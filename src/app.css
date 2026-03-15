@@ -1,0 +1,118 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+/* ── Model colors — Warm & Cool palette ── */
+:root {
+  --opus: #C4704B;
+  --opus-soft: rgba(196,112,75,0.12);
+  --sonnet: #D4956A;
+  --sonnet-soft: rgba(212,149,106,0.12);
+  --haiku: #E2A987;
+  --haiku-soft: rgba(226,169,135,0.12);
+  --gpt54: #4A7B9D;
+  --gpt53: #6B9DBF;
+  --gpt52: #8BB8D4;
+  --codex: #6B9DBF;
+}
+
+/* ── Dark theme (default) ── */
+:root,
+[data-theme="dark"] {
+  --bg: #0C0C0E;
+  --surface: #141416;
+  --surface-2: rgba(255,255,255,0.028);
+  --surface-hover: rgba(255,255,255,0.04);
+  --border: rgba(255,255,255,0.055);
+  --border-subtle: rgba(255,255,255,0.035);
+
+  --t1: rgba(255,255,255,0.92);
+  --t2: rgba(255,255,255,0.68);
+  --t3: rgba(255,255,255,0.46);
+  --t4: rgba(255,255,255,0.34);
+}
+
+/* ── Light theme ── */
+[data-theme="light"] {
+  --bg: #F5F5F7;
+  --surface: #FFFFFF;
+  --surface-2: rgba(0,0,0,0.028);
+  --surface-hover: rgba(0,0,0,0.05);
+  --border: rgba(0,0,0,0.08);
+  --border-subtle: rgba(0,0,0,0.05);
+
+  --t1: rgba(0,0,0,0.88);
+  --t2: rgba(0,0,0,0.62);
+  --t3: rgba(0,0,0,0.42);
+  --t4: rgba(0,0,0,0.28);
+}
+
+/* ── System theme: follow OS preference ── */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg: #F5F5F7;
+    --surface: #FFFFFF;
+    --surface-2: rgba(0,0,0,0.028);
+    --surface-hover: rgba(0,0,0,0.05);
+    --border: rgba(0,0,0,0.08);
+    --border-subtle: rgba(0,0,0,0.05);
+
+    --t1: rgba(0,0,0,0.88);
+    --t2: rgba(0,0,0,0.62);
+    --t3: rgba(0,0,0,0.42);
+    --t4: rgba(0,0,0,0.28);
+  }
+}
+
+@keyframes popIn {
+  0% { opacity: 0; transform: scale(0.98) translateY(-3px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes barGrow {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+@keyframes softPulse {
+  0%,100% { opacity: .45; }
+  50% { opacity: 1; }
+}
+@keyframes tabUnderline {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes tipReveal {
+  from { opacity: 0; transform: translateX(-50%) translateY(3px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body, #app {
+  width: 100%;
+  overflow: hidden;
+}
+
+html, body {
+  height: 100%;
+}
+
+/* #app wraps to content height so the transparent window
+   doesn't show a gap below the popover */
+#app {
+  height: auto;
+}
+
+body {
+  background: transparent;
+  font-family: 'Inter', -apple-system, system-ui, sans-serif;
+  color: var(--t1);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  cursor: default;
+}
