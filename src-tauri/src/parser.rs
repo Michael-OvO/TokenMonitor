@@ -142,6 +142,17 @@ fn normalize_model(raw: &str) -> (&str, &str) {
 // Provider-specific readers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Check if a file was modified on or after the given date.
+fn modified_since(path: &Path, since: NaiveDate) -> bool {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| {
+            let dt: chrono::DateTime<Local> = t.into();
+            dt.date_naive() >= since
+        })
+        .unwrap_or(true) // if we can't read metadata, include the file
+}
+
 /// Read all Claude assistant entries from JSONL files under `projects_dir`,
 /// optionally filtering to entries on or after `since`.
 pub fn read_claude_entries(projects_dir: &Path, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
@@ -149,6 +160,14 @@ pub fn read_claude_entries(projects_dir: &Path, since: Option<NaiveDate>) -> Vec
     let files = glob_jsonl_files(projects_dir);
 
     for path in files {
+        // Skip files that haven't been modified since the since date.
+        // This avoids reading hundreds of old files for short time periods.
+        if let Some(since_date) = since {
+            if !modified_since(&path, since_date) {
+                continue;
+            }
+        }
+
         let contents = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => continue,
