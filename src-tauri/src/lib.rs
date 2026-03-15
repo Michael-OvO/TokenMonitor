@@ -2,6 +2,7 @@ mod ccusage;
 mod commands;
 mod hourly;
 mod models;
+mod pricing;
 
 use commands::AppState;
 use std::time::Duration;
