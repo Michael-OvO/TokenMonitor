@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicehash/tauri/refs/heads/v2/crates/tauri-utils/schema/capability.json",
+  "identifier": "default",
+  "description": "Default capabilities for TokenMonitor",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "positioner:default"
+  ]
+}
