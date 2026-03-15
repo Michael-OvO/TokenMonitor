@@ -169,7 +169,7 @@
     <Settings onBack={() => showSettings = false} />
   {:else if data}
     {#if showRefresh}<div class="refresh-bar"></div>{/if}
-    <Toggle active={provider} onChange={handleProviderChange} />
+    <Toggle active={provider} onChange={handleProviderChange} {brandTheming} />
     <TimeTabs active={period} onChange={handlePeriodChange} />
     <MetricsRow {data} />
     <div class="hr"></div>
