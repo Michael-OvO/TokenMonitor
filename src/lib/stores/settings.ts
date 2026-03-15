@@ -1,0 +1,83 @@
+import { writable } from "svelte/store";
+import { load } from "@tauri-apps/plugin-store";
+import { setCurrency } from "../utils/format.js";
+
+export interface Settings {
+  theme: "light" | "dark" | "system";
+  defaultProvider: "claude" | "codex";
+  defaultPeriod: "5h" | "day" | "week" | "month";
+  refreshInterval: number; // seconds: 30, 60, 300, 0 = off
+  costAlertThreshold: number;
+  launchAtLogin: boolean;
+  currency: string;
+  hiddenModels: string[];
+  brandTheming: boolean;
+}
+
+const DEFAULTS: Settings = {
+  theme: "dark",
+  defaultProvider: "claude",
+  defaultPeriod: "day",
+  refreshInterval: 30,
+  costAlertThreshold: 0,
+  launchAtLogin: false,
+  currency: "USD",
+  hiddenModels: [],
+  brandTheming: true,
+};
+
+export const settings = writable<Settings>({ ...DEFAULTS });
+
+let storeInstance: Awaited<ReturnType<typeof load>> | null = null;
+
+export async function loadSettings(): Promise<Settings> {
+  try {
+    const store = await load("settings.json", { autoSave: true });
+    storeInstance = store;
+
+    const saved = await store.get<Partial<Settings>>("settings");
+    const merged = { ...DEFAULTS, ...saved };
+    settings.set(merged);
+    setCurrency(merged.currency);
+    return merged;
+  } catch (e) {
+    console.warn("Failed to load settings, using defaults:", e);
+    return { ...DEFAULTS };
+  }
+}
+
+export async function updateSetting<K extends keyof Settings>(
+  key: K,
+  value: Settings[K],
+) {
+  settings.update((s) => {
+    const updated = { ...s, [key]: value };
+    // Persist and flush to disk
+    if (storeInstance) {
+      storeInstance.set("settings", updated).then(() => storeInstance!.save());
+    }
+    // Apply currency change immediately
+    if (key === "currency") {
+      setCurrency(value as string);
+    }
+    return updated;
+  });
+}
+
+export function applyTheme(theme: Settings["theme"]) {
+  const root = document.documentElement;
+  if (theme === "system") {
+    root.removeAttribute("data-theme");
+  } else {
+    root.setAttribute("data-theme", theme);
+  }
+}
+
+export function applyProvider(provider: "all" | "claude" | "codex", brandTheming: boolean) {
+  const root = document.documentElement;
+  if (!brandTheming || provider === "all") {
+    root.removeAttribute("data-provider");
+  } else {
+    root.setAttribute("data-provider", provider);
+  }
+}
