@@ -45,6 +45,38 @@
   --t4: rgba(0,0,0,0.28);
 }
 
+/* ── Accent defaults (neutral — no provider selected) ── */
+:root {
+  --accent: var(--t2);
+  --accent-soft: rgba(255,255,255,0.06);
+  --provider-bg: transparent;
+}
+[data-theme="light"] {
+  --accent-soft: rgba(0,0,0,0.04);
+}
+
+/* ── Provider: Claude (warm terracotta) ── */
+[data-provider="claude"] {
+  --accent: #C4704B;
+  --accent-soft: rgba(196,112,75,0.08);
+  --provider-bg: rgba(196,112,75,0.03);
+}
+[data-theme="light"][data-provider="claude"] {
+  --accent-soft: rgba(196,112,75,0.10);
+  --provider-bg: rgba(196,112,75,0.025);
+}
+
+/* ── Provider: Codex (cool blue) ── */
+[data-provider="codex"] {
+  --accent: #4A7B9D;
+  --accent-soft: rgba(74,123,157,0.08);
+  --provider-bg: rgba(74,123,157,0.03);
+}
+[data-theme="light"][data-provider="codex"] {
+  --accent-soft: rgba(74,123,157,0.10);
+  --provider-bg: rgba(74,123,157,0.025);
+}
+
 /* ── System theme: follow OS preference ── */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
@@ -59,6 +91,16 @@
     --t2: rgba(0,0,0,0.62);
     --t3: rgba(0,0,0,0.42);
     --t4: rgba(0,0,0,0.28);
+
+    --accent-soft: rgba(0,0,0,0.04);
+  }
+  :root:not([data-theme])[data-provider="claude"] {
+    --accent-soft: rgba(196,112,75,0.10);
+    --provider-bg: rgba(196,112,75,0.025);
+  }
+  :root:not([data-theme])[data-provider="codex"] {
+    --accent-soft: rgba(74,123,157,0.10);
+    --provider-bg: rgba(74,123,157,0.025);
   }
 }
 
