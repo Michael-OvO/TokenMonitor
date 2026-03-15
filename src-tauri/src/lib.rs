@@ -2,6 +2,7 @@ mod ccusage;
 mod commands;
 mod hourly;
 mod models;
+mod parser;
 mod pricing;
 
 use commands::AppState;
