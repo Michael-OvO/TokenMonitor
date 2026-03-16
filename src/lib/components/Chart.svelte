@@ -178,7 +178,7 @@
           <svg viewBox="0 0 {CHART_W} {CHART_H}" preserveAspectRatio="none" class="chart-svg">
             <!-- Grid lines -->
             {#each yTicks() as tick}
-              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} stroke="rgba(255,255,255,0.04)" stroke-width="0.5"/>
+              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} style="stroke: var(--border-subtle)" stroke-width="0.5"/>
             {/each}
 
             {#each filteredBuckets as bucket, i}
@@ -221,7 +221,7 @@
           <svg viewBox="0 0 {CHART_W} {CHART_H}" preserveAspectRatio="none" class="chart-svg line-svg">
             <!-- Grid lines -->
             {#each yTicks() as tick}
-              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} stroke="rgba(255,255,255,0.04)" stroke-width="0.5"/>
+              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} style="stroke: var(--border-subtle)" stroke-width="0.5"/>
             {/each}
 
             <defs>
@@ -269,7 +269,7 @@
             {#if hoveredIdx >= 0}
               {@const stepX = filteredBuckets.length > 1 ? CHART_W / (filteredBuckets.length - 1) : CHART_W / 2}
               {@const hx = filteredBuckets.length > 1 ? hoveredIdx * stepX : CHART_W / 2}
-              <line x1={hx} y1="0" x2={hx} y2={CHART_H} stroke="rgba(255,255,255,0.12)" stroke-width="0.5" stroke-dasharray="2,2"/>
+              <line x1={hx} y1="0" x2={hx} y2={CHART_H} style="stroke: var(--border)" stroke-width="0.5" stroke-dasharray="2,2"/>
             {/if}
           </svg>
         {/if}
@@ -328,7 +328,7 @@
   /* Mode toggle */
   .mode-toggle {
     display: flex;
-    background: rgba(255,255,255,0.04);
+    background: var(--surface-2);
     border-radius: 4px;
     padding: 1.5px;
     gap: 1px;
@@ -343,7 +343,7 @@
   }
   .mode-toggle button.on {
     color: var(--t1);
-    background: rgba(255,255,255,0.08);
+    background: var(--surface-hover);
   }
   .mode-toggle button:hover:not(.on) { color: var(--t2); }
 
@@ -421,7 +421,7 @@
   /* Detail panel */
   .detail {
     margin-top: 10px;
-    background: rgba(255,255,255,0.03);
+    background: var(--surface-2);
     border-radius: 8px;
     overflow: hidden;
     max-height: 0;
