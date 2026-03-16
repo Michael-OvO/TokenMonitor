@@ -1,6 +1,7 @@
 import { writable } from "svelte/store";
 import { invoke } from "@tauri-apps/api/core";
 import type { UsagePayload } from "../types/index.js";
+import { isResizeDebugEnabled, logResizeDebug } from "../resizeDebug.js";
 
 export const activeProvider = writable<"all" | "claude" | "codex">("claude");
 export const activePeriod = writable<"5h" | "day" | "week" | "month" | "year">("day");
@@ -43,6 +44,45 @@ function cacheKey(provider: string, period: string, offset: number = 0) {
 // overwriting fresh data when the user rapidly switches tabs.
 let currentRequestId = 0;
 
+function formatDebugError(error: unknown) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+    };
+  }
+
+  if (typeof error === "string") {
+    return { message: error };
+  }
+
+  if (error && typeof error === "object") {
+    return JSON.parse(JSON.stringify(error));
+  }
+
+  return { message: String(error) };
+}
+
+async function logUsageReadDebug(
+  type: string,
+  details: Record<string, unknown>,
+) {
+  if (!isResizeDebugEnabled()) return;
+
+  try {
+    const backendReport = await invoke("get_last_usage_debug");
+    logResizeDebug(type, {
+      ...details,
+      backendReport,
+    });
+  } catch (error) {
+    logResizeDebug(type, {
+      ...details,
+      backendDebugError: formatDebugError(error),
+    });
+  }
+}
+
 /**
  * Fetch data for a provider/period.
  *
@@ -54,11 +94,27 @@ let currentRequestId = 0;
 export async function fetchData(provider: string, period: string, offset: number = 0) {
   const requestId = ++currentRequestId;
   const key = cacheKey(provider, period, offset);
+  logResizeDebug("usage:fetch-start", {
+    provider,
+    period,
+    offset,
+    requestId,
+    cacheKey: key,
+    hadFrontendCache: payloadCache.has(key),
+  });
 
   // ── Stale-while-revalidate: instant show + silent refresh ──
   const cached = payloadCache.get(key);
   if (cached && Date.now() - cached.at < CACHE_TTL) {
     usageData.set(cached.data);
+    logResizeDebug("usage:frontend-cache-hit", {
+      provider,
+      period,
+      offset,
+      requestId,
+      cacheKey: key,
+      cacheAgeMs: Date.now() - cached.at,
+    });
     // Silent background refresh — no loading indicator
     invoke<UsagePayload>("get_usage_data", { provider, period, offset })
       .then((fresh: UsagePayload) => {
@@ -66,8 +122,26 @@ export async function fetchData(provider: string, period: string, offset: number
         if (requestId === currentRequestId) {
           usageData.set(fresh);
         }
+        void logUsageReadDebug("usage:background-refresh-resolved", {
+          provider,
+          period,
+          offset,
+          requestId,
+          cacheKey: key,
+          appliedToUi: requestId === currentRequestId,
+          fromPayloadCache: fresh.from_cache,
+        });
       })
-      .catch(() => {});
+      .catch((error) => {
+        logResizeDebug("usage:background-refresh-rejected", {
+          provider,
+          period,
+          offset,
+          requestId,
+          cacheKey: key,
+          error: formatDebugError(error),
+        });
+      });
     return;
   }
 
@@ -91,10 +165,27 @@ export async function fetchData(provider: string, period: string, offset: number
       payloadCache.set(key, { data, at: Date.now() });
       usageData.set(data);
     }
+    await logUsageReadDebug("usage:fetch-resolved", {
+      provider,
+      period,
+      offset,
+      requestId,
+      cacheKey: key,
+      appliedToUi: requestId === currentRequestId,
+      fromPayloadCache: data.from_cache,
+    });
   } catch (e) {
     if (requestId === currentRequestId) {
       console.error("Failed to fetch usage data:", e);
     }
+    logResizeDebug("usage:fetch-rejected", {
+      provider,
+      period,
+      offset,
+      requestId,
+      cacheKey: key,
+      error: formatDebugError(e),
+    });
   } finally {
     if (requestId === currentRequestId) {
       isLoading.set(false);
@@ -112,19 +203,34 @@ export function warmCache(provider: string, period: string, offset: number = 0) 
   invoke<UsagePayload>("get_usage_data", { provider, period, offset })
     .then((data: UsagePayload) => {
       payloadCache.set(key, { data, at: Date.now() });
+      void logUsageReadDebug("usage:warm-cache-resolved", {
+        provider,
+        period,
+        offset,
+        cacheKey: key,
+        fromPayloadCache: data.from_cache,
+      });
     })
-    .catch(() => {});
+    .catch((error) => {
+      logResizeDebug("usage:warm-cache-rejected", {
+        provider,
+        period,
+        offset,
+        cacheKey: key,
+        error: formatDebugError(error),
+      });
+    });
 }
 
-const ALL_PERIODS = ["5h", "day", "week", "month", "year"] as const;
+const WARM_PERIODS = ["5h", "day", "week", "month"] as const;
 
 /**
- * Pre-warm all period tabs for a provider.
+ * Pre-warm lightweight period tabs for a provider.
  * Skips the period already being fetched to avoid redundant work.
+ * Intentionally excludes `year` because it is the most expensive aggregation.
  */
 export function warmAllPeriods(provider: string, skipPeriod?: string) {
-  for (const p of ALL_PERIODS) {
+  for (const p of WARM_PERIODS) {
     if (p !== skipPeriod) warmCache(provider, p);
   }
 }
-

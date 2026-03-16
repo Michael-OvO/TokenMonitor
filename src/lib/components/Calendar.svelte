@@ -4,6 +4,7 @@
   import { activeProvider } from "../stores/usage.js";
   import { formatCost } from "../utils/format.js";
   import { intensityLevel, computeEarned, heatmapColor } from "../calendar-utils.js";
+  import { isResizeDebugEnabled, logResizeDebug } from "../resizeDebug.js";
   import SegmentedControl from "./SegmentedControl.svelte";
   import type { MonthlyUsagePayload } from "../types/index.js";
 
@@ -40,16 +41,71 @@
     fetchMonth(provider, viewYear, viewMonth);
   });
 
+  function formatDebugError(error: unknown) {
+    if (error instanceof Error) {
+      return {
+        name: error.name,
+        message: error.message,
+      };
+    }
+
+    if (typeof error === "string") {
+      return { message: error };
+    }
+
+    if (error && typeof error === "object") {
+      return JSON.parse(JSON.stringify(error));
+    }
+
+    return { message: String(error) };
+  }
+
+  async function logCalendarReadDebug(
+    type: string,
+    details: Record<string, unknown>,
+  ) {
+    if (!isResizeDebugEnabled()) return;
+
+    try {
+      const backendReport = await invoke("get_last_usage_debug");
+      logResizeDebug(type, {
+        ...details,
+        backendReport,
+      });
+    } catch (error) {
+      logResizeDebug(type, {
+        ...details,
+        backendDebugError: formatDebugError(error),
+      });
+    }
+  }
+
   async function fetchMonth(prov: string, year: number, month: number) {
     loading = true;
+    logResizeDebug("calendar:fetch-start", {
+      provider: prov,
+      year,
+      month,
+    });
     try {
       data = await invoke<MonthlyUsagePayload>("get_monthly_usage", {
         provider: prov,
         year,
         month,
       });
+      await logCalendarReadDebug("calendar:fetch-resolved", {
+        provider: prov,
+        year,
+        month,
+      });
     } catch (e) {
       console.error("Failed to fetch monthly usage:", e);
+      logResizeDebug("calendar:fetch-rejected", {
+        provider: prov,
+        year,
+        month,
+        error: formatDebugError(e),
+      });
       data = { year, month, days: [], total_cost: 0 };
     } finally {
       loading = false;
@@ -296,7 +352,7 @@
     border: none;
     cursor: pointer;
     color: var(--t3);
-    font-size: 16px;
+    font-size: 14px;
     padding: 2px 6px;
     transition: color 0.15s ease;
   }
@@ -356,7 +412,7 @@
 
   .day-num {
     font: 400 9px/1 'Inter', sans-serif;
-    color: rgba(255, 255, 255, 0.5);
+    color: var(--t2);
     font-variant-numeric: tabular-nums;
   }
   .cell.future .day-num {

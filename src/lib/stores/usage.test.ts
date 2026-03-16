@@ -151,16 +151,16 @@ describe("warmAllPeriods", () => {
     warmAllPeriods("claude", "day");
 
     await vi.waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledTimes(4);
+      expect(mockInvoke).toHaveBeenCalledTimes(3);
     });
 
-    const calledPeriods = mockInvoke.mock.calls.map(
-      (c: unknown[]) => (c[1] as { period: string }).period,
-    );
+    const calledPeriods = mockInvoke.mock.calls
+      .filter((c: unknown[]) => c[0] === "get_usage_data")
+      .map((c: unknown[]) => (c[1] as { period: string }).period);
     expect(calledPeriods).not.toContain("day");
     expect(calledPeriods).toContain("5h");
     expect(calledPeriods).toContain("week");
     expect(calledPeriods).toContain("month");
-    expect(calledPeriods).toContain("year");
+    expect(calledPeriods).not.toContain("year");
   });
 });

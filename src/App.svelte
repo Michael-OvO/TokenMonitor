@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-  import { currentMonitor } from "@tauri-apps/api/window";
+  import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
   import { LogicalSize } from "@tauri-apps/api/dpi";
   import {
     activeProvider,
@@ -27,6 +27,13 @@
     measureTargetWindowHeight,
     resolveMonitorMaxWindowHeight,
   } from "./lib/windowSizing.js";
+  import { syncNativeWindowSurface } from "./lib/windowAppearance.js";
+  import {
+    captureResizeDebugSnapshot,
+    initResizeDebug,
+    isResizeDebugEnabled,
+    logResizeDebug,
+  } from "./lib/resizeDebug.js";
 
   import Toggle from "./lib/components/Toggle.svelte";
   import TimeTabs from "./lib/components/TimeTabs.svelte";
@@ -51,7 +58,6 @@
   let data = $state($usageData);
   let loading = $state(false);
   let showRefresh = $state(false);
-  let dataKey = $state("initial");
   let brandTheming = $state(true);
   let popEl: HTMLDivElement | null = null;
   let maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
@@ -81,21 +87,22 @@
   });
 
   async function handleProviderChange(p: "all" | "claude" | "codex") {
+    if (provider === p) return;
     provider = p;
     activeProvider.set(p as any);
     await fetchData(p, period, offset);
     // Guard: if the user switched again while we were fetching, bail out
-    // so we don't overwrite dataKey / kick off stale warm-ups.
+    // so we don't kick off stale warm-ups.
     if (provider !== p) return;
-    dataKey = `${p}-${period}-${offset}-${Date.now()}`;
     await tick();
-    syncSize();
+    syncSizeAndVerify("provider-change");
     warmAllPeriods(p, period);
     if (p === "claude") warmCache("codex", period);
     else if (p === "codex") warmCache("claude", period);
   }
 
   async function handlePeriodChange(p: "5h" | "day" | "week" | "month" | "year") {
+    if (period === p && offset === 0) return;
     const prov = provider;
     period = p;
     offset = 0;
@@ -104,9 +111,8 @@
     await fetchData(prov, p, 0);
     // Guard: if provider or period changed while we were fetching, bail out.
     if (period !== p || provider !== prov) return;
-    dataKey = `${prov}-${p}-${Date.now()}`;
     await tick();
-    syncSize();
+    syncSizeAndVerify("period-change");
   }
 
   async function handleOffsetChange(delta: number) {
@@ -116,9 +122,8 @@
     activeOffset.set(offset);
     await fetchData(prov, per, offset);
     if (period !== per || provider !== prov) return;
-    dataKey = `${prov}-${per}-${offset}-${Date.now()}`;
     await tick();
-    syncSize();
+    syncSizeAndVerify("offset-change");
     // Warm adjacent offsets for instant navigation
     warmCache(prov, per, offset - 1);
     if (offset < 0) warmCache(prov, per, offset + 1);
@@ -132,35 +137,34 @@
     activeOffset.set(0);
     await fetchData(prov, per, 0);
     if (period !== per || provider !== prov) return;
-    dataKey = `${prov}-${per}-0-${Date.now()}`;
     await tick();
-    syncSize();
+    syncSizeAndVerify("offset-reset");
   }
 
   async function handleSettingsOpen() {
     showCalendar = false;
     showSettings = true;
     await tick();
-    syncSizeAndVerify();
+    syncSizeAndVerify("settings-open");
   }
 
   async function handleSettingsClose() {
     showSettings = false;
     await tick();
-    syncSizeAndVerify();
+    syncSizeAndVerify("settings-close");
   }
 
   async function handleCalendarOpen() {
     showSettings = false;
     showCalendar = true;
     await tick();
-    syncSizeAndVerify();
+    syncSizeAndVerify("calendar-open");
   }
 
   async function handleCalendarClose() {
     showCalendar = false;
     await tick();
-    syncSizeAndVerify();
+    syncSizeAndVerify("calendar-close");
   }
 
   // ── Window resize ──────────────────────────────────────────────
@@ -179,8 +183,39 @@
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   let lastWindowH = typeof window === "undefined" ? 0 : window.innerHeight;
   const webviewWindow = getCurrentWebviewWindow();
+  const tauriWindow = getCurrentWindow();
+
+  function captureDebugSnapshot(reason: string) {
+    return isResizeDebugEnabled()
+      ? captureResizeDebugSnapshot(reason, popEl, { lastWindowH, maxWindowH })
+      : {};
+  }
+
+  function formatDebugError(error: unknown) {
+    if (error instanceof Error) {
+      return {
+        name: error.name,
+        message: error.message,
+      };
+    }
+
+    if (typeof error === "string") {
+      return { message: error };
+    }
+
+    if (error && typeof error === "object") {
+      return JSON.parse(JSON.stringify(error));
+    }
+
+    return { message: String(error) };
+  }
 
   function clearPendingResize() {
+    logResizeDebug("resize:clear-pending", {
+      hadTimer: Boolean(resizeTimer),
+      hadRaf: resizeRaf !== 0,
+      ...captureDebugSnapshot("clear-pending"),
+    });
     if (resizeTimer) {
       clearTimeout(resizeTimer);
       resizeTimer = null;
@@ -198,8 +233,14 @@
         monitor.workArea.size.height,
         monitor.scaleFactor,
       );
+      logResizeDebug("resize:monitor-metrics", {
+        workAreaHeight: monitor.workArea.size.height,
+        scaleFactor: monitor.scaleFactor,
+        maxWindowH,
+      });
     } catch {
       maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
+      logResizeDebug("resize:monitor-metrics-fallback", { maxWindowH });
     }
   }
 
@@ -211,57 +252,103 @@
     return measureTargetWindowHeight(popEl.scrollHeight + 2);
   }
 
-  function applyWindowHeight(targetHeight: number) {
+  function applyWindowHeight(targetHeight: number, source = "unknown") {
     const nextHeight = clampWindowHeight(targetHeight, maxWindowH, MIN_WINDOW_HEIGHT);
-    if (classifyResize(nextHeight, lastWindowH, MIN_WINDOW_HEIGHT) === "skip") return;
-
-    lastWindowH = nextHeight;
-    webviewWindow.setSize(new LogicalSize(WINDOW_WIDTH, nextHeight)).catch(() => {
-      if (typeof window !== "undefined") {
-        lastWindowH = window.innerHeight;
-      }
+    const disposition = classifyResize(nextHeight, lastWindowH, MIN_WINDOW_HEIGHT);
+    logResizeDebug("resize:apply-request", {
+      source,
+      targetHeight,
+      nextHeight,
+      disposition,
+      ...captureDebugSnapshot(`apply-${source}`),
     });
+    if (disposition === "skip") return;
+    lastWindowH = nextHeight;
+    webviewWindow
+      .setSize(new LogicalSize(WINDOW_WIDTH, nextHeight))
+      .then(() => {
+        logResizeDebug("resize:set-size-resolved", {
+          source,
+          nextHeight,
+          ...captureDebugSnapshot(`set-size-resolved-${source}`),
+        });
+      })
+      .catch((error) => {
+        logResizeDebug("resize:set-size-rejected", {
+          source,
+          nextHeight,
+          error: formatDebugError(error),
+          ...captureDebugSnapshot(`set-size-rejected-${source}`),
+        });
+        if (typeof window !== "undefined") {
+          lastWindowH = window.innerHeight;
+        }
+      });
   }
 
-  function syncSize() {
+  function syncSize(source = "unknown") {
     const nextHeight = measureContentHeight();
+    logResizeDebug("resize:sync-size", {
+      source,
+      measuredHeight: nextHeight,
+      ...captureDebugSnapshot(`sync-${source}`),
+    });
     if (nextHeight == null) return;
-    applyWindowHeight(nextHeight);
+    applyWindowHeight(nextHeight, source);
   }
 
   /** syncSize + schedule a delayed re-measurement.
    *  Catches content whose layout settles a frame or two after the
    *  initial measurement (e.g. chart detail panel pushing footer down). */
-  function syncSizeAndVerify() {
-    syncSize();
-    scheduleSettledResize(100);
+  function syncSizeAndVerify(source = "unknown") {
+    logResizeDebug("resize:sync-and-verify", { source });
+    syncSize(`${source}:initial`);
+    scheduleSettledResize(100, `${source}:verify`);
   }
 
-  function scheduleSettledResize(delay = RESIZE_SETTLE_DELAY_MS) {
+  function scheduleSettledResize(delay = RESIZE_SETTLE_DELAY_MS, source = "unknown") {
+    logResizeDebug("resize:schedule-settled", {
+      source,
+      delay,
+      ...captureDebugSnapshot(`schedule-${source}`),
+    });
     clearPendingResize();
     resizeTimer = setTimeout(() => {
       resizeTimer = null;
       resizeRaf = requestAnimationFrame(() => {
         resizeRaf = requestAnimationFrame(() => {
           resizeRaf = 0;
-          syncSize();
+          logResizeDebug("resize:settled-fire", {
+            source,
+            ...captureDebugSnapshot(`settled-fire-${source}`),
+          });
+          syncSize(`${source}:settled`);
         });
       });
     }, delay);
   }
 
-  function resizeToContent() {
+  function resizeToContent(source = "observer") {
     const measuredHeight = measureContentHeight();
+    logResizeDebug("resize:observer-measure", {
+      source,
+      measuredHeight,
+      ...captureDebugSnapshot(`resize-to-content-${source}`),
+    });
     if (measuredHeight == null) return;
     const nextHeight = clampWindowHeight(measuredHeight, maxWindowH, MIN_WINDOW_HEIGHT);
+    const disposition = classifyResize(nextHeight, lastWindowH, MIN_WINDOW_HEIGHT);
 
-    switch (classifyResize(nextHeight, lastWindowH, MIN_WINDOW_HEIGHT)) {
+    switch (disposition) {
       case "grow":
         clearPendingResize();
-        applyWindowHeight(measuredHeight);
+        applyWindowHeight(measuredHeight, `${source}:grow`);
+        // Re-measure after setSize settles — the first scrollHeight
+        // can miss content still laying out (e.g. detail panel + footer).
+        scheduleSettledResize(100, `${source}:grow`);
         return;
       case "shrink":
-        scheduleSettledResize();
+        scheduleSettledResize(RESIZE_SETTLE_DELAY_MS, `${source}:shrink`);
         return;
       default:
         return;
@@ -272,6 +359,36 @@
     let cancelled = false;
     let observer: ResizeObserver | undefined;
     let unlisten: (() => void) | undefined;
+    let unlistenWindowResize: (() => void) | undefined;
+    const colorScheme = window.matchMedia("(prefers-color-scheme: light)");
+    const handleColorSchemeChange = () => {
+      if (!document.documentElement.hasAttribute("data-theme")) {
+        logResizeDebug("theme:system-change", {
+          matchesLight: colorScheme.matches,
+        });
+        void syncNativeWindowSurface().catch(() => {});
+      }
+    };
+    const handleBrowserResize = () => {
+      logResizeDebug("browser:resize", captureDebugSnapshot("browser-resize"));
+    };
+    const handleWindowFocus = () => {
+      logResizeDebug("window:focus", captureDebugSnapshot("window-focus"));
+      void syncNativeWindowSurface().catch(() => {});
+      syncSizeAndVerify("window-focus");
+    };
+    const handleWindowBlur = () => {
+      logResizeDebug("window:blur", captureDebugSnapshot("window-blur"));
+    };
+    const handleVisibilityChange = () => {
+      logResizeDebug("document:visibility-change", {
+        hidden: document.hidden,
+        visibilityState: document.visibilityState,
+        ...captureDebugSnapshot("document-visibility-change"),
+      });
+    };
+    initResizeDebug();
+    logResizeDebug("app:mount", captureDebugSnapshot("mount"));
 
     const init = async () => {
       await refreshWindowMetrics();
@@ -284,42 +401,96 @@
         if (cancelled) return;
         provider = runtime.provider;
         period = runtime.period;
+        logResizeDebug("app:settings-loaded", {
+          provider: runtime.provider,
+          period: runtime.period,
+        });
       } catch {
         // Settings load failed — continue with defaults
+        logResizeDebug("app:settings-load-failed");
       }
 
       await fetchData(provider, period, offset);
       if (cancelled) return;
+      logResizeDebug("app:data-ready", {
+        provider,
+        period,
+        offset,
+        ...captureDebugSnapshot("data-ready"),
+      });
 
       warmAllPeriods(provider, period);
       warmAllPeriods(provider === "claude" ? "codex" : "claude");
       appReady = true;
 
       if (popEl) {
-        observer = new ResizeObserver(() => resizeToContent());
+        observer = new ResizeObserver((entries) => {
+          logResizeDebug("resize:observer-fired", {
+            entries: entries.map((entry) => ({
+              width: entry.contentRect.width,
+              height: entry.contentRect.height,
+            })),
+            ...captureDebugSnapshot("resize-observer"),
+          });
+          resizeToContent("resize-observer");
+        });
         observer.observe(popEl);
-        syncSize();
+        syncSizeAndVerify("initial-mount");
       }
 
       unlisten = await listen("data-updated", () => {
-        dataKey = `${provider}-${period}-${offset}-${Date.now()}`;
+        logResizeDebug("app:data-updated-event", {
+          provider,
+          period,
+          offset,
+        });
         fetchData(provider, period, offset);
+      });
+
+      unlistenWindowResize = await tauriWindow.onResized(({ payload }) => {
+        logResizeDebug("tauri:window-resized", {
+          width: payload.width,
+          height: payload.height,
+          ...captureDebugSnapshot("tauri-window-resized"),
+        });
       });
 
       if (cancelled) {
         unlisten();
         unlisten = undefined;
+        unlistenWindowResize?.();
+        unlistenWindowResize = undefined;
       }
     };
 
     init();
+    window.addEventListener("resize", handleBrowserResize);
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("blur", handleWindowBlur);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    if (typeof colorScheme.addEventListener === "function") {
+      colorScheme.addEventListener("change", handleColorSchemeChange);
+    } else {
+      colorScheme.addListener(handleColorSchemeChange);
+    }
 
     return () => {
       cancelled = true;
       unlisten?.();
+      unlistenWindowResize?.();
       observer?.disconnect();
       if (resizeTimer) clearTimeout(resizeTimer);
       cancelAnimationFrame(resizeRaf);
+      window.removeEventListener("resize", handleBrowserResize);
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("blur", handleWindowBlur);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (typeof colorScheme.removeEventListener === "function") {
+        colorScheme.removeEventListener("change", handleColorSchemeChange);
+      } else {
+        colorScheme.removeListener(handleColorSchemeChange);
+      }
     };
   });
 </script>
@@ -327,7 +498,7 @@
 <div class="pop" bind:this={popEl}>
   <div class="pop-content">
     {#if showSplash}
-      <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(syncSize); }} />
+      <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
     {:else if appReady && !data}
       <SetupScreen />
     {:else if showSettings}
@@ -356,11 +527,11 @@
       {:else if data.total_cost === 0 && data.total_tokens === 0}
         <div class="empty-period">No usage data for this period</div>
       {:else}
-        <Chart buckets={data.chart_buckets} {dataKey} />
+        <Chart buckets={data.chart_buckets} />
       {/if}
 
-      <div class="hr"></div>
       {#if period !== "5h" && data.model_breakdown.length > 0}
+        <div class="hr"></div>
         <ModelList models={data.model_breakdown} />
       {/if}
       <Footer {data} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} />
@@ -393,7 +564,11 @@
     /* Provider theme tint — transparent when neutral */
     background-image: linear-gradient(var(--provider-bg), var(--provider-bg));
   }
-  .pop-content { min-width: 0; }
+  .pop-content {
+    min-width: 0;
+    min-height: 100%;
+    background: var(--surface);
+  }
   .hr { height: 1px; background: var(--border-subtle); margin: 0 12px; }
   .loading {
     display: flex; flex-direction: column; align-items: center;
