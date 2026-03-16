@@ -13,6 +13,8 @@ export interface Settings {
   hiddenModels: string[];
   brandTheming: boolean;
   showTrayAmount: boolean;
+  claudePlan: number;
+  codexPlan: number;
 }
 
 const DEFAULTS: Settings = {
@@ -26,6 +28,8 @@ const DEFAULTS: Settings = {
   hiddenModels: [],
   brandTheming: true,
   showTrayAmount: true,
+  claudePlan: 0,
+  codexPlan: 0,
 };
 
 export const settings = writable<Settings>({ ...DEFAULTS });
