@@ -3,6 +3,8 @@ mod models;
 mod parser;
 mod pricing;
 
+#[cfg(target_os = "macos")]
+use commands::apply_default_window_surface;
 use commands::{sync_tray_title, AppState};
 use std::time::Duration;
 use tauri::{
@@ -71,6 +73,10 @@ pub fn run() {
 
             // Hide window on focus loss (popover behavior)
             let window = app.get_webview_window("main").unwrap();
+            #[cfg(target_os = "macos")]
+            if let Err(err) = apply_default_window_surface(&app.handle()) {
+                eprintln!("failed to apply default native window surface: {err}");
+            }
             window.on_window_event(move |event| {
                 if let WindowEvent::Focused(false) = event {
                     // Popover behavior: window hides when unfocused
@@ -88,6 +94,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_usage_data,
             commands::get_monthly_usage,
+            commands::get_known_models,
+            commands::get_last_usage_debug,
+            commands::set_window_surface,
             commands::set_refresh_interval,
             commands::set_show_tray_amount,
             commands::clear_cache,

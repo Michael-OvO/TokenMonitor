@@ -65,6 +65,12 @@ pub struct MonthlyUsagePayload {
     pub total_cost: f64,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub struct KnownModel {
+    pub display_name: String,
+    pub model_key: String,
+}
+
 // ── Helpers ──
 
 pub fn normalize_claude_model(raw: &str) -> (&str, &str) {
@@ -75,34 +81,52 @@ pub fn normalize_claude_model(raw: &str) -> (&str, &str) {
         ("Opus 4.5", "opus")
     } else if raw.contains("sonnet-4-6") {
         ("Sonnet 4.6", "sonnet")
+    } else if raw.contains("sonnet-4-5") {
+        ("Sonnet 4.5", "sonnet")
     } else if raw.contains("sonnet") {
         ("Sonnet", "sonnet")
-    } else if raw.contains("haiku") {
+    } else if raw.contains("haiku-4-5") {
         ("Haiku 4.5", "haiku")
+    } else if raw.contains("haiku") {
+        ("Haiku", "haiku")
     } else {
         ("Unknown", "unknown")
     }
 }
 
-pub fn normalize_codex_model(raw: &str) -> (&str, &str) {
-    if raw.contains("5.4") {
-        ("GPT-5.4", "gpt54")
-    } else if raw.contains("5.3") {
-        ("GPT-5.3 Codex", "gpt53")
-    } else if raw.contains("5.2") {
-        ("GPT-5.2", "gpt52")
-    } else if raw.starts_with("o4-mini") {
-        ("o4-mini", "o4mini")
-    } else if raw.starts_with("o3-mini") {
-        ("o3-mini", "o3mini")
-    } else if raw.starts_with("o3") {
-        ("o3", "o3")
-    } else if raw.starts_with("o1-mini") {
-        ("o1-mini", "o1mini")
-    } else if raw.starts_with("o1") {
-        ("o1", "o1")
+pub fn normalize_codex_model(raw: &str) -> (String, String) {
+    let display_name = raw.trim();
+    if display_name.is_empty() {
+        return (String::from("Unknown"), String::from("unknown"));
+    }
+
+    (
+        display_name.to_string(),
+        display_name.to_ascii_lowercase(),
+    )
+}
+
+fn is_codex_model_name(raw: &str) -> bool {
+    raw.starts_with("gpt")
+        || raw.starts_with("o1")
+        || raw.starts_with("o3")
+        || raw.starts_with("o4")
+        || raw.contains("codex")
+}
+
+pub fn known_model_from_raw(raw: &str) -> KnownModel {
+    if is_codex_model_name(raw) {
+        let (display_name, model_key) = normalize_codex_model(raw);
+        KnownModel {
+            display_name,
+            model_key,
+        }
     } else {
-        (raw, "codex")
+        let (display_name, model_key) = normalize_claude_model(raw);
+        KnownModel {
+            display_name: display_name.to_string(),
+            model_key: model_key.to_string(),
+        }
     }
 }
 
@@ -137,6 +161,14 @@ mod tests {
     }
 
     #[test]
+    fn claude_sonnet_4_5() {
+        assert_eq!(
+            normalize_claude_model("claude-sonnet-4-5-20250514"),
+            ("Sonnet 4.5", "sonnet")
+        );
+    }
+
+    #[test]
     fn claude_sonnet_generic() {
         assert_eq!(
             normalize_claude_model("claude-3-5-sonnet-20241022"),
@@ -164,27 +196,85 @@ mod tests {
 
     #[test]
     fn codex_gpt_5_4() {
-        assert_eq!(normalize_codex_model("gpt-5.4-turbo"), ("GPT-5.4", "gpt54"));
+        assert_eq!(
+            normalize_codex_model("gpt-5.4-turbo"),
+            (String::from("gpt-5.4-turbo"), String::from("gpt-5.4-turbo"))
+        );
     }
 
     #[test]
     fn codex_gpt_5_3() {
         assert_eq!(
             normalize_codex_model("gpt-5.3-codex"),
-            ("GPT-5.3 Codex", "gpt53")
+            (String::from("gpt-5.3-codex"), String::from("gpt-5.3-codex"))
         );
     }
 
     #[test]
     fn codex_gpt_5_2() {
-        assert_eq!(normalize_codex_model("gpt-5.2"), ("GPT-5.2", "gpt52"));
+        assert_eq!(
+            normalize_codex_model("gpt-5.2"),
+            (String::from("gpt-5.2"), String::from("gpt-5.2"))
+        );
+    }
+
+    #[test]
+    fn codex_gpt_5_1_codex_max() {
+        assert_eq!(
+            normalize_codex_model("gpt-5.1-codex-max"),
+            (
+                String::from("gpt-5.1-codex-max"),
+                String::from("gpt-5.1-codex-max")
+            )
+        );
+    }
+
+    #[test]
+    fn codex_gpt_5_1_codex_mini() {
+        assert_eq!(
+            normalize_codex_model("gpt-5.1-codex-mini"),
+            (
+                String::from("gpt-5.1-codex-mini"),
+                String::from("gpt-5.1-codex-mini")
+            )
+        );
+    }
+
+    #[test]
+    fn codex_gpt_5_1_codex() {
+        assert_eq!(
+            normalize_codex_model("gpt-5.1-codex"),
+            (String::from("gpt-5.1-codex"), String::from("gpt-5.1-codex"))
+        );
+    }
+
+    #[test]
+    fn codex_gpt_5_codex() {
+        assert_eq!(
+            normalize_codex_model("gpt-5-codex"),
+            (String::from("gpt-5-codex"), String::from("gpt-5-codex"))
+        );
+    }
+
+    #[test]
+    fn codex_mini_latest() {
+        assert_eq!(
+            normalize_codex_model("codex-mini-latest"),
+            (
+                String::from("codex-mini-latest"),
+                String::from("codex-mini-latest")
+            )
+        );
     }
 
     #[test]
     fn codex_o4_mini() {
         assert_eq!(
             normalize_codex_model("o4-mini-2025-04-16"),
-            ("o4-mini", "o4mini")
+            (
+                String::from("o4-mini-2025-04-16"),
+                String::from("o4-mini-2025-04-16")
+            )
         );
     }
 
@@ -192,33 +282,59 @@ mod tests {
     fn codex_o3_mini() {
         assert_eq!(
             normalize_codex_model("o3-mini-2025-01-31"),
-            ("o3-mini", "o3mini")
+            (
+                String::from("o3-mini-2025-01-31"),
+                String::from("o3-mini-2025-01-31")
+            )
         );
     }
 
     #[test]
     fn codex_o3() {
-        assert_eq!(normalize_codex_model("o3-2025-04-16"), ("o3", "o3"));
+        assert_eq!(
+            normalize_codex_model("o3-2025-04-16"),
+            (String::from("o3-2025-04-16"), String::from("o3-2025-04-16"))
+        );
     }
 
     #[test]
     fn codex_o1_mini() {
         assert_eq!(
             normalize_codex_model("o1-mini-2024-09-12"),
-            ("o1-mini", "o1mini")
+            (
+                String::from("o1-mini-2024-09-12"),
+                String::from("o1-mini-2024-09-12")
+            )
         );
     }
 
     #[test]
     fn codex_o1() {
-        assert_eq!(normalize_codex_model("o1-2024-12-17"), ("o1", "o1"));
+        assert_eq!(
+            normalize_codex_model("o1-2024-12-17"),
+            (String::from("o1-2024-12-17"), String::from("o1-2024-12-17"))
+        );
     }
 
     #[test]
     fn codex_fallback() {
         assert_eq!(
             normalize_codex_model("some-future-model"),
-            ("some-future-model", "codex")
+            (
+                String::from("some-future-model"),
+                String::from("some-future-model")
+            )
+        );
+    }
+
+    #[test]
+    fn known_model_from_raw_uses_dynamic_codex_identity() {
+        assert_eq!(
+            known_model_from_raw("gpt-5.3-codex"),
+            KnownModel {
+                display_name: String::from("gpt-5.3-codex"),
+                model_key: String::from("gpt-5.3-codex"),
+            }
         );
     }
 }

@@ -1,17 +1,20 @@
 use crate::models::{ActiveBlock, ChartBucket, ChartSegment, ModelSummary, UsagePayload};
 use chrono::{DateTime, Local, NaiveDate, Timelike};
-use serde::Deserialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Parsed entry (shared between Claude and Codex)
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct ParsedEntry {
     pub timestamp: DateTime<Local>,
     pub model: String,
@@ -20,6 +23,70 @@ pub struct ParsedEntry {
     pub cache_creation_5m_tokens: u64,
     pub cache_creation_1h_tokens: u64,
     pub cache_read_tokens: u64,
+    pub unique_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderReadDebug {
+    pub provider: String,
+    pub root_dir: String,
+    pub root_exists: bool,
+    pub since: Option<String>,
+    pub strategy: String,
+    pub discovered_paths: usize,
+    pub attempted_paths: usize,
+    pub opened_paths: usize,
+    pub skipped_paths: usize,
+    pub skipped_by_mtime: usize,
+    pub failed_paths: usize,
+    pub lines_read: usize,
+    pub emitted_entries: usize,
+    pub visited_day_dirs: usize,
+    pub existing_day_dirs: usize,
+    pub sample_paths: Vec<String>,
+    pub sample_skipped_paths: Vec<String>,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageQueryDebugReport {
+    pub provider: String,
+    pub aggregation: String,
+    pub since: String,
+    pub cache_key: String,
+    pub from_cache: bool,
+    pub entry_count: usize,
+    pub sources: Vec<ProviderReadDebug>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FileStamp {
+    modified: SystemTime,
+    len: u64,
+}
+
+#[derive(Clone)]
+struct CachedFileEntries {
+    stamp: FileStamp,
+    entries: Vec<ParsedEntry>,
+    earliest_date: Option<NaiveDate>,
+}
+
+#[derive(Clone, Copy)]
+enum ProviderFileKind {
+    Claude,
+    Codex,
+}
+
+struct CachedFileLoad {
+    entries: Vec<ParsedEntry>,
+    earliest_date: Option<NaiveDate>,
+    lines_read: usize,
+    opened: bool,
+    from_cache: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -32,6 +99,8 @@ struct ClaudeJsonlEntry {
     entry_type: String,
     #[serde(default)]
     timestamp: String,
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
     message: Option<ClaudeJsonlMessage>,
 }
 
@@ -39,7 +108,7 @@ struct ClaudeJsonlEntry {
 struct ClaudeJsonlMessage {
     model: Option<String>,
     usage: Option<ClaudeJsonlUsage>,
-    stop_reason: Option<String>,
+    id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -65,29 +134,8 @@ struct CacheCreationBreakdown {
 struct CodexJsonlEntry {
     #[serde(rename = "type", default)]
     entry_type: String,
-    #[serde(default)]
-    timestamp: String,
-    payload: Option<CodexPayload>,
-}
-
-#[derive(Deserialize)]
-struct CodexPayload {
-    #[serde(rename = "type", default)]
-    payload_type: String,
-    info: Option<CodexTokenInfo>,
-}
-
-#[derive(Deserialize)]
-struct CodexTokenInfo {
-    last_token_usage: Option<CodexTokenUsage>,
-}
-
-#[derive(Deserialize)]
-struct CodexTokenUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    reasoning_output_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
+    timestamp: Option<String>,
+    payload: Option<Value>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +161,7 @@ pub fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
             results.push(path);
         }
     }
+    results.sort();
     results
 }
 
@@ -121,29 +170,211 @@ pub fn parse_since_date(since: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(since, "%Y%m%d").ok()
 }
 
-/// Extract a model name from a raw JSON line by searching for `"model":"<value>"`.
-pub fn extract_model_from_line(line: &str) -> Option<String> {
-    let marker = "\"model\":\"";
-    let start = line.find(marker)? + marker.len();
-    let end = line[start..].find('"')? + start;
-    Some(line[start..end].to_string())
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn push_sample_path(sample_paths: &mut Vec<String>, path: &Path) {
+    if sample_paths.len() < 5 {
+        sample_paths.push(path_to_string(path));
+    }
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(FileStamp {
+        modified: metadata.modified().ok()?,
+        len: metadata.len(),
+    })
+}
+
+fn earliest_entry_date(entries: &[ParsedEntry]) -> Option<NaiveDate> {
+    entries
+        .iter()
+        .map(|entry| entry.timestamp.date_naive())
+        .min()
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    for path in paths {
+        let key = path_to_string(&path);
+        if seen.insert(key) {
+            out.push(path);
+        }
+    }
+
+    out
+}
+
+fn normalize_claude_projects_dir(path: PathBuf) -> PathBuf {
+    if path.file_name().is_some_and(|name| name == "projects") {
+        path
+    } else {
+        path.join("projects")
+    }
+}
+
+fn normalize_codex_sessions_dir(path: PathBuf) -> PathBuf {
+    if path.file_name().is_some_and(|name| name == "sessions") {
+        path
+    } else {
+        path.join("sessions")
+    }
+}
+
+fn detect_claude_project_dirs() -> Vec<PathBuf> {
+    if let Ok(raw) = env::var("CLAUDE_CONFIG_DIR") {
+        let explicit = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map(normalize_claude_projects_dir)
+            .collect::<Vec<_>>();
+
+        if !explicit.is_empty() {
+            return dedupe_paths(explicit);
+        }
+    }
+
+    let home = dirs::home_dir().unwrap_or_default();
+    let config_dir = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+
+    dedupe_paths(vec![
+        config_dir.join("claude").join("projects"),
+        home.join(".claude").join("projects"),
+    ])
+}
+
+fn detect_codex_sessions_dir() -> PathBuf {
+    if let Ok(raw) = env::var("CODEX_HOME") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return normalize_codex_sessions_dir(PathBuf::from(trimmed));
+        }
+    }
+
+    let home = dirs::home_dir().unwrap_or_default();
+    home.join(".codex").join("sessions")
+}
+
+fn create_claude_unique_hash(entry: &ClaudeJsonlEntry) -> Option<String> {
+    let message_id = entry.message.as_ref()?.id.as_ref()?;
+    let request_id = entry.request_id.as_ref()?;
+
+    Some(format!("{message_id}:{request_id}"))
+}
+
+#[derive(Clone, Copy, Default)]
+struct CodexRawUsage {
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    output_tokens: u64,
+    reasoning_output_tokens: u64,
+    total_tokens: u64,
+}
+
+fn codex_usage_is_zero(usage: CodexRawUsage) -> bool {
+    usage.input_tokens == 0
+        && usage.cached_input_tokens == 0
+        && usage.output_tokens == 0
+        && usage.reasoning_output_tokens == 0
+        && usage.total_tokens == 0
+}
+
+fn ensure_u64(value: Option<&Value>) -> u64 {
+    value.and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn normalize_codex_raw_usage(value: Option<&Value>) -> Option<CodexRawUsage> {
+    let record = value?.as_object()?;
+
+    let input_tokens = ensure_u64(record.get("input_tokens"));
+    let cached_input_tokens = ensure_u64(
+        record
+            .get("cached_input_tokens")
+            .or_else(|| record.get("cache_read_input_tokens")),
+    );
+    let output_tokens = ensure_u64(record.get("output_tokens"));
+    let reasoning_output_tokens = ensure_u64(record.get("reasoning_output_tokens"));
+    let total_tokens = ensure_u64(record.get("total_tokens"));
+
+    Some(CodexRawUsage {
+        input_tokens,
+        cached_input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+        total_tokens: if total_tokens > 0 {
+            total_tokens
+        } else {
+            input_tokens + output_tokens
+        },
+    })
+}
+
+fn subtract_codex_raw_usage(
+    current: CodexRawUsage,
+    previous: Option<CodexRawUsage>,
+) -> CodexRawUsage {
+    let previous = previous.unwrap_or_default();
+
+    CodexRawUsage {
+        input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
+        cached_input_tokens: current
+            .cached_input_tokens
+            .saturating_sub(previous.cached_input_tokens),
+        output_tokens: current.output_tokens.saturating_sub(previous.output_tokens),
+        reasoning_output_tokens: current
+            .reasoning_output_tokens
+            .saturating_sub(previous.reasoning_output_tokens),
+        total_tokens: current.total_tokens.saturating_sub(previous.total_tokens),
+    }
+}
+
+fn value_as_non_empty_string(value: Option<&Value>) -> Option<String> {
+    let raw = value?.as_str()?.trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.to_string())
+    }
+}
+
+fn extract_codex_model(value: &Value) -> Option<String> {
+    if let Some(info) = value.get("info") {
+        if let Some(model) = value_as_non_empty_string(info.get("model")) {
+            return Some(model);
+        }
+        if let Some(model) = value_as_non_empty_string(info.get("model_name")) {
+            return Some(model);
+        }
+        if let Some(model) = info
+            .get("metadata")
+            .and_then(|metadata| value_as_non_empty_string(metadata.get("model")))
+        {
+            return Some(model);
+        }
+    }
+
+    if let Some(model) = value_as_non_empty_string(value.get("model")) {
+        return Some(model);
+    }
+
+    value
+        .get("metadata")
+        .and_then(|metadata| value_as_non_empty_string(metadata.get("model")))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Model normalisation helper
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn normalize_model(raw: &str) -> (&str, &str) {
-    if raw.starts_with("gpt")
-        || raw.starts_with("o1")
-        || raw.starts_with("o3")
-        || raw.starts_with("o4")
-        || raw.contains("codex")
-    {
-        crate::models::normalize_codex_model(raw)
-    } else {
-        crate::models::normalize_claude_model(raw)
-    }
+fn normalize_model(raw: &str) -> (String, String) {
+    let known = crate::models::known_model_from_raw(raw);
+    (known.display_name, known.model_key)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -161,200 +392,314 @@ fn modified_since(path: &Path, since: NaiveDate) -> bool {
         .unwrap_or(true) // if we can't read metadata, include the file
 }
 
+type ClaudeParseResult = (Vec<ParsedEntry>, usize, bool);
+
+fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return (Vec::new(), 0, false),
+    };
+
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+    let mut lines_read = 0;
+
+    for line in reader.lines() {
+        lines_read += 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => continue,
+        };
+
+        // Fast pre-filter: skip lines that can't be assistant entries
+        if !line.contains("\"assistant\"") {
+            continue;
+        }
+
+        let entry: ClaudeJsonlEntry = match serde_json::from_str(&line) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if entry.entry_type != "assistant" {
+            continue;
+        }
+
+        let msg = match &entry.message {
+            Some(message) => message,
+            None => continue,
+        };
+        let usage = match &msg.usage {
+            Some(usage) => usage,
+            None => continue,
+        };
+        let model = match &msg.model {
+            Some(model) if !model.starts_with('<') => model.clone(), // skip <synthetic> etc.
+            _ => continue,
+        };
+        let ts = match chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
+            Ok(ts) => ts.with_timezone(&Local),
+            Err(_) => continue,
+        };
+
+        // Split cache creation into 5m and 1h tiers.
+        // If the breakdown sub-object exists, use it directly.
+        // Otherwise default all cache creation to 1h (Claude Code's default).
+        let total_cw = usage.cache_creation_input_tokens.unwrap_or(0);
+        let (cw_5m, cw_1h) = match &usage.cache_creation {
+            Some(bd) => (
+                bd.ephemeral_5m_input_tokens.unwrap_or(0),
+                bd.ephemeral_1h_input_tokens.unwrap_or(0),
+            ),
+            None => (0, total_cw),
+        };
+
+        entries.push(ParsedEntry {
+            timestamp: ts,
+            model,
+            input_tokens: usage.input_tokens.unwrap_or(0),
+            output_tokens: usage.output_tokens.unwrap_or(0),
+            cache_creation_5m_tokens: cw_5m,
+            cache_creation_1h_tokens: cw_1h,
+            cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
+            unique_hash: create_claude_unique_hash(&entry),
+        });
+    }
+
+    (entries, lines_read, true)
+}
+
 /// Read all Claude assistant entries from JSONL files under `projects_dir`,
 /// optionally filtering to entries on or after `since`.
-pub fn read_claude_entries(projects_dir: &Path, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
+fn read_claude_entries_with_debug(
+    projects_dir: &Path,
+    since: Option<NaiveDate>,
+) -> (Vec<ParsedEntry>, ProviderReadDebug) {
     let mut entries = Vec::new();
+    let mut processed_hashes = HashSet::new();
     let files = glob_jsonl_files(projects_dir);
+    let mut report = ProviderReadDebug {
+        provider: String::from("claude"),
+        root_dir: path_to_string(projects_dir),
+        root_exists: projects_dir.exists(),
+        since: since.map(|date| date.format("%Y-%m-%d").to_string()),
+        strategy: String::from("recursive-jsonl-glob"),
+        discovered_paths: files.len(),
+        ..ProviderReadDebug::default()
+    };
 
     for path in files {
         // Skip files that haven't been modified since the since date.
         // This avoids reading hundreds of old files for short time periods.
         if let Some(since_date) = since {
             if !modified_since(&path, since_date) {
+                report.skipped_paths += 1;
+                report.skipped_by_mtime += 1;
+                push_sample_path(&mut report.sample_skipped_paths, &path);
                 continue;
             }
         }
+        report.attempted_paths += 1;
+        push_sample_path(&mut report.sample_paths, &path);
 
-        let file = match fs::File::open(&path) {
-            Ok(f) => f,
-            Err(_) => continue,
-        };
-        let reader = BufReader::new(file);
+        let (parsed_entries, lines_read, opened) = parse_claude_session_file(&path);
+        report.lines_read += lines_read;
+        if opened {
+            report.opened_paths += 1;
+        } else {
+            report.failed_paths += 1;
+            continue;
+        }
 
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-            // Fast pre-filter: skip lines that can't be assistant entries
-            if !line.contains("\"assistant\"") {
+        for entry in parsed_entries {
+            if since.is_some_and(|since_date| entry.timestamp.date_naive() < since_date) {
                 continue;
             }
-            let entry: ClaudeJsonlEntry = match serde_json::from_str(&line) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if entry.entry_type != "assistant" {
-                continue;
-            }
-            let msg = match &entry.message {
-                Some(m) => m,
-                None => continue,
-            };
-            // Skip intermediate streaming chunks — only count the final
-            // response which has a non-null stop_reason (e.g. "end_turn",
-            // "tool_use").  Intermediate entries duplicate usage and inflate costs.
-            if msg.stop_reason.is_none() {
-                continue;
-            }
-            let usage = match &msg.usage {
-                Some(u) => u,
-                None => continue,
-            };
-            let model = match &msg.model {
-                Some(m) if !m.starts_with('<') => m.clone(), // skip <synthetic> etc.
-                _ => continue,
-            };
-            let ts = match chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
-                Ok(dt) => dt.with_timezone(&Local),
-                Err(_) => continue,
-            };
-            if let Some(since_date) = since {
-                if ts.date_naive() < since_date {
+            if let Some(unique_hash) = entry.unique_hash.as_ref() {
+                if !processed_hashes.insert(unique_hash.clone()) {
                     continue;
                 }
             }
-
-            // Split cache creation into 5m and 1h tiers.
-            // If the breakdown sub-object exists, use it directly.
-            // Otherwise default all cache creation to 1h (Claude Code's default).
-            let total_cw = usage.cache_creation_input_tokens.unwrap_or(0);
-            let (cw_5m, cw_1h) = match &usage.cache_creation {
-                Some(bd) => (
-                    bd.ephemeral_5m_input_tokens.unwrap_or(0),
-                    bd.ephemeral_1h_input_tokens.unwrap_or(0),
-                ),
-                None => (0, total_cw),
-            };
-
-            entries.push(ParsedEntry {
-                timestamp: ts,
-                model,
-                input_tokens: usage.input_tokens.unwrap_or(0),
-                output_tokens: usage.output_tokens.unwrap_or(0),
-                cache_creation_5m_tokens: cw_5m,
-                cache_creation_1h_tokens: cw_1h,
-                cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
-            });
+            entries.push(entry);
         }
     }
-    entries
+    report.emitted_entries = entries.len();
+    (entries, report)
+}
+
+#[allow(dead_code)]
+pub fn read_claude_entries(projects_dir: &Path, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
+    read_claude_entries_with_debug(projects_dir, since).0
 }
 
 /// Parse a single Codex session JSONL file.
-/// Codex `last_token_usage` is cumulative — only the FINAL `token_count` event
-/// per file is used.  Model name is extracted via regex-free string search.
-fn parse_codex_session_file(path: &Path) -> Option<ParsedEntry> {
-    let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    let mut final_usage: Option<(DateTime<Local>, String, u64, u64, u64)> = None;
-    let mut session_model = String::from("codex-mini-latest");
+/// Codex `event_msg` / `token_count` events may include either per-turn
+/// `last_token_usage` or cumulative `total_token_usage`. We normalize both
+/// forms into per-event deltas and track model context via `turn_context`.
+///
+/// In current Codex logs, `input_tokens` already includes cached input.
+/// Normalize it to billable uncached input here so downstream pricing and
+/// token totals do not count cached input twice.
+type CodexParseResult = (Vec<ParsedEntry>, usize, bool);
 
-    for line in reader.lines().map_while(Result::ok) {
-        // Try to extract a model name anywhere in this line
-        if line.contains("\"model\":\"") {
-            if let Some(m) = extract_model_from_line(&line) {
-                if !m.is_empty() {
-                    session_model = m;
-                }
-            }
-        }
+fn parse_codex_session_file(path: &Path) -> CodexParseResult {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return (Vec::new(), 0, false),
+    };
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+    let mut previous_totals: Option<CodexRawUsage> = None;
+    let mut current_model: Option<String> = None;
+    let mut lines_read = 0;
+
+    for line in reader.lines() {
+        lines_read += 1;
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => continue,
+        };
 
         let entry: CodexJsonlEntry = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(_) => continue,
         };
+
+        if entry.entry_type == "turn_context" {
+            if let Some(payload) = entry.payload.as_ref() {
+                if let Some(model) = extract_codex_model(payload) {
+                    current_model = Some(model);
+                }
+            }
+            continue;
+        }
+
         if entry.entry_type != "event_msg" {
             continue;
         }
-        let payload = match &entry.payload {
+
+        let payload = match entry.payload.as_ref() {
             Some(p) => p,
             None => continue,
         };
-        if payload.payload_type != "token_count" {
+        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
             continue;
         }
-        let info = match &payload.info {
-            Some(i) => i,
-            None => continue,
+
+        let info = payload.get("info");
+        let last_usage = normalize_codex_raw_usage(info.and_then(|value| value.get("last_token_usage")));
+        let total_usage =
+            normalize_codex_raw_usage(info.and_then(|value| value.get("total_token_usage")));
+
+        let raw_usage = if let Some(last_usage) = last_usage {
+            last_usage
+        } else if let Some(total_usage) = total_usage {
+            subtract_codex_raw_usage(total_usage, previous_totals)
+        } else {
+            continue;
         };
-        let usage = match &info.last_token_usage {
-            Some(u) => u,
+
+        if let Some(total_usage) = total_usage {
+            previous_totals = Some(total_usage);
+        }
+
+        if codex_usage_is_zero(raw_usage) {
+            continue;
+        }
+
+        let timestamp = match entry.timestamp.as_deref() {
+            Some(timestamp) => timestamp,
             None => continue,
         };
 
-        let ts = match chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
+        let ts = match chrono::DateTime::parse_from_rfc3339(timestamp) {
             Ok(dt) => dt.with_timezone(&Local),
             Err(_) => continue,
         };
 
-        let input = usage.input_tokens.unwrap_or(0);
-        let output = usage.output_tokens.unwrap_or(0) + usage.reasoning_output_tokens.unwrap_or(0);
-        let cache_read = usage.cached_input_tokens.unwrap_or(0);
+        let extracted_model = extract_codex_model(payload);
+        if let Some(model) = extracted_model.as_ref() {
+            current_model = Some(model.clone());
+        }
 
-        // Overwrite — we always want the FINAL token_count event
-        final_usage = Some((ts, session_model.clone(), input, output, cache_read));
+        let model = extracted_model
+            .or_else(|| current_model.clone())
+            .unwrap_or_else(|| String::from("gpt-5"));
+
+        let uncached_input_tokens = raw_usage
+            .input_tokens
+            .saturating_sub(raw_usage.cached_input_tokens);
+
+        entries.push(ParsedEntry {
+            timestamp: ts,
+            model,
+            input_tokens: uncached_input_tokens,
+            output_tokens: raw_usage.output_tokens,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            cache_read_tokens: raw_usage.cached_input_tokens,
+            unique_hash: None,
+        });
     }
 
-    let (ts, model, input, output, cache_read) = final_usage?;
-    Some(ParsedEntry {
-        timestamp: ts,
-        model,
-        input_tokens: input,
-        output_tokens: output,
-        cache_creation_5m_tokens: 0,
-        cache_creation_1h_tokens: 0,
-        cache_read_tokens: cache_read,
-    })
+    entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    (entries, lines_read, true)
 }
 
-/// Read all Codex session entries from `sessions_dir`, iterating date dirs
-/// from `since` (inclusive) through today.
-pub fn read_codex_entries(sessions_dir: &Path, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
-    let today = Local::now().date_naive();
-    let start = since.unwrap_or(today);
+/// Read all Codex session entries from `sessions_dir`, recursively scanning
+/// all JSONL session files under the directory.
+fn read_codex_entries_with_debug(
+    sessions_dir: &Path,
+    since: Option<NaiveDate>,
+) -> (Vec<ParsedEntry>, ProviderReadDebug) {
     let mut entries = Vec::new();
+    let files = glob_jsonl_files(sessions_dir);
+    let mut report = ProviderReadDebug {
+        provider: String::from("codex"),
+        root_dir: path_to_string(sessions_dir),
+        root_exists: sessions_dir.exists(),
+        since: since.map(|date| date.format("%Y-%m-%d").to_string()),
+        strategy: String::from("recursive-jsonl-glob"),
+        discovered_paths: files.len(),
+        ..ProviderReadDebug::default()
+    };
 
-    let mut current = start;
-    while current <= today {
-        let day_dir = sessions_dir
-            .join(current.format("%Y").to_string())
-            .join(current.format("%m").to_string())
-            .join(current.format("%d").to_string());
-
-        if day_dir.exists() {
-            if let Ok(rd) = fs::read_dir(&day_dir) {
-                for entry in rd.flatten() {
-                    let path = entry.path();
-                    if path.extension().is_none_or(|e| e != "jsonl") {
-                        continue;
-                    }
-                    if let Some(parsed) = parse_codex_session_file(&path) {
-                        // Apply date filter
-                        if parsed.timestamp.date_naive() >= start {
-                            entries.push(parsed);
-                        }
-                    }
-                }
+    for path in files {
+        if let Some(since_date) = since {
+            if !modified_since(&path, since_date) {
+                report.skipped_paths += 1;
+                report.skipped_by_mtime += 1;
+                push_sample_path(&mut report.sample_skipped_paths, &path);
+                continue;
             }
         }
-        current = match current.succ_opt() {
-            Some(d) => d,
-            None => break,
-        };
+
+        report.attempted_paths += 1;
+        push_sample_path(&mut report.sample_paths, &path);
+        let (parsed_entries, lines_read, opened) = parse_codex_session_file(&path);
+        report.lines_read += lines_read;
+        if opened {
+            report.opened_paths += 1;
+        } else {
+            report.failed_paths += 1;
+            continue;
+        }
+
+        for parsed in parsed_entries {
+            if since.is_some_and(|since_date| parsed.timestamp.date_naive() < since_date) {
+                continue;
+            }
+            entries.push(parsed);
+        }
     }
-    entries
+
+    entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    report.emitted_entries = entries.len();
+    (entries, report)
+}
+
+#[allow(dead_code)]
+pub fn read_codex_entries(sessions_dir: &Path, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
+    read_codex_entries_with_debug(sessions_dir, since).0
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -387,9 +732,7 @@ fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, (String, f64, 
             e.cache_read_tokens,
         );
         let (name, key) = normalize_model(&e.model);
-        let entry = map
-            .entry(key.to_string())
-            .or_insert((name.to_string(), 0.0, 0));
+        let entry = map.entry(key).or_insert((name, 0.0, 0));
         entry.1 += cost;
         entry.2 += entry_total_tokens(e);
     }
@@ -399,13 +742,6 @@ fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, (String, f64, 
 fn entry_total_tokens(entry: &ParsedEntry) -> u64 {
     entry.input_tokens
         + entry.output_tokens
-        + entry.cache_creation_5m_tokens
-        + entry.cache_creation_1h_tokens
-        + entry.cache_read_tokens
-}
-
-fn entry_total_input(entry: &ParsedEntry) -> u64 {
-    entry.input_tokens
         + entry.cache_creation_5m_tokens
         + entry.cache_creation_1h_tokens
         + entry.cache_read_tokens
@@ -440,42 +776,59 @@ fn segment_map_to_model_summaries(map: &HashMap<String, (String, f64, u64)>) -> 
 const CACHE_TTL_SECS: u64 = 120;
 
 pub struct UsageParser {
-    claude_dir: PathBuf,
+    claude_dirs: Vec<PathBuf>,
     codex_dir: PathBuf,
     cache: Mutex<HashMap<String, (UsagePayload, Instant)>>,
+    file_cache: Mutex<HashMap<String, CachedFileEntries>>,
+    last_query_debug: Mutex<Option<UsageQueryDebugReport>>,
 }
 
 impl UsageParser {
     /// Create with default home-directory paths.
     #[allow(dead_code)]
     pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_default();
         Self {
-            claude_dir: home.join(".claude").join("projects"),
-            codex_dir: home.join(".codex").join("sessions"),
+            claude_dirs: detect_claude_project_dirs(),
+            codex_dir: detect_codex_sessions_dir(),
             cache: Mutex::new(HashMap::new()),
+            file_cache: Mutex::new(HashMap::new()),
+            last_query_debug: Mutex::new(None),
         }
     }
 
     /// Create with an explicit Claude projects directory (for testing).
     #[allow(dead_code)]
     pub fn with_claude_dir(claude_dir: PathBuf) -> Self {
-        let home = dirs::home_dir().unwrap_or_default();
         Self {
-            claude_dir,
-            codex_dir: home.join(".codex").join("sessions"),
+            claude_dirs: vec![claude_dir],
+            codex_dir: detect_codex_sessions_dir(),
             cache: Mutex::new(HashMap::new()),
+            file_cache: Mutex::new(HashMap::new()),
+            last_query_debug: Mutex::new(None),
+        }
+    }
+
+    /// Create with explicit Claude projects directories (for testing).
+    #[allow(dead_code)]
+    pub fn with_claude_dirs(claude_dirs: Vec<PathBuf>) -> Self {
+        Self {
+            claude_dirs,
+            codex_dir: detect_codex_sessions_dir(),
+            cache: Mutex::new(HashMap::new()),
+            file_cache: Mutex::new(HashMap::new()),
+            last_query_debug: Mutex::new(None),
         }
     }
 
     /// Create with an explicit Codex sessions directory (for testing).
     #[allow(dead_code)]
     pub fn with_codex_dir(codex_dir: PathBuf) -> Self {
-        let home = dirs::home_dir().unwrap_or_default();
         Self {
-            claude_dir: home.join(".claude").join("projects"),
+            claude_dirs: detect_claude_project_dirs(),
             codex_dir,
             cache: Mutex::new(HashMap::new()),
+            file_cache: Mutex::new(HashMap::new()),
+            last_query_debug: Mutex::new(None),
         }
     }
 
@@ -483,9 +836,11 @@ impl UsageParser {
     #[allow(dead_code)]
     pub fn with_dirs(claude_dir: PathBuf, codex_dir: PathBuf) -> Self {
         Self {
-            claude_dir,
+            claude_dirs: vec![claude_dir],
             codex_dir,
             cache: Mutex::new(HashMap::new()),
+            file_cache: Mutex::new(HashMap::new()),
+            last_query_debug: Mutex::new(None),
         }
     }
 
@@ -495,6 +850,12 @@ impl UsageParser {
     pub fn clear_cache(&self) {
         if let Ok(mut c) = self.cache.lock() {
             c.clear();
+        }
+        if let Ok(mut c) = self.file_cache.lock() {
+            c.clear();
+        }
+        if let Ok(mut current) = self.last_query_debug.lock() {
+            *current = None;
         }
     }
 
@@ -516,16 +877,212 @@ impl UsageParser {
         }
     }
 
+    fn set_last_query_debug(&self, report: UsageQueryDebugReport) {
+        if let Ok(mut current) = self.last_query_debug.lock() {
+            *current = Some(report);
+        }
+    }
+
+    pub fn last_query_debug(&self) -> Option<UsageQueryDebugReport> {
+        self.last_query_debug.lock().ok()?.clone()
+    }
+
+    fn load_cached_file(&self, path: &Path, kind: ProviderFileKind) -> CachedFileLoad {
+        let cache_key = path_to_string(path);
+        let stamp = file_stamp(path);
+
+        if let Some(stamp) = stamp.as_ref() {
+            if let Ok(cache) = self.file_cache.lock() {
+                if let Some(cached) = cache.get(&cache_key) {
+                    if &cached.stamp == stamp {
+                        return CachedFileLoad {
+                            entries: cached.entries.clone(),
+                            earliest_date: cached.earliest_date,
+                            lines_read: 0,
+                            opened: false,
+                            from_cache: true,
+                        };
+                    }
+                }
+            }
+        }
+
+        let (entries, lines_read, opened) = match kind {
+            ProviderFileKind::Claude => parse_claude_session_file(path),
+            ProviderFileKind::Codex => parse_codex_session_file(path),
+        };
+        let earliest_date = earliest_entry_date(&entries);
+
+        if let Ok(mut cache) = self.file_cache.lock() {
+            if opened {
+                if let Some(stamp) = stamp {
+                    cache.insert(
+                        cache_key,
+                        CachedFileEntries {
+                            stamp,
+                            entries: entries.clone(),
+                            earliest_date,
+                        },
+                    );
+                } else {
+                    cache.remove(&cache_key);
+                }
+            } else {
+                cache.remove(&cache_key);
+            }
+        }
+
+        CachedFileLoad {
+            entries,
+            earliest_date,
+            lines_read,
+            opened,
+            from_cache: false,
+        }
+    }
+
+    fn load_claude_entries_with_debug(
+        &self,
+        since: Option<NaiveDate>,
+    ) -> (Vec<ParsedEntry>, Vec<ProviderReadDebug>) {
+        let mut entries = Vec::new();
+        let mut reports = Vec::new();
+        let mut processed_hashes = HashSet::new();
+
+        for claude_dir in &self.claude_dirs {
+            let files = glob_jsonl_files(claude_dir);
+            let mut report = ProviderReadDebug {
+                provider: String::from("claude"),
+                root_dir: path_to_string(claude_dir),
+                root_exists: claude_dir.exists(),
+                since: since.map(|date| date.format("%Y-%m-%d").to_string()),
+                strategy: String::from("recursive-jsonl-glob+parsed-file-cache+dedupe"),
+                discovered_paths: files.len(),
+                ..ProviderReadDebug::default()
+            };
+
+            for path in files {
+                if let Some(since_date) = since {
+                    if !modified_since(&path, since_date) {
+                        report.skipped_paths += 1;
+                        report.skipped_by_mtime += 1;
+                        push_sample_path(&mut report.sample_skipped_paths, &path);
+                        continue;
+                    }
+                }
+
+                report.attempted_paths += 1;
+                push_sample_path(&mut report.sample_paths, &path);
+
+                let loaded = self.load_cached_file(&path, ProviderFileKind::Claude);
+                report.lines_read += loaded.lines_read;
+                if loaded.from_cache {
+                    report.cache_hits += 1;
+                } else {
+                    report.cache_misses += 1;
+                    if loaded.opened {
+                        report.opened_paths += 1;
+                    } else {
+                        report.failed_paths += 1;
+                        continue;
+                    }
+                }
+
+                for entry in loaded.entries {
+                    if since.is_some_and(|since_date| entry.timestamp.date_naive() < since_date) {
+                        continue;
+                    }
+                    if let Some(unique_hash) = entry.unique_hash.as_ref() {
+                        if !processed_hashes.insert(unique_hash.clone()) {
+                            continue;
+                        }
+                    }
+                    report.emitted_entries += 1;
+                    entries.push(entry);
+                }
+            }
+
+            reports.push(report);
+        }
+
+        (entries, reports)
+    }
+
+    fn load_codex_entries_with_debug(
+        &self,
+        since: Option<NaiveDate>,
+    ) -> (Vec<ParsedEntry>, ProviderReadDebug) {
+        let mut entries = Vec::new();
+        let files = glob_jsonl_files(&self.codex_dir);
+        let mut report = ProviderReadDebug {
+            provider: String::from("codex"),
+            root_dir: path_to_string(&self.codex_dir),
+            root_exists: self.codex_dir.exists(),
+            since: since.map(|date| date.format("%Y-%m-%d").to_string()),
+            strategy: String::from("recursive-jsonl-glob+parsed-file-cache+token-delta"),
+            discovered_paths: files.len(),
+            ..ProviderReadDebug::default()
+        };
+
+        for path in files {
+            if let Some(since_date) = since {
+                if !modified_since(&path, since_date) {
+                    report.skipped_paths += 1;
+                    report.skipped_by_mtime += 1;
+                    push_sample_path(&mut report.sample_skipped_paths, &path);
+                    continue;
+                }
+            }
+
+            report.attempted_paths += 1;
+            push_sample_path(&mut report.sample_paths, &path);
+
+            let loaded = self.load_cached_file(&path, ProviderFileKind::Codex);
+            report.lines_read += loaded.lines_read;
+            if loaded.from_cache {
+                report.cache_hits += 1;
+            } else {
+                report.cache_misses += 1;
+                if loaded.opened {
+                    report.opened_paths += 1;
+                } else {
+                    report.failed_paths += 1;
+                    continue;
+                }
+            }
+
+            for parsed in loaded.entries {
+                if since.is_some_and(|since_date| parsed.timestamp.date_naive() < since_date) {
+                    continue;
+                }
+                report.emitted_entries += 1;
+                entries.push(parsed);
+            }
+        }
+
+        (entries, report)
+    }
+
     // ── Internal: load entries for a provider/since combination ──
 
-    fn load_entries(&self, provider: &str, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
+    pub(crate) fn load_entries(
+        &self,
+        provider: &str,
+        since: Option<NaiveDate>,
+    ) -> (Vec<ParsedEntry>, Vec<ProviderReadDebug>) {
         match provider {
-            "claude" => read_claude_entries(&self.claude_dir, since),
-            "codex" => read_codex_entries(&self.codex_dir, since),
+            "claude" => self.load_claude_entries_with_debug(since),
+            "codex" => {
+                let (entries, report) = self.load_codex_entries_with_debug(since);
+                (entries, vec![report])
+            }
             _ => {
-                let mut all = read_claude_entries(&self.claude_dir, since);
-                all.extend(read_codex_entries(&self.codex_dir, since));
-                all
+                let (mut claude_entries, mut claude_reports) =
+                    self.load_claude_entries_with_debug(since);
+                let (codex_entries, codex_report) = self.load_codex_entries_with_debug(since);
+                claude_entries.extend(codex_entries);
+                claude_reports.push(codex_report);
+                (claude_entries, claude_reports)
             }
         }
     }
@@ -536,40 +1093,35 @@ impl UsageParser {
         match provider {
             "claude" => self.has_claude_entries_before(before_date),
             "codex" => self.has_codex_entries_before(before_date),
-            _ => self.has_claude_entries_before(before_date) || self.has_codex_entries_before(before_date),
+            _ => {
+                self.has_claude_entries_before(before_date)
+                    || self.has_codex_entries_before(before_date)
+            }
         }
     }
 
     fn has_claude_entries_before(&self, before_date: NaiveDate) -> bool {
-        let files = glob_jsonl_files(&self.claude_dir);
-        for path in files {
-            let file = match fs::File::open(&path) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            let reader = BufReader::new(file);
-            for line in reader.lines().map_while(Result::ok) {
-                if !line.contains("\"assistant\"") {
-                    continue;
-                }
-                let entry: ClaudeJsonlEntry = match serde_json::from_str(&line) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                if entry.entry_type != "assistant" {
-                    continue;
-                }
-                let msg = match &entry.message {
-                    Some(m) if m.stop_reason.is_some() => m,
-                    _ => continue,
-                };
-                if msg.usage.is_none() {
-                    continue;
-                }
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
-                    if dt.with_timezone(&Local).date_naive() < before_date {
-                        return true;
-                    }
+        for claude_dir in &self.claude_dirs {
+            let mut files = glob_jsonl_files(claude_dir);
+            files.sort_by_key(|path| {
+                fs::metadata(path)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .map(|modified| {
+                        let modified: chrono::DateTime<Local> = modified.into();
+                        let modified_date = modified.date_naive();
+                        (modified_date >= before_date, modified_date)
+                    })
+                    .unwrap_or((true, Local::now().date_naive()))
+            });
+
+            for path in files {
+                let loaded = self.load_cached_file(&path, ProviderFileKind::Claude);
+                if loaded
+                    .earliest_date
+                    .is_some_and(|entry_date| entry_date < before_date)
+                {
+                    return true;
                 }
             }
         }
@@ -577,45 +1129,26 @@ impl UsageParser {
     }
 
     fn has_codex_entries_before(&self, before_date: NaiveDate) -> bool {
-        let years = match fs::read_dir(&self.codex_dir) {
-            Ok(rd) => rd,
-            Err(_) => return false,
-        };
-        for year_entry in years.flatten() {
-            let year: i32 = match year_entry.file_name().to_string_lossy().parse() {
-                Ok(y) => y,
-                Err(_) => continue,
-            };
-            let months = match fs::read_dir(year_entry.path()) {
-                Ok(rd) => rd,
-                Err(_) => continue,
-            };
-            for month_entry in months.flatten() {
-                let month: u32 = match month_entry.file_name().to_string_lossy().parse() {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                let days = match fs::read_dir(month_entry.path()) {
-                    Ok(rd) => rd,
-                    Err(_) => continue,
-                };
-                for day_entry in days.flatten() {
-                    let day: u32 = match day_entry.file_name().to_string_lossy().parse() {
-                        Ok(d) => d,
-                        Err(_) => continue,
-                    };
-                    if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
-                        if date < before_date {
-                            if let Ok(files) = fs::read_dir(day_entry.path()) {
-                                for f in files.flatten() {
-                                    if f.path().extension().is_some_and(|e| e == "jsonl") {
-                                        return true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        let mut files = glob_jsonl_files(&self.codex_dir);
+        files.sort_by_key(|path| {
+            fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .map(|modified| {
+                    let modified: chrono::DateTime<Local> = modified.into();
+                    let modified_date = modified.date_naive();
+                    (modified_date >= before_date, modified_date)
+                })
+                .unwrap_or((true, Local::now().date_naive()))
+        });
+
+        for path in files {
+            let loaded = self.load_cached_file(&path, ProviderFileKind::Codex);
+            if loaded
+                .earliest_date
+                .is_some_and(|entry_date| entry_date < before_date)
+            {
+                return true;
             }
         }
         false
@@ -635,11 +1168,29 @@ impl UsageParser {
     pub fn get_daily(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("daily:{}:{}", provider, since);
         if let Some(cached) = self.check_cache(&cache_key) {
+            self.set_last_query_debug(UsageQueryDebugReport {
+                provider: provider.to_string(),
+                aggregation: String::from("daily"),
+                since: since.to_string(),
+                cache_key: cache_key.clone(),
+                from_cache: true,
+                entry_count: 0,
+                sources: vec![],
+            });
             return cached;
         }
 
         let since_date = parse_since_date(since);
-        let entries = self.load_entries(provider, since_date);
+        let (entries, sources) = self.load_entries(provider, since_date);
+        self.set_last_query_debug(UsageQueryDebugReport {
+            provider: provider.to_string(),
+            aggregation: String::from("daily"),
+            since: since.to_string(),
+            cache_key: cache_key.clone(),
+            from_cache: false,
+            entry_count: entries.len(),
+            sources,
+        });
 
         // Group by NaiveDate using a BTreeMap so dates are ordered
         let mut day_map: std::collections::BTreeMap<NaiveDate, Vec<&ParsedEntry>> =
@@ -665,7 +1216,7 @@ impl UsageParser {
             total_tokens += bucket_tokens;
 
             for e in day_entries.iter() {
-                total_input += entry_total_input(e);
+                total_input += e.input_tokens;
                 total_output += e.output_tokens;
             }
 
@@ -714,11 +1265,29 @@ impl UsageParser {
     pub fn get_monthly(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("monthly:{}:{}", provider, since);
         if let Some(cached) = self.check_cache(&cache_key) {
+            self.set_last_query_debug(UsageQueryDebugReport {
+                provider: provider.to_string(),
+                aggregation: String::from("monthly"),
+                since: since.to_string(),
+                cache_key: cache_key.clone(),
+                from_cache: true,
+                entry_count: 0,
+                sources: vec![],
+            });
             return cached;
         }
 
         let since_date = parse_since_date(since);
-        let entries = self.load_entries(provider, since_date);
+        let (entries, sources) = self.load_entries(provider, since_date);
+        self.set_last_query_debug(UsageQueryDebugReport {
+            provider: provider.to_string(),
+            aggregation: String::from("monthly"),
+            since: since.to_string(),
+            cache_key: cache_key.clone(),
+            from_cache: false,
+            entry_count: entries.len(),
+            sources,
+        });
 
         // Group by YYYY-MM string using a BTreeMap for order
         let mut month_map: std::collections::BTreeMap<String, Vec<&ParsedEntry>> =
@@ -749,7 +1318,7 @@ impl UsageParser {
             total_tokens += bucket_tokens;
 
             for e in month_entries.iter() {
-                total_input += entry_total_input(e);
+                total_input += e.input_tokens;
                 total_output += e.output_tokens;
             }
 
@@ -797,11 +1366,29 @@ impl UsageParser {
     pub fn get_hourly(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("hourly:{}:{}", provider, since);
         if let Some(cached) = self.check_cache(&cache_key) {
+            self.set_last_query_debug(UsageQueryDebugReport {
+                provider: provider.to_string(),
+                aggregation: String::from("hourly"),
+                since: since.to_string(),
+                cache_key: cache_key.clone(),
+                from_cache: true,
+                entry_count: 0,
+                sources: vec![],
+            });
             return cached;
         }
 
         let since_date = parse_since_date(since);
-        let entries = self.load_entries(provider, since_date);
+        let (entries, sources) = self.load_entries(provider, since_date);
+        self.set_last_query_debug(UsageQueryDebugReport {
+            provider: provider.to_string(),
+            aggregation: String::from("hourly"),
+            since: since.to_string(),
+            cache_key: cache_key.clone(),
+            from_cache: false,
+            entry_count: entries.len(),
+            sources,
+        });
 
         // Group by hour (0-23)
         let mut hour_map: HashMap<u32, Vec<&ParsedEntry>> = HashMap::new();
@@ -840,7 +1427,7 @@ impl UsageParser {
             total_tokens += bucket_tokens;
 
             for e in hour_entries.iter() {
-                total_input += entry_total_input(e);
+                total_input += e.input_tokens;
                 total_output += e.output_tokens;
             }
 
@@ -888,14 +1475,32 @@ impl UsageParser {
     pub fn get_blocks(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("blocks:{}:{}", provider, since);
         if let Some(cached) = self.check_cache(&cache_key) {
+            self.set_last_query_debug(UsageQueryDebugReport {
+                provider: provider.to_string(),
+                aggregation: String::from("blocks"),
+                since: since.to_string(),
+                cache_key: cache_key.clone(),
+                from_cache: true,
+                entry_count: 0,
+                sources: vec![],
+            });
             return cached;
         }
 
         let since_date = parse_since_date(since);
-        let mut entries = self.load_entries(provider, since_date);
+        let (mut entries, sources) = self.load_entries(provider, since_date);
+        self.set_last_query_debug(UsageQueryDebugReport {
+            provider: provider.to_string(),
+            aggregation: String::from("blocks"),
+            since: since.to_string(),
+            cache_key: cache_key.clone(),
+            from_cache: false,
+            entry_count: entries.len(),
+            sources,
+        });
 
         // Sort by timestamp ascending
-        entries.sort_by_key(|e| e.timestamp);
+        entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
         // NOT a const — chrono::Duration::minutes() is not const fn
         let gap_threshold = chrono::Duration::minutes(30);
@@ -940,7 +1545,7 @@ impl UsageParser {
             total_tokens += block_tokens;
 
             for e in block.iter() {
-                total_input += entry_total_input(e);
+                total_input += e.input_tokens;
                 total_output += e.output_tokens;
             }
 
@@ -1083,62 +1688,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_claude_dedupes_null_stop_reason_entries_by_message_and_request() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":20,"cache_read_input_tokens":30}}}
+{"type":"assistant","timestamp":"2026-03-15T12:00:01+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":20,"cache_read_input_tokens":30}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let (entries, reports) = parser.load_entries("claude", parse_since_date("20260301"));
+
+        assert_eq!(entries.len(), 1, "duplicate assistant transcript entries should count once");
+        assert_eq!(entries[0].input_tokens, 10);
+        assert_eq!(entries[0].output_tokens, 5);
+        assert_eq!(entries[0].cache_creation_1h_tokens, 20);
+        assert_eq!(entries[0].cache_read_tokens, 30);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].emitted_entries, 1);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Codex parsing
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn parse_codex_uses_final_token_count_only() {
+    fn parse_codex_emits_last_usage_for_each_token_event() {
         let dir = TempDir::new().unwrap();
-        let today = Local::now().date_naive();
-        let day_dir = dir
-            .path()
-            .join(today.format("%Y").to_string())
-            .join(today.format("%m").to_string())
-            .join(today.format("%d").to_string());
-        fs::create_dir_all(&day_dir).unwrap();
+        let session_dir = dir.path().join("workspace").join("subdir");
+        fs::create_dir_all(&session_dir).unwrap();
 
-        // Two token_count events — cumulative: first says 100, second says 200
-        // We must only use the final one (200).
         let ts = Local::now().format("%Y-%m-%dT12:00:00+00:00").to_string();
         let content = format!(
-            r#"{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":100,"output_tokens":50,"reasoning_output_tokens":0,"cached_input_tokens":0}}}}}}}}
-{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":200,"output_tokens":100,"reasoning_output_tokens":0,"cached_input_tokens":0}}}}}}}}"#,
+            r#"{{"type":"turn_context","payload":{{"cwd":"/tmp/demo","model":"gpt-5.4"}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":100,"output_tokens":50,"reasoning_output_tokens":5,"cached_input_tokens":10}}}}}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":200,"output_tokens":100,"reasoning_output_tokens":15,"cached_input_tokens":20}}}}}}}}"#,
             ts = ts
         );
-        write_file(&day_dir.join("session.jsonl"), &content);
+        write_file(&session_dir.join("session.jsonl"), &content);
 
-        let today_str = today.format("%Y%m%d").to_string();
+        let today_str = Local::now().format("%Y%m%d").to_string();
         let entries = read_codex_entries(dir.path(), parse_since_date(&today_str));
         assert_eq!(
             entries.len(),
-            1,
-            "should produce one entry per session file"
+            2,
+            "should produce one entry per token_count event"
         );
+        assert_eq!(entries[0].model, "gpt-5.4");
+        assert_eq!(entries[0].input_tokens, 90);
+        assert_eq!(entries[0].output_tokens, 50);
+        assert_eq!(entries[0].cache_read_tokens, 10);
         assert_eq!(
-            entries[0].input_tokens, 200,
-            "should use the final token_count (200), not the first (100)"
+            entries[1].input_tokens, 180,
+            "should preserve per-event usage rather than collapsing to the final event"
         );
+        assert_eq!(entries[1].output_tokens, 100);
+        assert_eq!(entries[1].cache_read_tokens, 20);
     }
 
     #[test]
-    fn parse_codex_filters_by_date() {
+    fn parse_codex_total_token_usage_is_converted_to_deltas() {
+        let dir = TempDir::new().unwrap();
+        let session_dir = dir.path().join("nested");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let ts1 = "2026-03-15T12:00:00+00:00";
+        let ts2 = "2026-03-15T12:05:00+00:00";
+        let content = format!(
+            r#"{{"type":"turn_context","payload":{{"cwd":"/tmp/demo","model":"gpt-5"}}}}
+{{"type":"event_msg","timestamp":"{ts1}","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":300,"output_tokens":100,"reasoning_output_tokens":25,"cached_input_tokens":50,"total_tokens":400}}}}}}}}
+{{"type":"event_msg","timestamp":"{ts2}","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":450,"output_tokens":160,"reasoning_output_tokens":40,"cached_input_tokens":70,"total_tokens":610}}}}}}}}"#
+        );
+        write_file(&session_dir.join("session.jsonl"), &content);
+
+        let entries = read_codex_entries(dir.path(), parse_since_date("20260301"));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].input_tokens, 250);
+        assert_eq!(entries[0].output_tokens, 100);
+        assert_eq!(entries[0].cache_read_tokens, 50);
+        assert_eq!(entries[1].input_tokens, 130);
+        assert_eq!(entries[1].output_tokens, 60);
+        assert_eq!(entries[1].cache_read_tokens, 20);
+    }
+
+    #[test]
+    fn parse_codex_filters_by_timestamp_date() {
         let dir = TempDir::new().unwrap();
 
-        // Old date dir — should be excluded when since = today
-        let old_dir = dir.path().join("2025").join("01").join("01");
-        fs::create_dir_all(&old_dir).unwrap();
+        let session_dir = dir.path().join("workspace").join("history");
+        fs::create_dir_all(&session_dir).unwrap();
         let old_ts = "2025-01-01T12:00:00+00:00";
         let old_content = format!(
             r#"{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":999,"output_tokens":1}}}}}}}}"#,
             ts = old_ts
         );
-        write_file(&old_dir.join("old.jsonl"), &old_content);
+        write_file(&session_dir.join("old.jsonl"), &old_content);
 
         let today = Local::now().date_naive();
         let today_str = today.format("%Y%m%d").to_string();
         let entries = read_codex_entries(dir.path(), parse_since_date(&today_str));
-        assert!(entries.is_empty(), "old date dir should be excluded");
+        assert!(entries.is_empty(), "old timestamp should be excluded");
     }
 
     #[test]
@@ -1198,17 +1846,70 @@ mod tests {
     }
 
     #[test]
+    fn daily_aggregation_keeps_distinct_codex_models_separate() {
+        let dir = TempDir::new().unwrap();
+        let session_dir = dir.path().join("2026").join("03").join("15");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let content = r#"{"type":"turn_context","payload":{"cwd":"/tmp/demo","model":"gpt-5.1-codex-max"}}
+{"type":"event_msg","timestamp":"2026-03-15T12:00:00+00:00","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":50}}}}
+{"type":"turn_context","payload":{"cwd":"/tmp/demo","model":"gpt-5.4"}}
+{"type":"event_msg","timestamp":"2026-03-15T12:10:00+00:00","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":200,"output_tokens":75}}}}"#;
+        write_file(&session_dir.join("session.jsonl"), content);
+
+        let parser = UsageParser::with_codex_dir(dir.path().to_path_buf());
+        let payload = parser.get_daily("codex", "20260315");
+
+        assert_eq!(
+            payload.model_breakdown.len(),
+            2,
+            "distinct Codex models should not collapse into one generic bucket"
+        );
+        let keys: Vec<&str> = payload
+            .model_breakdown
+            .iter()
+            .map(|m| m.model_key.as_str())
+            .collect();
+        assert!(
+            keys.contains(&"gpt-5.1-codex-max"),
+            "should include gpt-5.1-codex-max"
+        );
+        assert!(keys.contains(&"gpt-5.4"), "should include gpt-5.4");
+    }
+
+    #[test]
     fn daily_aggregation_includes_cache_tokens_in_totals_and_models() {
         let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":50,"cache_read_input_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":30}}}}"#;
         let (_dir, parser) = make_parser_with_claude_data(content);
         let payload = parser.get_daily("claude", "20260315");
 
         assert_eq!(payload.total_tokens, 210);
-        assert_eq!(payload.input_tokens, 160);
+        assert_eq!(payload.input_tokens, 100);
         assert_eq!(payload.output_tokens, 50);
         assert_eq!(payload.model_breakdown.len(), 1);
         assert_eq!(payload.model_breakdown[0].tokens, 210);
         assert_eq!(payload.chart_buckets[0].segments[0].tokens, 210);
+    }
+
+    #[test]
+    fn codex_cached_input_is_not_double_counted_in_input_or_cost() {
+        let dir = TempDir::new().unwrap();
+        let session_dir = dir.path().join("2026").join("03").join("15");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let content = r#"{"type":"turn_context","payload":{"cwd":"/tmp/demo","model":"gpt-5.4"}}
+{"type":"event_msg","timestamp":"2026-03-15T12:00:00+00:00","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":110}}}}"#;
+        write_file(&session_dir.join("session.jsonl"), content);
+
+        let parser = UsageParser::with_codex_dir(dir.path().to_path_buf());
+        let payload = parser.get_daily("codex", "20260315");
+
+        assert_eq!(payload.input_tokens, 20);
+        assert_eq!(payload.output_tokens, 10);
+        assert_eq!(payload.total_tokens, 110);
+        assert_eq!(payload.model_breakdown.len(), 1);
+        assert_eq!(payload.model_breakdown[0].tokens, 110);
+        assert!((payload.total_cost - 0.00022).abs() < 1e-9);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1228,6 +1929,60 @@ mod tests {
             second.from_cache,
             "second call within TTL should be from cache"
         );
+    }
+
+    #[test]
+    fn parsed_file_cache_reuses_claude_file_across_aggregations() {
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":1000,"output_tokens":500}}}"#;
+        let (_dir, parser) = make_parser_with_claude_data(content);
+
+        parser.get_daily("claude", "20260101");
+        let first_debug = parser.last_query_debug().unwrap();
+        let first_source = &first_debug.sources[0];
+        assert_eq!(first_source.cache_hits, 0);
+        assert_eq!(first_source.cache_misses, 1);
+        assert_eq!(first_source.opened_paths, 1);
+
+        parser.get_monthly("claude", "20260101");
+        let second_debug = parser.last_query_debug().unwrap();
+        let second_source = &second_debug.sources[0];
+        assert_eq!(second_source.cache_hits, 1);
+        assert_eq!(second_source.cache_misses, 0);
+        assert_eq!(second_source.opened_paths, 0);
+        assert_eq!(second_source.lines_read, 0);
+    }
+
+    #[test]
+    fn parsed_file_cache_invalidates_when_claude_file_changes() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write_file(
+            &path,
+            r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#,
+        );
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+
+        let first = parser.get_daily("claude", "20260101");
+        assert_eq!(first.input_tokens, 100);
+        let first_debug = parser.last_query_debug().unwrap();
+        assert_eq!(first_debug.sources[0].cache_misses, 1);
+
+        write_file(
+            &path,
+            concat!(
+                r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-03-16T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":75}}}"#,
+            ),
+        );
+
+        let second = parser.get_monthly("claude", "20260101");
+        assert_eq!(second.input_tokens, 300);
+        assert_eq!(second.output_tokens, 125);
+        let second_debug = parser.last_query_debug().unwrap();
+        assert_eq!(second_debug.sources[0].cache_hits, 0);
+        assert_eq!(second_debug.sources[0].cache_misses, 1);
+        assert_eq!(second_debug.sources[0].opened_paths, 1);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1351,8 +2106,16 @@ mod tests {
         write_file(&dir.path().join("session.jsonl"), &content);
         let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
         let payload = parser.get_hourly("claude", "20260115");
-        assert_eq!(payload.chart_buckets.len(), 24, "past day should have 24 hourly buckets");
-        let nine_am = payload.chart_buckets.iter().find(|b| b.label == "9AM").unwrap();
+        assert_eq!(
+            payload.chart_buckets.len(),
+            24,
+            "past day should have 24 hourly buckets"
+        );
+        let nine_am = payload
+            .chart_buckets
+            .iter()
+            .find(|b| b.label == "9AM")
+            .unwrap();
         assert!(nine_am.total > 0.0);
     }
 
@@ -1379,21 +2142,27 @@ mod tests {
     }
 
     #[test]
-    fn has_entries_before_codex_returns_true_when_old_dirs_exist() {
+    fn has_entries_before_codex_returns_true_when_old_entries_exist() {
         let dir = TempDir::new().unwrap();
-        let day_dir = dir.path().join("2026").join("01").join("15");
-        fs::create_dir_all(&day_dir).unwrap();
-        write_file(&day_dir.join("session.jsonl"), "{}");
+        let session_dir = dir.path().join("workspace").join("old");
+        fs::create_dir_all(&session_dir).unwrap();
+        write_file(
+            &session_dir.join("session.jsonl"),
+            r#"{"type":"event_msg","timestamp":"2026-01-15T12:00:00+00:00","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":50}}}}"#,
+        );
         let parser = UsageParser::with_codex_dir(dir.path().to_path_buf());
         assert!(parser.has_entries_before("codex", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
     }
 
     #[test]
-    fn has_entries_before_codex_returns_false_when_no_old_dirs() {
+    fn has_entries_before_codex_returns_false_when_no_old_entries() {
         let dir = TempDir::new().unwrap();
-        let day_dir = dir.path().join("2026").join("03").join("15");
-        fs::create_dir_all(&day_dir).unwrap();
-        write_file(&day_dir.join("session.jsonl"), "{}");
+        let session_dir = dir.path().join("workspace").join("recent");
+        fs::create_dir_all(&session_dir).unwrap();
+        write_file(
+            &session_dir.join("session.jsonl"),
+            r#"{"type":"event_msg","timestamp":"2026-03-15T12:00:00+00:00","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":50}}}}"#,
+        );
         let parser = UsageParser::with_codex_dir(dir.path().to_path_buf());
         assert!(!parser.has_entries_before("codex", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
     }
@@ -1423,7 +2192,7 @@ mod debug_compare {
                 e.cache_creation_1h_tokens,
                 e.cache_read_tokens,
             );
-            let m = model_totals.entry(key.to_string()).or_default();
+            let m = model_totals.entry(key).or_default();
             m.0 += e.input_tokens;
             m.1 += e.output_tokens;
             m.2 += e.cache_creation_5m_tokens + e.cache_creation_1h_tokens;
@@ -1455,8 +2224,9 @@ mod debug_compare {
         let parser = UsageParser::new();
         let today = chrono::Local::now().format("%Y%m%d").to_string();
 
-        let claude =
-            read_claude_entries(&parser.claude_dir, Some(parse_since_date(&today).unwrap()));
+        let claude = parser
+            .load_entries("claude", Some(parse_since_date(&today).unwrap()))
+            .0;
         print_provider("CLAUDE", &claude);
         println!("\n=== CLAUDE: ccusage ===");
         println!("  opus:   inp=19,875 out=129,193 cw=3,180,937 cr=74,758,016 total=78,088,021 cost=$65.768004");
@@ -1468,10 +2238,12 @@ mod debug_compare {
         );
         println!("  TOTAL: tokens=85,666,713 cost=$68.325146");
 
-        let codex = read_codex_entries(&parser.codex_dir, Some(parse_since_date(&today).unwrap()));
+        let codex = parser
+            .load_entries("codex", Some(parse_since_date(&today).unwrap()))
+            .0;
         print_provider("CODEX", &codex);
         println!("\n=== CODEX: ccusage ===");
         println!("  gpt-5.4: inp=231,247 out=7,338 reasoning=5,997 total=238,585 cost=$0.277788");
-        println!("  (ccusage out excludes reasoning; our out=out+reasoning)");
+        println!("  (reasoning is informational; both parsers bill against token_count usage)");
     }
 }

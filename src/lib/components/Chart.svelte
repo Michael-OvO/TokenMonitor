@@ -1,7 +1,7 @@
 <script lang="ts">
   import { modelColor, formatCost, currencySymbol, convertCost } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
-  import type { ChartBucket } from "../types/index.js";
+  import type { ChartBucket, ChartSegment } from "../types/index.js";
 
   interface Props { buckets: ChartBucket[]; dataKey: string }
   let { buckets, dataKey }: Props = $props();
@@ -22,19 +22,22 @@
 
   const CHART_H = 72;
   const CHART_W = 280; // SVG viewbox width (y-axis labels sit outside)
-  const MAX_LEGEND_ITEMS = 4;
   let maxCost = $derived(Math.max(...filteredBuckets.map((b) => b.total), 0.01));
   let hoveredIdx = $state(-1);
-  let selectedIdx = $state<number | null>(null);
   let chartMode = $state<"bar" | "line">("bar");
 
+  // Debounced hover for smooth detail panel transitions
+  let displayedIdx = $state(-1);
+  let leaveTimer: ReturnType<typeof setTimeout> | null = null;
+
   function onEnter(i: number) {
+    if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
     hoveredIdx = i;
-    if (filteredBuckets[i]?.total > 0) selectedIdx = i;
+    displayedIdx = filteredBuckets[i]?.total > 0 ? i : -1;
   }
   function onLeave() {
     hoveredIdx = -1;
-    selectedIdx = null;
+    leaveTimer = setTimeout(() => { displayedIdx = -1; }, 150);
   }
 
   let legendModels = $derived(() => {
@@ -46,16 +49,8 @@
     }
     return Array.from(seen.entries()).map(([key, name]) => ({ key, name }));
   });
-  let legendPreview = $derived(() => legendModels().slice(0, MAX_LEGEND_ITEMS));
-  let hiddenLegendCount = $derived(() => Math.max(legendModels().length - MAX_LEGEND_ITEMS, 0));
-  let displayed = $derived(selectedIdx != null ? filteredBuckets[selectedIdx] : null);
 
-  $effect(() => {
-    dataKey;
-    // Reset on data change — detail panel stays hidden until hover
-    selectedIdx = null;
-    hoveredIdx = -1;
-  });
+  let displayed = $derived(displayedIdx >= 0 ? filteredBuckets[displayedIdx] : null);
 
   // Y-axis ticks (3 ticks: 0, mid, max)
   let yTicks = $derived(() => {
@@ -140,48 +135,31 @@
 <div class="ch">
   <div class="ch-top">
     <span class="ch-t">Cost by model</span>
-    <div class="mode-toggle">
-      <button
-        type="button"
-        class:on={chartMode === "bar"}
-        aria-label="Bar chart"
-        aria-pressed={chartMode === "bar"}
-        onclick={() => (chartMode = "bar")}
-      >
-        <svg width="10" height="10" viewBox="0 0 10 10">
-          <rect x="1" y="4" width="2" height="6" rx=".5" fill="currentColor"/>
-          <rect x="4" y="1" width="2" height="9" rx=".5" fill="currentColor"/>
-          <rect x="7" y="3" width="2" height="7" rx=".5" fill="currentColor"/>
-        </svg>
-      </button>
-      <button
-        type="button"
-        class:on={chartMode === "line"}
-        aria-label="Line chart"
-        aria-pressed={chartMode === "line"}
-        onclick={() => (chartMode = "line")}
-      >
-        <svg width="10" height="10" viewBox="0 0 10 10">
-          <path d="M1,7 C3,3 5,5 9,2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-        </svg>
-      </button>
-    </div>
-  </div>
-  {#if legendModels().length > 0}
-    <div class="leg-row">
+    <div class="ch-right">
       <div class="leg">
-        {#each legendPreview() as lm}
+        {#each legendModels() as lm}
           <span class="leg-item">
             <span class="leg-dot" style="background:{modelColor(lm.key)}"></span>
             {lm.name}
           </span>
         {/each}
-        {#if hiddenLegendCount() > 0}
-          <span class="leg-more">+{hiddenLegendCount()} more</span>
-        {/if}
+      </div>
+      <div class="mode-toggle">
+        <button class:on={chartMode === "bar"} onclick={() => (chartMode = "bar")}>
+          <svg width="10" height="10" viewBox="0 0 10 10">
+            <rect x="1" y="4" width="2" height="6" rx=".5" fill="currentColor"/>
+            <rect x="4" y="1" width="2" height="9" rx=".5" fill="currentColor"/>
+            <rect x="7" y="3" width="2" height="7" rx=".5" fill="currentColor"/>
+          </svg>
+        </button>
+        <button class:on={chartMode === "line"} onclick={() => (chartMode = "line")}>
+          <svg width="10" height="10" viewBox="0 0 10 10">
+            <path d="M1,7 C3,3 5,5 9,2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+          </svg>
+        </button>
       </div>
     </div>
-  {/if}
+  </div>
 
   <div class="chart-body">
     <!-- Y-axis labels -->
@@ -200,7 +178,7 @@
           <svg viewBox="0 0 {CHART_W} {CHART_H}" preserveAspectRatio="none" class="chart-svg">
             <!-- Grid lines -->
             {#each yTicks() as tick}
-              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} stroke="var(--border-subtle)" stroke-width="0.5"/>
+              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} stroke="rgba(255,255,255,0.04)" stroke-width="0.5"/>
             {/each}
 
             {#each filteredBuckets as bucket, i}
@@ -208,13 +186,10 @@
               {@const x = barX(i)}
               {@const isActive = hoveredIdx === i}
               <g
-                role="button"
-                tabindex="0"
+                role="img"
                 aria-label="{bucket.label}: {formatCost(bucket.total)}"
                 onmouseenter={() => onEnter(i)}
                 onmouseleave={onLeave}
-                onfocus={() => onEnter(i)}
-                onblur={onLeave}
                 style="cursor:pointer"
               >
                 <!-- Invisible hit area -->
@@ -246,7 +221,7 @@
           <svg viewBox="0 0 {CHART_W} {CHART_H}" preserveAspectRatio="none" class="chart-svg line-svg">
             <!-- Grid lines -->
             {#each yTicks() as tick}
-              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} stroke="var(--border-subtle)" stroke-width="0.5"/>
+              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} stroke="rgba(255,255,255,0.04)" stroke-width="0.5"/>
             {/each}
 
             <defs>
@@ -284,13 +259,8 @@
                 width={stepX}
                 height={CHART_H}
                 fill="transparent"
-                role="button"
-                tabindex="0"
-                aria-label="{bucket.label}: {formatCost(bucket.total)}"
                 onmouseenter={() => onEnter(i)}
                 onmouseleave={onLeave}
-                onfocus={() => onEnter(i)}
-                onblur={onLeave}
                 style="cursor:pointer"
               />
             {/each}
@@ -299,7 +269,7 @@
             {#if hoveredIdx >= 0}
               {@const stepX = filteredBuckets.length > 1 ? CHART_W / (filteredBuckets.length - 1) : CHART_W / 2}
               {@const hx = filteredBuckets.length > 1 ? hoveredIdx * stepX : CHART_W / 2}
-              <line x1={hx} y1="0" x2={hx} y2={CHART_H} stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2,2"/>
+              <line x1={hx} y1="0" x2={hx} y2={CHART_H} stroke="rgba(255,255,255,0.12)" stroke-width="0.5" stroke-dasharray="2,2"/>
             {/if}
           </svg>
         {/if}
@@ -318,60 +288,47 @@
     </div>
   {/if}
 
-  {#if displayed && displayed.total > 0}
-    <div class="detail" role="status" aria-live="polite">
-      {#key selectedIdx}
+  <!-- Detail panel -->
+  <div class="detail" class:visible={displayed != null}>
+    {#if displayed}
+      {#key displayedIdx}
         <div class="detail-inner">
           <div class="detail-head">
-            <div class="detail-title">
-              <span class="detail-label">{displayed.label}</span>
-              <span class="detail-meta">{displayed.segments.length} models</span>
-            </div>
+            <span class="detail-label">{displayed.label}</span>
             <span class="detail-total">{formatCost(displayed.total)}</span>
           </div>
           <div class="detail-models">
-            {#each displayed.segments.slice(0, 4) as seg}
+            {#each displayed.segments as seg}
               <div class="detail-row">
                 <span class="detail-dot" style="background:{modelColor(seg.model_key)}"></span>
                 <span class="detail-name">{seg.model}</span>
                 <span class="detail-cost">{formatCost(seg.cost)}</span>
               </div>
             {/each}
-            {#if displayed.segments.length > 4}
-              <div class="detail-more">+ {displayed.segments.length - 4} more</div>
-            {/if}
           </div>
         </div>
       {/key}
-    </div>
-  {/if}
+    {/if}
+  </div>
 </div>
 
 <style>
   .ch { padding: 14px 12px; animation: fadeUp .28s ease both .09s; }
 
-  .ch-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .ch-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
   .ch-t { font: 500 8px/1 'Inter', sans-serif; color: var(--t3); text-transform: uppercase; letter-spacing: .8px; }
-  .leg-row { margin-bottom: 10px; }
-  .leg {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    min-width: 0;
-    overflow: hidden;
-  }
+  .ch-right { display: flex; align-items: center; gap: 8px; }
+  .leg { display: flex; gap: 7px; }
   .leg-item {
     display: flex; align-items: center; gap: 3px;
     font: 400 8px/1 'Inter', sans-serif; color: var(--t2);
-    white-space: nowrap;
   }
   .leg-dot { width: 5px; height: 5px; border-radius: 1.5px; flex-shrink: 0; }
-  .leg-more { font: 400 8px/1 'Inter', sans-serif; color: var(--t3); white-space: nowrap; }
 
   /* Mode toggle */
   .mode-toggle {
     display: flex;
-    background: var(--border-subtle);
+    background: rgba(255,255,255,0.04);
     border-radius: 4px;
     padding: 1.5px;
     gap: 1px;
@@ -386,7 +343,7 @@
   }
   .mode-toggle button.on {
     color: var(--t1);
-    background: var(--border);
+    background: rgba(255,255,255,0.08);
   }
   .mode-toggle button:hover:not(.on) { color: var(--t2); }
 
@@ -461,15 +418,19 @@
   .xa { display: flex; justify-content: space-between; margin-top: 8px; padding: 0 29px 0 32px; }
   .xa span { font: 400 8px/1 'Inter', sans-serif; color: var(--t4); font-variant-numeric: tabular-nums; }
 
-  /* Detail panel — only rendered when a non-empty bucket is selected */
+  /* Detail panel */
   .detail {
     margin-top: 10px;
-    background: var(--surface-2);
-    border: 1px solid var(--border-subtle);
+    background: rgba(255,255,255,0.03);
     border-radius: 8px;
+    overflow: hidden;
+    max-height: 0;
+    opacity: 0;
+    transition: max-height .3s cubic-bezier(.25,.8,.25,1), opacity .2s ease;
   }
+  .detail.visible { max-height: 120px; opacity: 1; }
   .detail-inner {
-    padding: 9px 10px 8px;
+    padding: 8px 10px;
     animation: detailFade .15s ease both;
   }
   @keyframes detailFade {
@@ -477,16 +438,12 @@
     to { opacity: 1; }
   }
   .detail-head {
-    display: flex; justify-content: space-between; align-items: flex-start;
-    gap: 8px;
-    margin-bottom: 6px;
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 5px;
   }
-  .detail-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .detail-label { font: 600 10px/1 'Inter', sans-serif; color: var(--t1); }
-  .detail-meta { font: 400 8px/1 'Inter', sans-serif; color: var(--t4); text-transform: uppercase; letter-spacing: .5px; }
   .detail-total { font: 600 10px/1 'Inter', sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }
   .detail-models { display: flex; flex-direction: column; gap: 2px; }
-  .detail-more { font: 400 9px/1 'Inter', sans-serif; color: var(--t3); padding: 1px 0 0 10px; }
   .detail-row { display: flex; align-items: center; gap: 5px; }
   .detail-dot { width: 5px; height: 5px; border-radius: 1.5px; flex-shrink: 0; }
   .detail-name { font: 400 10px/1 'Inter', sans-serif; color: var(--t2); flex: 1; }

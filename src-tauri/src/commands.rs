@@ -1,15 +1,26 @@
 use crate::models::*;
-use crate::parser::UsageParser;
+use crate::parser::{UsageParser, UsageQueryDebugReport};
 use chrono::{Datelike, Local, NaiveDate};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 use tokio::sync::RwLock;
+
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSColor, NSView, NSWindow};
+#[cfg(target_os = "macos")]
+use objc2_quartz_core::CALayer;
+#[cfg(target_os = "macos")]
+use tauri::AppHandle;
+#[cfg(target_os = "macos")]
+use tokio::sync::oneshot;
 
 pub struct AppState {
     pub parser: Arc<UsageParser>,
     pub refresh_interval: Arc<RwLock<u64>>,
     pub show_tray_amount: Arc<RwLock<bool>>,
+    pub last_usage_debug: Arc<RwLock<Option<UsageDebugReport>>>,
 }
 
 impl AppState {
@@ -18,8 +29,100 @@ impl AppState {
             parser: Arc::new(UsageParser::new()),
             refresh_interval: Arc::new(RwLock::new(30)),
             show_tray_amount: Arc::new(RwLock::new(true)),
+            last_usage_debug: Arc::new(RwLock::new(None)),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageDebugReport {
+    pub request_kind: String,
+    pub requested_provider: String,
+    pub period: Option<String>,
+    pub offset: Option<i32>,
+    pub year: Option<i32>,
+    pub month: Option<u32>,
+    pub queries: Vec<UsageQueryDebugReport>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowSurface {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    #[serde(default = "default_surface_alpha")]
+    pub alpha: u8,
+}
+
+const DEFAULT_WINDOW_CORNER_RADIUS: f64 = 14.0;
+const DEFAULT_DARK_SURFACE: WindowSurface = WindowSurface {
+    red: 0x14,
+    green: 0x14,
+    blue: 0x16,
+    alpha: 0xFF,
+};
+
+const fn default_surface_alpha() -> u8 {
+    0xFF
+}
+
+#[cfg(target_os = "macos")]
+fn apply_window_surface(
+    window: &tauri::WebviewWindow,
+    surface: WindowSurface,
+    corner_radius: f64,
+) -> Result<(), String> {
+    let ns_window = window
+        .ns_window()
+        .map_err(|e| format!("Failed to access NSWindow: {e}"))?;
+    let ns_window = unsafe { &*(ns_window.cast::<NSWindow>()) };
+
+    let color = NSColor::colorWithSRGBRed_green_blue_alpha(
+        f64::from(surface.red) / 255.0,
+        f64::from(surface.green) / 255.0,
+        f64::from(surface.blue) / 255.0,
+        f64::from(surface.alpha) / 255.0,
+    );
+    let cg_color = color.CGColor();
+    let clear = NSColor::clearColor();
+
+    ns_window.setOpaque(false);
+    // Keep the window itself clear so the clipped corner triangles stay
+    // transparent, and let the native content-view layer provide the
+    // surface fill that resizes with the window.
+    ns_window.setBackgroundColor(Some(&clear));
+
+    let content_view = ns_window
+        .contentView()
+        .ok_or_else(|| String::from("NSWindow is missing a content view"))?;
+    let content_view: &NSView = &content_view;
+
+    content_view.setWantsLayer(true);
+    let layer = match content_view.layer() {
+        Some(layer) => layer,
+        None => {
+            let layer = CALayer::layer();
+            content_view.setLayer(Some(&layer));
+            layer
+        }
+    };
+
+    layer.setBackgroundColor(Some(&cg_color));
+    layer.setCornerRadius(corner_radius);
+    layer.setMasksToBounds(true);
+    layer.setOpaque(false);
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn apply_default_window_surface(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| String::from("Main window not found"))?;
+    apply_window_surface(&window, DEFAULT_DARK_SURFACE, DEFAULT_WINDOW_CORNER_RADIUS)
 }
 
 fn format_tray_title(show: bool, total_cost: f64) -> String {
@@ -44,6 +147,54 @@ pub async fn sync_tray_title(app: &tauri::AppHandle, state: &AppState) {
         // `tray-icon` on macOS ignores `None` here, so clearing must use an
         // empty string to collapse the title width immediately.
         let _ = tray.set_title(Some(title));
+    }
+}
+
+async fn set_last_usage_debug(state: &AppState, report: UsageDebugReport) {
+    let mut current = state.last_usage_debug.write().await;
+    *current = Some(report);
+}
+
+fn capture_query_debug(parser: &UsageParser) -> Result<UsageQueryDebugReport, String> {
+    parser
+        .last_query_debug()
+        .ok_or_else(|| String::from("Usage debug report was not available"))
+}
+
+#[tauri::command]
+pub async fn set_window_surface(
+    app: tauri::AppHandle,
+    surface: WindowSurface,
+    corner_radius: Option<f64>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| String::from("Main window not found"))?;
+        let next_radius = corner_radius.unwrap_or(DEFAULT_WINDOW_CORNER_RADIUS);
+        let (tx, rx) = oneshot::channel();
+        let window_for_main_thread = window.clone();
+
+        window
+            .run_on_main_thread(move || {
+                let _ = tx.send(apply_window_surface(
+                    &window_for_main_thread,
+                    surface,
+                    next_radius,
+                ));
+            })
+            .map_err(|e| format!("Failed to schedule native window surface update: {e}"))?;
+
+        return rx
+            .await
+            .map_err(|_| String::from("Native window surface update was cancelled"))?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, surface, corner_radius);
+        Ok(())
     }
 }
 
@@ -76,6 +227,32 @@ pub async fn clear_cache(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn get_last_usage_debug(
+    state: State<'_, AppState>,
+) -> Result<Option<UsageDebugReport>, String> {
+    Ok(state.last_usage_debug.read().await.clone())
+}
+
+#[tauri::command]
+pub async fn get_known_models(
+    provider: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<KnownModel>, String> {
+    match provider.as_str() {
+        "claude" | "codex" | "all" => {
+            let (entries, _) = state.parser.load_entries(&provider, None);
+            let mut models = BTreeMap::<String, KnownModel>::new();
+            for entry in entries {
+                let model = crate::models::known_model_from_raw(&entry.model);
+                models.entry(model.model_key.clone()).or_insert(model);
+            }
+            Ok(models.into_values().collect())
+        }
+        _ => Err(format!("Unknown provider: {}", provider)),
+    }
+}
+
+#[tauri::command]
 pub async fn get_usage_data(
     provider: String,
     period: String,
@@ -85,10 +262,42 @@ pub async fn get_usage_data(
     let parser = &state.parser;
 
     match provider.as_str() {
-        "claude" | "codex" => Ok(get_provider_data(parser, &provider, &period, offset)?),
+        "claude" | "codex" => {
+            let payload = get_provider_data(parser, &provider, &period, offset)?;
+            let query = capture_query_debug(parser)?;
+            set_last_usage_debug(
+                &state,
+                UsageDebugReport {
+                    request_kind: String::from("usage"),
+                    requested_provider: provider,
+                    period: Some(period),
+                    offset: Some(offset),
+                    year: None,
+                    month: None,
+                    queries: vec![query],
+                },
+            )
+            .await;
+            Ok(payload)
+        }
         "all" => {
             let claude = get_provider_data(parser, "claude", &period, offset)?;
+            let claude_query = capture_query_debug(parser)?;
             let codex = get_provider_data(parser, "codex", &period, offset)?;
+            let codex_query = capture_query_debug(parser)?;
+            set_last_usage_debug(
+                &state,
+                UsageDebugReport {
+                    request_kind: String::from("usage"),
+                    requested_provider: provider,
+                    period: Some(period),
+                    offset: Some(offset),
+                    year: None,
+                    month: None,
+                    queries: vec![claude_query, codex_query],
+                },
+            )
+            .await;
             Ok(merge_payloads(claude, codex))
         }
         _ => Err(format!("Unknown provider: {}", provider)),
@@ -111,15 +320,20 @@ fn filter_buckets_to_range(payload: &mut UsagePayload, start: NaiveDate, end: Na
         .flat_map(|b| &b.segments)
         .map(|s| s.tokens)
         .sum();
-    payload.session_count = payload.chart_buckets.iter().filter(|b| b.total > 0.0).count() as u32;
+    payload.session_count = payload
+        .chart_buckets
+        .iter()
+        .filter(|b| b.total > 0.0)
+        .count() as u32;
 
     // Rebuild model_breakdown from retained buckets
     let mut model_map: HashMap<String, (String, f64, u64)> = HashMap::new();
     for bucket in &payload.chart_buckets {
         for seg in &bucket.segments {
-            let entry = model_map
-                .entry(seg.model_key.clone())
-                .or_insert((seg.model.clone(), 0.0, 0));
+            let entry =
+                model_map
+                    .entry(seg.model_key.clone())
+                    .or_insert((seg.model.clone(), 0.0, 0));
             entry.1 += seg.cost;
             entry.2 += seg.tokens;
         }
@@ -162,7 +376,8 @@ fn get_provider_data(
             p
         }
         "week" => {
-            let current_monday = today - chrono::Duration::days(now.weekday().num_days_from_monday() as i64);
+            let current_monday =
+                today - chrono::Duration::days(now.weekday().num_days_from_monday() as i64);
             let target_monday = current_monday + chrono::Duration::days((offset * 7) as i64);
             let target_sunday = target_monday + chrono::Duration::days(6);
             let since_str = target_monday.format("%Y%m%d").to_string();
@@ -184,7 +399,8 @@ fn get_provider_data(
                 target_year += 1;
                 target_month -= 12;
             }
-            let first_of_month = NaiveDate::from_ymd_opt(target_year, target_month as u32, 1).unwrap();
+            let first_of_month =
+                NaiveDate::from_ymd_opt(target_year, target_month as u32, 1).unwrap();
             let end_of_month = if target_month == 12 {
                 NaiveDate::from_ymd_opt(target_year + 1, 1, 1).unwrap()
             } else {
@@ -287,11 +503,23 @@ fn format_day_label(date: NaiveDate) -> String {
 
 fn format_week_label(monday: NaiveDate, sunday: NaiveDate) -> String {
     if monday.year() != sunday.year() {
-        format!("{} \u{2013} {}", monday.format("%b %-d, %Y"), sunday.format("%b %-d, %Y"))
+        format!(
+            "{} \u{2013} {}",
+            monday.format("%b %-d, %Y"),
+            sunday.format("%b %-d, %Y")
+        )
     } else if monday.month() != sunday.month() {
-        format!("{} \u{2013} {}", monday.format("%b %-d"), sunday.format("%b %-d, %Y"))
+        format!(
+            "{} \u{2013} {}",
+            monday.format("%b %-d"),
+            sunday.format("%b %-d, %Y")
+        )
     } else {
-        format!("{} \u{2013} {}", monday.format("%b %-d"), sunday.format("%-d, %Y"))
+        format!(
+            "{} \u{2013} {}",
+            monday.format("%b %-d"),
+            sunday.format("%-d, %Y")
+        )
     }
 }
 
@@ -303,12 +531,12 @@ fn format_year_label(year: i32) -> String {
     year.to_string()
 }
 
-fn get_monthly_usage_sync(
+fn get_monthly_usage_with_debug_sync(
     state: &AppState,
     provider: &str,
     year: i32,
     month: u32,
-) -> MonthlyUsagePayload {
+) -> Result<(MonthlyUsagePayload, Vec<UsageQueryDebugReport>), String> {
     let month_start = NaiveDate::from_ymd_opt(year, month, 1)
         .unwrap()
         .format("%Y%m%d")
@@ -320,31 +548,32 @@ fn get_monthly_usage_sync(
         NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
     };
 
-    let fetch_for_provider = |prov: &str| -> Vec<CalendarDay> {
-        let usage = state.parser.get_daily(prov, &month_start);
-        usage
-            .chart_buckets
-            .iter()
-            .filter_map(|bucket| {
-                let date = NaiveDate::parse_from_str(&bucket.sort_key, "%Y-%m-%d").ok()?;
-                if date >= NaiveDate::from_ymd_opt(year, month, 1).unwrap()
-                    && date < end_date
-                {
-                    Some(CalendarDay {
-                        day: date.day(),
-                        cost: bucket.total,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
+    let fetch_for_provider =
+        |prov: &str| -> Result<(Vec<CalendarDay>, UsageQueryDebugReport), String> {
+            let usage = state.parser.get_daily(prov, &month_start);
+            let query = capture_query_debug(&state.parser)?;
+            let days = usage
+                .chart_buckets
+                .iter()
+                .filter_map(|bucket| {
+                    let date = NaiveDate::parse_from_str(&bucket.sort_key, "%Y-%m-%d").ok()?;
+                    if date >= NaiveDate::from_ymd_opt(year, month, 1).unwrap() && date < end_date {
+                        Some(CalendarDay {
+                            day: date.day(),
+                            cost: bucket.total,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            Ok((days, query))
+        };
 
-    let days = match provider {
+    let (days, queries) = match provider {
         "all" => {
-            let claude_days = fetch_for_provider("claude");
-            let codex_days = fetch_for_provider("codex");
+            let (claude_days, claude_query) = fetch_for_provider("claude")?;
+            let (codex_days, codex_query) = fetch_for_provider("codex")?;
             let mut day_map: HashMap<u32, f64> = HashMap::new();
             for d in claude_days.iter().chain(codex_days.iter()) {
                 *day_map.entry(d.day).or_insert(0.0) += d.cost;
@@ -354,18 +583,36 @@ fn get_monthly_usage_sync(
                 .map(|(day, cost)| CalendarDay { day, cost })
                 .collect();
             merged.sort_by_key(|d| d.day);
-            merged
+            (merged, vec![claude_query, codex_query])
         }
-        prov => fetch_for_provider(prov),
+        prov => {
+            let (days, query) = fetch_for_provider(prov)?;
+            (days, vec![query])
+        }
     };
 
     let total_cost: f64 = days.iter().map(|d| d.cost).sum();
-    MonthlyUsagePayload {
-        year,
-        month,
-        days,
-        total_cost,
-    }
+    Ok((
+        MonthlyUsagePayload {
+            year,
+            month,
+            days,
+            total_cost,
+        },
+        queries,
+    ))
+}
+
+#[allow(dead_code)]
+fn get_monthly_usage_sync(
+    state: &AppState,
+    provider: &str,
+    year: i32,
+    month: u32,
+) -> MonthlyUsagePayload {
+    get_monthly_usage_with_debug_sync(state, provider, year, month)
+        .map(|(payload, _)| payload)
+        .expect("monthly usage debug capture should be available")
 }
 
 #[tauri::command]
@@ -375,7 +622,21 @@ pub async fn get_monthly_usage(
     month: u32,
     state: State<'_, AppState>,
 ) -> Result<MonthlyUsagePayload, String> {
-    Ok(get_monthly_usage_sync(&state, &provider, year, month))
+    let (payload, queries) = get_monthly_usage_with_debug_sync(&state, &provider, year, month)?;
+    set_last_usage_debug(
+        &state,
+        UsageDebugReport {
+            request_kind: String::from("calendar-month"),
+            requested_provider: provider,
+            period: None,
+            offset: None,
+            year: Some(year),
+            month: Some(month),
+            queries,
+        },
+    )
+    .await;
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -570,14 +831,20 @@ mod tests {
     fn period_label_week_cross_month() {
         let monday = NaiveDate::from_ymd_opt(2026, 3, 30).unwrap();
         let sunday = NaiveDate::from_ymd_opt(2026, 4, 5).unwrap();
-        assert_eq!(format_week_label(monday, sunday), "Mar 30 \u{2013} Apr 5, 2026");
+        assert_eq!(
+            format_week_label(monday, sunday),
+            "Mar 30 \u{2013} Apr 5, 2026"
+        );
     }
 
     #[test]
     fn period_label_week_cross_year() {
         let monday = NaiveDate::from_ymd_opt(2025, 12, 29).unwrap();
         let sunday = NaiveDate::from_ymd_opt(2026, 1, 4).unwrap();
-        assert_eq!(format_week_label(monday, sunday), "Dec 29, 2025 \u{2013} Jan 4, 2026");
+        assert_eq!(
+            format_week_label(monday, sunday),
+            "Dec 29, 2025 \u{2013} Jan 4, 2026"
+        );
     }
 
     #[test]
@@ -609,6 +876,7 @@ mod tests {
             parser: Arc::new(parser),
             refresh_interval: Arc::new(RwLock::new(30)),
             show_tray_amount: Arc::new(RwLock::new(true)),
+            last_usage_debug: Arc::new(RwLock::new(None)),
         };
 
         let payload = get_monthly_usage_sync(&state, "claude", 2026, 3);
@@ -643,6 +911,7 @@ mod tests {
             parser: Arc::new(parser),
             refresh_interval: Arc::new(RwLock::new(30)),
             show_tray_amount: Arc::new(RwLock::new(true)),
+            last_usage_debug: Arc::new(RwLock::new(None)),
         };
 
         let payload = get_monthly_usage_sync(&state, "claude", 2026, 2);
@@ -676,6 +945,7 @@ mod tests {
             parser: Arc::new(parser),
             refresh_interval: Arc::new(RwLock::new(30)),
             show_tray_amount: Arc::new(RwLock::new(true)),
+            last_usage_debug: Arc::new(RwLock::new(None)),
         };
 
         let payload = get_monthly_usage_sync(&state, "all", 2026, 3);
@@ -683,8 +953,18 @@ mod tests {
         assert!(day5.is_some(), "should have merged day 5");
         let claude_only = get_monthly_usage_sync(&state, "claude", 2026, 3);
         let codex_only = get_monthly_usage_sync(&state, "codex", 2026, 3);
-        let claude_day5_cost = claude_only.days.iter().find(|d| d.day == 5).map(|d| d.cost).unwrap_or(0.0);
-        let codex_day5_cost = codex_only.days.iter().find(|d| d.day == 5).map(|d| d.cost).unwrap_or(0.0);
+        let claude_day5_cost = claude_only
+            .days
+            .iter()
+            .find(|d| d.day == 5)
+            .map(|d| d.cost)
+            .unwrap_or(0.0);
+        let codex_day5_cost = codex_only
+            .days
+            .iter()
+            .find(|d| d.day == 5)
+            .map(|d| d.cost)
+            .unwrap_or(0.0);
         assert!(
             (day5.unwrap().cost - (claude_day5_cost + codex_day5_cost)).abs() < 0.001,
             "merged cost should equal sum of individual provider costs"

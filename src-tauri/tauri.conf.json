@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicehash/tauri/refs/heads/v2/crates/tauri-cli/schema.json",
   "productName": "TokenMonitor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.tokenmonitor.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -17,10 +17,11 @@
         "label": "main",
         "title": "TokenMonitor",
         "width": 340,
-        "height": 540,
+        "height": 300,
         "minHeight": 200,
         "maxHeight": 2400,
         "resizable": true,
+        "backgroundColor": "#141416",
         "decorations": false,
         "transparent": true,
         "visible": false,
