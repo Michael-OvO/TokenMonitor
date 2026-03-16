@@ -530,6 +530,97 @@ impl UsageParser {
         }
     }
 
+    // ── has_entries_before: check if data exists before a given date ──
+
+    pub fn has_entries_before(&self, provider: &str, before_date: NaiveDate) -> bool {
+        match provider {
+            "claude" => self.has_claude_entries_before(before_date),
+            "codex" => self.has_codex_entries_before(before_date),
+            _ => self.has_claude_entries_before(before_date) || self.has_codex_entries_before(before_date),
+        }
+    }
+
+    fn has_claude_entries_before(&self, before_date: NaiveDate) -> bool {
+        let files = glob_jsonl_files(&self.claude_dir);
+        for path in files {
+            let file = match fs::File::open(&path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                if !line.contains("\"assistant\"") {
+                    continue;
+                }
+                let entry: ClaudeJsonlEntry = match serde_json::from_str(&line) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                if entry.entry_type != "assistant" {
+                    continue;
+                }
+                let msg = match &entry.message {
+                    Some(m) if m.stop_reason.is_some() => m,
+                    _ => continue,
+                };
+                if msg.usage.is_none() {
+                    continue;
+                }
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
+                    if dt.with_timezone(&Local).date_naive() < before_date {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn has_codex_entries_before(&self, before_date: NaiveDate) -> bool {
+        let years = match fs::read_dir(&self.codex_dir) {
+            Ok(rd) => rd,
+            Err(_) => return false,
+        };
+        for year_entry in years.flatten() {
+            let year: i32 = match year_entry.file_name().to_string_lossy().parse() {
+                Ok(y) => y,
+                Err(_) => continue,
+            };
+            let months = match fs::read_dir(year_entry.path()) {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+            for month_entry in months.flatten() {
+                let month: u32 = match month_entry.file_name().to_string_lossy().parse() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let days = match fs::read_dir(month_entry.path()) {
+                    Ok(rd) => rd,
+                    Err(_) => continue,
+                };
+                for day_entry in days.flatten() {
+                    let day: u32 = match day_entry.file_name().to_string_lossy().parse() {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    if let Some(date) = NaiveDate::from_ymd_opt(year, month, day) {
+                        if date < before_date {
+                            if let Ok(files) = fs::read_dir(day_entry.path()) {
+                                for f in files.flatten() {
+                                    if f.path().extension().is_some_and(|e| e == "jsonl") {
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     // ── Internal: build model_breakdown across all entries ──
 
     #[allow(dead_code)]
@@ -1225,6 +1316,55 @@ mod tests {
         assert!(payload.active_block.is_none());
         assert!((payload.five_hour_cost - payload.total_cost).abs() < f64::EPSILON);
         assert!(payload.total_cost > 0.0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // has_entries_before
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn has_entries_before_claude_returns_true_when_old_entries_exist() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-01-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        assert!(parser.has_entries_before("claude", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
+    }
+
+    #[test]
+    fn has_entries_before_claude_returns_false_when_no_old_entries() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        assert!(!parser.has_entries_before("claude", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
+    }
+
+    #[test]
+    fn has_entries_before_codex_returns_true_when_old_dirs_exist() {
+        let dir = TempDir::new().unwrap();
+        let day_dir = dir.path().join("2026").join("01").join("15");
+        fs::create_dir_all(&day_dir).unwrap();
+        write_file(&day_dir.join("session.jsonl"), "{}");
+        let parser = UsageParser::with_codex_dir(dir.path().to_path_buf());
+        assert!(parser.has_entries_before("codex", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
+    }
+
+    #[test]
+    fn has_entries_before_codex_returns_false_when_no_old_dirs() {
+        let dir = TempDir::new().unwrap();
+        let day_dir = dir.path().join("2026").join("03").join("15");
+        fs::create_dir_all(&day_dir).unwrap();
+        write_file(&day_dir.join("session.jsonl"), "{}");
+        let parser = UsageParser::with_codex_dir(dir.path().to_path_buf());
+        assert!(!parser.has_entries_before("codex", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
+    }
+
+    #[test]
+    fn has_entries_before_empty_dir_returns_false() {
+        let dir = TempDir::new().unwrap();
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        assert!(!parser.has_entries_before("claude", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
     }
 }
 
