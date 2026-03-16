@@ -95,6 +95,50 @@ pub async fn get_usage_data(
     }
 }
 
+/// Filter a UsagePayload's chart_buckets to only include dates in [start, end).
+/// Recalculates total_cost, total_tokens, and model_breakdown from the retained buckets.
+fn filter_buckets_to_range(payload: &mut UsagePayload, start: NaiveDate, end: NaiveDate) {
+    payload.chart_buckets.retain(|bucket| {
+        NaiveDate::parse_from_str(&bucket.sort_key, "%Y-%m-%d")
+            .map(|d| d >= start && d < end)
+            .unwrap_or(false)
+    });
+
+    payload.total_cost = payload.chart_buckets.iter().map(|b| b.total).sum();
+    payload.total_tokens = payload
+        .chart_buckets
+        .iter()
+        .flat_map(|b| &b.segments)
+        .map(|s| s.tokens)
+        .sum();
+    payload.session_count = payload.chart_buckets.iter().filter(|b| b.total > 0.0).count() as u32;
+
+    // Rebuild model_breakdown from retained buckets
+    let mut model_map: HashMap<String, (String, f64, u64)> = HashMap::new();
+    for bucket in &payload.chart_buckets {
+        for seg in &bucket.segments {
+            let entry = model_map
+                .entry(seg.model_key.clone())
+                .or_insert((seg.model.clone(), 0.0, 0));
+            entry.1 += seg.cost;
+            entry.2 += seg.tokens;
+        }
+    }
+    payload.model_breakdown = model_map
+        .into_iter()
+        .map(|(key, (name, cost, tokens))| ModelSummary {
+            display_name: name,
+            model_key: key,
+            cost,
+            tokens,
+        })
+        .collect();
+
+    // Recalculate input/output tokens
+    payload.input_tokens = 0;
+    payload.output_tokens = 0;
+}
+
 fn get_provider_data(
     parser: &UsageParser,
     provider: &str,
@@ -122,7 +166,9 @@ fn get_provider_data(
             let target_monday = current_monday + chrono::Duration::days((offset * 7) as i64);
             let target_sunday = target_monday + chrono::Duration::days(6);
             let since_str = target_monday.format("%Y%m%d").to_string();
+            let end_date = target_sunday + chrono::Duration::days(1);
             let mut p = parser.get_daily(provider, &since_str);
+            filter_buckets_to_range(&mut p, target_monday, end_date);
             p.period_label = format_week_label(target_monday, target_sunday);
             p.has_earlier_data = parser.has_entries_before(provider, target_monday);
             p
@@ -139,8 +185,14 @@ fn get_provider_data(
                 target_month -= 12;
             }
             let first_of_month = NaiveDate::from_ymd_opt(target_year, target_month as u32, 1).unwrap();
+            let end_of_month = if target_month == 12 {
+                NaiveDate::from_ymd_opt(target_year + 1, 1, 1).unwrap()
+            } else {
+                NaiveDate::from_ymd_opt(target_year, (target_month + 1) as u32, 1).unwrap()
+            };
             let since_str = first_of_month.format("%Y%m%d").to_string();
             let mut p = parser.get_daily(provider, &since_str);
+            filter_buckets_to_range(&mut p, first_of_month, end_of_month);
             p.period_label = format_month_label(first_of_month);
             p.has_earlier_data = parser.has_entries_before(provider, first_of_month);
             p
