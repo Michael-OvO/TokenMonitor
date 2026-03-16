@@ -21,7 +21,8 @@ tokio = { version = "1", features = ["process", "fs", "time"] }
 dirs = "6"
 tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
-objc2-app-kit = { version = "0.3.2", features = ["NSColor", "NSView", "NSWindow", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSColor", "NSStatusItem", "NSView", "NSWindow", "objc2-quartz-core"] }
+objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 objc2-quartz-core = { version = "0.3.2", features = ["CALayer"] }
 
 [dev-dependencies]

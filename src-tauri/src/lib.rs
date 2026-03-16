@@ -71,6 +71,17 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // Set autosaveName so macOS remembers the user's chosen menu bar position
+            #[cfg(target_os = "macos")]
+            if let Some(tray) = app.tray_by_id("main-tray") {
+                let _ = tray.with_inner_tray_icon(|inner| {
+                    if let Some(ns_status_item) = inner.ns_status_item() {
+                        let name = objc2_foundation::NSString::from_str("TokenMonitor");
+                        ns_status_item.setAutosaveName(Some(&name));
+                    }
+                });
+            }
+
             // Hide window on focus loss (popover behavior)
             let window = app.get_webview_window("main").unwrap();
             #[cfg(target_os = "macos")]
