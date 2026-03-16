@@ -13,7 +13,8 @@
     warmAllPeriods,
   } from "./lib/stores/usage.js";
 
-  import { loadSettings, settings, applyTheme, applyProvider } from "./lib/stores/settings.js";
+  import { loadSettings, settings, applyProvider } from "./lib/stores/settings.js";
+  import { initializeRuntimeFromSettings } from "./lib/bootstrap.js";
 
   import Toggle from "./lib/components/Toggle.svelte";
   import TimeTabs from "./lib/components/TimeTabs.svelte";
@@ -69,7 +70,8 @@
     // so we don't overwrite dataKey / kick off stale warm-ups.
     if (provider !== p) return;
     dataKey = `${p}-${period}-${Date.now()}`;
-    resizeToContent();
+    await tick();
+    syncSize();
     warmAllPeriods(p, period);
     if (p === "claude") warmCache("codex", period);
     else if (p === "codex") warmCache("claude", period);
@@ -83,32 +85,70 @@
     // Guard: if provider or period changed while we were fetching, bail out.
     if (period !== p || provider !== prov) return;
     dataKey = `${prov}-${p}-${Date.now()}`;
-    resizeToContent();
+    await tick();
+    syncSize();
   }
 
-  // Resize window to match .pop content height.
-  // Debounced + double-rAF to prevent transparent ghost traces on macOS:
-  // the native window must not shrink until the compositor has painted the
-  // new (shorter) content, otherwise stale pixels linger in the old region.
+  async function handleSettingsOpen() {
+    showSettings = true;
+    await tick();
+    syncSize();
+  }
+
+  async function handleSettingsClose() {
+    showSettings = false;
+    await tick();
+    syncSize();
+  }
+
+  // ── Window resize ──────────────────────────────────────────────
+  //
+  //  syncSize()        — measure .pop and call setSize().
+  //                      Used directly after `await tick()` for
+  //                      user-initiated view changes.
+  //
+  //  resizeToContent() — called by ResizeObserver.
+  //    • GROW  → immediate.  Prevents clipping during CSS
+  //              transitions (detail-panel, ModelList expand).
+  //    • SHRINK → debounced (16 ms + double-rAF).  Lets {#key}
+  //              destroy→create and transition-end settle first.
   let resizeRaf = 0;
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
   let lastWindowH = 0;
 
+  function syncSize() {
+    const pop = document.querySelector('.pop') as HTMLElement;
+    if (!pop) return;
+    const h = Math.ceil(pop.getBoundingClientRect().height) + 2;
+    if (h === lastWindowH || h < 100) return;
+    lastWindowH = h;
+    getCurrentWebviewWindow().setSize(new LogicalSize(340, h)).catch(() => {});
+  }
+
   function resizeToContent() {
+    // Grows apply immediately — if we debounce, every ResizeObserver
+    // callback during a CSS transition resets the timer and the window
+    // never catches up, visibly clipping the expanding content.
+    const pop = document.querySelector('.pop') as HTMLElement;
+    if (pop) {
+      const h = Math.ceil(pop.getBoundingClientRect().height) + 2;
+      if (h > lastWindowH && h >= 100) {
+        if (resizeTimer) clearTimeout(resizeTimer);
+        cancelAnimationFrame(resizeRaf);
+        lastWindowH = h;
+        getCurrentWebviewWindow().setSize(new LogicalSize(340, h)).catch(() => {});
+        return;
+      }
+    }
+
+    // Shrink / no-op: debounce so {#key} destroy→create cycles and
+    // ResizeObserver bursts settle before we measure.
     if (resizeTimer) clearTimeout(resizeTimer);
     cancelAnimationFrame(resizeRaf);
-
-    // Small delay lets Svelte's {#key} destroy→create cycle settle
     resizeTimer = setTimeout(() => {
-      // Double rAF: first rAF runs after layout, second after paint
       resizeRaf = requestAnimationFrame(() => {
         resizeRaf = requestAnimationFrame(() => {
-          const pop = document.querySelector('.pop') as HTMLElement;
-          if (!pop) return;
-          const h = Math.ceil(pop.getBoundingClientRect().height) + 2;
-          if (h === lastWindowH || h < 100) return;  // skip no-ops & transient 0-height
-          lastWindowH = h;
-          getCurrentWebviewWindow().setSize(new LogicalSize(340, h)).catch(() => {});
+          syncSize();
         });
       });
     }, 16);
@@ -118,11 +158,9 @@
     // Load persisted settings and apply theme + defaults (non-blocking)
     try {
       const saved = await loadSettings();
-      applyTheme(saved.theme);
-      provider = saved.defaultProvider;
-      period = saved.defaultPeriod;
-      activeProvider.set(provider);
-      activePeriod.set(period);
+      const runtime = await initializeRuntimeFromSettings(saved);
+      provider = runtime.provider;
+      period = runtime.period;
     } catch {
       // Settings load failed — continue with defaults
     }
@@ -153,11 +191,11 @@
 
 <div class="pop">
   {#if showSplash}
-    <SplashScreen ready={appReady} onComplete={() => showSplash = false} />
+    <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(syncSize); }} />
   {:else if appReady && !data}
     <SetupScreen />
   {:else if showSettings}
-    <Settings onBack={() => showSettings = false} />
+    <Settings onBack={handleSettingsClose} />
   {:else if data}
     {#if showRefresh}<div class="refresh-bar"></div>{/if}
     <Toggle active={provider} onChange={handleProviderChange} {brandTheming} />
@@ -177,7 +215,7 @@
     {#if period !== "5h" && data.model_breakdown.length > 0}
       <ModelList models={data.model_breakdown} />
     {/if}
-    <Footer {data} onSettings={() => showSettings = true} />
+    <Footer {data} onSettings={handleSettingsOpen} />
   {:else}
     <div class="loading">
       <div class="spinner"></div>

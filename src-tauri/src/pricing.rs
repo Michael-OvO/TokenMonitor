@@ -1,9 +1,11 @@
+#[cfg_attr(not(test), allow(dead_code))]
 pub const PRICING_VERSION: &str = "2026-03-15";
 
 struct ModelRates {
     input: f64,
     output: f64,
-    cache_write: f64,
+    cache_write_5m: f64,
+    cache_write_1h: f64,
     cache_read: f64,
 }
 
@@ -11,121 +13,144 @@ pub fn calculate_cost(
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
-    cache_creation_tokens: u64,
+    cache_creation_5m_tokens: u64,
+    cache_creation_1h_tokens: u64,
     cache_read_tokens: u64,
 ) -> f64 {
     let rates = get_rates(model);
     let mtok = 1_000_000.0;
     (input_tokens as f64 / mtok) * rates.input
         + (output_tokens as f64 / mtok) * rates.output
-        + (cache_creation_tokens as f64 / mtok) * rates.cache_write
+        + (cache_creation_5m_tokens as f64 / mtok) * rates.cache_write_5m
+        + (cache_creation_1h_tokens as f64 / mtok) * rates.cache_write_1h
         + (cache_read_tokens as f64 / mtok) * rates.cache_read
+}
+
+/// Build a ModelRates from base input price.  Cache multipliers follow
+/// Anthropic's standard: 5m = 1.25x, 1h = 2x, read = 0.1x.
+const fn claude_rates(input: f64, output: f64) -> ModelRates {
+    ModelRates {
+        input,
+        output,
+        cache_write_5m: input * 1.25,
+        cache_write_1h: input * 2.0,
+        cache_read: input * 0.1,
+    }
+}
+
+/// OpenAI/o-series don't have a 1h tier — set 1h = 5m (same rate).
+const fn openai_rates(input: f64, output: f64, cache_write: f64, cache_read: f64) -> ModelRates {
+    ModelRates {
+        input,
+        output,
+        cache_write_5m: cache_write,
+        cache_write_1h: cache_write,
+        cache_read,
+    }
 }
 
 fn get_rates(model: &str) -> ModelRates {
     // ── Claude models (most-specific first) ─────────────────────────────────
 
     if model.contains("opus-4-6") {
-        return ModelRates { input: 5.00, output: 25.00, cache_write: 6.25, cache_read: 0.50 };
+        return claude_rates(5.00, 25.00);
     }
     if model.contains("opus-4-5") {
-        return ModelRates { input: 5.00, output: 25.00, cache_write: 6.25, cache_read: 0.50 };
+        return claude_rates(5.00, 25.00);
     }
     if model.contains("opus-4-1") {
-        return ModelRates { input: 15.00, output: 75.00, cache_write: 18.75, cache_read: 1.50 };
+        return claude_rates(15.00, 75.00);
     }
     if model.contains("opus-4") {
-        return ModelRates { input: 15.00, output: 75.00, cache_write: 18.75, cache_read: 1.50 };
+        return claude_rates(15.00, 75.00);
     }
     if model.contains("sonnet-4-6") {
-        return ModelRates { input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30 };
+        return claude_rates(3.00, 15.00);
     }
     if model.contains("sonnet-4-5") {
-        return ModelRates { input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30 };
+        return claude_rates(3.00, 15.00);
     }
     if model.contains("haiku-4-5") {
-        return ModelRates { input: 1.00, output: 5.00, cache_write: 1.25, cache_read: 0.10 };
+        return claude_rates(1.00, 5.00);
     }
     if model.contains("haiku-3-5") {
-        return ModelRates { input: 0.80, output: 4.00, cache_write: 1.00, cache_read: 0.08 };
+        return claude_rates(0.80, 4.00);
     }
 
     // Claude family catchalls (before OpenAI checks).
-    // Use versioned prefixes so future major-version models fall through to
-    // get_fallback_rates() instead of picking up stale Claude 3/4 rates.
-    if model.contains("sonnet-4") || model.contains("3-5-sonnet") || model.contains("3-7-sonnet")
-        || model.contains("3-sonnet") || model.contains("sonnet-3")
+    if model.contains("sonnet-4")
+        || model.contains("3-5-sonnet")
+        || model.contains("3-7-sonnet")
+        || model.contains("3-sonnet")
+        || model.contains("sonnet-3")
     {
-        return ModelRates { input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30 };
+        return claude_rates(3.00, 15.00);
     }
-    // Broad sonnet catchall — catches "claude-3-7-sonnet-..." and similar patterns
-    // where the version prefix appears before "sonnet".
     if model.contains("sonnet") {
-        return ModelRates { input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30 };
+        return claude_rates(3.00, 15.00);
     }
-    // Haiku-3 catchall (original Claude 3 Haiku pricing).
     if model.contains("haiku-3") || model.contains("3-haiku") {
-        return ModelRates { input: 0.25, output: 1.25, cache_write: 0.30, cache_read: 0.03 };
+        return claude_rates(0.25, 1.25);
     }
 
     // ── OpenAI / Codex models ────────────────────────────────────────────────
 
     if model.contains("gpt-5.4") {
-        return ModelRates { input: 2.50, output: 15.00, cache_write: 2.50, cache_read: 0.25 };
+        return openai_rates(2.50, 15.00, 2.50, 0.25);
     }
     if model.contains("gpt-5.3-codex") {
-        return ModelRates { input: 1.75, output: 14.00, cache_write: 1.75, cache_read: 0.175 };
+        return openai_rates(1.75, 14.00, 1.75, 0.175);
     }
     if model.contains("gpt-5.2-codex") {
-        return ModelRates { input: 1.75, output: 14.00, cache_write: 1.75, cache_read: 0.175 };
+        return openai_rates(1.75, 14.00, 1.75, 0.175);
     }
     if model.contains("gpt-5.2") {
-        return ModelRates { input: 1.75, output: 14.00, cache_write: 1.75, cache_read: 0.175 };
+        return openai_rates(1.75, 14.00, 1.75, 0.175);
     }
     if model.contains("gpt-5.1-codex-max") {
-        return ModelRates { input: 1.25, output: 10.00, cache_write: 1.25, cache_read: 0.125 };
+        return openai_rates(1.25, 10.00, 1.25, 0.125);
     }
     if model.contains("gpt-5.1-codex-mini") {
-        return ModelRates { input: 0.25, output: 2.00, cache_write: 0.25, cache_read: 0.025 };
+        return openai_rates(0.25, 2.00, 0.25, 0.025);
     }
     if model.contains("gpt-5.1-codex") {
-        return ModelRates { input: 1.25, output: 10.00, cache_write: 1.25, cache_read: 0.125 };
+        return openai_rates(1.25, 10.00, 1.25, 0.125);
     }
     if model.contains("codex-mini-latest") {
-        return ModelRates { input: 1.50, output: 6.00, cache_write: 1.50, cache_read: 0.375 };
+        return openai_rates(1.50, 6.00, 1.50, 0.375);
     }
     if model.contains("gpt-5-codex") {
-        return ModelRates { input: 1.25, output: 10.00, cache_write: 1.25, cache_read: 0.125 };
+        return openai_rates(1.25, 10.00, 1.25, 0.125);
     }
     if model.contains("gpt-5-mini") {
-        return ModelRates { input: 0.25, output: 2.00, cache_write: 0.25, cache_read: 0.025 };
+        return openai_rates(0.25, 2.00, 0.25, 0.025);
     }
     if model.contains("gpt-5-nano") {
-        return ModelRates { input: 0.05, output: 0.40, cache_write: 0.05, cache_read: 0.005 };
+        return openai_rates(0.05, 0.40, 0.05, 0.005);
     }
     if model.contains("gpt-5.1") {
-        return ModelRates { input: 1.25, output: 10.00, cache_write: 1.25, cache_read: 0.125 };
+        return openai_rates(1.25, 10.00, 1.25, 0.125);
     }
     if model.contains("gpt-5") {
-        return ModelRates { input: 1.25, output: 10.00, cache_write: 1.25, cache_read: 0.125 };
+        return openai_rates(1.25, 10.00, 1.25, 0.125);
     }
 
     // ── o-series (starts_with, most-specific first) ──────────────────────────
 
     if model.starts_with("o4-mini") {
-        return ModelRates { input: 1.10, output: 4.40, cache_write: 1.10, cache_read: 0.275 };
+        return openai_rates(1.10, 4.40, 1.10, 0.275);
     }
     if model.starts_with("o3-mini") {
-        return ModelRates { input: 1.10, output: 4.40, cache_write: 1.10, cache_read: 0.55 };
+        return openai_rates(1.10, 4.40, 1.10, 0.55);
     }
     if model.starts_with("o3") {
-        return ModelRates { input: 2.00, output: 8.00, cache_write: 2.00, cache_read: 0.50 };
+        return openai_rates(2.00, 8.00, 2.00, 0.50);
     }
     if model.starts_with("o1-mini") {
-        return ModelRates { input: 1.10, output: 4.40, cache_write: 1.10, cache_read: 0.55 };
+        return openai_rates(1.10, 4.40, 1.10, 0.55);
     }
     if model.starts_with("o1") {
-        return ModelRates { input: 15.00, output: 60.00, cache_write: 15.00, cache_read: 7.50 };
+        return openai_rates(15.00, 60.00, 15.00, 7.50);
     }
 
     // ── Fuzzy fallback ───────────────────────────────────────────────────────
@@ -134,27 +159,27 @@ fn get_rates(model: &str) -> ModelRates {
 
 fn get_fallback_rates(model: &str) -> ModelRates {
     if model.contains("opus") {
-        return ModelRates { input: 5.00, output: 25.00, cache_write: 6.25, cache_read: 0.50 };
+        return claude_rates(5.00, 25.00);
     }
     if model.contains("sonnet") {
-        return ModelRates { input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30 };
+        return claude_rates(3.00, 15.00);
     }
     if model.contains("haiku") {
-        return ModelRates { input: 1.00, output: 5.00, cache_write: 1.25, cache_read: 0.10 };
+        return claude_rates(1.00, 5.00);
     }
     if model.contains("codex-mini") {
-        return ModelRates { input: 0.25, output: 2.00, cache_write: 0.25, cache_read: 0.025 };
+        return openai_rates(0.25, 2.00, 0.25, 0.025);
     }
     if model.contains("codex") || model.contains("gpt-5") {
-        return ModelRates { input: 1.25, output: 10.00, cache_write: 1.25, cache_read: 0.125 };
+        return openai_rates(1.25, 10.00, 1.25, 0.125);
     }
     // Starts with o + ASCII digit
     let bytes = model.as_bytes();
-    if bytes.first() == Some(&b'o') && bytes.get(1).map_or(false, |b| b.is_ascii_digit()) {
-        return ModelRates { input: 1.10, output: 4.40, cache_write: 1.10, cache_read: 0.275 };
+    if bytes.first() == Some(&b'o') && bytes.get(1).is_some_and(|b| b.is_ascii_digit()) {
+        return openai_rates(1.10, 4.40, 1.10, 0.275);
     }
     // Completely unknown — default to Sonnet rates
-    ModelRates { input: 3.00, output: 15.00, cache_write: 3.75, cache_read: 0.30 }
+    claude_rates(3.00, 15.00)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,11 +193,15 @@ mod tests {
     const M: u64 = 1_000_000;
 
     fn cost(model: &str, input: u64, output: u64) -> f64 {
-        calculate_cost(model, input, output, 0, 0)
+        calculate_cost(model, input, output, 0, 0, 0)
     }
 
-    fn cost_cache(model: &str, cache_write: u64, cache_read: u64) -> f64 {
-        calculate_cost(model, 0, 0, cache_write, cache_read)
+    fn cost_cache_5m(model: &str, cache_write: u64, cache_read: u64) -> f64 {
+        calculate_cost(model, 0, 0, cache_write, 0, cache_read)
+    }
+
+    fn cost_cache_1h(model: &str, cache_write: u64, cache_read: u64) -> f64 {
+        calculate_cost(model, 0, 0, 0, cache_write, cache_read)
     }
 
     fn approx_eq(a: f64, b: f64) -> bool {
@@ -195,9 +224,27 @@ mod tests {
     }
 
     #[test]
-    fn claude_cache_tokens() {
-        // Sonnet 4.6: cache_write $3.75 + cache_read $0.30 = $4.05
-        assert!(approx_eq(cost_cache("claude-sonnet-4-6-20260101", M, M), 4.05));
+    fn claude_5m_cache_tokens() {
+        // Sonnet 4.6: 5m cache_write $3.75 + cache_read $0.30 = $4.05
+        assert!(approx_eq(
+            cost_cache_5m("claude-sonnet-4-6-20260101", M, M),
+            4.05
+        ));
+    }
+
+    #[test]
+    fn claude_1h_cache_tokens() {
+        // Sonnet 4.6: 1h cache_write $6.00 + cache_read $0.30 = $6.30
+        assert!(approx_eq(
+            cost_cache_1h("claude-sonnet-4-6-20260101", M, M),
+            6.30
+        ));
+    }
+
+    #[test]
+    fn opus_1h_cache_tokens() {
+        // Opus 4.6: 1h cache_write $10.00 + cache_read $0.50 = $10.50
+        assert!(approx_eq(cost_cache_1h("claude-opus-4-6", M, M), 10.50));
     }
 
     #[test]
@@ -207,7 +254,6 @@ mod tests {
 
     #[test]
     fn opus_4_no_minor_version() {
-        // "claude-opus-4-20250401" contains "opus-4" but not "opus-4-1" / "opus-4-5" / "opus-4-6"
         assert!(approx_eq(cost("claude-opus-4-20250401", M, M), 90.00));
     }
 
@@ -258,8 +304,9 @@ mod tests {
 
     #[test]
     fn openai_cached_input_tokens() {
-        // gpt-5.4: cache_write $2.50 + cache_read $0.25 = $2.75
-        assert!(approx_eq(cost_cache("gpt-5.4", M, M), 2.75));
+        // gpt-5.4: cache_write $2.50 + cache_read $0.25 = $2.75 (no 1h tier)
+        assert!(approx_eq(cost_cache_5m("gpt-5.4", M, M), 2.75));
+        assert!(approx_eq(cost_cache_1h("gpt-5.4", M, M), 2.75));
     }
 
     #[test]
@@ -274,7 +321,6 @@ mod tests {
 
     #[test]
     fn gpt_5_1_codex_not_mini() {
-        // "gpt-5.1-codex" should NOT hit gpt-5.1-codex-mini
         assert!(approx_eq(cost("gpt-5.1-codex", M, M), 11.25));
     }
 
@@ -286,7 +332,7 @@ mod tests {
     #[test]
     fn o3_cache_rates() {
         // o3: cache_write $2.00 + cache_read $0.50 = $2.50
-        assert!(approx_eq(cost_cache("o3", M, M), 2.50));
+        assert!(approx_eq(cost_cache_5m("o3", M, M), 2.50));
     }
 
     #[test]
@@ -326,7 +372,10 @@ mod tests {
 
     #[test]
     fn zero_tokens_zero_cost() {
-        assert!(approx_eq(calculate_cost("claude-sonnet-4-6", 0, 0, 0, 0), 0.00));
+        assert!(approx_eq(
+            calculate_cost("claude-sonnet-4-6", 0, 0, 0, 0, 0),
+            0.00
+        ));
     }
 
     #[test]

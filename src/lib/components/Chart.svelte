@@ -145,14 +145,26 @@
         {/each}
       </div>
       <div class="mode-toggle">
-        <button class:on={chartMode === "bar"} onclick={() => (chartMode = "bar")}>
+        <button
+          type="button"
+          class:on={chartMode === "bar"}
+          aria-label="Bar chart"
+          aria-pressed={chartMode === "bar"}
+          onclick={() => (chartMode = "bar")}
+        >
           <svg width="10" height="10" viewBox="0 0 10 10">
             <rect x="1" y="4" width="2" height="6" rx=".5" fill="currentColor"/>
             <rect x="4" y="1" width="2" height="9" rx=".5" fill="currentColor"/>
             <rect x="7" y="3" width="2" height="7" rx=".5" fill="currentColor"/>
           </svg>
         </button>
-        <button class:on={chartMode === "line"} onclick={() => (chartMode = "line")}>
+        <button
+          type="button"
+          class:on={chartMode === "line"}
+          aria-label="Line chart"
+          aria-pressed={chartMode === "line"}
+          onclick={() => (chartMode = "line")}
+        >
           <svg width="10" height="10" viewBox="0 0 10 10">
             <path d="M1,7 C3,3 5,5 9,2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
           </svg>
@@ -178,7 +190,7 @@
           <svg viewBox="0 0 {CHART_W} {CHART_H}" preserveAspectRatio="none" class="chart-svg">
             <!-- Grid lines -->
             {#each yTicks() as tick}
-              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} stroke="rgba(255,255,255,0.04)" stroke-width="0.5"/>
+              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} stroke="var(--border-subtle)" stroke-width="0.5"/>
             {/each}
 
             {#each filteredBuckets as bucket, i}
@@ -186,10 +198,13 @@
               {@const x = barX(i)}
               {@const isActive = hoveredIdx === i}
               <g
-                role="img"
+                role="button"
+                tabindex="0"
                 aria-label="{bucket.label}: {formatCost(bucket.total)}"
                 onmouseenter={() => onEnter(i)}
                 onmouseleave={onLeave}
+                onfocus={() => onEnter(i)}
+                onblur={onLeave}
                 style="cursor:pointer"
               >
                 <!-- Invisible hit area -->
@@ -221,7 +236,7 @@
           <svg viewBox="0 0 {CHART_W} {CHART_H}" preserveAspectRatio="none" class="chart-svg line-svg">
             <!-- Grid lines -->
             {#each yTicks() as tick}
-              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} stroke="rgba(255,255,255,0.04)" stroke-width="0.5"/>
+              <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} stroke="var(--border-subtle)" stroke-width="0.5"/>
             {/each}
 
             <defs>
@@ -259,8 +274,13 @@
                 width={stepX}
                 height={CHART_H}
                 fill="transparent"
+                role="button"
+                tabindex="0"
+                aria-label="{bucket.label}: {formatCost(bucket.total)}"
                 onmouseenter={() => onEnter(i)}
                 onmouseleave={onLeave}
+                onfocus={() => onEnter(i)}
+                onblur={onLeave}
                 style="cursor:pointer"
               />
             {/each}
@@ -269,7 +289,7 @@
             {#if hoveredIdx >= 0}
               {@const stepX = filteredBuckets.length > 1 ? CHART_W / (filteredBuckets.length - 1) : CHART_W / 2}
               {@const hx = filteredBuckets.length > 1 ? hoveredIdx * stepX : CHART_W / 2}
-              <line x1={hx} y1="0" x2={hx} y2={CHART_H} stroke="rgba(255,255,255,0.12)" stroke-width="0.5" stroke-dasharray="2,2"/>
+              <line x1={hx} y1="0" x2={hx} y2={CHART_H} stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2,2"/>
             {/if}
           </svg>
         {/if}
@@ -290,6 +310,8 @@
 
   <!-- Detail panel -->
   <div class="detail" class:visible={displayed != null}
+    role="tooltip"
+    aria-hidden={displayed == null}
     onmouseenter={() => { if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; } }}
     onmouseleave={onLeave}
   >
@@ -334,7 +356,7 @@
   /* Mode toggle */
   .mode-toggle {
     display: flex;
-    background: rgba(255,255,255,0.04);
+    background: var(--border-subtle);
     border-radius: 4px;
     padding: 1.5px;
     gap: 1px;
@@ -349,7 +371,7 @@
   }
   .mode-toggle button.on {
     color: var(--t1);
-    background: rgba(255,255,255,0.08);
+    background: var(--border);
   }
   .mode-toggle button:hover:not(.on) { color: var(--t2); }
 
@@ -427,7 +449,7 @@
   /* Detail panel */
   .detail {
     margin-top: 10px;
-    background: rgba(255,255,255,0.03);
+    background: var(--border-subtle);
     border-radius: 8px;
     overflow: hidden;
     max-height: 0;

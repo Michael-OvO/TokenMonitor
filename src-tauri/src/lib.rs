@@ -19,7 +19,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec![])))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
         .manage(AppState::new())
         .setup(|app| {
             // Build quit menu for right-click
@@ -85,6 +88,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_usage_data,
             commands::set_refresh_interval,
+            commands::set_show_tray_amount,
             commands::clear_cache,
         ])
         .run(tauri::generate_context!())
@@ -92,10 +96,15 @@ pub fn run() {
 }
 
 async fn update_tray_title(app: &tauri::AppHandle, state: &AppState) {
-    let today = chrono::Local::now().format("%Y%m%d").to_string();
-    let payload = state.parser.get_daily("claude", &today);
+    let show = *state.show_tray_amount.read().await;
     if let Some(tray) = app.tray_by_id("main-tray") {
-        let _ = tray.set_title(Some(&format!("${:.2}", payload.total_cost)));
+        if show {
+            let today = chrono::Local::now().format("%Y%m%d").to_string();
+            let payload = state.parser.get_daily("claude", &today);
+            let _ = tray.set_title(Some(&format!("${:.2}", payload.total_cost)));
+        } else {
+            let _ = tray.set_title(None::<&str>);
+        }
     }
 }
 

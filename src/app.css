@@ -119,8 +119,8 @@
 }
 
 @keyframes popIn {
-  0% { opacity: 0; transform: scale(0.98) translateY(-3px); }
-  100% { opacity: 1; transform: scale(1) translateY(0); }
+  0% { opacity: 0; transform: translateY(-4px); }
+  100% { opacity: 1; transform: translateY(0); }
 }
 @keyframes fadeUp {
   from { opacity: 0; transform: translateY(3px); }

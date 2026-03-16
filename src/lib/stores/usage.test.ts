@@ -11,12 +11,9 @@ vi.mock("@tauri-apps/api/core", () => ({
 const {
   usageData,
   isLoading,
-  setupStatus,
   fetchData,
   warmCache,
   warmAllPeriods,
-  initializeApp,
-  checkSetup,
 } = await import("./usage.js");
 
 function makePayload(overrides: Record<string, unknown> = {}) {
@@ -40,7 +37,6 @@ beforeEach(() => {
   mockInvoke.mockReset();
   usageData.set(null);
   isLoading.set(false);
-  setupStatus.set({ ready: false, installing: false, error: null });
 });
 
 // ── fetchData ───────────────────────────────────────────────────────
@@ -164,54 +160,5 @@ describe("warmAllPeriods", () => {
     expect(calledPeriods).toContain("week");
     expect(calledPeriods).toContain("month");
     expect(calledPeriods).toContain("year");
-  });
-});
-
-// ── initializeApp ───────────────────────────────────────────────────
-
-describe("initializeApp", () => {
-  it("transitions through installing state on success", async () => {
-    const status = { ready: true, installing: false, error: null };
-
-    // Check installing state is set before invoke resolves
-    let wasInstalling = false;
-    mockInvoke.mockImplementationOnce(() => {
-      wasInstalling = get(setupStatus).installing;
-      return Promise.resolve(status);
-    });
-
-    await initializeApp();
-    expect(wasInstalling).toBe(true);
-    expect(get(setupStatus)).toEqual(status);
-  });
-
-  it("sets error on failure", async () => {
-    mockInvoke.mockRejectedValueOnce(new Error("no node"));
-
-    const result = await initializeApp();
-    expect(result).toBeNull();
-    expect(get(setupStatus).error).toBe("no node");
-    expect(get(setupStatus).ready).toBe(false);
-    expect(get(setupStatus).installing).toBe(false);
-  });
-});
-
-// ── checkSetup ──────────────────────────────────────────────────────
-
-describe("checkSetup", () => {
-  it("returns status on success", async () => {
-    const status = { ready: true, installing: false, error: null };
-    mockInvoke.mockResolvedValueOnce(status);
-
-    const result = await checkSetup();
-    expect(result).toEqual(status);
-    expect(get(setupStatus)).toEqual(status);
-  });
-
-  it("returns null on failure", async () => {
-    mockInvoke.mockRejectedValueOnce(new Error("fail"));
-
-    const result = await checkSetup();
-    expect(result).toBeNull();
   });
 });

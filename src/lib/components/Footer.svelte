@@ -8,13 +8,16 @@
   }
   let { data, onSettings }: Props = $props();
 
-  let timeAgo = $state(formatTimeAgo(data.last_updated));
+  let refreshTick = $state(0);
+  let timeAgo = $derived.by(() => {
+    refreshTick;
+    return formatTimeAgo(data.last_updated);
+  });
 
   // Update "time ago" every 10 seconds
   $effect(() => {
-    timeAgo = formatTimeAgo(data.last_updated);
     const interval = setInterval(() => {
-      timeAgo = formatTimeAgo(data.last_updated);
+      refreshTick += 1;
     }, 10_000);
     return () => clearInterval(interval);
   });

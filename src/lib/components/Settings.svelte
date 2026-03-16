@@ -22,6 +22,7 @@
     currency: "USD",
     hiddenModels: [],
     brandTheming: true,
+    showTrayAmount: true,
   });
 
   let costInput = $state("50.00");
@@ -57,6 +58,11 @@
 
   function handleBrandTheming(checked: boolean) {
     updateSetting("brandTheming", checked);
+  }
+
+  function handleShowTrayAmount(checked: boolean) {
+    updateSetting("showTrayAmount", checked);
+    invoke("set_show_tray_amount", { show: checked }).catch(() => {});
   }
 
   function handlePeriod(val: string) {
@@ -166,7 +172,7 @@
           />
         </div>
         <div class="row border">
-          <span class="label">Provider</span>
+          <span class="label">Default Provider</span>
           <SegmentedControl
             options={[
               { value: "claude", label: "Claude" },
@@ -177,7 +183,7 @@
           />
         </div>
         <div class="row border">
-          <span class="label">Period</span>
+          <span class="label">Default Period</span>
           <SegmentedControl
             options={[
               { value: "5h", label: "5H" },
@@ -202,11 +208,18 @@
             onChange={handleRefresh}
           />
         </div>
-        <div class="row">
+        <div class="row border">
           <span class="label">Brand Theming</span>
           <ToggleSwitch
             checked={current.brandTheming}
             onChange={handleBrandTheming}
+          />
+        </div>
+        <div class="row">
+          <span class="label">Menu Bar Cost</span>
+          <ToggleSwitch
+            checked={current.showTrayAmount}
+            onChange={handleShowTrayAmount}
           />
         </div>
       </div>

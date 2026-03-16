@@ -18,6 +18,8 @@
         "title": "TokenMonitor",
         "width": 340,
         "height": 540,
+        "minHeight": 200,
+        "maxHeight": 1200,
         "resizable": false,
         "decorations": false,
         "transparent": true,

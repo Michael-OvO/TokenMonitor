@@ -1,14 +1,20 @@
 <script lang="ts">
   import { formatCost, formatTokens } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
+  import { activePeriod } from "../stores/usage.js";
   import type { UsagePayload } from "../types/index.js";
 
   interface Props { data: UsagePayload }
   let { data }: Props = $props();
 
   let threshold = $state(0); // 0 = disabled by default; user configures in Settings
+  let period = $state<"5h" | "day" | "week" | "month" | "year">("day");
   $effect(() => {
     const unsub = settings.subscribe((s) => (threshold = s.costAlertThreshold));
+    return unsub;
+  });
+  $effect(() => {
+    const unsub = activePeriod.subscribe((value) => (period = value));
     return unsub;
   });
 
@@ -16,6 +22,15 @@
 
   let inLabel = $derived(formatTokens(data.input_tokens));
   let outLabel = $derived(formatTokens(data.output_tokens));
+  let countLabel = $derived(
+    period === "5h"
+      ? "Sessions"
+      : period === "day"
+        ? "Active Hours"
+        : period === "year"
+          ? "Active Months"
+          : "Active Days"
+  );
 </script>
 
 <div class="met">
@@ -32,7 +47,7 @@
   </div>
   <div class="m">
     <div class="m-v">{data.session_count}</div>
-    <div class="m-l">Sessions</div>
+    <div class="m-l">{countLabel}</div>
   </div>
 </div>
 

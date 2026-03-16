@@ -12,6 +12,7 @@ export interface Settings {
   currency: string;
   hiddenModels: string[];
   brandTheming: boolean;
+  showTrayAmount: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -24,6 +25,7 @@ const DEFAULTS: Settings = {
   currency: "USD",
   hiddenModels: [],
   brandTheming: true,
+  showTrayAmount: true,
 };
 
 export const settings = writable<Settings>({ ...DEFAULTS });

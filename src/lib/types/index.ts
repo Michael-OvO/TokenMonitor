@@ -14,6 +14,7 @@ export interface UsagePayload {
 
 export interface ChartBucket {
   label: string;
+  sort_key?: string;
   total: number;
   segments: ChartSegment[];
 }

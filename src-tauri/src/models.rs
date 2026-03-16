@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 // ── Frontend payload (sent to Svelte via IPC) ──
 
@@ -20,6 +20,7 @@ pub struct UsagePayload {
 #[derive(Debug, Serialize, Clone)]
 pub struct ChartBucket {
     pub label: String,
+    pub sort_key: String,
     pub total: f64,
     pub segments: Vec<ChartSegment>,
 }
@@ -46,13 +47,6 @@ pub struct ActiveBlock {
     pub burn_rate_per_hour: f64,
     pub projected_cost: f64,
     pub is_active: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SetupStatus {
-    pub ready: bool,
-    pub installing: bool,
-    pub error: Option<String>,
 }
 
 // ── Helpers ──
@@ -172,12 +166,18 @@ mod tests {
 
     #[test]
     fn codex_o4_mini() {
-        assert_eq!(normalize_codex_model("o4-mini-2025-04-16"), ("o4-mini", "o4mini"));
+        assert_eq!(
+            normalize_codex_model("o4-mini-2025-04-16"),
+            ("o4-mini", "o4mini")
+        );
     }
 
     #[test]
     fn codex_o3_mini() {
-        assert_eq!(normalize_codex_model("o3-mini-2025-01-31"), ("o3-mini", "o3mini"));
+        assert_eq!(
+            normalize_codex_model("o3-mini-2025-01-31"),
+            ("o3-mini", "o3mini")
+        );
     }
 
     #[test]
@@ -187,7 +187,10 @@ mod tests {
 
     #[test]
     fn codex_o1_mini() {
-        assert_eq!(normalize_codex_model("o1-mini-2024-09-12"), ("o1-mini", "o1mini"));
+        assert_eq!(
+            normalize_codex_model("o1-mini-2024-09-12"),
+            ("o1-mini", "o1mini")
+        );
     }
 
     #[test]
@@ -197,6 +200,9 @@ mod tests {
 
     #[test]
     fn codex_fallback() {
-        assert_eq!(normalize_codex_model("some-future-model"), ("some-future-model", "codex"));
+        assert_eq!(
+            normalize_codex_model("some-future-model"),
+            ("some-future-model", "codex")
+        );
     }
 }

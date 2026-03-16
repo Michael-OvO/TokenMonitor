@@ -1,10 +1,9 @@
-use crate::models::{
-    ActiveBlock, ChartBucket, ChartSegment, ModelSummary, UsagePayload,
-};
+use crate::models::{ActiveBlock, ChartBucket, ChartSegment, ModelSummary, UsagePayload};
 use chrono::{DateTime, Local, NaiveDate, Timelike};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -18,7 +17,8 @@ pub struct ParsedEntry {
     pub model: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub cache_creation_tokens: u64,
+    pub cache_creation_5m_tokens: u64,
+    pub cache_creation_1h_tokens: u64,
     pub cache_read_tokens: u64,
 }
 
@@ -39,6 +39,7 @@ struct ClaudeJsonlEntry {
 struct ClaudeJsonlMessage {
     model: Option<String>,
     usage: Option<ClaudeJsonlUsage>,
+    stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +48,13 @@ struct ClaudeJsonlUsage {
     output_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
+    cache_creation: Option<CacheCreationBreakdown>,
+}
+
+#[derive(Deserialize)]
+struct CacheCreationBreakdown {
+    ephemeral_5m_input_tokens: Option<u64>,
+    ephemeral_1h_input_tokens: Option<u64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,7 +109,7 @@ pub fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
         if path.is_dir() {
             let mut sub = glob_jsonl_files(&path);
             results.append(&mut sub);
-        } else if path.extension().map_or(false, |e| e == "jsonl") {
+        } else if path.extension().is_some_and(|e| e == "jsonl") {
             results.push(path);
         }
     }
@@ -168,18 +176,22 @@ pub fn read_claude_entries(projects_dir: &Path, since: Option<NaiveDate>) -> Vec
             }
         }
 
-        let contents = match fs::read_to_string(&path) {
-            Ok(c) => c,
+        let file = match fs::File::open(&path) {
+            Ok(f) => f,
             Err(_) => continue,
         };
+        let reader = BufReader::new(file);
 
-        // cache_read_input_tokens is CUMULATIVE per session file (monotonically
-        // increasing). We track the previous value and emit only the delta so
-        // that summing entries gives the correct total.
-        let mut prev_cache_read: u64 = 0;
-
-        for line in contents.lines() {
-            let entry: ClaudeJsonlEntry = match serde_json::from_str(line) {
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            // Fast pre-filter: skip lines that can't be assistant entries
+            if !line.contains("\"assistant\"") {
+                continue;
+            }
+            let entry: ClaudeJsonlEntry = match serde_json::from_str(&line) {
                 Ok(e) => e,
                 Err(_) => continue,
             };
@@ -190,6 +202,12 @@ pub fn read_claude_entries(projects_dir: &Path, since: Option<NaiveDate>) -> Vec
                 Some(m) => m,
                 None => continue,
             };
+            // Skip intermediate streaming chunks — only count the final
+            // response which has a non-null stop_reason (e.g. "end_turn",
+            // "tool_use").  Intermediate entries duplicate usage and inflate costs.
+            if msg.stop_reason.is_none() {
+                continue;
+            }
             let usage = match &msg.usage {
                 Some(u) => u,
                 None => continue,
@@ -208,17 +226,26 @@ pub fn read_claude_entries(projects_dir: &Path, since: Option<NaiveDate>) -> Vec
                 }
             }
 
-            let cumulative_cache_read = usage.cache_read_input_tokens.unwrap_or(0);
-            let delta_cache_read = cumulative_cache_read.saturating_sub(prev_cache_read);
-            prev_cache_read = cumulative_cache_read;
+            // Split cache creation into 5m and 1h tiers.
+            // If the breakdown sub-object exists, use it directly.
+            // Otherwise default all cache creation to 1h (Claude Code's default).
+            let total_cw = usage.cache_creation_input_tokens.unwrap_or(0);
+            let (cw_5m, cw_1h) = match &usage.cache_creation {
+                Some(bd) => (
+                    bd.ephemeral_5m_input_tokens.unwrap_or(0),
+                    bd.ephemeral_1h_input_tokens.unwrap_or(0),
+                ),
+                None => (0, total_cw),
+            };
 
             entries.push(ParsedEntry {
                 timestamp: ts,
                 model,
                 input_tokens: usage.input_tokens.unwrap_or(0),
                 output_tokens: usage.output_tokens.unwrap_or(0),
-                cache_creation_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
-                cache_read_tokens: delta_cache_read,
+                cache_creation_5m_tokens: cw_5m,
+                cache_creation_1h_tokens: cw_1h,
+                cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
             });
         }
     }
@@ -229,21 +256,22 @@ pub fn read_claude_entries(projects_dir: &Path, since: Option<NaiveDate>) -> Vec
 /// Codex `last_token_usage` is cumulative — only the FINAL `token_count` event
 /// per file is used.  Model name is extracted via regex-free string search.
 fn parse_codex_session_file(path: &Path) -> Option<ParsedEntry> {
-    let contents = fs::read_to_string(path).ok()?;
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
     let mut final_usage: Option<(DateTime<Local>, String, u64, u64, u64)> = None;
     let mut session_model = String::from("codex-mini-latest");
 
-    for line in contents.lines() {
+    for line in reader.lines().map_while(Result::ok) {
         // Try to extract a model name anywhere in this line
         if line.contains("\"model\":\"") {
-            if let Some(m) = extract_model_from_line(line) {
+            if let Some(m) = extract_model_from_line(&line) {
                 if !m.is_empty() {
                     session_model = m;
                 }
             }
         }
 
-        let entry: CodexJsonlEntry = match serde_json::from_str(line) {
+        let entry: CodexJsonlEntry = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(_) => continue,
         };
@@ -272,8 +300,7 @@ fn parse_codex_session_file(path: &Path) -> Option<ParsedEntry> {
         };
 
         let input = usage.input_tokens.unwrap_or(0);
-        let output = usage.output_tokens.unwrap_or(0)
-            + usage.reasoning_output_tokens.unwrap_or(0);
+        let output = usage.output_tokens.unwrap_or(0) + usage.reasoning_output_tokens.unwrap_or(0);
         let cache_read = usage.cached_input_tokens.unwrap_or(0);
 
         // Overwrite — we always want the FINAL token_count event
@@ -286,7 +313,8 @@ fn parse_codex_session_file(path: &Path) -> Option<ParsedEntry> {
         model,
         input_tokens: input,
         output_tokens: output,
-        cache_creation_tokens: 0,
+        cache_creation_5m_tokens: 0,
+        cache_creation_1h_tokens: 0,
         cache_read_tokens: cache_read,
     })
 }
@@ -309,7 +337,7 @@ pub fn read_codex_entries(sessions_dir: &Path, since: Option<NaiveDate>) -> Vec<
             if let Ok(rd) = fs::read_dir(&day_dir) {
                 for entry in rd.flatten() {
                     let path = entry.path();
-                    if !path.extension().map_or(false, |e| e == "jsonl") {
+                    if path.extension().is_none_or(|e| e != "jsonl") {
                         continue;
                     }
                     if let Some(parsed) = parse_codex_session_file(&path) {
@@ -347,16 +375,15 @@ fn format_hour(h: u32) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Aggregate (display_name, cost, tokens) keyed by model_key for a slice of entries.
-fn build_segment_map(
-    entries: &[&ParsedEntry],
-) -> HashMap<String, (String, f64, u64)> {
+fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, (String, f64, u64)> {
     let mut map: HashMap<String, (String, f64, u64)> = HashMap::new();
     for e in entries {
         let cost = crate::pricing::calculate_cost(
             &e.model,
             e.input_tokens,
             e.output_tokens,
-            e.cache_creation_tokens,
+            e.cache_creation_5m_tokens,
+            e.cache_creation_1h_tokens,
             e.cache_read_tokens,
         );
         let (name, key) = normalize_model(&e.model);
@@ -364,9 +391,24 @@ fn build_segment_map(
             .entry(key.to_string())
             .or_insert((name.to_string(), 0.0, 0));
         entry.1 += cost;
-        entry.2 += e.input_tokens + e.output_tokens;
+        entry.2 += entry_total_tokens(e);
     }
     map
+}
+
+fn entry_total_tokens(entry: &ParsedEntry) -> u64 {
+    entry.input_tokens
+        + entry.output_tokens
+        + entry.cache_creation_5m_tokens
+        + entry.cache_creation_1h_tokens
+        + entry.cache_read_tokens
+}
+
+fn entry_total_input(entry: &ParsedEntry) -> u64 {
+    entry.input_tokens
+        + entry.cache_creation_5m_tokens
+        + entry.cache_creation_1h_tokens
+        + entry.cache_read_tokens
 }
 
 fn segment_map_to_vec(map: HashMap<String, (String, f64, u64)>) -> Vec<ChartSegment> {
@@ -380,9 +422,7 @@ fn segment_map_to_vec(map: HashMap<String, (String, f64, u64)>) -> Vec<ChartSegm
         .collect()
 }
 
-fn segment_map_to_model_summaries(
-    map: &HashMap<String, (String, f64, u64)>,
-) -> Vec<ModelSummary> {
+fn segment_map_to_model_summaries(map: &HashMap<String, (String, f64, u64)>) -> Vec<ModelSummary> {
     map.iter()
         .map(|(key, (name, cost, tokens))| ModelSummary {
             display_name: name.clone(),
@@ -534,7 +574,7 @@ impl UsageParser {
             total_tokens += bucket_tokens;
 
             for e in day_entries.iter() {
-                total_input += e.input_tokens + e.cache_creation_tokens + e.cache_read_tokens;
+                total_input += entry_total_input(e);
                 total_output += e.output_tokens;
             }
 
@@ -549,6 +589,7 @@ impl UsageParser {
 
             chart_buckets.push(ChartBucket {
                 label,
+                sort_key: date.format("%Y-%m-%d").to_string(),
                 total: bucket_cost,
                 segments: segment_map_to_vec(seg_map),
             });
@@ -615,7 +656,7 @@ impl UsageParser {
             total_tokens += bucket_tokens;
 
             for e in month_entries.iter() {
-                total_input += e.input_tokens + e.cache_creation_tokens + e.cache_read_tokens;
+                total_input += entry_total_input(e);
                 total_output += e.output_tokens;
             }
 
@@ -629,6 +670,7 @@ impl UsageParser {
 
             chart_buckets.push(ChartBucket {
                 label,
+                sort_key: ym.clone(),
                 total: bucket_cost,
                 segments: segment_map_to_vec(seg_map),
             });
@@ -669,10 +711,7 @@ impl UsageParser {
         // Group by hour (0-23)
         let mut hour_map: HashMap<u32, Vec<&ParsedEntry>> = HashMap::new();
         for e in &entries {
-            hour_map
-                .entry(e.timestamp.hour())
-                .or_default()
-                .push(e);
+            hour_map.entry(e.timestamp.hour()).or_default().push(e);
         }
 
         let now = Local::now();
@@ -698,7 +737,7 @@ impl UsageParser {
             total_tokens += bucket_tokens;
 
             for e in hour_entries.iter() {
-                total_input += e.input_tokens + e.cache_creation_tokens + e.cache_read_tokens;
+                total_input += entry_total_input(e);
                 total_output += e.output_tokens;
             }
 
@@ -712,6 +751,7 @@ impl UsageParser {
 
             chart_buckets.push(ChartBucket {
                 label,
+                sort_key: format!("{:02}", h),
                 total: bucket_cost,
                 segments: segment_map_to_vec(seg_map),
             });
@@ -764,10 +804,8 @@ impl UsageParser {
 
             for e in &entry_refs {
                 if let Some(prev) = prev_ts {
-                    if e.timestamp - prev > gap_threshold {
-                        if !current_block.is_empty() {
-                            blocks.push(std::mem::take(&mut current_block));
-                        }
+                    if e.timestamp - prev > gap_threshold && !current_block.is_empty() {
+                        blocks.push(std::mem::take(&mut current_block));
                     }
                 }
                 current_block.push(e);
@@ -797,7 +835,7 @@ impl UsageParser {
             total_tokens += block_tokens;
 
             for e in block.iter() {
-                total_input += e.input_tokens + e.cache_creation_tokens + e.cache_read_tokens;
+                total_input += entry_total_input(e);
                 total_output += e.output_tokens;
             }
 
@@ -815,6 +853,7 @@ impl UsageParser {
 
             chart_buckets.push(ChartBucket {
                 label,
+                sort_key: start_ts.to_rfc3339(),
                 total: block_cost,
                 segments: segment_map_to_vec(seg_map),
             });
@@ -833,13 +872,15 @@ impl UsageParser {
                 // Project to 5-hour block
                 let projected_cost = burn_rate_per_hour * 5.0;
 
-                active_block = Some(ActiveBlock {
-                    cost: block_cost,
-                    burn_rate_per_hour,
-                    projected_cost,
-                    is_active,
-                });
-                five_hour_cost = block_cost;
+                if is_active {
+                    active_block = Some(ActiveBlock {
+                        cost: block_cost,
+                        burn_rate_per_hour,
+                        projected_cost,
+                        is_active,
+                    });
+                    five_hour_cost = block_cost;
+                }
             }
         }
 
@@ -892,9 +933,9 @@ mod tests {
     #[test]
     fn parse_claude_entries_from_jsonl() {
         let dir = TempDir::new().unwrap();
-        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"user","timestamp":"2026-03-15T12:01:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":5}}}
-{"type":"assistant","timestamp":"2026-03-15T12:02:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"user","timestamp":"2026-03-15T12:01:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}}
+{"type":"assistant","timestamp":"2026-03-15T12:02:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":80}}}"#;
         write_file(&dir.path().join("session.jsonl"), content);
 
         let entries = read_claude_entries(dir.path(), None);
@@ -907,8 +948,8 @@ mod tests {
     fn parse_claude_filters_by_date() {
         let dir = TempDir::new().unwrap();
         // Use noon UTC to avoid local-timezone edge cases near midnight
-        let content = r#"{"type":"assistant","timestamp":"2026-01-01T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":50}}}
-{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2026-01-01T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":80}}}"#;
         write_file(&dir.path().join("session.jsonl"), content);
 
         let since = parse_since_date("20260301");
@@ -923,12 +964,16 @@ mod tests {
         let sub = dir.path().join("project-abc").join("session-1");
         fs::create_dir_all(&sub).unwrap();
 
-        let entry_line = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":50,"output_tokens":20}}}"#;
+        let entry_line = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":50,"output_tokens":20}}}"#;
         write_file(&dir.path().join("root.jsonl"), entry_line);
         write_file(&sub.join("nested.jsonl"), entry_line);
 
         let entries = read_claude_entries(dir.path(), None);
-        assert_eq!(entries.len(), 2, "should find files in nested subdirectories");
+        assert_eq!(
+            entries.len(),
+            2,
+            "should find files in nested subdirectories"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -958,7 +1003,11 @@ mod tests {
 
         let today_str = today.format("%Y%m%d").to_string();
         let entries = read_codex_entries(dir.path(), parse_since_date(&today_str));
-        assert_eq!(entries.len(), 1, "should produce one entry per session file");
+        assert_eq!(
+            entries.len(),
+            1,
+            "should produce one entry per session file"
+        );
         assert_eq!(
             entries[0].input_tokens, 200,
             "should use the final token_count (200), not the first (100)"
@@ -1005,21 +1054,25 @@ mod tests {
 
     #[test]
     fn daily_aggregation_groups_by_date() {
-        let content = r#"{"type":"assistant","timestamp":"2026-03-14T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1000,"output_tokens":500}}}
-{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":2000,"output_tokens":1000}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2026-03-14T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":1000,"output_tokens":500}}}
+{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":2000,"output_tokens":1000}}}"#;
         let (_dir, parser) = make_parser_with_claude_data(content);
         let payload = parser.get_daily("claude", "20260101");
 
         assert_eq!(payload.chart_buckets.len(), 2, "should have 2 day buckets");
-        let labels: Vec<&str> = payload.chart_buckets.iter().map(|b| b.label.as_str()).collect();
+        let labels: Vec<&str> = payload
+            .chart_buckets
+            .iter()
+            .map(|b| b.label.as_str())
+            .collect();
         assert!(labels.contains(&"Mar 14"), "should have Mar 14 bucket");
         assert!(labels.contains(&"Mar 15"), "should have Mar 15 bucket");
     }
 
     #[test]
     fn daily_aggregation_model_breakdown() {
-        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1000,"output_tokens":500}}}
-{"type":"assistant","timestamp":"2026-03-15T12:30:00+00:00","message":{"model":"claude-opus-4-6","usage":{"input_tokens":500,"output_tokens":200}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":1000,"output_tokens":500}}}
+{"type":"assistant","timestamp":"2026-03-15T12:30:00+00:00","message":{"model":"claude-opus-4-6","stop_reason":"end_turn","usage":{"input_tokens":500,"output_tokens":200}}}"#;
         let (_dir, parser) = make_parser_with_claude_data(content);
         let payload = parser.get_daily("claude", "20260315");
 
@@ -1028,9 +1081,27 @@ mod tests {
             2,
             "should have 2 distinct model summaries"
         );
-        let keys: Vec<&str> = payload.model_breakdown.iter().map(|m| m.model_key.as_str()).collect();
+        let keys: Vec<&str> = payload
+            .model_breakdown
+            .iter()
+            .map(|m| m.model_key.as_str())
+            .collect();
         assert!(keys.contains(&"sonnet"), "should include sonnet");
         assert!(keys.contains(&"opus"), "should include opus");
+    }
+
+    #[test]
+    fn daily_aggregation_includes_cache_tokens_in_totals_and_models() {
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":50,"cache_read_input_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":30}}}}"#;
+        let (_dir, parser) = make_parser_with_claude_data(content);
+        let payload = parser.get_daily("claude", "20260315");
+
+        assert_eq!(payload.total_tokens, 210);
+        assert_eq!(payload.input_tokens, 160);
+        assert_eq!(payload.output_tokens, 50);
+        assert_eq!(payload.model_breakdown.len(), 1);
+        assert_eq!(payload.model_breakdown[0].tokens, 210);
+        assert_eq!(payload.chart_buckets[0].segments[0].tokens, 210);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1039,14 +1110,17 @@ mod tests {
 
     #[test]
     fn cache_returns_same_payload_within_ttl() {
-        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1000,"output_tokens":500}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":1000,"output_tokens":500}}}"#;
         let (_dir, parser) = make_parser_with_claude_data(content);
 
         let first = parser.get_daily("claude", "20260315");
         assert!(!first.from_cache, "first call should NOT be from cache");
 
         let second = parser.get_daily("claude", "20260315");
-        assert!(second.from_cache, "second call within TTL should be from cache");
+        assert!(
+            second.from_cache,
+            "second call within TTL should be from cache"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1055,14 +1129,22 @@ mod tests {
 
     #[test]
     fn monthly_aggregation_groups_by_month() {
-        let content = r#"{"type":"assistant","timestamp":"2026-01-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1000,"output_tokens":500}}}
-{"type":"assistant","timestamp":"2026-02-10T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":2000,"output_tokens":1000}}}
-{"type":"assistant","timestamp":"2026-03-05T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":3000,"output_tokens":1500}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2026-01-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":1000,"output_tokens":500}}}
+{"type":"assistant","timestamp":"2026-02-10T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":2000,"output_tokens":1000}}}
+{"type":"assistant","timestamp":"2026-03-05T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":3000,"output_tokens":1500}}}"#;
         let (_dir, parser) = make_parser_with_claude_data(content);
         let payload = parser.get_monthly("claude", "20260101");
 
-        assert_eq!(payload.chart_buckets.len(), 3, "should have 3 month buckets");
-        let labels: Vec<&str> = payload.chart_buckets.iter().map(|b| b.label.as_str()).collect();
+        assert_eq!(
+            payload.chart_buckets.len(),
+            3,
+            "should have 3 month buckets"
+        );
+        let labels: Vec<&str> = payload
+            .chart_buckets
+            .iter()
+            .map(|b| b.label.as_str())
+            .collect();
         assert!(labels.contains(&"Jan"), "should have Jan bucket");
         assert!(labels.contains(&"Feb"), "should have Feb bucket");
         assert!(labels.contains(&"Mar"), "should have Mar bucket");
@@ -1077,8 +1159,8 @@ mod tests {
         // Use today's date so entries are not filtered out by "today only" logic
         let today = Local::now().format("%Y-%m-%dT").to_string();
         let content = format!(
-            r#"{{"type":"assistant","timestamp":"{today}09:00:00+00:00","message":{{"model":"claude-sonnet-4-6","usage":{{"input_tokens":1000,"output_tokens":500}}}}}}
-{{"type":"assistant","timestamp":"{today}14:00:00+00:00","message":{{"model":"claude-sonnet-4-6","usage":{{"input_tokens":2000,"output_tokens":1000}}}}}}"#,
+            r#"{{"type":"assistant","timestamp":"{today}09:00:00+00:00","message":{{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{{"input_tokens":1000,"output_tokens":500}}}}}}
+{{"type":"assistant","timestamp":"{today}14:00:00+00:00","message":{{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{{"input_tokens":2000,"output_tokens":1000}}}}}}"#,
             today = today
         );
 
@@ -1106,8 +1188,8 @@ mod tests {
     #[test]
     fn blocks_detects_activity_windows() {
         // Two entries more than 30 minutes apart -> 2 blocks
-        let content = r#"{"type":"assistant","timestamp":"2026-03-15T09:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1000,"output_tokens":500}}}
-{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":2000,"output_tokens":1000}}}"#;
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T09:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":1000,"output_tokens":500}}}
+{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":2000,"output_tokens":1000}}}"#;
         let (_dir, parser) = make_parser_with_claude_data(content);
         let payload = parser.get_blocks("claude", "20260315");
 
@@ -1117,46 +1199,93 @@ mod tests {
             "entries >30 min apart should produce 2 activity blocks"
         );
     }
+
+    #[test]
+    fn inactive_last_block_returns_no_active_block_and_uses_total_cost() {
+        let end = Local::now() - chrono::Duration::minutes(40);
+        let start = end - chrono::Duration::minutes(10);
+        let since = start.date_naive().format("%Y%m%d").to_string();
+        let content = format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{{"input_tokens":1000,"output_tokens":500}}}}}}
+{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{{"input_tokens":500,"output_tokens":250}}}}}}"#,
+            start.to_rfc3339(),
+            end.to_rfc3339()
+        );
+        let (_dir, parser) = make_parser_with_claude_data(&content);
+        let payload = parser.get_blocks("claude", &since);
+
+        assert!(payload.active_block.is_none());
+        assert!((payload.five_hour_cost - payload.total_cost).abs() < f64::EPSILON);
+        assert!(payload.total_cost > 0.0);
+    }
 }
 
 #[cfg(test)]
 mod debug_compare {
     use super::*;
 
-    #[test]
-    fn compare_token_counts_with_ccusage() {
-        let parser = UsageParser::new();
-        let today = chrono::Local::now().format("%Y%m%d").to_string();
-        
-        // Read raw entries to see per-model token counts
-        let entries = read_claude_entries(&parser.claude_dir, Some(parse_since_date(&today).unwrap()));
-        
-        let mut model_totals: std::collections::HashMap<String, (u64, u64, u64, u64, usize)> = std::collections::HashMap::new();
-        for e in &entries {
+    fn print_provider(label: &str, entries: &[ParsedEntry]) {
+        let mut model_totals: std::collections::HashMap<String, (u64, u64, u64, u64, usize, f64)> =
+            std::collections::HashMap::new();
+        for e in entries {
             let (_, key) = normalize_model(&e.model);
+            let cost = crate::pricing::calculate_cost(
+                &e.model,
+                e.input_tokens,
+                e.output_tokens,
+                e.cache_creation_5m_tokens,
+                e.cache_creation_1h_tokens,
+                e.cache_read_tokens,
+            );
             let m = model_totals.entry(key.to_string()).or_default();
             m.0 += e.input_tokens;
             m.1 += e.output_tokens;
-            m.2 += e.cache_creation_tokens;
+            m.2 += e.cache_creation_5m_tokens + e.cache_creation_1h_tokens;
             m.3 += e.cache_read_tokens;
             m.4 += 1;
+            m.5 += cost;
         }
-        
-        println!("\n=== Our parser token counts (today) ===");
-        println!("Total entries parsed: {}", entries.len());
-        for (model, (inp, out, cw, cr, count)) in &model_totals {
-            let total = inp + out + cw + cr;
-            let cost = crate::pricing::calculate_cost(
-                &format!("claude-{}-4-6", model), *inp, *out, *cw, *cr
+        println!(
+            "\n=== {}: Our parser ({} entries) ===",
+            label,
+            entries.len()
+        );
+        let mut total_tok = 0u64;
+        let mut total_cost = 0.0f64;
+        for (model, (inp, out, cw, cr, count, cost)) in &model_totals {
+            let t = inp + out + cw + cr;
+            total_tok += t;
+            total_cost += *cost;
+            println!(
+                "  {}: inp={} out={} cw={} cr={} total={} n={} cost=${:.6}",
+                model, inp, out, cw, cr, t, count, cost
             );
-            println!("{}: inp={} out={} cw={} cr={} total={} entries={} cost=${:.6}", 
-                model, inp, out, cw, cr, total, count, cost);
         }
-        
-        println!("\n=== ccusage token counts (for comparison) ===");
-        println!("opus:   inp=19829 out=124000 cw=3149917 cr=65366136 total=68659882 cost=$59.852193");
-        println!("haiku:  inp=3354 out=28909 cw=612190 cr=4675714 total=5320167 cost=$1.380708");
-        println!("sonnet: inp=60 out=4597 cw=124968 cr=2128900 total=2258525 cost=$1.176435");
-        println!("ccusage total tokens: 76238574, total cost: $62.409336");
+        println!("  TOTAL: tokens={} cost=${:.6}", total_tok, total_cost);
+    }
+
+    #[test]
+    fn compare_all_with_ccusage() {
+        let parser = UsageParser::new();
+        let today = chrono::Local::now().format("%Y%m%d").to_string();
+
+        let claude =
+            read_claude_entries(&parser.claude_dir, Some(parse_since_date(&today).unwrap()));
+        print_provider("CLAUDE", &claude);
+        println!("\n=== CLAUDE: ccusage ===");
+        println!("  opus:   inp=19,875 out=129,193 cw=3,180,937 cr=74,758,016 total=78,088,021 cost=$65.768004");
+        println!(
+            "  haiku:  inp=3,354 out=28,909 cw=612,190 cr=4,675,714 total=5,320,167 cost=$1.380708"
+        );
+        println!(
+            "  sonnet: inp=60 out=4,597 cw=124,968 cr=2,128,900 total=2,258,525 cost=$1.176435"
+        );
+        println!("  TOTAL: tokens=85,666,713 cost=$68.325146");
+
+        let codex = read_codex_entries(&parser.codex_dir, Some(parse_since_date(&today).unwrap()));
+        print_provider("CODEX", &codex);
+        println!("\n=== CODEX: ccusage ===");
+        println!("  gpt-5.4: inp=231,247 out=7,338 reasoning=5,997 total=238,585 cost=$0.277788");
+        println!("  (ccusage out excludes reasoning; our out=out+reasoning)");
     }
 }
