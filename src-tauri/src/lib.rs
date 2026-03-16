@@ -87,6 +87,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_usage_data,
+            commands::get_monthly_usage,
             commands::set_refresh_interval,
             commands::set_show_tray_amount,
             commands::clear_cache,
