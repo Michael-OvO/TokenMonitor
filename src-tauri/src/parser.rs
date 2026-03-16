@@ -1,5 +1,5 @@
 use crate::models::{ActiveBlock, ChartBucket, ChartSegment, ModelSummary, UsagePayload};
-use chrono::{DateTime, Local, NaiveDate, Timelike};
+use chrono::{Datelike, DateTime, Local, NaiveDate, Timelike};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
@@ -810,8 +810,16 @@ impl UsageParser {
         }
 
         let now = Local::now();
-        let current_hour = now.hour();
-        let min_hour = hour_map.keys().copied().min().unwrap_or(current_hour);
+        let today = now.date_naive();
+        let since_naive = parse_since_date(since);
+        let is_past_day = since_naive.is_some_and(|d| d < today);
+        let (start_hour, end_hour) = if is_past_day {
+            (0u32, 23u32)
+        } else {
+            let current_hour = now.hour();
+            let min_hour = hour_map.keys().copied().min().unwrap_or(current_hour);
+            (min_hour, current_hour)
+        };
 
         let mut chart_buckets: Vec<ChartBucket> = Vec::new();
         let mut total_cost = 0.0f64;
@@ -820,7 +828,7 @@ impl UsageParser {
         let mut total_output = 0u64;
         let mut global_model_map: HashMap<String, (String, f64, u64)> = HashMap::new();
 
-        for h in min_hour..=current_hour {
+        for h in start_hour..=end_hour {
             let label = format_hour(h);
             let hour_entries = hour_map.get(&h).map(|v| v.as_slice()).unwrap_or(&[]);
 
@@ -1316,6 +1324,30 @@ mod tests {
         assert!(payload.active_block.is_none());
         assert!((payload.five_hour_cost - payload.total_cost).abs() < f64::EPSILON);
         assert!(payload.total_cost > 0.0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Hourly aggregation — past day
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn get_hourly_past_day_returns_24_buckets() {
+        let dir = TempDir::new().unwrap();
+        // Build a timestamp at 9AM local on a past day, using that day's correct UTC offset
+        let target_date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let naive_dt = target_date.and_hms_opt(9, 0, 0).unwrap();
+        let local_dt = naive_dt.and_local_timezone(Local).unwrap();
+        let ts = local_dt.to_rfc3339();
+        let content = format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#,
+            ts
+        );
+        write_file(&dir.path().join("session.jsonl"), &content);
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let payload = parser.get_hourly("claude", "20260115");
+        assert_eq!(payload.chart_buckets.len(), 24, "past day should have 24 hourly buckets");
+        let nine_am = payload.chart_buckets.iter().find(|b| b.label == "9AM").unwrap();
+        assert!(nine_am.total > 0.0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
