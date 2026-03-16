@@ -38,11 +38,13 @@
   import SetupScreen from "./lib/components/SetupScreen.svelte";
   import SplashScreen from "./lib/components/SplashScreen.svelte";
   import Settings from "./lib/components/Settings.svelte";
+  import Calendar from "./lib/components/Calendar.svelte";
   import DateNav from "./lib/components/DateNav.svelte";
 
   let showSplash = $state(true);
   let appReady = $state(false);
   let showSettings = $state(false);
+  let showCalendar = $state(false);
   let provider = $state<"all" | "claude" | "codex">("claude");
   let period = $state<"5h" | "day" | "week" | "month" | "year">("day");
   let offset = $state(0);
@@ -52,7 +54,6 @@
   let dataKey = $state("initial");
   let brandTheming = $state(true);
   let popEl: HTMLDivElement | null = null;
-  let popContentEl: HTMLDivElement | null = null;
   let maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
 
   // Subscribe to stores
@@ -88,7 +89,7 @@
     if (provider !== p) return;
     dataKey = `${p}-${period}-${offset}-${Date.now()}`;
     await tick();
-    syncSizeAndVerify();
+    syncSize();
     warmAllPeriods(p, period);
     if (p === "claude") warmCache("codex", period);
     else if (p === "codex") warmCache("claude", period);
@@ -105,7 +106,7 @@
     if (period !== p || provider !== prov) return;
     dataKey = `${prov}-${p}-${Date.now()}`;
     await tick();
-    syncSizeAndVerify();
+    syncSize();
   }
 
   async function handleOffsetChange(delta: number) {
@@ -117,7 +118,7 @@
     if (period !== per || provider !== prov) return;
     dataKey = `${prov}-${per}-${offset}-${Date.now()}`;
     await tick();
-    syncSizeAndVerify();
+    syncSize();
     // Warm adjacent offsets for instant navigation
     warmCache(prov, per, offset - 1);
     if (offset < 0) warmCache(prov, per, offset + 1);
@@ -133,10 +134,11 @@
     if (period !== per || provider !== prov) return;
     dataKey = `${prov}-${per}-0-${Date.now()}`;
     await tick();
-    syncSizeAndVerify();
+    syncSize();
   }
 
   async function handleSettingsOpen() {
+    showCalendar = false;
     showSettings = true;
     await tick();
     syncSizeAndVerify();
@@ -148,9 +150,22 @@
     syncSizeAndVerify();
   }
 
+  async function handleCalendarOpen() {
+    showSettings = false;
+    showCalendar = true;
+    await tick();
+    syncSizeAndVerify();
+  }
+
+  async function handleCalendarClose() {
+    showCalendar = false;
+    await tick();
+    syncSizeAndVerify();
+  }
+
   // ── Window resize ──────────────────────────────────────────────
   //
-  //  syncSize()        — measure .pop-content's full content height via
+  //  syncSize()        — measure .pop's full content height via
   //                      scrollHeight (immune to viewport capping) and
   //                      call setSize() immediately.  Used after
   //                      await tick() in every user-initiated view swap.
@@ -189,38 +204,23 @@
   }
 
   function measureContentHeight(): number | null {
-    if (!popContentEl) return null;
-    // .pop-content has overflow:hidden → scrollHeight reports the FULL
-    // content height (immune to WebKit's viewport capping of offsetHeight).
-    // We measure .pop-content (not .pop) because .pop's inline min-height
-    // is pinned to the window height during resize transitions.
-    // Add 2 for .pop's 1px top + 1px bottom border.
-    return measureTargetWindowHeight(popContentEl.scrollHeight + 2);
+    if (!popEl) return null;
+    // .pop has overflow:hidden → scrollHeight reports the FULL content
+    // height including any overflow below the viewport.  Add 2 for
+    // .pop's 1px top + 1px bottom border (excluded from scrollHeight).
+    return measureTargetWindowHeight(popEl.scrollHeight + 2);
   }
 
   function applyWindowHeight(targetHeight: number) {
     const nextHeight = clampWindowHeight(targetHeight, maxWindowH, MIN_WINDOW_HEIGHT);
     if (classifyResize(nextHeight, lastWindowH, MIN_WINDOW_HEIGHT) === "skip") return;
 
-    // Pin .pop to the LARGER of old/new height so it always covers the
-    // window during the resize IPC round-trip — prevents the macOS
-    // compositor from flashing the transparent background.
-    const pinHeight = Math.max(nextHeight, lastWindowH);
-    if (popEl) popEl.style.minHeight = `${pinHeight}px`;
-
     lastWindowH = nextHeight;
-    webviewWindow.setSize(new LogicalSize(WINDOW_WIDTH, nextHeight))
-      .then(() => {
-        // Window is now at nextHeight — relax .pop to match.
-        if (popEl) popEl.style.minHeight = `${nextHeight}px`;
-      })
-      .catch(() => {
-        if (typeof window !== "undefined") {
-          lastWindowH = window.innerHeight;
-          // Pin to actual window height (setSize failed, window didn't move)
-          if (popEl) popEl.style.minHeight = `${window.innerHeight}px`;
-        }
-      });
+    webviewWindow.setSize(new LogicalSize(WINDOW_WIDTH, nextHeight)).catch(() => {
+      if (typeof window !== "undefined") {
+        lastWindowH = window.innerHeight;
+      }
+    });
   }
 
   function syncSize() {
@@ -259,9 +259,6 @@
       case "grow":
         clearPendingResize();
         applyWindowHeight(measuredHeight);
-        // Re-measure after the setSize IPC settles — catches content
-        // that was still laying out when the observer first fired.
-        scheduleSettledResize(100);
         return;
       case "shrink":
         scheduleSettledResize();
@@ -277,10 +274,6 @@
     let unlisten: (() => void) | undefined;
 
     const init = async () => {
-      // Pin .pop to the initial window height immediately so it fills
-      // the native window before any content renders.
-      if (popEl) popEl.style.minHeight = `${window.innerHeight}px`;
-
       await refreshWindowMetrics();
 
       // Load persisted settings and apply theme + defaults (non-blocking)
@@ -302,13 +295,10 @@
       warmAllPeriods(provider === "claude" ? "codex" : "claude");
       appReady = true;
 
-      // Watch .pop-content (not .pop) because .pop uses min-height:100vh
-      // to fill the window — its size only changes when the viewport does,
-      // not when content changes.  .pop-content wraps content naturally.
-      if (popContentEl) {
+      if (popEl) {
         observer = new ResizeObserver(() => resizeToContent());
-        observer.observe(popContentEl);
-        syncSizeAndVerify();
+        observer.observe(popEl);
+        syncSize();
       }
 
       unlisten = await listen("data-updated", () => {
@@ -335,13 +325,15 @@
 </script>
 
 <div class="pop" bind:this={popEl}>
-  <div class="pop-content" bind:this={popContentEl}>
+  <div class="pop-content">
     {#if showSplash}
-      <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(syncSizeAndVerify); }} />
+      <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(syncSize); }} />
     {:else if appReady && !data}
       <SetupScreen />
     {:else if showSettings}
       <Settings onBack={handleSettingsClose} />
+    {:else if showCalendar}
+      <Calendar onBack={handleCalendarClose} />
     {:else if data}
       {#if showRefresh}<div class="refresh-bar"></div>{/if}
       <Toggle active={provider} onChange={handleProviderChange} {brandTheming} />
@@ -371,7 +363,7 @@
       {#if period !== "5h" && data.model_breakdown.length > 0}
         <ModelList models={data.model_breakdown} />
       {/if}
-      <Footer {data} onSettings={handleSettingsOpen} />
+      <Footer {data} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} />
     {:else}
       <div class="loading">
         <div class="spinner"></div>
@@ -401,11 +393,7 @@
     /* Provider theme tint — transparent when neutral */
     background-image: linear-gradient(var(--provider-bg), var(--provider-bg));
   }
-  /* overflow:hidden → scrollHeight reports true content height even when
-     WebKit caps offsetHeight to the viewport.  This is the measurement
-     target for window sizing (instead of .pop, whose min-height:100vh
-     would inflate scrollHeight). */
-  .pop-content { min-width: 0; overflow: hidden; }
+  .pop-content { min-width: 0; }
   .hr { height: 1px; background: var(--border-subtle); margin: 0 12px; }
   .loading {
     display: flex; flex-direction: column; align-items: center;
