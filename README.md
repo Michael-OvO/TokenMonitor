@@ -5,7 +5,11 @@
 <h1 align="center">TokenMonitor</h1>
 
 <p align="center">
-  <strong>macOS menu bar app for tracking Claude Code &amp; Codex token usage and costs</strong>
+  <strong>Native macOS menu bar monitor for Claude Code and Codex usage</strong>
+</p>
+
+<p align="center">
+  Track spend, tokens, activity windows, and per-model breakdowns directly from local session logs.
 </p>
 
 <p align="center">
@@ -19,48 +23,73 @@
 
 ---
 
-TokenMonitor lives in your menu bar and gives you real-time visibility into how much you're spending on AI coding assistants. It reads local usage data from [ccusage](https://github.com/ryoppippi/ccusage) — no API keys or cloud accounts required.
+TokenMonitor lives in your menu bar and gives you a fast, local view of how much you are spending on AI coding assistants. It reads Claude Code and Codex session logs directly from disk, computes pricing locally, and renders the results in a native-feeling popover.
+
+No API keys. No cloud sync. No external CLI dependency.
+
+## Why TokenMonitor
+
+- Accurate pricing for Anthropic 5-minute vs 1-hour cache writes
+- Native Rust parser instead of subprocessing a third-party usage tool
+- Local-first architecture that reads `~/.claude` and `~/.codex` directly
+- Menu bar UX with background refresh, launch-at-login, and configurable tray display
+- Per-model breakdowns and activity views that are useful day to day, not just for post-hoc reporting
 
 ## Features
 
-- **Menu bar native** — runs as a tray icon with a popover UI; no dock icon, no window clutter
-- **Dual provider support** — toggle between Claude Code and Codex usage with a single click
-- **Multiple time views** — 5-hour, daily, weekly, and monthly breakdowns
-- **Live cost in tray** — today's running total displayed right in the menu bar (e.g. `$4.72`)
-- **Stacked bar charts** — visualize spending trends over time with per-model color coding
-- **Per-model breakdown** — see cost and token counts for each model (Opus, Sonnet, Haiku, etc.)
-- **3-tier caching** — memory → disk → subprocess hierarchy for instant tab switching
-- **Background polling** — data refreshes automatically on a configurable interval
-- **Auto-install** — ccusage is installed and updated automatically on first launch
-- **Launch at login** — optional autostart via macOS Launch Agent
-- **Dark & light themes** — follows system appearance or manual override
+- Native macOS menu bar app with popover UI
+- Claude Code, Codex, and combined `all` provider views
+- `5h`, `day`, `week`, `month`, and `year` time ranges
+- Real-time tray title showing today's spend, with an option to hide it
+- Per-model cost and token breakdowns
+- Activity-window view for the `5h` tab
+- Background refresh with configurable cadence
+- Theme, provider, period, currency, and model-visibility settings
+- Correct handling of cache token pricing and cached-input discounts
+- Local parsing and in-memory caching for fast tab switches
+
+## Supported Data Sources
+
+| Provider | Path | Notes |
+|---|---|---|
+| Claude Code | `~/.claude/projects/**/*.jsonl` | Reads assistant messages directly from project logs |
+| Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | Uses final `token_count` event per session file |
+
+## Pricing Accuracy
+
+TokenMonitor is designed to be more faithful than generic usage wrappers because it prices cache traffic explicitly instead of flattening it into a single token count.
+
+For Claude models, cache writes can occur at two tiers:
+
+| Model | 5m Cache Write | 1h Cache Write | Difference |
+|---|---:|---:|---:|
+| Opus 4.6 | $6.25 / MTok | $10.00 / MTok | +60% |
+| Sonnet 4.6 | $3.75 / MTok | $6.00 / MTok | +60% |
+| Haiku 4.5 | $1.25 / MTok | $2.00 / MTok | +60% |
+
+TokenMonitor reads the `cache_creation` breakdown from each Claude log entry and applies the appropriate tier. For Codex/OpenAI models it separately accounts for cached input discounts.
 
 ## Requirements
 
-- **macOS 13+** (Ventura or later)
-- **Node.js ≥ 18** — required for the ccusage data backend
-- Active usage of **Claude Code** and/or **Codex CLI** (the tools whose logs are read)
+- macOS 13 or newer
+- Existing Claude Code and/or Codex usage logs on disk
+- Node.js 18+ and Rust toolchain only if you are building from source
 
 ## Installation
 
-### From Source
+### Build From Source
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/TokenMonitor.git
+git clone https://github.com/Michael-OvO/TokenMonitor.git
 cd TokenMonitor
-
-# Install frontend dependencies
 npm install
-
-# Build the app
 npx tauri build
 ```
 
-The `.dmg` installer is output to:
+Expected bundle output:
 
-```
-src-tauri/target/release/bundle/dmg/TokenMonitor_0.1.0_aarch64.dmg
+```text
+src-tauri/target/release/bundle/
 ```
 
 ### Development
@@ -70,61 +99,86 @@ npm install
 npx tauri dev
 ```
 
-The app appears as a menu bar icon. Click it to open the popover. See [DEVELOPMENT.md](DEVELOPMENT.md) for the full development guide.
+The app launches as a menu bar item. Click the tray icon to open the popover.
 
-## How It Works
+## Validation
+
+The current repo is set up so you can run both frontend and Rust checks locally:
+
+```bash
+./node_modules/.bin/tsc --noEmit
+npm test -- --run
+npm run build
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+For convenience:
+
+```bash
+npm run test:all
+```
+
+## Architecture
 
 ```mermaid
 graph LR
-    A["ccusage CLI<br/><sub>Node.js subprocess</sub>"] -- "JSON stdout" --> B["Rust Backend<br/><sub>3-tier cache</sub>"]
-    B -- "IPC invoke" --> C["Svelte Frontend<br/><sub>menu bar UI</sub>"]
+    A["~/.claude/projects/**/*.jsonl<br/><sub>Claude Code logs</sub>"] --> B["Rust parser<br/><sub>streaming + cache</sub>"]
+    D["~/.codex/sessions/YYYY/MM/DD/*.jsonl<br/><sub>Codex session logs</sub>"] --> B
+    B --> C["Tauri IPC layer"]
+    C --> E["Svelte 5 popover UI"]
+    C --> F["Menu bar title updater"]
 ```
 
-TokenMonitor uses the [ccusage](https://github.com/ryoppippi/ccusage) CLI to parse local Claude Code and Codex session logs, then pipes the JSON output through a Rust caching layer before rendering it in a Svelte-powered popover.
+### Runtime flow
 
-**Cache hierarchy** keeps the UI snappy:
+1. The frontend requests a provider and period through Tauri IPC.
+2. The Rust backend scans only the relevant log files, parses entries, and prices them locally.
+3. Aggregated payloads are cached in memory for fast repeat requests.
+4. The UI renders charts, breakdowns, and footer state from the payload.
+5. A background loop refreshes the tray title and emits update events on the configured interval.
 
-| Tier | Storage | Latency | TTL |
-|------|---------|---------|-----|
-| 1 | In-memory HashMap | ~ns | 120s |
-| 2 | Disk JSON | ~ms | 120s |
-| 3 | CLI subprocess | ~6-7s | — |
+### Parser behavior
 
-On cache miss, the CLI is invoked; on CLI failure, stale cache is served for stability.
+- Claude: skips non-assistant entries and intermediate streaming chunks
+- Codex: uses the final cumulative `token_count` event per session file
+- Aggregations: daily, monthly, hourly, and activity-block views
+- Merge path: preserves chronological order when combining providers
 
 ## Project Structure
 
-```
+```text
 TokenMonitor/
-├── src/                        # Svelte 5 frontend
-│   ├── App.svelte              # Root layout & navigation
+├── src/
+│   ├── App.svelte
 │   └── lib/
-│       ├── components/         # UI components (Chart, MetricsRow, Toggle, etc.)
-│       ├── stores/             # Reactive stores + IPC fetch logic
-│       ├── types/              # TypeScript interfaces
-│       └── utils/              # Formatting helpers & model color map
-├── src-tauri/                  # Tauri v2 / Rust backend
+│       ├── bootstrap.ts
+│       ├── components/
+│       ├── stores/
+│       ├── types/
+│       └── utils/
+├── src-tauri/
 │   └── src/
-│       ├── lib.rs              # App setup, tray icon, background polling
-│       ├── ccusage.rs          # Auto-install, subprocess exec, 3-tier cache
-│       ├── commands.rs         # IPC command handlers
-│       └── models.rs           # Serde structs for data serialization
+│       ├── lib.rs
+│       ├── commands.rs
+│       ├── models.rs
+│       ├── parser.rs
+│       └── pricing.rs
+├── DEVELOPMENT.md
 ├── package.json
-├── vite.config.ts
-└── DEVELOPMENT.md              # Detailed development guide
+└── README.md
 ```
 
 ## Tech Stack
 
 | Layer | Technology |
-|-------|-----------|
-| Framework | [Tauri v2](https://v2.tauri.app/) |
+|---|---|
+| Desktop shell | [Tauri v2](https://v2.tauri.app/) |
 | Frontend | [Svelte 5](https://svelte.dev/) + TypeScript |
-| Backend | Rust 1.93 |
-| Data source | [ccusage](https://github.com/ryoppippi/ccusage) CLI |
+| Backend | Rust |
 | Build tool | [Vite 6](https://vitejs.dev/) |
-| Plugins | `tauri-plugin-positioner`, `tauri-plugin-store`, `tauri-plugin-autostart` |
+| State/data path | Local JSONL parsing + Tauri IPC + Svelte stores |
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
+Licensed under the [GNU General Public License v3.0](LICENSE).
