@@ -1,0 +1,93 @@
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { logResizeDebug } from "./resizeDebug.js";
+
+export const WINDOW_CORNER_RADIUS = 14;
+
+export type WindowSurface = {
+  red: number;
+  green: number;
+  blue: number;
+  alpha: number;
+};
+
+function clampChannel(value: number): number {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+export function parseCssColor(value: string): WindowSurface | null {
+  const color = value.trim();
+  if (!color) return null;
+
+  if (color.startsWith("#")) {
+    const hex = color.slice(1);
+    if (hex.length === 3 || hex.length === 4) {
+      const [r, g, b, a = "f"] = hex.split("");
+      return {
+        red: parseInt(`${r}${r}`, 16),
+        green: parseInt(`${g}${g}`, 16),
+        blue: parseInt(`${b}${b}`, 16),
+        alpha: parseInt(`${a}${a}`, 16),
+      };
+    }
+
+    if (hex.length === 6 || hex.length === 8) {
+      return {
+        red: parseInt(hex.slice(0, 2), 16),
+        green: parseInt(hex.slice(2, 4), 16),
+        blue: parseInt(hex.slice(4, 6), 16),
+        alpha: hex.length === 8 ? parseInt(hex.slice(6, 8), 16) : 255,
+      };
+    }
+
+    return null;
+  }
+
+  const rgbMatch = color.match(/^rgba?\((.+)\)$/i);
+  if (!rgbMatch) return null;
+
+  const parts = rgbMatch[1].split(",").map((part) => part.trim());
+  if (parts.length < 3 || parts.length > 4) return null;
+
+  const red = Number(parts[0]);
+  const green = Number(parts[1]);
+  const blue = Number(parts[2]);
+  const alpha = parts[3] == null ? 255 : Number(parts[3]) * 255;
+
+  if ([red, green, blue, alpha].some((part) => !Number.isFinite(part))) {
+    return null;
+  }
+
+  return {
+    red: clampChannel(red),
+    green: clampChannel(green),
+    blue: clampChannel(blue),
+    alpha: clampChannel(alpha),
+  };
+}
+
+export function readSurfaceColor(
+  root: HTMLElement = document.documentElement,
+  getStyles: typeof getComputedStyle = getComputedStyle,
+): WindowSurface | null {
+  return parseCssColor(getStyles(root).getPropertyValue("--surface"));
+}
+
+export async function syncNativeWindowSurface(
+  invokeFn: typeof invoke = invoke,
+): Promise<void> {
+  if (typeof document === "undefined") return;
+
+  const surface = readSurfaceColor();
+  if (!surface) return;
+
+  logResizeDebug("native-surface:sync-request", { surface });
+  await Promise.all([
+    getCurrentWebviewWindow().setBackgroundColor(surface),
+    invokeFn("set_window_surface", {
+      surface,
+      cornerRadius: WINDOW_CORNER_RADIUS,
+    }),
+  ]);
+  logResizeDebug("native-surface:sync-resolved", { surface });
+}

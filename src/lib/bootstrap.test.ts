@@ -29,6 +29,7 @@ describe("initializeRuntimeFromSettings", () => {
   it("applies provider/period stores and forwards refresh interval to the backend", async () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyThemeFn = vi.fn();
+    const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
     const saved = makeSettings({
       theme: "system",
       defaultProvider: "codex",
@@ -39,9 +40,11 @@ describe("initializeRuntimeFromSettings", () => {
     const runtime = await initializeRuntimeFromSettings(saved, {
       invokeFn,
       applyThemeFn,
+      syncNativeWindowSurfaceFn,
     });
 
     expect(applyThemeFn).toHaveBeenCalledWith("system");
+    expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn);
     expect(invokeFn).toHaveBeenCalledWith("set_refresh_interval", { interval: 300 });
     expect(invokeFn).toHaveBeenCalledWith("set_show_tray_amount", { show: true });
     expect(get(activeProvider)).toBe("codex");
@@ -52,6 +55,7 @@ describe("initializeRuntimeFromSettings", () => {
   it("keeps local startup state even when refresh interval IPC fails", async () => {
     const invokeFn = vi.fn().mockRejectedValue(new Error("ipc not ready"));
     const applyThemeFn = vi.fn();
+    const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
     const saved = makeSettings({
       defaultProvider: "codex",
       defaultPeriod: "5h",
@@ -59,13 +63,18 @@ describe("initializeRuntimeFromSettings", () => {
     });
 
     await expect(
-      initializeRuntimeFromSettings(saved, { invokeFn, applyThemeFn }),
+      initializeRuntimeFromSettings(saved, {
+        invokeFn,
+        applyThemeFn,
+        syncNativeWindowSurfaceFn,
+      }),
     ).resolves.toEqual({
       provider: "codex",
       period: "5h",
     });
 
     expect(applyThemeFn).toHaveBeenCalledWith("dark");
+    expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn);
     expect(invokeFn).toHaveBeenCalledWith("set_refresh_interval", { interval: 0 });
     expect(get(activeProvider)).toBe("codex");
     expect(get(activePeriod)).toBe("5h");

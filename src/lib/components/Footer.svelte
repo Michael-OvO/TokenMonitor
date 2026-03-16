@@ -61,8 +61,7 @@
 
 <style>
   .ft {
-    border-top: 1px solid var(--border-subtle);
-    padding: 7px 12px 4px;
+    padding: 8px 12px 4px;
     display: flex; justify-content: space-between; align-items: center;
     animation: fadeUp .28s ease both .14s;
   }

@@ -1,5 +1,7 @@
 export const WINDOW_WIDTH = 340;
-export const WINDOW_HEIGHT_PADDING = 2;
+// Extra window padding created a visible native strip below the card,
+// which read as a second bottom border in the popover.
+export const WINDOW_HEIGHT_PADDING = 0;
 export const MIN_WINDOW_HEIGHT = 100;
 export const DEFAULT_MAX_WINDOW_HEIGHT = 2400;
 export const WINDOW_MONITOR_MARGIN = 24;

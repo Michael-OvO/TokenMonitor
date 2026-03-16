@@ -150,11 +150,8 @@
 
 html, body, #app {
   width: 100%;
+  background: var(--surface);
 }
-
-/* No min-height or overflow on body — both inflate scrollHeight
-   measurements, preventing accurate window sizing.  .pop's own
-   overflow:hidden handles content clipping for border-radius. */
 
 /* Prevent scrollbars without capping descendant measurements.
    overflow:hidden (not clip) — clip causes WebKit/WKWebView to cap
@@ -163,14 +160,15 @@ html {
   overflow: hidden;
 }
 
-/* #app wraps to content height so the transparent window
-   doesn't show a gap below the popover */
+/* Keep the webview itself painted so transparent-window compositor misses
+   fall back to the app surface instead of black. */
 #app {
   height: auto;
+  min-height: 100%;
 }
 
 body {
-  background: transparent;
+  font-size: 14px;
   font-family: 'Inter', -apple-system, system-ui, sans-serif;
   color: var(--t1);
   -webkit-font-smoothing: antialiased;
