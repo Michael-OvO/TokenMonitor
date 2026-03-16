@@ -20,6 +20,8 @@ function emptyPayload(): UsagePayload {
     five_hour_cost: 0,
     last_updated: new Date().toISOString(),
     from_cache: false,
+    period_label: "",
+    has_earlier_data: false,
   };
 }
 export const setupStatus = writable({ ready: false, installing: false, error: null as string | null });

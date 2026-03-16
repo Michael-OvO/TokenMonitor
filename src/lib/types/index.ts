@@ -10,6 +10,8 @@ export interface UsagePayload {
   five_hour_cost: number;
   last_updated: string;
   from_cache: boolean;
+  period_label: string;
+  has_earlier_data: boolean;
 }
 
 export interface ChartBucket {
