@@ -143,7 +143,7 @@ async fn background_loop(app: tauri::AppHandle) {
         tokio::time::sleep(Duration::from_secs(interval_secs)).await;
         update_counter += 1;
 
-        state.parser.clear_cache();
+        state.parser.clear_payload_cache();
         sync_tray_title(&app, &state).await;
         let _ = app.emit("data-updated", update_counter);
     }

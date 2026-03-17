@@ -854,14 +854,18 @@ impl UsageParser {
 
     #[allow(dead_code)]
     pub fn clear_cache(&self) {
-        if let Ok(mut c) = self.cache.lock() {
-            c.clear();
-        }
+        self.clear_payload_cache();
         if let Ok(mut c) = self.file_cache.lock() {
             c.clear();
         }
         if let Ok(mut current) = self.last_query_debug.lock() {
             *current = None;
+        }
+    }
+
+    pub fn clear_payload_cache(&self) {
+        if let Ok(mut c) = self.cache.lock() {
+            c.clear();
         }
     }
 
@@ -2014,6 +2018,25 @@ mod tests {
         assert_eq!(second_debug.sources[0].cache_hits, 0);
         assert_eq!(second_debug.sources[0].cache_misses, 1);
         assert_eq!(second_debug.sources[0].opened_paths, 1);
+    }
+
+    #[test]
+    fn clearing_payload_cache_preserves_parsed_file_cache() {
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":1000,"output_tokens":500}}}"#;
+        let (_dir, parser) = make_parser_with_claude_data(content);
+
+        parser.get_daily("claude", "20260101");
+        let first_debug = parser.last_query_debug().unwrap();
+        assert_eq!(first_debug.sources[0].cache_hits, 0);
+        assert_eq!(first_debug.sources[0].cache_misses, 1);
+
+        parser.clear_payload_cache();
+        parser.get_monthly("claude", "20260101");
+        let second_debug = parser.last_query_debug().unwrap();
+        assert_eq!(second_debug.sources[0].cache_hits, 1);
+        assert_eq!(second_debug.sources[0].cache_misses, 0);
+        assert_eq!(second_debug.sources[0].opened_paths, 0);
+        assert_eq!(second_debug.sources[0].lines_read, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
