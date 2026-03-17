@@ -109,6 +109,16 @@ struct ClaudeExtraUsageData {
     utilization: Option<f64>,
 }
 
+fn normalize_claude_extra_usage(extra_usage: ClaudeExtraUsageData) -> ExtraUsageInfo {
+    ExtraUsageInfo {
+        is_enabled: extra_usage.is_enabled,
+        // The OAuth usage endpoint reports credit values in cents.
+        monthly_limit: extra_usage.monthly_limit / 100.0,
+        used_credits: extra_usage.used_credits / 100.0,
+        utilization: extra_usage.utilization,
+    }
+}
+
 #[derive(Deserialize)]
 struct ClaudeAccountResponse {
     memberships: Vec<ClaudeMembership>,
@@ -208,12 +218,7 @@ async fn fetch_claude_rate_limits() -> Result<ProviderRateLimits, RateLimitFetch
         }
     }
 
-    let extra_usage = usage.extra_usage.map(|eu| ExtraUsageInfo {
-        is_enabled: eu.is_enabled,
-        monthly_limit: eu.monthly_limit,
-        used_credits: eu.used_credits,
-        utilization: eu.utilization,
-    });
+    let extra_usage = usage.extra_usage.map(normalize_claude_extra_usage);
 
     Ok(ProviderRateLimits {
         provider: "claude".to_string(),
@@ -937,6 +942,21 @@ mod tests {
 
         assert_eq!(retry_after_seconds, Some(120));
         assert_eq!(cooldown_until.as_deref(), Some("2026-03-17T12:02:00+00:00"));
+    }
+
+    #[test]
+    fn normalizes_claude_extra_usage_from_cents_to_usd() {
+        let extra_usage = normalize_claude_extra_usage(ClaudeExtraUsageData {
+            is_enabled: true,
+            monthly_limit: 5000.0,
+            used_credits: 710.0,
+            utilization: Some(14.2),
+        });
+
+        assert!(extra_usage.is_enabled);
+        assert_eq!(extra_usage.monthly_limit, 50.0);
+        assert_eq!(extra_usage.used_credits, 7.1);
+        assert_eq!(extra_usage.utilization, Some(14.2));
     }
 
     #[test]
