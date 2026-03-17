@@ -96,3 +96,21 @@ export interface RateLimitsPayload {
   claude: ProviderRateLimits | null;
   codex: ProviderRateLimits | null;
 }
+
+export interface RateLimitRequestState {
+  loading: boolean;
+  loaded: boolean;
+  error: string | null;
+  deferredUntil: string | null;
+}
+
+export interface RateLimitProviderMonitorState extends RateLimitRequestState {
+  failureStreak: number;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+}
+
+export interface RateLimitsMonitorState {
+  claude: RateLimitProviderMonitorState;
+  codex: RateLimitProviderMonitorState;
+}
