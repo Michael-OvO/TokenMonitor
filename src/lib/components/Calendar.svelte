@@ -1,12 +1,13 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, updateSetting } from "../stores/settings.js";
+  import { settings } from "../stores/settings.js";
   import { activeProvider } from "../stores/usage.js";
   import { formatCost } from "../utils/format.js";
+  import { planTierCost } from "../utils/plans.js";
   import { intensityLevel, computeEarned, heatmapColor } from "../calendar-utils.js";
   import { isResizeDebugEnabled, logResizeDebug } from "../resizeDebug.js";
-  import SegmentedControl from "./SegmentedControl.svelte";
-  import type { MonthlyUsagePayload, UsageProvider } from "../types/index.js";
+  import { rateLimitsData } from "../stores/rateLimits.js";
+  import type { MonthlyUsagePayload, RateLimitsPayload, UsageProvider } from "../types/index.js";
 
   interface Props {
     onBack: () => void;
@@ -22,18 +23,15 @@
   let loading = $state(false);
   let provider = $state<UsageProvider>("claude");
   let brandTheming = $state(true);
-  let claudePlan = $state(0);
-  let codexPlan = $state(0);
+  let rateLimits = $state<RateLimitsPayload | null>(null);
+
 
   // Subscribe to stores
   $effect(() => {
     const unsub1 = activeProvider.subscribe((p) => (provider = p));
-    const unsub2 = settings.subscribe((s) => {
-      brandTheming = s.brandTheming;
-      claudePlan = s.claudePlan;
-      codexPlan = s.codexPlan;
-    });
-    return () => { unsub1(); unsub2(); };
+    const unsub2 = settings.subscribe((s) => { brandTheming = s.brandTheming; });
+    const unsub3 = rateLimitsData.subscribe((r) => { rateLimits = r; });
+    return () => { unsub1(); unsub2(); unsub3(); };
   });
 
   // Fetch data when month/year/provider changes
@@ -132,39 +130,6 @@
     }
   }
 
-  // Plan helpers
-  let activePlan = $derived(
-    provider === "claude" ? claudePlan :
-    provider === "codex" ? codexPlan : 0
-  );
-
-  let planOptions = $derived(
-    provider === "claude"
-      ? [
-          { value: "0", label: "None" },
-          { value: "20", label: "$20" },
-          { value: "100", label: "$100" },
-          { value: "200", label: "$200" },
-        ]
-      : provider === "codex"
-      ? [
-          { value: "0", label: "None" },
-          { value: "20", label: "$20" },
-          { value: "200", label: "$200" },
-        ]
-      : []
-  );
-
-  function handlePlanChange(val: string) {
-    const num = parseInt(val);
-    if (provider === "claude") updateSetting("claudePlan", num);
-    else if (provider === "codex") updateSetting("codexPlan", num);
-  }
-
-  let earned = $derived(
-    data ? computeEarned(data.total_cost, activePlan) : null
-  );
-
   // Calendar grid helpers
   const MONTH_NAMES = [
     "January", "February", "March", "April", "May", "June",
@@ -215,6 +180,16 @@
     if (!isCurrentMonth) return false;
     return day > new Date().getDate();
   }
+
+  let detectedPlanTier = $derived.by(() => {
+    if (provider === "claude") return rateLimits?.claude?.planTier ?? null;
+    if (provider === "codex") return rateLimits?.codex?.planTier ?? null;
+    return null;
+  });
+
+  let detectedPlanCost = $derived(planTierCost(detectedPlanTier, provider));
+
+  let earned = $derived(data ? computeEarned(data.total_cost, detectedPlanCost) : null);
 </script>
 
 <div class="calendar">
@@ -240,17 +215,6 @@
         disabled={isCurrentMonth}
       >›</button>
     </div>
-
-    <!-- Plan selector -->
-    {#if provider !== "all" && planOptions.length > 0}
-      <div class="plan-selector">
-        <SegmentedControl
-          options={planOptions}
-          value={String(activePlan)}
-          onChange={handlePlanChange}
-        />
-      </div>
-    {/if}
 
     <!-- Day-of-week headers -->
     <div class="day-headers">
@@ -283,7 +247,12 @@
 
     <!-- Summary -->
     <div class="summary">
-      <div class="summary-label">MONTHLY USAGE</div>
+      <div class="summary-label">
+        MONTHLY USAGE
+        {#if detectedPlanTier}
+          <span class="plan-badge">{detectedPlanTier}</span>
+        {/if}
+      </div>
       <div class="summary-values">
         <span class="summary-total">{formatCost(data?.total_cost ?? 0)}</span>
         {#if earned !== null}
@@ -367,12 +336,6 @@
     color: var(--t1);
   }
 
-  .plan-selector {
-    display: flex;
-    justify-content: center;
-    padding: 0 0 10px;
-  }
-
   .day-headers {
     display: grid;
     grid-template-columns: repeat(7, 1fr);
@@ -427,11 +390,26 @@
   }
 
   .summary-label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
     font: 500 10px/1 'Inter', sans-serif;
     text-transform: uppercase;
     letter-spacing: 0.8px;
     color: var(--t4);
     margin-bottom: 6px;
+  }
+
+  .plan-badge {
+    font: 500 9px/1 'Inter', sans-serif;
+    letter-spacing: 0.4px;
+    text-transform: none;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border-radius: 4px;
+    padding: 2px 5px;
   }
 
   .summary-values {
@@ -456,10 +434,6 @@
     font: 600 14px/1 'Inter', sans-serif;
     font-variant-numeric: tabular-nums;
   }
-  .summary-earned.positive {
-    color: #4daf4a;
-  }
-  .summary-earned.negative {
-    color: var(--t3);
-  }
+  .summary-earned.positive { color: #4daf4a; }
+  .summary-earned.negative { color: var(--t3); }
 </style>
