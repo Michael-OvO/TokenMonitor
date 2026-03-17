@@ -106,6 +106,17 @@
     }
   });
 
+  function emptyPeriodLabel(p: UsagePeriod, o: number): string {
+    if (o === 0) {
+      if (p === "day") return "Clean slate today";
+      if (p === "week") return "Nothing this week yet";
+      if (p === "month") return "Nothing this month yet";
+      return "No usage yet";
+    }
+    if (p === "day") return "A quiet day";
+    return "No usage data for this period";
+  }
+
   async function handleProviderChange(p: UsageProvider) {
     if (provider === p) return;
     provider = p;
@@ -573,7 +584,7 @@
           </div>
         </div>
       {:else if data.total_cost === 0 && data.total_tokens === 0}
-        <div class="empty-period">No usage data for this period</div>
+        <div class="empty-period">{emptyPeriodLabel(period, offset)}</div>
       {:else}
         <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} />
       {/if}
