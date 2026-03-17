@@ -58,9 +58,9 @@ export function formatResetsIn(isoString: string | null): string {
   return hours > 0 ? `Resets in ${hours}h ${minutes}m` : `Resets in ${minutes}m`;
 }
 
-export function formatRetryIn(isoString: string | null): string {
+export function formatRetryIn(isoString: string | null, now = Date.now()): string {
   if (!isoString) return "";
-  const ms = new Date(isoString).getTime() - Date.now();
+  const ms = new Date(isoString).getTime() - now;
   if (ms <= 0) return "Retrying...";
 
   const totalSeconds = Math.ceil(ms / 1000);
