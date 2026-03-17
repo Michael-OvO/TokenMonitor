@@ -1,0 +1,63 @@
+import { describe, expect, it } from "vitest";
+import type { ProviderRateLimits, RateLimitsPayload } from "./types/index.js";
+import { footerFiveHourPct } from "./footerView.js";
+
+function providerRateLimits(
+  provider: "claude" | "codex",
+  windows: ProviderRateLimits["windows"],
+): ProviderRateLimits {
+  return {
+    provider,
+    planTier: null,
+    windows,
+    extraUsage: null,
+    stale: false,
+    error: null,
+    retryAfterSeconds: null,
+    cooldownUntil: null,
+    fetchedAt: "2026-03-17T12:00:00.000Z",
+  };
+}
+
+function makePayload(): RateLimitsPayload {
+  return {
+    claude: providerRateLimits("claude", [
+      {
+        windowId: "five_hour",
+        label: "Session (5hr)",
+        utilization: 61,
+        resetsAt: "2026-03-17T14:00:00.000Z",
+      },
+    ]),
+    codex: providerRateLimits("codex", [
+      {
+        windowId: "primary",
+        label: "Session (5hr)",
+        utilization: 4,
+        resetsAt: "2026-03-17T14:00:00.000Z",
+      },
+    ]),
+  };
+}
+
+describe("footerFiveHourPct", () => {
+  it("uses only the selected Claude provider window", () => {
+    expect(footerFiveHourPct(makePayload(), "claude")).toBe(61);
+  });
+
+  it("uses only the selected Codex provider window", () => {
+    expect(footerFiveHourPct(makePayload(), "codex")).toBe(4);
+  });
+
+  it("returns null when the selected provider has no usable 5h window", () => {
+    const payload = makePayload();
+    if (!payload.claude) throw new Error("expected claude payload");
+    payload.claude.windows = [];
+
+    expect(footerFiveHourPct(payload, "claude")).toBeNull();
+  });
+
+  it("uses the highest 5h utilization when all providers are selected", () => {
+    expect(footerFiveHourPct(makePayload(), "all")).toBe(61);
+  });
+});

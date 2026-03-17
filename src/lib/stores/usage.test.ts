@@ -1,22 +1,29 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
+import type { UsagePayload } from "../types/index.js";
 
-// Mock @tauri-apps/api/core before importing the module under test
 const mockInvoke = vi.fn();
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
 }));
 
-// Import after mock is set up
-const {
-  usageData,
-  isLoading,
-  fetchData,
-  warmCache,
-  warmAllPeriods,
-} = await import("./usage.js");
+vi.mock("../resizeDebug.js", () => ({
+  isResizeDebugEnabled: () => false,
+  logResizeDebug: vi.fn(),
+}));
 
-function makePayload(overrides: Record<string, unknown> = {}) {
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function makePayload(overrides: Partial<UsagePayload> = {}): UsagePayload {
   return {
     total_cost: 1.23,
     total_tokens: 5000,
@@ -27,125 +34,208 @@ function makePayload(overrides: Record<string, unknown> = {}) {
     model_breakdown: [],
     active_block: null,
     five_hour_cost: 0.5,
-    last_updated: new Date().toISOString(),
+    last_updated: "2026-03-16T00:00:00.000Z",
     from_cache: false,
+    period_label: "Today",
+    has_earlier_data: false,
     ...overrides,
   };
 }
 
+async function loadUsageModule() {
+  return import("./usage.js");
+}
+
 beforeEach(() => {
+  vi.resetModules();
+  vi.useRealTimers();
   mockInvoke.mockReset();
-  usageData.set(null);
-  isLoading.set(false);
 });
 
-// ── fetchData ───────────────────────────────────────────────────────
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("fetchData", () => {
-  it("cold path: fetches via invoke and updates store", async () => {
-    const payload = makePayload();
-    mockInvoke.mockResolvedValueOnce(payload);
+  it("replaces unrelated stale UI data with an empty payload during a cold fetch", async () => {
+    const { usageData, isLoading, fetchData } = await loadUsageModule();
+    usageData.set(makePayload({ total_cost: 99, period_label: "Wrong view" }));
 
-    await fetchData("claude", "day");
+    const request = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(request.promise);
+
+    const fetchPromise = fetchData("codex", "day");
+
+    expect(get(usageData)).toEqual(
+      expect.objectContaining({
+        total_cost: 0,
+        total_tokens: 0,
+        session_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        chart_buckets: [],
+        model_breakdown: [],
+        active_block: null,
+        five_hour_cost: 0,
+        from_cache: false,
+        period_label: "",
+        has_earlier_data: false,
+      }),
+    );
+    expect(get(isLoading)).toBe(true);
+
+    const fresh = makePayload({ total_cost: 8.75, period_label: "March 16, 2026" });
+    request.resolve(fresh);
+    await fetchPromise;
 
     expect(mockInvoke).toHaveBeenCalledWith("get_usage_data", {
-      provider: "claude",
+      provider: "codex",
       period: "day",
       offset: 0,
     });
-    expect(get(usageData)).toEqual(payload);
+    expect(get(usageData)).toEqual(fresh);
     expect(get(isLoading)).toBe(false);
   });
 
-  it("sets isLoading during cold fetch", async () => {
-    let loadingDuringFetch = false;
-    mockInvoke.mockImplementationOnce(() => {
-      loadingDuringFetch = get(isLoading);
-      return Promise.resolve(makePayload());
-    });
-
-    await fetchData("claude", "week");
-    expect(loadingDuringFetch).toBe(true);
-    expect(get(isLoading)).toBe(false);
-  });
-
-  it("handles invoke error without clobbering data", async () => {
-    const existing = makePayload({ total_cost: 99 });
-    usageData.set(existing);
-    mockInvoke.mockRejectedValueOnce(new Error("network fail"));
-
-    await fetchData("claude", "day");
-
-    // usageData should not be replaced with null on error
-    // (it may be set to null or keep old data depending on cache state)
-    expect(get(isLoading)).toBe(false);
-  });
-
-  it("warm cache path: shows cached data immediately then refreshes", async () => {
+  it("serves a warm cache entry synchronously and refreshes it in the background", async () => {
+    const { usageData, isLoading, fetchData } = await loadUsageModule();
     const cached = makePayload({ total_cost: 1.0 });
-    const fresh = makePayload({ total_cost: 2.0 });
-
-    // First call populates cache
     mockInvoke.mockResolvedValueOnce(cached);
     await fetchData("claude", "day");
+
+    const refresh = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(refresh.promise);
+
+    const fetchPromise = fetchData("claude", "day");
+
+    expect(get(usageData)).toEqual(cached);
+    expect(get(isLoading)).toBe(false);
+
+    await fetchPromise;
     expect(get(usageData)).toEqual(cached);
 
-    // Second call should show cached immediately, then refresh
-    mockInvoke.mockResolvedValueOnce(fresh);
-    await fetchData("claude", "day");
+    const fresh = makePayload({ total_cost: 2.0 });
+    refresh.resolve(fresh);
 
-    // Wait for background refresh to complete
     await vi.waitFor(() => {
-      expect(get(usageData)?.total_cost).toBe(2.0);
+      expect(get(usageData)).toEqual(fresh);
     });
+    expect(get(isLoading)).toBe(false);
   });
 
-  it("request deduplication: rapid calls only apply latest", async () => {
-    const slow = makePayload({ total_cost: 1.0 });
-    const fast = makePayload({ total_cost: 2.0 });
+  it("shows expired cache data while refetching and then replaces it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-16T12:00:00.000Z"));
 
-    // First invoke is slow, second is fast
-    mockInvoke
-      .mockImplementationOnce(
-        () => new Promise((r) => setTimeout(() => r(slow), 50)),
-      )
-      .mockResolvedValueOnce(fast);
+    const { usageData, isLoading, fetchData } = await loadUsageModule();
+    const cached = makePayload({ total_cost: 4.0 });
+    mockInvoke.mockResolvedValueOnce(cached);
+    await fetchData("claude", "week");
 
-    // Fire both without awaiting the first
-    const p1 = fetchData("claude", "5h");
-    const p2 = fetchData("claude", "week");
-    await Promise.all([p1, p2]);
+    vi.setSystemTime(new Date("2026-03-16T12:05:01.000Z"));
 
-    // The second call's data should win (higher request ID)
-    expect(get(usageData)).toEqual(fast);
+    const refresh = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(refresh.promise);
+
+    const fetchPromise = fetchData("claude", "week");
+
+    expect(get(usageData)).toEqual(cached);
+    expect(get(isLoading)).toBe(true);
+
+    const fresh = makePayload({ total_cost: 7.5 });
+    refresh.resolve(fresh);
+    await fetchPromise;
+
+    expect(get(usageData)).toEqual(fresh);
+    expect(get(isLoading)).toBe(false);
+  });
+
+  it("keeps expired cache data visible when a refresh fails", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-16T12:00:00.000Z"));
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { usageData, isLoading, fetchData } = await loadUsageModule();
+    const cached = makePayload({ total_cost: 4.0 });
+    mockInvoke.mockResolvedValueOnce(cached);
+    await fetchData("claude", "month");
+
+    vi.setSystemTime(new Date("2026-03-16T12:05:01.000Z"));
+    mockInvoke.mockRejectedValueOnce(new Error("backend unavailable"));
+
+    await fetchData("claude", "month");
+
+    expect(get(usageData)).toEqual(cached);
+    expect(get(isLoading)).toBe(false);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it("ignores stale responses from earlier requests", async () => {
+    const { usageData, isLoading, fetchData } = await loadUsageModule();
+    const slow = deferred<UsagePayload>();
+    const fast = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise);
+
+    const firstCall = fetchData("claude", "5h");
+    const secondCall = fetchData("claude", "week");
+
+    const latest = makePayload({ total_cost: 9.5, period_label: "This week" });
+    fast.resolve(latest);
+    await secondCall;
+
+    expect(get(usageData)).toEqual(latest);
+    expect(get(isLoading)).toBe(false);
+
+    slow.resolve(makePayload({ total_cost: 1.0, period_label: "Last 5 hours" }));
+    await firstCall;
+
+    expect(get(usageData)).toEqual(latest);
+    expect(get(isLoading)).toBe(false);
   });
 });
 
-// ── warmCache ───────────────────────────────────────────────────────
-
 describe("warmCache", () => {
-  it("calls invoke but does not update usageData store", async () => {
-    const payload = makePayload();
-    mockInvoke.mockResolvedValueOnce(payload);
+  it("fills the frontend cache without mutating the UI and makes the next fetch synchronous", async () => {
+    const { usageData, warmCache, fetchData } = await loadUsageModule();
+    const warmed = makePayload({ total_cost: 6.4 });
+    const warmRequest = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(warmRequest.promise);
 
-    warmCache("claude", "week");
+    warmCache("claude", "month");
+
     await vi.waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith("get_usage_data", {
         provider: "claude",
-        period: "week",
+        period: "month",
         offset: 0,
       });
     });
-
-    // usageData should remain null — warmCache only populates the internal cache
     expect(get(usageData)).toBeNull();
+
+    warmRequest.resolve(warmed);
+    await Promise.resolve();
+
+    const refresh = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(refresh.promise);
+
+    const fetchPromise = fetchData("claude", "month");
+
+    expect(get(usageData)).toEqual(warmed);
+    await fetchPromise;
+
+    const fresh = makePayload({ total_cost: 7.1 });
+    refresh.resolve(fresh);
+
+    await vi.waitFor(() => {
+      expect(get(usageData)).toEqual(fresh);
+    });
   });
 });
 
-// ── warmAllPeriods ──────────────────────────────────────────────────
-
 describe("warmAllPeriods", () => {
-  it("warms all periods except the skipped one", async () => {
+  it("warms every lightweight period except the skipped one", async () => {
+    const { warmAllPeriods } = await loadUsageModule();
     mockInvoke.mockResolvedValue(makePayload());
 
     warmAllPeriods("claude", "day");
@@ -154,13 +244,12 @@ describe("warmAllPeriods", () => {
       expect(mockInvoke).toHaveBeenCalledTimes(3);
     });
 
-    const calledPeriods = mockInvoke.mock.calls
-      .filter((c: unknown[]) => c[0] === "get_usage_data")
-      .map((c: unknown[]) => (c[1] as { period: string }).period);
-    expect(calledPeriods).not.toContain("day");
-    expect(calledPeriods).toContain("5h");
-    expect(calledPeriods).toContain("week");
-    expect(calledPeriods).toContain("month");
-    expect(calledPeriods).not.toContain("year");
+    const calledPeriods = new Set(
+      mockInvoke.mock.calls
+        .filter(([command]) => command === "get_usage_data")
+        .map(([, args]) => (args as { period: string }).period),
+    );
+
+    expect(calledPeriods).toEqual(new Set(["5h", "week", "month"]));
   });
 });
