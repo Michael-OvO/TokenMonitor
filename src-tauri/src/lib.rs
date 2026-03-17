@@ -2,6 +2,7 @@ mod commands;
 mod models;
 mod parser;
 mod pricing;
+mod rate_limits;
 
 #[cfg(target_os = "macos")]
 use commands::apply_default_window_surface;
@@ -88,9 +89,10 @@ pub fn run() {
             if let Err(err) = apply_default_window_surface(&app.handle()) {
                 eprintln!("failed to apply default native window surface: {err}");
             }
+            let window_clone = window.clone();
             window.on_window_event(move |event| {
                 if let WindowEvent::Focused(false) = event {
-                    // Popover behavior: window hides when unfocused
+                    let _ = window_clone.hide();
                 }
             });
 
@@ -111,6 +113,7 @@ pub fn run() {
             commands::set_refresh_interval,
             commands::set_show_tray_amount,
             commands::clear_cache,
+            commands::get_rate_limits,
         ])
         .run(tauri::generate_context!())
         .expect("error running TokenMonitor");

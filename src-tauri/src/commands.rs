@@ -21,6 +21,7 @@ pub struct AppState {
     pub refresh_interval: Arc<RwLock<u64>>,
     pub show_tray_amount: Arc<RwLock<bool>>,
     pub last_usage_debug: Arc<RwLock<Option<UsageDebugReport>>>,
+    pub cached_rate_limits: Arc<RwLock<Option<RateLimitsPayload>>>,
 }
 
 impl AppState {
@@ -30,6 +31,7 @@ impl AppState {
             refresh_interval: Arc::new(RwLock::new(30)),
             show_tray_amount: Arc::new(RwLock::new(true)),
             last_usage_debug: Arc::new(RwLock::new(None)),
+            cached_rate_limits: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -225,6 +227,30 @@ pub async fn set_show_tray_amount(
 pub async fn clear_cache(state: State<'_, AppState>) -> Result<(), String> {
     state.parser.clear_cache();
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_rate_limits(
+    provider: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<RateLimitsPayload, String> {
+    let selection = match provider.as_deref() {
+        None | Some("all") => crate::rate_limits::RateLimitSelection::All,
+        Some("claude") => crate::rate_limits::RateLimitSelection::Claude,
+        Some("codex") => crate::rate_limits::RateLimitSelection::Codex,
+        Some(other) => return Err(format!("Invalid provider for rate limits: {other}")),
+    };
+
+    let codex_dir = state.parser.codex_dir().to_path_buf();
+    let cached = state.cached_rate_limits.read().await.clone();
+    let fresh =
+        crate::rate_limits::fetch_selected_rate_limits(&codex_dir, selection, cached.as_ref())
+            .await;
+
+    let merged = crate::rate_limits::merge_rate_limits(fresh, cached.as_ref());
+
+    *state.cached_rate_limits.write().await = Some(merged.clone());
+    Ok(merged)
 }
 
 #[tauri::command]
@@ -830,7 +856,10 @@ mod tests {
 
         assert_eq!(payload.period_label, previous_year.to_string());
         assert_eq!(payload.chart_buckets.len(), 1);
-        assert_eq!(payload.chart_buckets[0].sort_key, format!("{previous_year}-06"));
+        assert_eq!(
+            payload.chart_buckets[0].sort_key,
+            format!("{previous_year}-06")
+        );
         assert_eq!(payload.model_breakdown.len(), 1);
         assert_eq!(payload.model_breakdown[0].model_key, "opus-4-6");
     }
@@ -937,6 +966,7 @@ mod tests {
             refresh_interval: Arc::new(RwLock::new(30)),
             show_tray_amount: Arc::new(RwLock::new(true)),
             last_usage_debug: Arc::new(RwLock::new(None)),
+            cached_rate_limits: Arc::new(RwLock::new(None)),
         };
 
         let payload = get_monthly_usage_sync(&state, "claude", 2026, 3);
@@ -972,6 +1002,7 @@ mod tests {
             refresh_interval: Arc::new(RwLock::new(30)),
             show_tray_amount: Arc::new(RwLock::new(true)),
             last_usage_debug: Arc::new(RwLock::new(None)),
+            cached_rate_limits: Arc::new(RwLock::new(None)),
         };
 
         let payload = get_monthly_usage_sync(&state, "claude", 2026, 2);
@@ -1006,6 +1037,7 @@ mod tests {
             refresh_interval: Arc::new(RwLock::new(30)),
             show_tray_amount: Arc::new(RwLock::new(true)),
             last_usage_debug: Arc::new(RwLock::new(None)),
+            cached_rate_limits: Arc::new(RwLock::new(None)),
         };
 
         let payload = get_monthly_usage_sync(&state, "all", 2026, 3);
