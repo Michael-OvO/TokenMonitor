@@ -57,7 +57,7 @@ describe("footerFiveHourPct", () => {
     expect(footerFiveHourPct(payload, "claude")).toBeNull();
   });
 
-  it("uses the highest 5h utilization when all providers are selected", () => {
-    expect(footerFiveHourPct(makePayload(), "all")).toBe(61);
+  it("returns null when all providers are selected", () => {
+    expect(footerFiveHourPct(makePayload(), "all")).toBeNull();
   });
 });

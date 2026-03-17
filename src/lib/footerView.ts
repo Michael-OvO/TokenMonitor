@@ -12,10 +12,7 @@ function fiveHourWindowsForProvider(
     return (rateLimits.codex?.windows ?? []).filter((w) => w.windowId === "primary");
   }
 
-  return [
-    ...(rateLimits.claude?.windows ?? []).filter((w) => w.windowId === "five_hour"),
-    ...(rateLimits.codex?.windows ?? []).filter((w) => w.windowId === "primary"),
-  ];
+  return [];
 }
 
 export function footerFiveHourPct(
