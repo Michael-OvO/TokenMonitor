@@ -87,6 +87,16 @@
     return 5;
   }
 
+  function formatUsdAmount(amount: number): string {
+    const wholeDollars = Math.abs(amount - Math.round(amount)) < 0.005;
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: wholeDollars ? 0 : 2,
+      maximumFractionDigits: 2,
+    }).format(amount);
+  }
+
   function emptySummary(): string {
     void refreshTick;
     const retryLabel = formatRetryIn(rateLimits.cooldownUntil);
@@ -158,7 +168,7 @@
     <div class="ub-row">
       <div class="ub-head">
         <span class="ub-label">Extra Usage</span>
-        <span class="ub-val">${rateLimits.extraUsage.usedCredits.toFixed(0)} / ${rateLimits.extraUsage.monthlyLimit.toFixed(0)}</span>
+        <span class="ub-val">{formatUsdAmount(rateLimits.extraUsage.usedCredits)} / {formatUsdAmount(rateLimits.extraUsage.monthlyLimit)}</span>
       </div>
       <div class="ub-track">
         <div
