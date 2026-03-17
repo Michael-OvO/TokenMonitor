@@ -1,3 +1,8 @@
+export type UsageProvider = "all" | "claude" | "codex";
+export type DefaultProvider = Exclude<UsageProvider, "all">;
+export type UsagePeriod = "5h" | "day" | "week" | "month" | "year";
+export type DefaultPeriod = Exclude<UsagePeriod, "year">;
+
 export interface UsagePayload {
   total_cost: number;
   total_tokens: number;
@@ -57,4 +62,37 @@ export interface MonthlyUsagePayload {
   month: number;
   days: CalendarDay[];
   total_cost: number;
+}
+
+// ── Rate limits ──
+
+export interface RateLimitWindow {
+  windowId: string;
+  label: string;
+  utilization: number;
+  resetsAt: string | null;
+}
+
+export interface ExtraUsageInfo {
+  isEnabled: boolean;
+  monthlyLimit: number;
+  usedCredits: number;
+  utilization: number | null;
+}
+
+export interface ProviderRateLimits {
+  provider: string;
+  planTier: string | null;
+  windows: RateLimitWindow[];
+  extraUsage: ExtraUsageInfo | null;
+  stale: boolean;
+  error: string | null;
+  retryAfterSeconds: number | null;
+  cooldownUntil: string | null;
+  fetchedAt: string;
+}
+
+export interface RateLimitsPayload {
+  claude: ProviderRateLimits | null;
+  codex: ProviderRateLimits | null;
 }
