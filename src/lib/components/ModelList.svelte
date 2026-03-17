@@ -59,7 +59,7 @@
     font-variant-numeric: tabular-nums;
   }
   .mr {
-    display: flex; align-items: center; padding: 5px 7px; border-radius: 6px;
+    display: flex; align-items: center; min-height: 24px; padding: 6px 7px; border-radius: 6px;
     transition: background .15s; gap: 7px;
   }
   .mr:hover { background: var(--surface-2); }
@@ -67,7 +67,7 @@
     background: var(--surface-2);
   }
   .mb { width: 2.5px; height: 14px; border-radius: 1.5px; flex-shrink: 0; }
-  .mn { font: 400 10px/1 'Inter', sans-serif; color: var(--t2); flex: 1; letter-spacing: .1px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mc { font: 500 10px/1 'Inter', sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }
-  .mt { font: 400 9px/1 'Inter', sans-serif; color: var(--t3); font-variant-numeric: tabular-nums; min-width: 32px; text-align: right; }
+  .mn { font: 400 10px/1.2 'Inter', sans-serif; color: var(--t2); flex: 1; letter-spacing: .1px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mc { font: 500 10px/1.2 'Inter', sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }
+  .mt { font: 400 9px/1.2 'Inter', sans-serif; color: var(--t3); font-variant-numeric: tabular-nums; min-width: 32px; text-align: right; }
 </style>

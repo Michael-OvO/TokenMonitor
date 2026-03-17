@@ -480,13 +480,14 @@
   .model-cell {
     display: flex;
     align-items: center;
+    min-height: 24px;
     gap: 5px;
-    padding: 5px 10px;
+    padding: 6px 10px;
   }
 
   .model-name {
     flex: 1;
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1.25 'Inter', sans-serif;
     color: var(--t1);
   }
 
