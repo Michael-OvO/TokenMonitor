@@ -5,7 +5,7 @@
   import { currencySymbol, modelColor } from "../utils/format.js";
   import { copyResizeDebugToClipboard, logResizeDebug } from "../resizeDebug.js";
   import { syncNativeWindowSurface } from "../windowAppearance.js";
-  import type { KnownModel } from "../types/index.js";
+  import type { KnownModel, TrayConfig } from "../types/index.js";
   import SegmentedControl from "./SegmentedControl.svelte";
   import ToggleSwitch from "./ToggleSwitch.svelte";
   import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
@@ -26,7 +26,14 @@
     currency: "USD",
     hiddenModels: [],
     brandTheming: true,
-    showTrayAmount: true,
+    trayConfig: {
+      barDisplay: 'both',
+      barProvider: 'claude',
+      showPercentages: false,
+      percentageFormat: 'compact',
+      showCost: true,
+      costPrecision: 'full',
+    },
     claudePlan: 0,
     codexPlan: 0,
   });
@@ -89,9 +96,10 @@
     updateSetting("codexPlan", parseInt(val));
   }
 
-  function handleShowTrayAmount(checked: boolean) {
-    updateSetting("showTrayAmount", checked);
-    invoke("set_show_tray_amount", { show: checked }).catch(() => {});
+  function handleTrayConfig<K extends keyof TrayConfig>(key: K, value: TrayConfig[K]) {
+    const next = { ...current.trayConfig, [key]: value };
+    updateSetting("trayConfig", next);
+    invoke("set_tray_config", { config: next }).catch(() => {});
   }
 
   function handlePeriod(val: string) {
@@ -239,18 +247,87 @@
             onChange={handleRefresh}
           />
         </div>
-        <div class="row border">
+        <div class="row">
           <span class="label">Brand Theming</span>
           <ToggleSwitch
             checked={current.brandTheming}
             onChange={handleBrandTheming}
           />
         </div>
-        <div class="row">
-          <span class="label">Menu Bar Cost</span>
+      </div>
+    </div>
+
+    <!-- Menu Bar -->
+    <div class="group">
+      <div class="group-label">Menu Bar</div>
+
+      <!-- Bars card -->
+      <div class="card" style="margin-bottom: 4px;">
+        <div class="row border">
+          <span class="label">Display</span>
+          <SegmentedControl
+            options={[
+              { value: "off", label: "Off" },
+              { value: "single", label: "Single" },
+              { value: "both", label: "Both" },
+            ]}
+            value={current.trayConfig.barDisplay}
+            onChange={(v) => handleTrayConfig("barDisplay", v as TrayConfig["barDisplay"])}
+          />
+        </div>
+        <div class="row" class:dim={current.trayConfig.barDisplay !== 'single'}>
+          <span class="label">Provider</span>
+          <SegmentedControl
+            options={[
+              { value: "claude", label: "Claude" },
+              { value: "codex", label: "Codex" },
+            ]}
+            value={current.trayConfig.barProvider}
+            onChange={(v) => handleTrayConfig("barProvider", v as TrayConfig["barProvider"])}
+          />
+        </div>
+      </div>
+
+      <!-- Percentages card -->
+      <div class="card" style="margin-bottom: 4px;">
+        <div class="row border">
+          <span class="label">Show Percentages</span>
           <ToggleSwitch
-            checked={current.showTrayAmount}
-            onChange={handleShowTrayAmount}
+            checked={current.trayConfig.showPercentages}
+            onChange={(checked) => handleTrayConfig("showPercentages", checked)}
+          />
+        </div>
+        <div class="row" class:dim={!current.trayConfig.showPercentages}>
+          <span class="label">Format</span>
+          <SegmentedControl
+            options={[
+              { value: "compact", label: "72 · 35" },
+              { value: "verbose", label: "Claude Code 72% Codex 35%" },
+            ]}
+            value={current.trayConfig.percentageFormat}
+            onChange={(v) => handleTrayConfig("percentageFormat", v as TrayConfig["percentageFormat"])}
+          />
+        </div>
+      </div>
+
+      <!-- Cost card -->
+      <div class="card">
+        <div class="row border">
+          <span class="label">Show Cost</span>
+          <ToggleSwitch
+            checked={current.trayConfig.showCost}
+            onChange={(checked) => handleTrayConfig("showCost", checked)}
+          />
+        </div>
+        <div class="row" class:dim={!current.trayConfig.showCost}>
+          <span class="label">Precision</span>
+          <SegmentedControl
+            options={[
+              { value: "whole", label: "$17" },
+              { value: "full", label: "$17.19" },
+            ]}
+            value={current.trayConfig.costPrecision}
+            onChange={(v) => handleTrayConfig("costPrecision", v as TrayConfig["costPrecision"])}
           />
         </div>
       </div>
@@ -452,6 +529,10 @@
   }
   .row.center {
     justify-content: center;
+  }
+  .row.dim {
+    opacity: 0.22;
+    pointer-events: none;
   }
 
   .actions {
