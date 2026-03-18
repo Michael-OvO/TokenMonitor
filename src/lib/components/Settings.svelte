@@ -6,6 +6,8 @@
   import { copyResizeDebugToClipboard, logResizeDebug } from "../resizeDebug.js";
   import { syncNativeWindowSurface } from "../windowAppearance.js";
   import type { KnownModel, TrayConfig, RateLimitsPayload } from "../types/index.js";
+  import { rateLimitsData } from "../stores/rateLimits.js";
+  import { syncTrayConfig } from "../traySync.js";
   import { formatTrayTitle } from "../trayTitle.js";
   import SegmentedControl from "./SegmentedControl.svelte";
   import ToggleSwitch from "./ToggleSwitch.svelte";
@@ -45,8 +47,8 @@
   let availableModels = $state<KnownModel[]>([]);
 
   const PREVIEW_RATE_LIMITS = {
-    claude: { provider: 'claude', planTier: null, windows: [{ windowId: 'p', label: 'Primary', utilization: 0.72, resetsAt: null }], extraUsage: null, stale: false, error: null, cooldownUntil: null, retryAfterSeconds: null, fetchedAt: '' },
-    codex: { provider: 'codex', planTier: null, windows: [{ windowId: 'p', label: 'Primary', utilization: 0.35, resetsAt: null }], extraUsage: null, stale: false, error: null, cooldownUntil: null, retryAfterSeconds: null, fetchedAt: '' },
+    claude: { provider: 'claude', planTier: null, windows: [{ windowId: 'p', label: 'Primary', utilization: 72, resetsAt: null }], extraUsage: null, stale: false, error: null, cooldownUntil: null, retryAfterSeconds: null, fetchedAt: '' },
+    codex: { provider: 'codex', planTier: null, windows: [{ windowId: 'p', label: 'Primary', utilization: 35, resetsAt: null }], extraUsage: null, stale: false, error: null, cooldownUntil: null, retryAfterSeconds: null, fetchedAt: '' },
   } as RateLimitsPayload;
 
   // Use a function call to ensure Svelte tracks all trayConfig fields
@@ -114,7 +116,7 @@
   function handleTrayConfig<K extends keyof TrayConfig>(key: K, value: TrayConfig[K]) {
     const next = { ...current.trayConfig, [key]: value };
     updateSetting("trayConfig", next);
-    invoke("set_tray_config", { config: next }).catch(() => {});
+    void syncTrayConfig(next, $rateLimitsData).catch(() => {});
   }
 
   function handlePeriod(val: string) {
@@ -280,9 +282,9 @@
         <div class="tp-inner">
           <!-- Icon (TokenMonitor winking face) -->
           <svg class="tp-icon" width="14" height="14" viewBox="0 0 44 44" fill="none">
-            <circle cx="22" cy="22" r="20" fill="currentColor" opacity="0.85"/>
-            <circle cx="16" cy="23" r="3" fill="var(--surface-1, #1c1c1e)"/>
-            <path d="M28 20l-4 3.5 4 3.5" stroke="var(--surface-1, #1c1c1e)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <circle cx="22" cy="22" r="20" fill="currentColor"/>
+            <circle cx="16" cy="23" r="3" fill="#262628"/>
+            <path d="M28 20l-4 3.5 4 3.5" stroke="#262628" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
           </svg>
           <!-- Bars -->
           {#if previewBarDisplay === 'both'}
@@ -574,8 +576,9 @@
     justify-content: center;
   }
   .row.dim {
-    opacity: 0.22;
+    opacity: 0.25;
     pointer-events: none;
+    transition: opacity 0.15s ease;
   }
 
   .actions {
@@ -679,6 +682,8 @@
     color: var(--t2);
   }
 
+  /* Tray preview — always renders as a dark macOS menu bar fragment,
+     regardless of app theme (the real menu bar is always dark). */
   .tray-preview {
     background: var(--surface-2);
     border-radius: 8px;
@@ -691,13 +696,16 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    background: rgba(0,0,0,0.3);
+    /* Always dark — matches real macOS dark menu bar */
+    background: #262628;
     border-radius: 5px;
     padding: 4px 8px;
     height: 22px;
+    border: 0.5px solid rgba(255,255,255,0.06);
   }
   .tp-icon {
-    color: var(--t2);
+    /* Always white inside the dark preview strip */
+    color: rgba(255,255,255,0.85);
     flex-shrink: 0;
   }
   .tp-bars {
@@ -708,7 +716,7 @@
   .tp-track {
     width: 32px;
     height: 2.5px;
-    background: rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.12);
     border-radius: 1.25px;
     overflow: hidden;
   }
@@ -727,7 +735,8 @@
     font: 400 10px/1 'Inter', -apple-system, sans-serif;
     font-variant-numeric: tabular-nums;
     letter-spacing: -0.2px;
-    color: var(--t2);
+    /* Always light text inside dark preview strip */
+    color: rgba(255,255,255,0.88);
     white-space: nowrap;
   }
 </style>
