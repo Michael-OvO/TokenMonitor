@@ -151,9 +151,53 @@ pub fn apply_default_window_surface(app: &AppHandle) -> Result<(), String> {
     apply_window_surface(&window, DEFAULT_DARK_SURFACE, DEFAULT_WINDOW_CORNER_RADIUS)
 }
 
-fn format_tray_title(config: &TrayConfig, total_cost: f64) -> String {
+fn format_tray_title(
+    config: &TrayConfig,
+    total_cost: f64,
+    claude_util: Option<f64>,
+    codex_util: Option<f64>,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
 
+    // Percentages
+    if config.show_percentages {
+        match config.bar_display.as_str() {
+            "both" => {
+                if let (Some(c), Some(x)) = (claude_util, codex_util) {
+                    let c_pct = (c * 100.0).round() as i64;
+                    let x_pct = (x * 100.0).round() as i64;
+                    if config.percentage_format == "compact" {
+                        parts.push(format!("{} · {}", c_pct, x_pct));
+                    } else {
+                        parts.push(format!("Claude Code {}%  Codex {}%", c_pct, x_pct));
+                    }
+                }
+            }
+            "single" => {
+                let util = if config.bar_provider == "claude" {
+                    claude_util
+                } else {
+                    codex_util
+                };
+                if let Some(u) = util {
+                    let pct = (u * 100.0).round() as i64;
+                    if config.percentage_format == "compact" {
+                        parts.push(format!("{}", pct));
+                    } else {
+                        let name = if config.bar_provider == "claude" {
+                            "Claude Code"
+                        } else {
+                            "Codex"
+                        };
+                        parts.push(format!("{} {}%", name, pct));
+                    }
+                }
+            }
+            _ => {} // "off" — no percentages
+        }
+    }
+
+    // Cost
     if config.show_cost {
         if config.cost_precision == "whole" {
             parts.push(format!("${}", total_cost.round() as i64));
@@ -167,14 +211,28 @@ fn format_tray_title(config: &TrayConfig, total_cost: f64) -> String {
 
 pub async fn sync_tray_title(app: &tauri::AppHandle, state: &AppState) {
     let config = state.tray_config.read().await.clone();
-    let title = if config.show_cost {
-        let today = Local::now().format("%Y%m%d").to_string();
-        let claude = state.parser.get_daily("claude", &today);
-        let codex = state.parser.get_daily("codex", &today);
-        format_tray_title(&config, claude.total_cost + codex.total_cost)
-    } else {
-        String::new()
-    };
+
+    // Always compute — could have percentages, cost, or both
+    let today = Local::now().format("%Y%m%d").to_string();
+    let claude = state.parser.get_daily("claude", &today);
+    let codex = state.parser.get_daily("codex", &today);
+    let total_cost = claude.total_cost + codex.total_cost;
+
+    // Read cached rate limits for utilization
+    let rate_limits = state.cached_rate_limits.read().await;
+    let claude_util = rate_limits
+        .as_ref()
+        .and_then(|rl| rl.claude.as_ref())
+        .and_then(|c| c.windows.first())
+        .map(|w| w.utilization);
+    let codex_util = rate_limits
+        .as_ref()
+        .and_then(|rl| rl.codex.as_ref())
+        .and_then(|c| c.windows.first())
+        .map(|w| w.utilization);
+    drop(rate_limits);
+
+    let title = format_tray_title(&config, total_cost, claude_util, codex_util);
 
     if let Some(tray) = app.tray_by_id("main-tray") {
         let _ = tray.set_title(Some(title));
@@ -754,16 +812,48 @@ mod tests {
             show_cost: false,
             ..TrayConfig::default()
         };
-        assert_eq!(format_tray_title(&config, 12.34), "");
+        assert_eq!(format_tray_title(&config, 12.34, None, None), "");
     }
 
     #[test]
     fn format_tray_title_formats_cost_when_visible() {
+        let config = TrayConfig::default(); // show_cost: true, cost_precision: "full"
+        assert_eq!(format_tray_title(&config, 12.345, None, None), "$12.35");
+    }
+
+    #[test]
+    fn format_tray_title_whole_cost() {
         let config = TrayConfig {
-            show_cost: true,
+            cost_precision: "whole".to_string(),
             ..TrayConfig::default()
         };
-        assert_eq!(format_tray_title(&config, 12.345), "$12.35");
+        assert_eq!(format_tray_title(&config, 12.345, None, None), "$12");
+    }
+
+    #[test]
+    fn format_tray_title_compact_percentages() {
+        let config = TrayConfig {
+            show_percentages: true,
+            ..TrayConfig::default()
+        };
+        assert_eq!(
+            format_tray_title(&config, 5.0, Some(0.72), Some(0.35)),
+            "72 · 35  $5.00"
+        );
+    }
+
+    #[test]
+    fn format_tray_title_verbose_percentages() {
+        let config = TrayConfig {
+            show_percentages: true,
+            percentage_format: "verbose".to_string(),
+            show_cost: false,
+            ..TrayConfig::default()
+        };
+        assert_eq!(
+            format_tray_title(&config, 0.0, Some(0.72), Some(0.35)),
+            "Claude Code 72%  Codex 35%"
+        );
     }
 
     #[test]
