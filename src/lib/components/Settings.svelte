@@ -49,7 +49,14 @@
     codex: { provider: 'codex', planTier: null, windows: [{ windowId: 'p', label: 'Primary', utilization: 0.35, resetsAt: null }], extraUsage: null, stale: false, error: null, cooldownUntil: null, retryAfterSeconds: null, fetchedAt: '' },
   } as RateLimitsPayload;
 
-  let titlePreview = $derived(formatTrayTitle(current.trayConfig, PREVIEW_RATE_LIMITS, 17.19));
+  // Use a function call to ensure Svelte tracks all trayConfig fields
+  let titlePreview = $derived.by(() => {
+    const cfg = current.trayConfig;
+    return formatTrayTitle(cfg, PREVIEW_RATE_LIMITS, 17.19);
+  });
+
+  let previewBarDisplay = $derived(current.trayConfig.barDisplay);
+  let previewBarProvider = $derived(current.trayConfig.barProvider);
 
   $effect(() => {
     const unsub = settings.subscribe((s) => {
@@ -271,21 +278,22 @@
 
       <div class="tray-preview">
         <div class="tp-inner">
-          <!-- Icon -->
-          <svg class="tp-icon" width="12" height="12" viewBox="0 0 16 16" fill="none">
-            <rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" stroke-width="1.3"/>
-            <path d="M5 7h6M5 10h4" stroke="currentColor" stroke-width="0.9" stroke-linecap="round"/>
+          <!-- Icon (TokenMonitor winking face) -->
+          <svg class="tp-icon" width="14" height="14" viewBox="0 0 44 44" fill="none">
+            <circle cx="22" cy="22" r="20" fill="currentColor" opacity="0.85"/>
+            <circle cx="16" cy="23" r="3" fill="var(--surface-1, #1c1c1e)"/>
+            <path d="M28 20l-4 3.5 4 3.5" stroke="var(--surface-1, #1c1c1e)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
           </svg>
           <!-- Bars -->
-          {#if current.trayConfig.barDisplay === 'both'}
+          {#if previewBarDisplay === 'both'}
             <div class="tp-bars">
               <div class="tp-track"><div class="tp-fill claude" style="width:72%"></div></div>
               <div class="tp-track"><div class="tp-fill codex" style="width:35%"></div></div>
             </div>
-          {:else if current.trayConfig.barDisplay === 'single'}
+          {:else if previewBarDisplay === 'single'}
             <div class="tp-bars">
               <div class="tp-track single">
-                <div class="tp-fill {current.trayConfig.barProvider}" style="width:72%"></div>
+                <div class="tp-fill {previewBarProvider}" style="width:72%"></div>
               </div>
             </div>
           {/if}

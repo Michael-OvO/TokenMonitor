@@ -318,6 +318,7 @@ pub async fn clear_cache(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn get_rate_limits(
     provider: Option<String>,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RateLimitsPayload, String> {
     let selection = match provider.as_deref() {
@@ -336,6 +337,10 @@ pub async fn get_rate_limits(
     let merged = crate::rate_limits::merge_rate_limits(fresh, cached.as_ref());
 
     *state.cached_rate_limits.write().await = Some(merged.clone());
+
+    // Sync tray title with fresh rate limit data
+    sync_tray_title(&app, &state).await;
+
     Ok(merged)
 }
 
