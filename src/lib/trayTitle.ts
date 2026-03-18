@@ -6,7 +6,7 @@ function primaryUtilization(
 ): number | null {
   const data = rateLimits?.[provider];
   if (!data || data.windows.length === 0) return null;
-  return Math.round(data.windows[0].utilization * 100);
+  return Math.round(data.windows[0].utilization);
 }
 
 export function formatTrayTitle(
@@ -16,28 +16,28 @@ export function formatTrayTitle(
 ): string {
   const parts: string[] = [];
 
-  // Percentages
+  // Percentages — independent of barDisplay
   if (config.showPercentages) {
     const claudePct = primaryUtilization(rateLimits, 'claude');
     const codexPct = primaryUtilization(rateLimits, 'codex');
 
-    if (config.barDisplay === 'both') {
-      if (claudePct !== null && codexPct !== null) {
-        if (config.percentageFormat === 'compact') {
-          parts.push(`${claudePct} · ${codexPct}`);
-        } else {
-          parts.push(`Claude Code ${claudePct}%  Codex ${codexPct}%`);
-        }
+    if (claudePct !== null && codexPct !== null) {
+      if (config.percentageFormat === 'compact') {
+        parts.push(`${claudePct} · ${codexPct}`);
+      } else {
+        parts.push(`Claude Code ${claudePct}%  Codex ${codexPct}%`);
       }
-    } else if (config.barDisplay === 'single') {
-      const pct = primaryUtilization(rateLimits, config.barProvider);
-      if (pct !== null) {
-        if (config.percentageFormat === 'compact') {
-          parts.push(`${pct}`);
-        } else {
-          const name = config.barProvider === 'claude' ? 'Claude Code' : 'Codex';
-          parts.push(`${name} ${pct}%`);
-        }
+    } else if (claudePct !== null) {
+      if (config.percentageFormat === 'compact') {
+        parts.push(`${claudePct}`);
+      } else {
+        parts.push(`Claude Code ${claudePct}%`);
+      }
+    } else if (codexPct !== null) {
+      if (config.percentageFormat === 'compact') {
+        parts.push(`${codexPct}`);
+      } else {
+        parts.push(`Codex ${codexPct}%`);
       }
     }
   }

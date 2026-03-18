@@ -173,41 +173,31 @@ fn format_tray_title(
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    // Percentages — utilization values are already 0–100
+    // Percentages — independent of bar_display.
+    // Utilization values are already 0–100.
     if config.show_percentages {
-        match config.bar_display.as_str() {
-            "both" => {
-                if let (Some(c), Some(x)) = (claude_util, codex_util) {
-                    let c_pct = c.round() as i64;
-                    let x_pct = x.round() as i64;
-                    if config.percentage_format == "compact" {
-                        parts.push(format!("{} · {}", c_pct, x_pct));
-                    } else {
-                        parts.push(format!("Claude Code {}%  Codex {}%", c_pct, x_pct));
-                    }
-                }
+        if let (Some(c), Some(x)) = (claude_util, codex_util) {
+            let c_pct = c.round() as i64;
+            let x_pct = x.round() as i64;
+            if config.percentage_format == "compact" {
+                parts.push(format!("{} · {}", c_pct, x_pct));
+            } else {
+                parts.push(format!("Claude Code {}%  Codex {}%", c_pct, x_pct));
             }
-            "single" => {
-                let util = if config.bar_provider == "claude" {
-                    claude_util
-                } else {
-                    codex_util
-                };
-                if let Some(u) = util {
-                    let pct = u.round() as i64;
-                    if config.percentage_format == "compact" {
-                        parts.push(format!("{}", pct));
-                    } else {
-                        let name = if config.bar_provider == "claude" {
-                            "Claude Code"
-                        } else {
-                            "Codex"
-                        };
-                        parts.push(format!("{} {}%", name, pct));
-                    }
-                }
+        } else if let Some(c) = claude_util {
+            let pct = c.round() as i64;
+            if config.percentage_format == "compact" {
+                parts.push(format!("{}", pct));
+            } else {
+                parts.push(format!("Claude Code {}%", pct));
             }
-            _ => {} // "off" — no percentages
+        } else if let Some(x) = codex_util {
+            let pct = x.round() as i64;
+            if config.percentage_format == "compact" {
+                parts.push(format!("{}", pct));
+            } else {
+                parts.push(format!("Codex {}%", pct));
+            }
         }
     }
 

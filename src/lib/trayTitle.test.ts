@@ -15,7 +15,7 @@ const RATE_LIMITS: RateLimitsPayload = {
   claude: {
     provider: 'claude',
     planTier: 'Max 5x',
-    windows: [{ windowId: 'w1', label: 'Primary', utilization: 0.72, resetsAt: null }],
+    windows: [{ windowId: 'w1', label: 'Primary', utilization: 72, resetsAt: null }],
     extraUsage: null,
     stale: false,
     error: null,
@@ -26,7 +26,7 @@ const RATE_LIMITS: RateLimitsPayload = {
   codex: {
     provider: 'codex',
     planTier: 'Pro',
-    windows: [{ windowId: 'w2', label: 'Primary', utilization: 0.35, resetsAt: null }],
+    windows: [{ windowId: 'w2', label: 'Primary', utilization: 35, resetsAt: null }],
     extraUsage: null,
     stale: false,
     error: null,
@@ -61,9 +61,14 @@ describe("formatTrayTitle", () => {
     expect(formatTrayTitle(config, RATE_LIMITS, 12.456)).toBe("");
   });
 
-  it("shows single provider percentage", () => {
+  it("shows both percentages even when barDisplay is single", () => {
     const config = { ...DEFAULT_CONFIG, barDisplay: 'single' as const, barProvider: 'claude' as const };
-    expect(formatTrayTitle(config, RATE_LIMITS, 12.456)).toBe("72  $12.46");
+    expect(formatTrayTitle(config, RATE_LIMITS, 12.456)).toBe("72 · 35  $12.46");
+  });
+
+  it("shows percentages when barDisplay is off", () => {
+    const config = { ...DEFAULT_CONFIG, barDisplay: 'off' as const };
+    expect(formatTrayTitle(config, RATE_LIMITS, 12.456)).toBe("72 · 35  $12.46");
   });
 
   it("shows verbose format", () => {
