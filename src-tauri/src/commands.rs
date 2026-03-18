@@ -16,10 +16,34 @@ use tauri::AppHandle;
 #[cfg(target_os = "macos")]
 use tokio::sync::oneshot;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayConfig {
+    pub bar_display: String,       // "off" | "single" | "both"
+    pub bar_provider: String,      // "claude" | "codex"
+    pub show_percentages: bool,
+    pub percentage_format: String, // "compact" | "verbose"
+    pub show_cost: bool,
+    pub cost_precision: String,    // "whole" | "full"
+}
+
+impl Default for TrayConfig {
+    fn default() -> Self {
+        Self {
+            bar_display: "both".to_string(),
+            bar_provider: "claude".to_string(),
+            show_percentages: false,
+            percentage_format: "compact".to_string(),
+            show_cost: true,
+            cost_precision: "full".to_string(),
+        }
+    }
+}
+
 pub struct AppState {
     pub parser: Arc<UsageParser>,
     pub refresh_interval: Arc<RwLock<u64>>,
-    pub show_tray_amount: Arc<RwLock<bool>>,
+    pub tray_config: Arc<RwLock<TrayConfig>>,
     pub last_usage_debug: Arc<RwLock<Option<UsageDebugReport>>>,
     pub cached_rate_limits: Arc<RwLock<Option<RateLimitsPayload>>>,
 }
@@ -29,7 +53,7 @@ impl AppState {
         Self {
             parser: Arc::new(UsageParser::new()),
             refresh_interval: Arc::new(RwLock::new(30)),
-            show_tray_amount: Arc::new(RwLock::new(true)),
+            tray_config: Arc::new(RwLock::new(TrayConfig::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
         }
@@ -127,28 +151,32 @@ pub fn apply_default_window_surface(app: &AppHandle) -> Result<(), String> {
     apply_window_surface(&window, DEFAULT_DARK_SURFACE, DEFAULT_WINDOW_CORNER_RADIUS)
 }
 
-fn format_tray_title(show: bool, total_cost: f64) -> String {
-    if show {
-        format!("${:.2}", total_cost)
-    } else {
-        String::new()
+fn format_tray_title(config: &TrayConfig, total_cost: f64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if config.show_cost {
+        if config.cost_precision == "whole" {
+            parts.push(format!("${}", total_cost.round() as i64));
+        } else {
+            parts.push(format!("${:.2}", total_cost));
+        }
     }
+
+    parts.join("  ")
 }
 
 pub async fn sync_tray_title(app: &tauri::AppHandle, state: &AppState) {
-    let show = *state.show_tray_amount.read().await;
-    let title = if show {
+    let config = state.tray_config.read().await.clone();
+    let title = if config.show_cost {
         let today = Local::now().format("%Y%m%d").to_string();
         let claude = state.parser.get_daily("claude", &today);
         let codex = state.parser.get_daily("codex", &today);
-        format_tray_title(true, claude.total_cost + codex.total_cost)
+        format_tray_title(&config, claude.total_cost + codex.total_cost)
     } else {
-        format_tray_title(false, 0.0)
+        String::new()
     };
 
     if let Some(tray) = app.tray_by_id("main-tray") {
-        // `tray-icon` on macOS ignores `None` here, so clearing must use an
-        // empty string to collapse the title width immediately.
         let _ = tray.set_title(Some(title));
     }
 }
@@ -209,13 +237,13 @@ pub async fn set_refresh_interval(interval: u64, state: State<'_, AppState>) -> 
 }
 
 #[tauri::command]
-pub async fn set_show_tray_amount(
-    show: bool,
+pub async fn set_tray_config(
+    config: TrayConfig,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut current = state.show_tray_amount.write().await;
-    *current = show;
+    let mut current = state.tray_config.write().await;
+    *current = config;
     drop(current);
 
     sync_tray_title(&app, &state).await;
@@ -722,12 +750,20 @@ mod tests {
 
     #[test]
     fn format_tray_title_returns_empty_string_when_hidden() {
-        assert_eq!(format_tray_title(false, 12.34), "");
+        let config = TrayConfig {
+            show_cost: false,
+            ..TrayConfig::default()
+        };
+        assert_eq!(format_tray_title(&config, 12.34), "");
     }
 
     #[test]
     fn format_tray_title_formats_cost_when_visible() {
-        assert_eq!(format_tray_title(true, 12.345), "$12.35");
+        let config = TrayConfig {
+            show_cost: true,
+            ..TrayConfig::default()
+        };
+        assert_eq!(format_tray_title(&config, 12.345), "$12.35");
     }
 
     #[test]
@@ -964,7 +1000,7 @@ mod tests {
         let state = AppState {
             parser: Arc::new(parser),
             refresh_interval: Arc::new(RwLock::new(30)),
-            show_tray_amount: Arc::new(RwLock::new(true)),
+            tray_config: Arc::new(RwLock::new(TrayConfig::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
         };
@@ -1000,7 +1036,7 @@ mod tests {
         let state = AppState {
             parser: Arc::new(parser),
             refresh_interval: Arc::new(RwLock::new(30)),
-            show_tray_amount: Arc::new(RwLock::new(true)),
+            tray_config: Arc::new(RwLock::new(TrayConfig::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
         };
@@ -1035,7 +1071,7 @@ mod tests {
         let state = AppState {
             parser: Arc::new(parser),
             refresh_interval: Arc::new(RwLock::new(30)),
-            show_tray_amount: Arc::new(RwLock::new(true)),
+            tray_config: Arc::new(RwLock::new(TrayConfig::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
         };
