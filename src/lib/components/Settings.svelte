@@ -6,6 +6,8 @@
   import { copyResizeDebugToClipboard, logResizeDebug } from "../resizeDebug.js";
   import { syncNativeWindowSurface } from "../windowAppearance.js";
   import type { KnownModel, TrayConfig } from "../types/index.js";
+  import { rateLimitsData } from "../stores/rateLimits.js";
+  import MenuBarPreview from "./MenuBarPreview.svelte";
   import SegmentedControl from "./SegmentedControl.svelte";
   import ToggleSwitch from "./ToggleSwitch.svelte";
   import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
@@ -42,6 +44,7 @@
   let costEnabled = $state(true);
   let copiedDebug = $state(false);
   let availableModels = $state<KnownModel[]>([]);
+  let previewTotalCost = $derived(0);
 
   $effect(() => {
     const unsub = settings.subscribe((s) => {
@@ -260,6 +263,12 @@
     <!-- Menu Bar -->
     <div class="group">
       <div class="group-label">Menu Bar</div>
+
+      <MenuBarPreview
+        config={current.trayConfig}
+        rateLimits={$rateLimitsData}
+        totalCost={previewTotalCost}
+      />
 
       <!-- Bars card -->
       <div class="card" style="margin-bottom: 4px;">
