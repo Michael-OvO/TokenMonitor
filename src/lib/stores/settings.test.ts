@@ -44,7 +44,14 @@ describe("loadSettings", () => {
       currency: "EUR",
       hiddenModels: ["haiku"],
       refreshInterval: 300,
-      showTrayAmount: false,
+      trayConfig: {
+        barDisplay: 'both',
+        barProvider: 'claude',
+        showPercentages: false,
+        percentageFormat: 'compact',
+        showCost: false,
+        costPrecision: 'full',
+      },
     });
     mockLoad.mockResolvedValueOnce(store);
 
@@ -66,7 +73,14 @@ describe("loadSettings", () => {
       currency: "EUR",
       hiddenModels: ["haiku"],
       brandTheming: true,
-      showTrayAmount: false,
+      trayConfig: {
+        barDisplay: 'both',
+        barProvider: 'claude',
+        showPercentages: false,
+        percentageFormat: 'compact',
+        showCost: false,
+        costPrecision: 'full',
+      },
       claudePlan: 0,
       codexPlan: 0,
     });
@@ -100,7 +114,14 @@ describe("loadSettings", () => {
       currency: "USD",
       hiddenModels: [],
       brandTheming: true,
-      showTrayAmount: true,
+      trayConfig: {
+        barDisplay: 'both',
+        barProvider: 'claude',
+        showPercentages: false,
+        percentageFormat: 'compact',
+        showCost: true,
+        costPrecision: 'full',
+      },
       claudePlan: 0,
       codexPlan: 0,
     });

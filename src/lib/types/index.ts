@@ -97,6 +97,19 @@ export interface RateLimitsPayload {
   codex: ProviderRateLimits | null;
 }
 
+export type BarDisplay = 'off' | 'single' | 'both';
+export type PercentageFormat = 'compact' | 'verbose';
+export type CostPrecision = 'whole' | 'full';
+
+export interface TrayConfig {
+  barDisplay: BarDisplay;
+  barProvider: 'claude' | 'codex';
+  showPercentages: boolean;
+  percentageFormat: PercentageFormat;
+  showCost: boolean;
+  costPrecision: CostPrecision;
+}
+
 export interface RateLimitRequestState {
   loading: boolean;
   loaded: boolean;
