@@ -19,12 +19,12 @@ use tokio::sync::oneshot;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrayConfig {
-    pub bar_display: String,       // "off" | "single" | "both"
-    pub bar_provider: String,      // "claude" | "codex"
+    pub bar_display: String,  // "off" | "single" | "both"
+    pub bar_provider: String, // "claude" | "codex"
     pub show_percentages: bool,
     pub percentage_format: String, // "compact" | "verbose"
     pub show_cost: bool,
-    pub cost_precision: String,    // "whole" | "full"
+    pub cost_precision: String, // "whole" | "full"
 }
 
 impl Default for TrayConfig {
@@ -40,10 +40,23 @@ impl Default for TrayConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct TrayUtilization {
+    claude: Option<f64>,
+    codex: Option<f64>,
+}
+
+impl TrayUtilization {
+    fn has_any(self) -> bool {
+        self.claude.is_some() || self.codex.is_some()
+    }
+}
+
 pub struct AppState {
     pub parser: Arc<UsageParser>,
     pub refresh_interval: Arc<RwLock<u64>>,
     pub tray_config: Arc<RwLock<TrayConfig>>,
+    tray_utilization: Arc<RwLock<TrayUtilization>>,
     pub last_usage_debug: Arc<RwLock<Option<UsageDebugReport>>>,
     pub cached_rate_limits: Arc<RwLock<Option<RateLimitsPayload>>>,
 }
@@ -54,6 +67,7 @@ impl AppState {
             parser: Arc::new(UsageParser::new()),
             refresh_interval: Arc::new(RwLock::new(30)),
             tray_config: Arc::new(RwLock::new(TrayConfig::default())),
+            tray_utilization: Arc::new(RwLock::new(TrayUtilization::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
         }
@@ -159,13 +173,13 @@ fn format_tray_title(
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    // Percentages
+    // Percentages — utilization values are already 0–100
     if config.show_percentages {
         match config.bar_display.as_str() {
             "both" => {
                 if let (Some(c), Some(x)) = (claude_util, codex_util) {
-                    let c_pct = (c * 100.0).round() as i64;
-                    let x_pct = (x * 100.0).round() as i64;
+                    let c_pct = c.round() as i64;
+                    let x_pct = x.round() as i64;
                     if config.percentage_format == "compact" {
                         parts.push(format!("{} · {}", c_pct, x_pct));
                     } else {
@@ -180,7 +194,7 @@ fn format_tray_title(
                     codex_util
                 };
                 if let Some(u) = util {
-                    let pct = (u * 100.0).round() as i64;
+                    let pct = u.round() as i64;
                     if config.percentage_format == "compact" {
                         parts.push(format!("{}", pct));
                     } else {
@@ -209,34 +223,93 @@ fn format_tray_title(
     parts.join("  ")
 }
 
-pub async fn sync_tray_title(app: &tauri::AppHandle, state: &AppState) {
-    let config = state.tray_config.read().await.clone();
+fn primary_window_utilization(rate_limits: Option<&ProviderRateLimits>) -> Option<f64> {
+    rate_limits
+        .and_then(|provider| provider.windows.first())
+        .map(|window| window.utilization)
+}
 
-    // Always compute — could have percentages, cost, or both
+fn tray_utilization_from_rate_limits(payload: Option<&RateLimitsPayload>) -> TrayUtilization {
+    TrayUtilization {
+        claude: primary_window_utilization(
+            payload.and_then(|rate_limits| rate_limits.claude.as_ref()),
+        ),
+        codex: primary_window_utilization(
+            payload.and_then(|rate_limits| rate_limits.codex.as_ref()),
+        ),
+    }
+}
+
+fn merge_tray_utilization(current: TrayUtilization, patch: TrayUtilization) -> TrayUtilization {
+    TrayUtilization {
+        claude: patch.claude.or(current.claude),
+        codex: patch.codex.or(current.codex),
+    }
+}
+
+fn current_daily_total_cost(state: &AppState) -> f64 {
     let today = Local::now().format("%Y%m%d").to_string();
     let claude = state.parser.get_daily("claude", &today);
     let codex = state.parser.get_daily("codex", &today);
-    let total_cost = claude.total_cost + codex.total_cost;
+    claude.total_cost + codex.total_cost
+}
 
-    // Read cached rate limits for utilization
-    let rate_limits = state.cached_rate_limits.read().await;
-    let claude_util = rate_limits
-        .as_ref()
-        .and_then(|rl| rl.claude.as_ref())
-        .and_then(|c| c.windows.first())
-        .map(|w| w.utilization);
-    let codex_util = rate_limits
-        .as_ref()
-        .and_then(|rl| rl.codex.as_ref())
-        .and_then(|c| c.windows.first())
-        .map(|w| w.utilization);
-    drop(rate_limits);
+fn should_update_tray_icon(config: &TrayConfig, utilization: TrayUtilization) -> bool {
+    config.bar_display == "off" || utilization.has_any()
+}
 
-    let title = format_tray_title(&config, total_cost, claude_util, codex_util);
+fn apply_tray_presentation(
+    app: &tauri::AppHandle,
+    config: &TrayConfig,
+    total_cost: f64,
+    utilization: TrayUtilization,
+) {
+    let title = format_tray_title(config, total_cost, utilization.claude, utilization.codex);
 
     if let Some(tray) = app.tray_by_id("main-tray") {
         let _ = tray.set_title(Some(title));
+
+        if should_update_tray_icon(config, utilization) {
+            let base_icon = include_bytes!("../icons/tray-icon@2x.rgba");
+            let dark_bar = crate::tray_render::is_menu_bar_dark();
+            let (icon_buf, w, h, use_template) = crate::tray_render::render_tray_icon(
+                base_icon,
+                config,
+                utilization.claude,
+                utilization.codex,
+                dark_bar,
+            );
+            let expected_size = (w * h * 4) as usize;
+            if icon_buf.len() == expected_size {
+                let icon = tauri::image::Image::new_owned(icon_buf, w, h);
+                let _ = tray.set_icon(Some(icon));
+                let _ = tray.set_icon_as_template(use_template);
+            }
+        }
     }
+}
+
+async fn patch_tray_utilization(state: &AppState, patch: TrayUtilization) -> TrayUtilization {
+    let mut current = state.tray_utilization.write().await;
+    *current = merge_tray_utilization(*current, patch);
+    *current
+}
+
+async fn current_tray_utilization(state: &AppState) -> TrayUtilization {
+    let current = *state.tray_utilization.read().await;
+    if current.has_any() {
+        return current;
+    }
+
+    let cached = state.cached_rate_limits.read().await;
+    tray_utilization_from_rate_limits(cached.as_ref())
+}
+
+pub async fn sync_tray_title(app: &tauri::AppHandle, state: &AppState) {
+    let config = state.tray_config.read().await.clone();
+    let total_cost = current_daily_total_cost(state);
+    let utilization = current_tray_utilization(state).await;
+    apply_tray_presentation(app, &config, total_cost, utilization);
 }
 
 async fn set_last_usage_debug(state: &AppState, report: UsageDebugReport) {
@@ -297,14 +370,30 @@ pub async fn set_refresh_interval(interval: u64, state: State<'_, AppState>) -> 
 #[tauri::command]
 pub async fn set_tray_config(
     config: TrayConfig,
+    claude_util: Option<f64>,
+    codex_util: Option<f64>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut current = state.tray_config.write().await;
-    *current = config;
-    drop(current);
+    {
+        let mut current = state.tray_config.write().await;
+        *current = config.clone();
+    }
 
-    sync_tray_title(&app, &state).await;
+    let utilization = if claude_util.is_some() || codex_util.is_some() {
+        patch_tray_utilization(
+            &state,
+            TrayUtilization {
+                claude: claude_util,
+                codex: codex_util,
+            },
+        )
+        .await
+    } else {
+        current_tray_utilization(&state).await
+    };
+
+    apply_tray_presentation(&app, &config, current_daily_total_cost(&state), utilization);
 
     Ok(())
 }
@@ -337,8 +426,8 @@ pub async fn get_rate_limits(
     let merged = crate::rate_limits::merge_rate_limits(fresh, cached.as_ref());
 
     *state.cached_rate_limits.write().await = Some(merged.clone());
+    patch_tray_utilization(&state, tray_utilization_from_rate_limits(Some(&merged))).await;
 
-    // Sync tray title with fresh rate limit data
     sync_tray_title(&app, &state).await;
 
     Ok(merged)
@@ -842,7 +931,7 @@ mod tests {
             ..TrayConfig::default()
         };
         assert_eq!(
-            format_tray_title(&config, 5.0, Some(0.72), Some(0.35)),
+            format_tray_title(&config, 5.0, Some(72.0), Some(35.0)),
             "72 · 35  $5.00"
         );
     }
@@ -856,9 +945,112 @@ mod tests {
             ..TrayConfig::default()
         };
         assert_eq!(
-            format_tray_title(&config, 0.0, Some(0.72), Some(0.35)),
+            format_tray_title(&config, 0.0, Some(72.0), Some(35.0)),
             "Claude Code 72%  Codex 35%"
         );
+    }
+
+    #[test]
+    fn merge_tray_utilization_keeps_existing_values_when_patch_is_empty() {
+        let current = TrayUtilization {
+            claude: Some(72.0),
+            codex: Some(35.0),
+        };
+
+        assert_eq!(
+            merge_tray_utilization(current, TrayUtilization::default()),
+            current
+        );
+    }
+
+    #[test]
+    fn merge_tray_utilization_updates_only_present_providers() {
+        let current = TrayUtilization {
+            claude: Some(72.0),
+            codex: Some(35.0),
+        };
+        let patch = TrayUtilization {
+            claude: None,
+            codex: Some(41.0),
+        };
+
+        assert_eq!(
+            merge_tray_utilization(current, patch),
+            TrayUtilization {
+                claude: Some(72.0),
+                codex: Some(41.0),
+            }
+        );
+    }
+
+    #[test]
+    fn tray_utilization_from_rate_limits_extracts_primary_windows() {
+        let payload = RateLimitsPayload {
+            claude: Some(ProviderRateLimits {
+                provider: "claude".to_string(),
+                plan_tier: Some("Max 5x".to_string()),
+                windows: vec![RateLimitWindow {
+                    window_id: "c".to_string(),
+                    label: "Primary".to_string(),
+                    utilization: 72.0,
+                    resets_at: None,
+                }],
+                extra_usage: None,
+                stale: false,
+                error: None,
+                retry_after_seconds: None,
+                cooldown_until: None,
+                fetched_at: "2026-03-18T00:00:00Z".to_string(),
+            }),
+            codex: Some(ProviderRateLimits {
+                provider: "codex".to_string(),
+                plan_tier: Some("Pro".to_string()),
+                windows: vec![RateLimitWindow {
+                    window_id: "x".to_string(),
+                    label: "Primary".to_string(),
+                    utilization: 35.0,
+                    resets_at: None,
+                }],
+                extra_usage: None,
+                stale: false,
+                error: None,
+                retry_after_seconds: None,
+                cooldown_until: None,
+                fetched_at: "2026-03-18T00:00:00Z".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            tray_utilization_from_rate_limits(Some(&payload)),
+            TrayUtilization {
+                claude: Some(72.0),
+                codex: Some(35.0),
+            }
+        );
+    }
+
+    #[test]
+    fn should_update_tray_icon_skips_bar_overwrite_without_data() {
+        let config = TrayConfig::default();
+
+        assert!(!should_update_tray_icon(
+            &config,
+            TrayUtilization::default()
+        ));
+        assert!(should_update_tray_icon(
+            &config,
+            TrayUtilization {
+                claude: Some(72.0),
+                codex: None,
+            }
+        ));
+        assert!(should_update_tray_icon(
+            &TrayConfig {
+                bar_display: "off".to_string(),
+                ..TrayConfig::default()
+            },
+            TrayUtilization::default(),
+        ));
     }
 
     #[test]
@@ -1096,6 +1288,7 @@ mod tests {
             parser: Arc::new(parser),
             refresh_interval: Arc::new(RwLock::new(30)),
             tray_config: Arc::new(RwLock::new(TrayConfig::default())),
+            tray_utilization: Arc::new(RwLock::new(TrayUtilization::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
         };
@@ -1132,6 +1325,7 @@ mod tests {
             parser: Arc::new(parser),
             refresh_interval: Arc::new(RwLock::new(30)),
             tray_config: Arc::new(RwLock::new(TrayConfig::default())),
+            tray_utilization: Arc::new(RwLock::new(TrayUtilization::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
         };
@@ -1167,6 +1361,7 @@ mod tests {
             parser: Arc::new(parser),
             refresh_interval: Arc::new(RwLock::new(30)),
             tray_config: Arc::new(RwLock::new(TrayConfig::default())),
+            tray_utilization: Arc::new(RwLock::new(TrayUtilization::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
         };
