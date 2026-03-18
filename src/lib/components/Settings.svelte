@@ -5,9 +5,8 @@
   import { currencySymbol, modelColor } from "../utils/format.js";
   import { copyResizeDebugToClipboard, logResizeDebug } from "../resizeDebug.js";
   import { syncNativeWindowSurface } from "../windowAppearance.js";
-  import type { KnownModel, TrayConfig } from "../types/index.js";
-  import { rateLimitsData } from "../stores/rateLimits.js";
-  import MenuBarPreview from "./MenuBarPreview.svelte";
+  import type { KnownModel, TrayConfig, RateLimitsPayload } from "../types/index.js";
+  import { formatTrayTitle } from "../trayTitle.js";
   import SegmentedControl from "./SegmentedControl.svelte";
   import ToggleSwitch from "./ToggleSwitch.svelte";
   import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
@@ -44,7 +43,13 @@
   let costEnabled = $state(true);
   let copiedDebug = $state(false);
   let availableModels = $state<KnownModel[]>([]);
-  let previewTotalCost = $derived(0);
+
+  const PREVIEW_RATE_LIMITS = {
+    claude: { provider: 'claude', planTier: null, windows: [{ windowId: 'p', label: 'Primary', utilization: 0.72, resetsAt: null }], extraUsage: null, stale: false, error: null, cooldownUntil: null, retryAfterSeconds: null, fetchedAt: '' },
+    codex: { provider: 'codex', planTier: null, windows: [{ windowId: 'p', label: 'Primary', utilization: 0.35, resetsAt: null }], extraUsage: null, stale: false, error: null, cooldownUntil: null, retryAfterSeconds: null, fetchedAt: '' },
+  } as RateLimitsPayload;
+
+  let titlePreview = $derived(formatTrayTitle(current.trayConfig, PREVIEW_RATE_LIMITS, 17.19));
 
   $effect(() => {
     const unsub = settings.subscribe((s) => {
@@ -264,11 +269,32 @@
     <div class="group">
       <div class="group-label">Menu Bar</div>
 
-      <MenuBarPreview
-        config={current.trayConfig}
-        rateLimits={$rateLimitsData}
-        totalCost={previewTotalCost}
-      />
+      <div class="tray-preview">
+        <div class="tp-inner">
+          <!-- Icon -->
+          <svg class="tp-icon" width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <rect x="2" y="3" width="12" height="10" rx="2" stroke="currentColor" stroke-width="1.3"/>
+            <path d="M5 7h6M5 10h4" stroke="currentColor" stroke-width="0.9" stroke-linecap="round"/>
+          </svg>
+          <!-- Bars -->
+          {#if current.trayConfig.barDisplay === 'both'}
+            <div class="tp-bars">
+              <div class="tp-track"><div class="tp-fill claude" style="width:72%"></div></div>
+              <div class="tp-track"><div class="tp-fill codex" style="width:35%"></div></div>
+            </div>
+          {:else if current.trayConfig.barDisplay === 'single'}
+            <div class="tp-bars">
+              <div class="tp-track single">
+                <div class="tp-fill {current.trayConfig.barProvider}" style="width:72%"></div>
+              </div>
+            </div>
+          {/if}
+          <!-- Text -->
+          {#if titlePreview}
+            <span class="tp-text">{titlePreview}</span>
+          {/if}
+        </div>
+      </div>
 
       <!-- Bars card -->
       <div class="card" style="margin-bottom: 4px;">
@@ -643,5 +669,57 @@
   }
   .reset-btn:hover {
     color: var(--t2);
+  }
+
+  .tray-preview {
+    background: var(--surface-2);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: center;
+  }
+  .tp-inner {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    background: rgba(0,0,0,0.3);
+    border-radius: 5px;
+    padding: 4px 8px;
+    height: 22px;
+  }
+  .tp-icon {
+    color: var(--t2);
+    flex-shrink: 0;
+  }
+  .tp-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5px;
+  }
+  .tp-track {
+    width: 32px;
+    height: 2.5px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 1.25px;
+    overflow: hidden;
+  }
+  .tp-track.single {
+    width: 38px;
+    height: 3.5px;
+    border-radius: 1.75px;
+  }
+  .tp-fill {
+    height: 100%;
+    border-radius: inherit;
+  }
+  .tp-fill.claude { background: #d4a574; }
+  .tp-fill.codex { background: #7aafff; }
+  .tp-text {
+    font: 400 10px/1 'Inter', -apple-system, sans-serif;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.2px;
+    color: var(--t2);
+    white-space: nowrap;
   }
 </style>
