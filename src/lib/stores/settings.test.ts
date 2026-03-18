@@ -131,6 +131,32 @@ describe("loadSettings", () => {
   });
 });
 
+describe("loadSettings migration", () => {
+  it("migrates showTrayAmount: true to trayConfig.showCost === true and barDisplay === 'off'", async () => {
+    const legacy = { showTrayAmount: true } as unknown as Record<string, unknown>;
+    const store = makePersistedStore(legacy as Partial<Settings>);
+    mockLoad.mockResolvedValueOnce(store);
+
+    const { loadSettings } = await loadSettingsModule();
+    const loaded = await loadSettings();
+
+    expect(loaded.trayConfig.showCost).toBe(true);
+    expect(loaded.trayConfig.barDisplay).toBe('off');
+  });
+
+  it("migrates showTrayAmount: false to trayConfig.showCost === false and barDisplay === 'off'", async () => {
+    const legacy = { showTrayAmount: false } as unknown as Record<string, unknown>;
+    const store = makePersistedStore(legacy as Partial<Settings>);
+    mockLoad.mockResolvedValueOnce(store);
+
+    const { loadSettings } = await loadSettingsModule();
+    const loaded = await loadSettings();
+
+    expect(loaded.trayConfig.showCost).toBe(false);
+    expect(loaded.trayConfig.barDisplay).toBe('off');
+  });
+});
+
 describe("updateSetting", () => {
   it("updates the store, persists the merged payload, and applies currency changes immediately", async () => {
     const store = makePersistedStore({

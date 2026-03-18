@@ -30,7 +30,7 @@ export async function initializeRuntimeFromSettings(
 
   try {
     await invokeFn("set_refresh_interval", { interval: saved.refreshInterval });
-    await invokeFn("set_show_tray_amount", { show: saved.showTrayAmount });
+    await invokeFn("set_tray_config", { config: saved.trayConfig });
   } catch {
     // Keep startup resilient if the backend IPC is not ready yet.
   }

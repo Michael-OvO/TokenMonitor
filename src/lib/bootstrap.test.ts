@@ -15,7 +15,14 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     currency: "USD",
     hiddenModels: [],
     brandTheming: true,
-    showTrayAmount: true,
+    trayConfig: {
+      barDisplay: 'both',
+      barProvider: 'claude',
+      showPercentages: false,
+      percentageFormat: 'compact',
+      showCost: true,
+      costPrecision: 'full',
+    },
     ...overrides,
   };
 }
@@ -46,7 +53,7 @@ describe("initializeRuntimeFromSettings", () => {
     expect(applyThemeFn).toHaveBeenCalledWith("system");
     expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn);
     expect(invokeFn).toHaveBeenCalledWith("set_refresh_interval", { interval: 300 });
-    expect(invokeFn).toHaveBeenCalledWith("set_show_tray_amount", { show: true });
+    expect(invokeFn).toHaveBeenCalledWith("set_tray_config", { config: expect.objectContaining({ showCost: true }) });
     expect(get(activeProvider)).toBe("codex");
     expect(get(activePeriod)).toBe("month");
     expect(runtime).toEqual({ provider: "codex", period: "month" });

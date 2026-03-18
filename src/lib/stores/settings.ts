@@ -57,6 +57,7 @@ export async function loadSettings(): Promise<Settings> {
       const legacy = saved as Record<string, unknown>;
       merged.trayConfig = {
         ...DEFAULTS.trayConfig,
+        barDisplay: 'off',
         showCost: legacy.showTrayAmount !== false,
       };
     }
