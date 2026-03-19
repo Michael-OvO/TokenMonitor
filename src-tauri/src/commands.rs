@@ -126,25 +126,8 @@ fn apply_window_surface(
         .map_err(|e| format!("Failed to access NSWindow: {e}"))?;
     let ns_window = unsafe { &*(ns_window.cast::<NSWindow>()) };
 
-    let effective_alpha = if glass_enabled {
-        f64::from(surface.alpha) / 255.0
-    } else {
-        1.0 // Force opaque when glass is off
-    };
-
-    let color = NSColor::colorWithSRGBRed_green_blue_alpha(
-        f64::from(surface.red) / 255.0,
-        f64::from(surface.green) / 255.0,
-        f64::from(surface.blue) / 255.0,
-        effective_alpha,
-    );
-    let cg_color = color.CGColor();
     let clear = NSColor::clearColor();
-
     ns_window.setOpaque(false);
-    // Keep the window itself clear so the clipped corner triangles stay
-    // transparent, and let the native content-view layer provide the
-    // surface fill that resizes with the window.
     ns_window.setBackgroundColor(Some(&clear));
 
     let content_view = ns_window
@@ -162,10 +145,23 @@ fn apply_window_surface(
         }
     };
 
-    layer.setBackgroundColor(Some(&cg_color));
-    if !glass_enabled {
-        layer.setCornerRadius(corner_radius);
-    }
+    // When glass is active the NSVisualEffectView provides the background fill;
+    // set the content-view layer to fully transparent so the blur shows through.
+    // When glass is off use the solid surface color instead.
+    let bg_cg_color = if glass_enabled {
+        clear.CGColor()
+    } else {
+        let color = NSColor::colorWithSRGBRed_green_blue_alpha(
+            f64::from(surface.red) / 255.0,
+            f64::from(surface.green) / 255.0,
+            f64::from(surface.blue) / 255.0,
+            1.0,
+        );
+        color.CGColor()
+    };
+    layer.setBackgroundColor(Some(&bg_cg_color));
+    // The content view owns clipping for the WKWebView subtree.
+    layer.setCornerRadius(corner_radius);
     layer.setMasksToBounds(true);
     layer.setOpaque(false);
 
@@ -236,9 +232,11 @@ fn apply_glass_effect(
             }
         }
 
-        // Clear corner radius from content view's own layer (effect view handles it)
+        // Keep the content view clipped as well, otherwise the transparent
+        // webview paints square corners over the rounded blur view.
         if let Some(layer) = content_view.layer() {
-            layer.setCornerRadius(0.0);
+            layer.setCornerRadius(corner_radius);
+            layer.setMasksToBounds(true);
         }
     } else {
         // Find and remove the visual effect view by class type
