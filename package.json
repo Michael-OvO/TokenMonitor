@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "test:rust": "cd src-tauri && cargo test",
     "test:all": "npm run test:rust && npm run test"
@@ -23,7 +24,9 @@
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5",
     "@tauri-apps/cli": "^2",
+    "@vitest/coverage-v8": "^4.1.0",
     "svelte": "^5",
+    "svelte-check": "^4.4.5",
     "typescript": "^5.7",
     "vite": "^6",
     "vitest": "^4.1.0"
