@@ -83,6 +83,7 @@ describe("loadSettings", () => {
       },
       claudePlan: 0,
       codexPlan: 0,
+      glassEffect: true,
     });
     expect(get(settings)).toEqual(loaded);
     expect(mockSetCurrency).toHaveBeenCalledWith("EUR");
@@ -124,6 +125,7 @@ describe("loadSettings", () => {
       },
       claudePlan: 0,
       codexPlan: 0,
+      glassEffect: true,
     });
     expect(get(settings)).toEqual(fallback);
     expect(mockSetCurrency).toHaveBeenCalledWith("USD");
