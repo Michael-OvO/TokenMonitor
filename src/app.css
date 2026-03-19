@@ -126,23 +126,25 @@
   }
 }
 
-/* ── Glass effect overrides (semi-transparent surfaces for native blur) ── */
-[data-glass="true"][data-theme="dark"] {
-  --bg: rgba(12, 12, 14, 0.55);
-  --surface: rgba(20, 20, 22, 0.60);
+/* ── Glass effect overrides ── */
+/* html/body/#app must be fully transparent so the native blur shows through.
+   Only the .pop container carries a subtle tint via --surface. */
+:root[data-glass="true"],
+:root[data-glass="true"] body,
+:root[data-glass="true"] #app {
+  background: transparent;
 }
-[data-glass="true"][data-theme="light"] {
-  --bg: rgba(245, 245, 247, 0.55);
-  --surface: rgba(255, 255, 255, 0.55);
+
+:root[data-glass="true"][data-theme="dark"],
+:root[data-glass="true"]:not([data-theme]) {
+  --surface: rgba(20, 20, 22, 0.45);
 }
-[data-glass="true"]:root:not([data-theme]) {
-  --bg: rgba(12, 12, 14, 0.55);
-  --surface: rgba(20, 20, 22, 0.60);
+:root[data-glass="true"][data-theme="light"] {
+  --surface: rgba(255, 255, 255, 0.45);
 }
 @media (prefers-color-scheme: light) {
-  [data-glass="true"]:root:not([data-theme]) {
-    --bg: rgba(245, 245, 247, 0.55);
-    --surface: rgba(255, 255, 255, 0.55);
+  :root[data-glass="true"]:not([data-theme]) {
+    --surface: rgba(255, 255, 255, 0.45);
   }
 }
 
@@ -176,9 +178,9 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; }
 
-html, body, #app {
+html, body {
   width: 100%;
-  background: var(--surface);
+  background: transparent;
 }
 
 /* Prevent scrollbars without capping descendant measurements.
@@ -188,11 +190,19 @@ html {
   overflow: hidden;
 }
 
-/* Keep the webview itself painted so transparent-window compositor misses
-   fall back to the app surface instead of black. */
+/* Paint the single app surface on the root container so the transparent
+   native window and the web content stay visually unified. */
 #app {
+  width: 100%;
   height: auto;
   min-height: 100%;
+  background: var(--surface);
+  background-image: linear-gradient(var(--provider-bg), var(--provider-bg));
+  border-radius: 14px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px var(--border);
+  isolation: isolate;
+  -webkit-backface-visibility: hidden;
 }
 
 body {
