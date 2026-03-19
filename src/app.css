@@ -153,11 +153,11 @@
 /* Glass dark mode: deeper accent colors for contrast against blurred bg */
 :root[data-glass="true"][data-theme="dark"][data-provider="claude"],
 :root[data-glass="true"]:not([data-theme])[data-provider="claude"] {
-  --accent: #C85E2A;
+  --accent: #D96C38;
 }
 :root[data-glass="true"][data-theme="dark"][data-provider="codex"],
 :root[data-glass="true"]:not([data-theme])[data-provider="codex"] {
-  --accent: #2E7EB5;
+  --accent: #3D93C8;
 }
 
 @keyframes popIn {
