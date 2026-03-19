@@ -49,7 +49,7 @@ Add `NSVisualEffectView` glass background to the popover window across all suppo
 - Material: `NSVisualEffectMaterial::Popover` — semantically correct for menu bar popovers, and the system maps it to the appropriate glass material per OS version
 - Blending mode: `NSVisualEffectBlendingMode::BehindWindow` — blurs desktop content behind the window
 - State: `NSVisualEffectState::Active` — keeps the blur active even when the window isn't focused (important since the popover briefly loses focus during certain interactions)
-- The visual effect view's `maskImage` or layer `cornerRadius` handles rounded corners
+- The `NSVisualEffectView`'s layer owns corner clipping when glass is active: set `masksToBounds = true` and `cornerRadius = 14` on its layer. The content view's CALayer should have its `cornerRadius` cleared (set to 0) to avoid double-clipping artifacts. When glass is disabled, restore the content view CALayer's corner radius.
 - Auto-resizing mask set so it tracks the content view's frame
 
 **New function**: `apply_glass_effect(window, enabled)`:
@@ -57,9 +57,9 @@ Add `NSVisualEffectView` glass background to the popover window across all suppo
 - When `enabled = false`: removes the `NSVisualEffectView`, restores opaque CALayer background
 
 **Modified function**: `apply_window_surface()`:
-- Checks whether glass effect is active
+- Accepts an additional `glass_enabled: bool` parameter (passed by callers who read from `AppState`)
 - If glass is active: sets CALayer background color with the alpha from CSS (semi-transparent)
-- If glass is inactive: sets CALayer background color fully opaque (current behavior)
+- If glass is inactive: forces alpha to 0xFF regardless of input (current behavior)
 
 ### 1.2 Cargo.toml
 
@@ -67,11 +67,13 @@ Add `NSVisualEffectView` feature to `objc2-app-kit`:
 
 ```toml
 objc2-app-kit = { version = "0.3.2", features = [
-    "NSAppearance", "NSApplication", "NSColor", "NSStatusItem",
-    "NSView", "NSWindow", "NSVisualEffectView",
+    "NSAppearance", "NSApplication", "NSColor", "NSResponder",
+    "NSStatusItem", "NSView", "NSWindow", "NSVisualEffectView",
     "objc2-quartz-core"
 ] }
 ```
+
+Note: `NSResponder` is listed explicitly because `NSVisualEffectView` depends on it via the `NSView` hierarchy.
 
 ### 1.3 New Tauri Command — `set_glass_effect`
 
@@ -95,20 +97,33 @@ When glass effect is active, `--surface` and `--bg` must be semi-transparent so 
 **Approach**: Add a `data-glass` attribute to the root element. When present, override surface colors with semi-transparent versions.
 
 ```css
-/* Glass-active overrides */
-[data-glass="true"][data-theme="dark"],
+/* Glass-active overrides — dark (explicit or default) */
+[data-glass="true"][data-theme="dark"] {
+  --bg: rgba(12, 12, 14, 0.55);
+  --surface: rgba(20, 20, 22, 0.60);
+}
+
+/* Glass-active overrides — light (explicit) */
+[data-glass="true"][data-theme="light"] {
+  --bg: rgba(245, 245, 247, 0.55);
+  --surface: rgba(255, 255, 255, 0.55);
+}
+
+/* Glass-active overrides — system theme (no data-theme attribute) */
+/* Dark system preference (default) */
 [data-glass="true"]:root:not([data-theme]) {
   --bg: rgba(12, 12, 14, 0.55);
   --surface: rgba(20, 20, 22, 0.60);
 }
 
-[data-glass="true"][data-theme="light"] {
-  --bg: rgba(245, 245, 247, 0.55);
-  --surface: rgba(255, 255, 255, 0.55);
+/* Light system preference */
+@media (prefers-color-scheme: light) {
+  [data-glass="true"]:root:not([data-theme]) {
+    --bg: rgba(245, 245, 247, 0.55);
+    --surface: rgba(255, 255, 255, 0.55);
+  }
 }
 ```
-
-The `@media (prefers-color-scheme: light)` block also needs glass variants.
 
 Alpha values (~0.55–0.65) are tuned so:
 - Text remains readable over the blurred background
@@ -123,7 +138,20 @@ Alpha values (~0.55–0.65) are tuned so:
 
 ### 3.1 syncNativeWindowSurface
 
-Already supports alpha via `parseCssColor` reading rgba values. No structural changes needed — once `--surface` is semi-transparent in CSS, the correct alpha flows through automatically.
+When glass is active, the webview's own `setBackgroundColor` must use alpha=0 (fully transparent) so the `NSVisualEffectView` blur shows through. The semi-transparent tint comes from CSS `--surface` only — the native webview background must not paint over the blur.
+
+When glass is inactive, `setBackgroundColor` uses the opaque `--surface` value (current behavior).
+
+```typescript
+// When glass is active:
+await getCurrentWebviewWindow().setBackgroundColor({ red: 0, green: 0, blue: 0, alpha: 0 });
+// surface color (semi-transparent) is sent only to set_window_surface for the CALayer
+
+// When glass is inactive:
+await getCurrentWebviewWindow().setBackgroundColor(surface); // opaque, current behavior
+```
+
+`syncNativeWindowSurface()` needs a `glassEnabled` parameter or reads from a shared state to branch on this.
 
 ### 3.2 Glass State Management
 
@@ -196,13 +224,15 @@ No proactive code changes for the tray icon — verify and fix if needed during 
 
 ```
 app.setup()
-  → apply_glass_effect(window, true)     // insert NSVisualEffectView
-  → apply_window_surface(window, surface) // semi-transparent CALayer on top
+  → apply_default_window_surface(window)  // opaque CALayer (safe default)
   → frontend loads
     → reads glass setting from store
-    → sets data-glass attribute
-    → syncNativeWindowSurface()          // syncs CSS alpha to native layer
+    → sets data-glass attribute (CSS becomes semi-transparent if glass=true)
+    → calls set_glass_effect(enabled)     // adds/removes NSVisualEffectView
+    → syncNativeWindowSurface()           // syncs CSS alpha to native layer
 ```
+
+This avoids the flash-of-glass-then-opaque race: the window starts opaque, and the frontend applies the stored setting once loaded. The popover is hidden by default (`visible: false`), so the user never sees the opaque-to-glass transition.
 
 On theme change:
 ```
@@ -223,7 +253,7 @@ CSS variables update (--surface becomes semi-transparent)
 | `src-tauri/src/commands.rs` | Add `apply_glass_effect()`, `set_glass_effect` command, modify `apply_window_surface()` |
 | `src-tauri/src/lib.rs` | Register `set_glass_effect` command, call `apply_glass_effect` in setup |
 | `src/app.css` | Add `[data-glass]` semi-transparent surface overrides |
-| `src/lib/windowAppearance.ts` | No structural changes (alpha already supported) |
+| `src/lib/windowAppearance.ts` | Add glass-aware branching: transparent webview bg when glass active, opaque when not |
 | `src/lib/stores/settings.ts` | Add `glassEffect` setting |
 | `src/lib/components/Settings.svelte` | Add glass effect toggle |
 | `src/App.svelte` | Read glass setting, set `data-glass` attribute |
