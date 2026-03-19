@@ -94,19 +94,25 @@ export function readSurfaceColor(
 
 export async function syncNativeWindowSurface(
   invokeFn: typeof invoke = invoke,
+  glassEnabled: boolean = false,
 ): Promise<void> {
   if (typeof document === "undefined") return;
 
   const surface = readSurfaceColor();
   if (!surface) return;
 
-  logResizeDebug("native-surface:sync-request", { surface });
+  logResizeDebug("native-surface:sync-request", { surface, glassEnabled });
+
+  const webviewBg = glassEnabled
+    ? { red: 0, green: 0, blue: 0, alpha: 0 }
+    : surface;
+
   await Promise.all([
-    getCurrentWebviewWindow().setBackgroundColor(surface),
+    getCurrentWebviewWindow().setBackgroundColor(webviewBg),
     invokeFn("set_window_surface", {
       surface,
       cornerRadius: WINDOW_CORNER_RADIUS,
     }),
   ]);
-  logResizeDebug("native-surface:sync-resolved", { surface });
+  logResizeDebug("native-surface:sync-resolved", { surface, glassEnabled });
 }
