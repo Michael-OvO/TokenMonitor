@@ -117,6 +117,10 @@ Usage history and cost analytics stay local. Optional rate-limit panels may use 
 
 ## Installation
 
+### Download
+
+Grab the latest `.dmg` from the [Releases](https://github.com/Michael-OvO/TokenMonitor/releases/latest) page, open it, and drag TokenMonitor to your Applications folder.
+
 ### Build From Source
 
 ```bash
