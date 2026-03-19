@@ -21,6 +21,7 @@ src-tauri/gen/
 
 # Superpowers
 .superpowers/
+docs/superpowers/
 
 # Code signing & notarization (keep locally, never commit)
 signing/
