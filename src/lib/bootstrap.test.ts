@@ -23,6 +23,9 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
       showCost: true,
       costPrecision: 'full',
     },
+    claudePlan: 0,
+    codexPlan: 0,
+    glassEffect: true,
     ...overrides,
   };
 }
@@ -36,6 +39,7 @@ describe("initializeRuntimeFromSettings", () => {
   it("applies provider/period stores and forwards refresh interval to the backend", async () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyThemeFn = vi.fn();
+    const applyGlassFn = vi.fn();
     const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
     const saved = makeSettings({
       theme: "system",
@@ -47,13 +51,20 @@ describe("initializeRuntimeFromSettings", () => {
     const runtime = await initializeRuntimeFromSettings(saved, {
       invokeFn,
       applyThemeFn,
+      applyGlassFn,
       syncNativeWindowSurfaceFn,
     });
 
     expect(applyThemeFn).toHaveBeenCalledWith("system");
-    expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn);
+    expect(applyGlassFn).toHaveBeenCalledWith(true);
+    expect(invokeFn).toHaveBeenCalledWith("set_glass_effect", { enabled: true });
+    expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, true);
     expect(invokeFn).toHaveBeenCalledWith("set_refresh_interval", { interval: 300 });
-    expect(invokeFn).toHaveBeenCalledWith("set_tray_config", { config: expect.objectContaining({ showCost: true }) });
+    expect(invokeFn).toHaveBeenCalledWith("set_tray_config", {
+      config: expect.objectContaining({ showCost: true }),
+      claudeUtil: null,
+      codexUtil: null,
+    });
     expect(get(activeProvider)).toBe("codex");
     expect(get(activePeriod)).toBe("month");
     expect(runtime).toEqual({ provider: "codex", period: "month" });
@@ -62,6 +73,7 @@ describe("initializeRuntimeFromSettings", () => {
   it("keeps local startup state even when refresh interval IPC fails", async () => {
     const invokeFn = vi.fn().mockRejectedValue(new Error("ipc not ready"));
     const applyThemeFn = vi.fn();
+    const applyGlassFn = vi.fn();
     const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
     const saved = makeSettings({
       defaultProvider: "codex",
@@ -73,6 +85,7 @@ describe("initializeRuntimeFromSettings", () => {
       initializeRuntimeFromSettings(saved, {
         invokeFn,
         applyThemeFn,
+        applyGlassFn,
         syncNativeWindowSurfaceFn,
       }),
     ).resolves.toEqual({
@@ -81,9 +94,41 @@ describe("initializeRuntimeFromSettings", () => {
     });
 
     expect(applyThemeFn).toHaveBeenCalledWith("dark");
-    expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn);
-    expect(invokeFn).toHaveBeenCalledWith("set_refresh_interval", { interval: 0 });
+    expect(applyGlassFn).toHaveBeenCalledWith(true);
+    expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, true);
     expect(get(activeProvider)).toBe("codex");
     expect(get(activePeriod)).toBe("5h");
+  });
+
+  it("applies glass effect on startup", async () => {
+    const invokeFn = vi.fn().mockResolvedValue(undefined);
+    const applyGlassFn = vi.fn();
+    const applyThemeFn = vi.fn();
+    const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
+
+    await initializeRuntimeFromSettings(
+      makeSettings({ glassEffect: true }),
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowSurfaceFn },
+    );
+
+    expect(applyGlassFn).toHaveBeenCalledWith(true);
+    expect(invokeFn).toHaveBeenCalledWith("set_glass_effect", { enabled: true });
+    expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, true);
+  });
+
+  it("does not enable glass when setting is false", async () => {
+    const invokeFn = vi.fn().mockResolvedValue(undefined);
+    const applyGlassFn = vi.fn();
+    const applyThemeFn = vi.fn();
+    const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
+
+    await initializeRuntimeFromSettings(
+      makeSettings({ glassEffect: false }),
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowSurfaceFn },
+    );
+
+    expect(applyGlassFn).toHaveBeenCalledWith(false);
+    expect(invokeFn).toHaveBeenCalledWith("set_glass_effect", { enabled: false });
+    expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, false);
   });
 });
