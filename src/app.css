@@ -9,21 +9,21 @@
 
 /* ── Model colors — Warm & Cool palette ── */
 :root {
-  --opus: #C4704B;
-  --opus-soft: rgba(196,112,75,0.12);
-  --sonnet: #D4956A;
-  --sonnet-soft: rgba(212,149,106,0.12);
-  --haiku: #E2A987;
-  --haiku-soft: rgba(226,169,135,0.12);
-  --gpt54: #4A7B9D;
-  --gpt53: #6B9DBF;
-  --gpt52: #8BB8D4;
+  --opus: #E0743E;
+  --opus-soft: rgba(224,116,62,0.14);
+  --sonnet: #EA9A66;
+  --sonnet-soft: rgba(234,154,102,0.14);
+  --haiku: #F2B888;
+  --haiku-soft: rgba(242,184,136,0.14);
+  --gpt54: #3D8FC0;
+  --gpt53: #5AAAD6;
+  --gpt52: #7BBFE6;
   --o3: #4A8B75;
   --o3mini: #6BAD96;
   --o4mini: #7878A0;
   --o1: #5A7089;
   --o1mini: #7C90A5;
-  --codex: #6B9DBF;
+  --codex: #5AAAD6;
 }
 
 /* ── Dark theme (default) ── */
@@ -76,24 +76,24 @@
 
 /* ── Provider: Claude (warm terracotta) ── */
 [data-provider="claude"] {
-  --accent: #C4704B;
-  --accent-soft: rgba(196,112,75,0.08);
-  --provider-bg: rgba(196,112,75,0.03);
+  --accent: #E0743E;
+  --accent-soft: rgba(224,116,62,0.10);
+  --provider-bg: rgba(224,116,62,0.04);
 }
 [data-theme="light"][data-provider="claude"] {
-  --accent-soft: rgba(196,112,75,0.12);
-  --provider-bg: rgba(196,112,75,0.03);
+  --accent-soft: rgba(224,116,62,0.14);
+  --provider-bg: rgba(224,116,62,0.04);
 }
 
 /* ── Provider: Codex (cool blue) ── */
 [data-provider="codex"] {
-  --accent: #4A7B9D;
-  --accent-soft: rgba(74,123,157,0.08);
-  --provider-bg: rgba(74,123,157,0.03);
+  --accent: #4A9ED0;
+  --accent-soft: rgba(74,158,208,0.10);
+  --provider-bg: rgba(74,158,208,0.04);
 }
 [data-theme="light"][data-provider="codex"] {
-  --accent-soft: rgba(74,123,157,0.12);
-  --provider-bg: rgba(74,123,157,0.03);
+  --accent-soft: rgba(74,158,208,0.14);
+  --provider-bg: rgba(74,158,208,0.04);
 }
 
 /* ── System theme: follow OS preference ── */
@@ -117,12 +117,12 @@
     --splash-eye: #F5F5F7;
   }
   :root:not([data-theme])[data-provider="claude"] {
-    --accent-soft: rgba(196,112,75,0.12);
-    --provider-bg: rgba(196,112,75,0.03);
+    --accent-soft: rgba(224,116,62,0.14);
+    --provider-bg: rgba(224,116,62,0.04);
   }
   :root:not([data-theme])[data-provider="codex"] {
-    --accent-soft: rgba(74,123,157,0.12);
-    --provider-bg: rgba(74,123,157,0.03);
+    --accent-soft: rgba(74,158,208,0.14);
+    --provider-bg: rgba(74,158,208,0.04);
   }
 }
 
