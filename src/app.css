@@ -139,7 +139,7 @@
    so the NSVisualEffectView blur shows through with a subtle dark tint. */
 :root[data-glass="true"][data-theme="dark"],
 :root[data-glass="true"]:not([data-theme]) {
-  --surface: rgba(20, 20, 22, 0.45);
+  --surface: rgba(20, 20, 22, 0.65);
 }
 :root[data-glass="true"][data-theme="light"] {
   --surface: rgba(255, 255, 255, 0.45);
