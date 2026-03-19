@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
+  import { get } from "svelte/store";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
@@ -25,6 +26,7 @@
   } from "./lib/stores/rateLimits.js";
   import { loadSettings, settings, applyProvider } from "./lib/stores/settings.js";
   import { initializeRuntimeFromSettings } from "./lib/bootstrap.js";
+  import { syncTrayConfig } from "./lib/traySync.js";
   import {
     DEFAULT_MAX_WINDOW_HEIGHT,
     MIN_WINDOW_HEIGHT,
@@ -38,6 +40,7 @@
   import { syncNativeWindowSurface } from "./lib/windowAppearance.js";
   import {
     captureResizeDebugSnapshot,
+    formatDebugError,
     initResizeDebug,
     isResizeDebugEnabled,
     logResizeDebug,
@@ -223,25 +226,6 @@
       : {};
   }
 
-  function formatDebugError(error: unknown) {
-    if (error instanceof Error) {
-      return {
-        name: error.name,
-        message: error.message,
-      };
-    }
-
-    if (typeof error === "string") {
-      return { message: error };
-    }
-
-    if (error && typeof error === "object") {
-      return JSON.parse(JSON.stringify(error));
-    }
-
-    return { message: String(error) };
-  }
-
   function clearPendingResize() {
     logResizeDebug("resize:clear-pending", {
       hadTimer: Boolean(resizeTimer),
@@ -398,7 +382,7 @@
         logResizeDebug("theme:system-change", {
           matchesLight: colorScheme.matches,
         });
-        void syncNativeWindowSurface().catch(() => {});
+        void syncNativeWindowSurface(undefined, get(settings).glassEffect).catch(() => {});
       }
     };
     const handleBrowserResize = () => {
@@ -406,7 +390,7 @@
     };
     const handleWindowFocus = () => {
       logResizeDebug("window:focus", captureDebugSnapshot("window-focus"));
-      void syncNativeWindowSurface().catch(() => {});
+      void syncNativeWindowSurface(undefined, get(settings).glassEffect).catch(() => {});
       syncSizeAndVerify("window-focus");
     };
     const handleWindowBlur = () => {
@@ -454,6 +438,8 @@
       });
 
       await hydrateRateLimits();
+      if (cancelled) return;
+      await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch(() => {});
       if (cancelled) return;
       warmAllPeriods(provider, period);
       warmAllPeriods(provider === "claude" ? "codex" : "claude");
@@ -580,7 +566,11 @@
         <div class="rate-limit-empty">
           <div class="rate-limit-empty-title">Rate limits unavailable</div>
           <div class="rate-limit-empty-text">
-            {rateLimitsRequest.error ?? "Unable to load rate limit data right now."}
+            {#if provider === "codex" && (data.total_tokens > 0 || data.total_cost > 0)}
+              Codex usage is being recorded, but this session has not emitted rate-limit metadata yet.
+            {:else}
+              {rateLimitsRequest.error ?? "Unable to load rate limit data right now."}
+            {/if}
           </div>
         </div>
       {:else if data.total_cost === 0 && data.total_tokens === 0}
