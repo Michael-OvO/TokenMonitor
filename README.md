@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/avatar.svg" width="128" height="128" alt="TokenMonitor icon" />
+  <img src="docs/assets/avatar.svg" width="128" height="128" alt="TokenMonitor icon" />
 </p>
 
 <h1 align="center">TokenMonitor</h1>
@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/hero.png" alt="TokenMonitor hero – Understand Your AI Usage. Instantly." width="800" />
+  <img src="docs/assets/hero.png" alt="TokenMonitor hero – Understand Your AI Usage. Instantly." width="800" />
 </p>
 
 ---
@@ -31,7 +31,7 @@ TokenMonitor is a local-first macOS menu bar app for people who use Claude Code 
 
 It reads the session logs already on your machine, applies provider-aware pricing rules, and turns them into a compact macOS interface for current-session spend, history, model mix, and rate-limit context.
 
-No API keys. No cloud sync. No runtime dependency on `ccusage` or another external usage CLI for usage parsing.
+No API keys. No cloud sync. No runtime dependency on `ccusage` or any other external CLI.
 
 ## Features
 
@@ -62,6 +62,7 @@ No API keys. No cloud sync. No runtime dependency on `ccusage` or another extern
 - Native macOS menu bar popover workflow
 - Launch-at-login support
 - Theme, currency, refresh interval, and branding controls
+- macOS glass (vibrancy) effect with a toggle for opaque fallback
 - Integrated settings and calendar panels inside the same popover flow
 
 ### Pricing Accuracy
