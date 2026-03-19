@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, updateSetting, applyTheme, type Settings as SettingsType } from "../stores/settings.js";
+  import { settings, updateSetting, applyTheme, applyGlass, type Settings as SettingsType } from "../stores/settings.js";
   import { currencySymbol, modelColor } from "../utils/format.js";
   import { copyResizeDebugToClipboard, logResizeDebug } from "../resizeDebug.js";
   import { syncNativeWindowSurface } from "../windowAppearance.js";
@@ -39,6 +39,7 @@
     },
     claudePlan: 0,
     codexPlan: 0,
+    glassEffect: true,
   });
 
   let costInput = $state("50.00");
@@ -94,7 +95,18 @@
     const theme = val as SettingsType["theme"];
     updateSetting("theme", theme);
     applyTheme(theme);
-    void syncNativeWindowSurface().catch(() => {});
+    void syncNativeWindowSurface(invoke, current.glassEffect).catch(() => {});
+  }
+
+  async function handleGlassEffect(checked: boolean) {
+    updateSetting("glassEffect", checked);
+    applyGlass(checked);
+    try {
+      await invoke("set_glass_effect", { enabled: checked });
+      await syncNativeWindowSurface(invoke, checked);
+    } catch (e) {
+      console.error("Failed to toggle glass effect:", e);
+    }
   }
 
   function handleProvider(val: string) {
@@ -106,11 +118,11 @@
   }
 
   function handleClaudePlan(val: string) {
-    updateSetting("claudePlan", parseInt(val));
+    updateSetting("claudePlan", parseInt(val, 10) || 0);
   }
 
   function handleCodexPlan(val: string) {
-    updateSetting("codexPlan", parseInt(val));
+    updateSetting("codexPlan", parseInt(val, 10) || 0);
   }
 
   function handleTrayConfig<K extends keyof TrayConfig>(key: K, value: TrayConfig[K]) {
@@ -124,7 +136,7 @@
   }
 
   function handleRefresh(val: string) {
-    const interval = parseInt(val);
+    const interval = parseInt(val, 10) || 0;
     updateSetting("refreshInterval", interval);
     invoke("set_refresh_interval", { interval }).catch(() => {});
   }
@@ -264,11 +276,18 @@
             onChange={handleRefresh}
           />
         </div>
-        <div class="row">
+        <div class="row border">
           <span class="label">Brand Theming</span>
           <ToggleSwitch
             checked={current.brandTheming}
             onChange={handleBrandTheming}
+          />
+        </div>
+        <div class="row">
+          <span class="label">Glass Effect</span>
+          <ToggleSwitch
+            checked={current.glassEffect}
+            onChange={handleGlassEffect}
           />
         </div>
       </div>
@@ -714,7 +733,7 @@
     gap: 1.5px;
   }
   .tp-track {
-    width: 32px;
+    width: 30px;
     height: 2.5px;
     background: rgba(255,255,255,0.12);
     border-radius: 1.25px;
