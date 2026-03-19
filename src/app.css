@@ -127,14 +127,8 @@
 }
 
 /* ── Glass effect overrides ── */
-/* html/body/#app must be fully transparent so the native blur shows through.
-   Only the .pop container carries a subtle tint via --surface. */
-:root[data-glass="true"],
-:root[data-glass="true"] body,
-:root[data-glass="true"] #app {
-  background: transparent;
-}
-
+/* html/body are already transparent; #app gets a semi-transparent --surface
+   so the NSVisualEffectView blur shows through with a subtle dark tint. */
 :root[data-glass="true"][data-theme="dark"],
 :root[data-glass="true"]:not([data-theme]) {
   --surface: rgba(20, 20, 22, 0.45);
