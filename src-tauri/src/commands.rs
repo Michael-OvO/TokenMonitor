@@ -1425,6 +1425,7 @@ mod tests {
             tray_utilization: Arc::new(RwLock::new(TrayUtilization::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
+            glass_enabled: Arc::new(RwLock::new(false)),
         };
 
         let payload = get_monthly_usage_sync(&state, "claude", 2026, 3);
@@ -1462,6 +1463,7 @@ mod tests {
             tray_utilization: Arc::new(RwLock::new(TrayUtilization::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
+            glass_enabled: Arc::new(RwLock::new(false)),
         };
 
         let payload = get_monthly_usage_sync(&state, "claude", 2026, 2);
@@ -1498,6 +1500,7 @@ mod tests {
             tray_utilization: Arc::new(RwLock::new(TrayUtilization::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
+            glass_enabled: Arc::new(RwLock::new(false)),
         };
 
         let payload = get_monthly_usage_sync(&state, "all", 2026, 3);
