@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { settings, updateSetting, applyTheme, applyGlass, type Settings as SettingsType } from "../stores/settings.js";
   import { currencySymbol, modelColor } from "../utils/format.js";
   import { copyResizeDebugToClipboard, logResizeDebug } from "../resizeDebug.js";
@@ -45,6 +46,7 @@
   let costInput = $state("50.00");
   let costEnabled = $state(true);
   let copiedDebug = $state(false);
+  let appVersion = $state("");
   let availableModels = $state<KnownModel[]>([]);
 
   const PREVIEW_RATE_LIMITS = {
@@ -80,6 +82,7 @@
   });
 
   onMount(() => {
+    getVersion().then((v) => { appVersion = v; }).catch(() => {});
     invoke<KnownModel[]>("get_known_models", { provider: "all" })
       .then((models) => {
         availableModels = [...models].sort((a, b) =>
@@ -219,7 +222,7 @@
       </svg>
       <span>Settings</span>
     </button>
-    <span class="ver">v0.2.0</span>
+    {#if appVersion}<span class="ver">v{appVersion}</span>{/if}
   </div>
 
   <div class="scroll">
