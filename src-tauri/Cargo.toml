@@ -22,6 +22,7 @@ dirs = "6"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
+objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", features = ["NSAppearance", "NSApplication", "NSColor", "NSGraphics", "NSResponder", "NSStatusItem", "NSView", "NSWindow", "NSVisualEffectView", "objc2-quartz-core"] }
 objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSString"] }
 objc2-quartz-core = { version = "0.3.2", features = ["CALayer"] }

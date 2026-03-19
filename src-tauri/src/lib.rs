@@ -3,6 +3,7 @@ mod models;
 mod parser;
 mod pricing;
 mod rate_limits;
+mod tray_render;
 
 #[cfg(target_os = "macos")]
 use commands::apply_default_window_surface;
@@ -112,6 +113,7 @@ pub fn run() {
             commands::get_known_models,
             commands::get_last_usage_debug,
             commands::set_window_surface,
+            commands::set_glass_effect,
             commands::set_refresh_interval,
             commands::set_tray_config,
             commands::clear_cache,

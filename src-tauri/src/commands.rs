@@ -8,7 +8,11 @@ use tauri::{Manager, State};
 use tokio::sync::RwLock;
 
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSColor, NSView, NSWindow};
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSColor, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
+    NSWindowOrderingMode,
+};
 #[cfg(target_os = "macos")]
 use objc2_quartz_core::CALayer;
 #[cfg(target_os = "macos")]
@@ -59,6 +63,7 @@ pub struct AppState {
     tray_utilization: Arc<RwLock<TrayUtilization>>,
     pub last_usage_debug: Arc<RwLock<Option<UsageDebugReport>>>,
     pub cached_rate_limits: Arc<RwLock<Option<RateLimitsPayload>>>,
+    pub glass_enabled: Arc<RwLock<bool>>,
 }
 
 impl AppState {
@@ -70,6 +75,7 @@ impl AppState {
             tray_utilization: Arc::new(RwLock::new(TrayUtilization::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
+            glass_enabled: Arc::new(RwLock::new(true)),
         }
     }
 }
@@ -113,17 +119,24 @@ fn apply_window_surface(
     window: &tauri::WebviewWindow,
     surface: WindowSurface,
     corner_radius: f64,
+    glass_enabled: bool,
 ) -> Result<(), String> {
     let ns_window = window
         .ns_window()
         .map_err(|e| format!("Failed to access NSWindow: {e}"))?;
     let ns_window = unsafe { &*(ns_window.cast::<NSWindow>()) };
 
+    let effective_alpha = if glass_enabled {
+        f64::from(surface.alpha) / 255.0
+    } else {
+        1.0 // Force opaque when glass is off
+    };
+
     let color = NSColor::colorWithSRGBRed_green_blue_alpha(
         f64::from(surface.red) / 255.0,
         f64::from(surface.green) / 255.0,
         f64::from(surface.blue) / 255.0,
-        f64::from(surface.alpha) / 255.0,
+        effective_alpha,
     );
     let cg_color = color.CGColor();
     let clear = NSColor::clearColor();
@@ -150,9 +163,100 @@ fn apply_window_surface(
     };
 
     layer.setBackgroundColor(Some(&cg_color));
-    layer.setCornerRadius(corner_radius);
+    if !glass_enabled {
+        layer.setCornerRadius(corner_radius);
+    }
     layer.setMasksToBounds(true);
     layer.setOpaque(false);
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_glass_effect(
+    window: &tauri::WebviewWindow,
+    enabled: bool,
+    corner_radius: f64,
+) -> Result<(), String> {
+    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2_foundation::NSObjectProtocol;
+
+    let ns_window = window
+        .ns_window()
+        .map_err(|e| format!("Failed to access NSWindow: {e}"))?;
+    let ns_window = unsafe { &*(ns_window.cast::<NSWindow>()) };
+    let content_view = ns_window
+        .contentView()
+        .ok_or_else(|| String::from("NSWindow is missing a content view"))?;
+
+    // Check whether an NSVisualEffectView already exists among direct subviews
+    let has_effect_view = || -> bool {
+        let subviews = content_view.subviews();
+        for i in 0..subviews.len() {
+            if subviews.objectAtIndex(i).is_kind_of::<NSVisualEffectView>() {
+                return true;
+            }
+        }
+        false
+    };
+
+    if enabled {
+        if !has_effect_view() {
+            let frame = content_view.frame();
+            // SAFETY: called from run_on_main_thread, so we are on the main thread
+            let mtm = unsafe { MainThreadMarker::new_unchecked() };
+            let effect_view =
+                unsafe { NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame) };
+            effect_view.setMaterial(NSVisualEffectMaterial::Popover);
+            effect_view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+            effect_view.setState(NSVisualEffectState::Active);
+
+            // Auto-resize with parent
+            unsafe {
+                effect_view.setAutoresizingMask(
+                    NSAutoresizingMaskOptions::ViewWidthSizable
+                        | NSAutoresizingMaskOptions::ViewHeightSizable,
+                );
+            }
+
+            // Corner radius on the effect view's layer
+            effect_view.setWantsLayer(true);
+            if let Some(layer) = effect_view.layer() {
+                layer.setCornerRadius(corner_radius);
+                layer.setMasksToBounds(true);
+            }
+
+            // Insert behind all other subviews (behind webview)
+            unsafe {
+                content_view.addSubview_positioned_relativeTo(
+                    &effect_view,
+                    NSWindowOrderingMode::Below,
+                    None,
+                );
+            }
+        }
+
+        // Clear corner radius from content view's own layer (effect view handles it)
+        if let Some(layer) = content_view.layer() {
+            layer.setCornerRadius(0.0);
+        }
+    } else {
+        // Find and remove the visual effect view by class type
+        let subviews = content_view.subviews();
+        for i in 0..subviews.len() {
+            let view = subviews.objectAtIndex(i);
+            if view.is_kind_of::<NSVisualEffectView>() {
+                view.removeFromSuperview();
+                break;
+            }
+        }
+
+        // Restore corner radius on content view's own layer
+        if let Some(layer) = content_view.layer() {
+            layer.setCornerRadius(corner_radius);
+            layer.setMasksToBounds(true);
+        }
+    }
 
     Ok(())
 }
@@ -162,7 +266,7 @@ pub fn apply_default_window_surface(app: &AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| String::from("Main window not found"))?;
-    apply_window_surface(&window, DEFAULT_DARK_SURFACE, DEFAULT_WINDOW_CORNER_RADIUS)
+    apply_window_surface(&window, DEFAULT_DARK_SURFACE, DEFAULT_WINDOW_CORNER_RADIUS, false)
 }
 
 fn format_tray_title(
@@ -316,11 +420,13 @@ fn capture_query_debug(parser: &UsageParser) -> Result<UsageQueryDebugReport, St
 #[tauri::command]
 pub async fn set_window_surface(
     app: tauri::AppHandle,
+    state: State<'_, AppState>,
     surface: WindowSurface,
     corner_radius: Option<f64>,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        let glass = *state.glass_enabled.read().await;
         let window = app
             .get_webview_window("main")
             .ok_or_else(|| String::from("Main window not found"))?;
@@ -334,6 +440,7 @@ pub async fn set_window_surface(
                     &window_for_main_thread,
                     surface,
                     next_radius,
+                    glass,
                 ));
             })
             .map_err(|e| format!("Failed to schedule native window surface update: {e}"))?;
@@ -345,7 +452,46 @@ pub async fn set_window_surface(
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, surface, corner_radius);
+        let _ = (app, state, surface, corner_radius);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub async fn set_glass_effect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    *state.glass_enabled.write().await = enabled;
+
+    #[cfg(target_os = "macos")]
+    {
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| String::from("Main window not found"))?;
+        let (tx, rx) = oneshot::channel();
+        let window_clone = window.clone();
+
+        // AppKit operations MUST run on the main thread
+        window
+            .run_on_main_thread(move || {
+                let _ = tx.send(apply_glass_effect(
+                    &window_clone,
+                    enabled,
+                    DEFAULT_WINDOW_CORNER_RADIUS,
+                ));
+            })
+            .map_err(|e| format!("Failed to schedule glass effect update: {e}"))?;
+
+        return rx
+            .await
+            .map_err(|_| String::from("Glass effect update was cancelled"))?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
         Ok(())
     }
 }
