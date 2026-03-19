@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  currentRateLimitWindows,
   hasRateLimitWindows,
   providerHasActiveCooldown,
   providerRateLimitViewState,
@@ -69,6 +70,19 @@ describe("providerRateLimitViewState", () => {
     ).toBe("error");
   });
 
+  it("returns ready for codex when metadata has not been emitted yet", () => {
+    expect(
+      providerRateLimitViewState(
+        providerRateLimits({
+          provider: "codex",
+          planTier: null,
+          windows: [],
+          error: "No rate limit data in Codex session files",
+        }),
+      ),
+    ).toBe("ready");
+  });
+
   it("returns empty when a provider payload has no windows and no error", () => {
     expect(
       providerRateLimitViewState(
@@ -78,6 +92,77 @@ describe("providerRateLimitViewState", () => {
         }),
       ),
     ).toBe("empty");
+  });
+
+  it("returns idle when codex only has expired windows from a prior refresh cycle", () => {
+    expect(
+      providerRateLimitViewState(
+        providerRateLimits({
+          provider: "codex",
+          planTier: null,
+        }),
+        Date.UTC(2026, 2, 17, 12, 1, 30),
+      ),
+    ).toBe("idle");
+  });
+});
+
+describe("currentRateLimitWindows", () => {
+  it("keeps current codex windows before the refresh grace period elapses", () => {
+    expect(
+      currentRateLimitWindows(
+        providerRateLimits({
+          provider: "codex",
+          planTier: null,
+        }),
+        Date.UTC(2026, 2, 17, 12, 0, 30),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("drops expired codex windows after the refresh grace period", () => {
+    expect(
+      currentRateLimitWindows(
+        providerRateLimits({
+          provider: "codex",
+          planTier: null,
+        }),
+        Date.UTC(2026, 2, 17, 12, 1, 30),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("synthesizes a zeroed codex 5h window when metadata is missing", () => {
+    expect(
+      currentRateLimitWindows(
+        providerRateLimits({
+          provider: "codex",
+          planTier: null,
+          windows: [],
+          error: "No rate limit data in Codex session files",
+        }),
+      ),
+    ).toEqual([
+      {
+        windowId: "primary",
+        label: "Session (5hr)",
+        utilization: 0,
+        resetsAt: null,
+      },
+    ]);
+  });
+
+  it("does not synthesize a zeroed codex window for unrelated errors", () => {
+    expect(
+      currentRateLimitWindows(
+        providerRateLimits({
+          provider: "codex",
+          planTier: null,
+          windows: [],
+          error: "Usage API returned 500",
+        }),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -122,6 +207,19 @@ describe("rateLimitWindowResetLabel", () => {
         }),
         "2026-03-17T12:00:00.000Z",
         Date.UTC(2026, 2, 17, 12, 5, 0),
+      ),
+    ).toBe("Awaiting refresh");
+  });
+
+  it("shows awaiting-refresh for expired codex windows after a short grace period", () => {
+    expect(
+      rateLimitWindowResetLabel(
+        providerRateLimits({
+          provider: "codex",
+          planTier: null,
+        }),
+        "2026-03-17T12:00:00.000Z",
+        Date.UTC(2026, 2, 17, 12, 1, 30),
       ),
     ).toBe("Awaiting refresh");
   });

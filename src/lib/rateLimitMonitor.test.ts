@@ -54,6 +54,61 @@ describe("mergeProviderRateLimits", () => {
       fetchedAt: "2026-03-17T12:01:00.000Z",
     });
   });
+
+  it("keeps Codex utilization from moving backward within the same reset window", () => {
+    const cached = providerRateLimits("codex", {
+      windows: [
+        {
+          windowId: "primary",
+          label: "Session (5hr)",
+          utilization: 3,
+          resetsAt: "2026-03-19T00:38:11+00:00",
+        },
+        {
+          windowId: "secondary",
+          label: "Weekly (7 day)",
+          utilization: 1,
+          resetsAt: "2026-03-25T19:38:11+00:00",
+        },
+      ],
+      fetchedAt: "2026-03-18T16:43:18.569Z",
+    });
+    const fresh = providerRateLimits("codex", {
+      windows: [
+        {
+          windowId: "primary",
+          label: "Session (5hr)",
+          utilization: 0,
+          resetsAt: "2026-03-19T00:38:11+00:00",
+        },
+        {
+          windowId: "secondary",
+          label: "Weekly (7 day)",
+          utilization: 0,
+          resetsAt: "2026-03-25T19:38:11+00:00",
+        },
+      ],
+      fetchedAt: "2026-03-18T16:43:45.969Z",
+    });
+
+    expect(mergeProviderRateLimits(fresh, cached)).toEqual({
+      ...fresh,
+      windows: [
+        {
+          windowId: "primary",
+          label: "Session (5hr)",
+          utilization: 3,
+          resetsAt: "2026-03-19T00:38:11+00:00",
+        },
+        {
+          windowId: "secondary",
+          label: "Weekly (7 day)",
+          utilization: 1,
+          resetsAt: "2026-03-25T19:38:11+00:00",
+        },
+      ],
+    });
+  });
 });
 
 describe("providerDeferredUntil", () => {

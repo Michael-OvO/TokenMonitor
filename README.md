@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Tracks real spend, tokens, models, session pace, and history directly from on-disk usage logs.
+  A fast, compact way to understand spend, burn rate, model mix, and usage history without leaving the desktop.
 </p>
 
 <p align="center">
@@ -21,38 +21,47 @@
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="License" />
 </p>
 
+<p align="center">
+  <img src="docs/hero.png" alt="TokenMonitor hero – Understand Your AI Usage. Instantly." width="800" />
+</p>
+
 ---
 
-TokenMonitor is a local-first macOS menu bar app for monitoring Claude Code and Codex usage.
+TokenMonitor is a local-first macOS menu bar app for people who use Claude Code and Codex heavily and want a cleaner, faster way to monitor usage.
 
-It parses Claude Code and Codex session logs locally, applies provider-aware pricing rules, and presents current-session, historical, and per-model usage in a compact macOS UI.
+It reads the session logs already on your machine, applies provider-aware pricing rules, and turns them into a compact macOS interface for current-session spend, history, model mix, and rate-limit context.
 
 No API keys. No cloud sync. No runtime dependency on `ccusage` or another external usage CLI for usage parsing.
 
-## Feature Summary
+## Why It Feels Different
 
-- Native macOS menu bar app with popover UI and optional live tray spend display
-- Claude, Codex, and merged provider views
-- Historical navigation across `5h`, `day`, `week`, `month`, and `year`
-- Per-model cost and token breakdowns with model hiding/filtering
-- Bar and line chart modes for cost-by-model exploration
-- Monthly calendar heatmap with plan-aware monthly context
-- Active-session footer with live burn rate and 5-hour spend context
-- Provider rate-limit windows with utilization, reset timing, pace hints, and cooldown handling when available
-- Launch-at-login, theme, refresh, currency, and branding controls
-- Local settings persistence
+- Built for quick menu bar check-ins, not a dashboard you keep open all day
+- Designed around glanceability so spend, burn rate, model mix, and pace are visible in one compact surface
+- Fast to navigate across recent and historical windows without depending on a remote backend
+- Local-first by default, with usage history staying on disk where it already lives
 
-## Overview
+## What TokenMonitor Shows
 
-TokenMonitor is designed to make local usage data easier to read and act on.
+- **Current session**: live spend, burn rate, and 5-hour context for the session you are in right now
+- **History**: quick views across `5h`, `day`, `week`, `month`, and `year`
+- **Model mix**: which models are actually driving usage and cost
+- **Provider context**: Claude, Codex, or a merged view when you want the full picture
+- **Rate limits**: utilization, reset timing, pace hints, and cooldown state when available
 
-- Usage history is read directly from local Claude Code and Codex session logs
-- Spend is calculated with provider-aware pricing logic rather than a flat token total
-- Current-session data, historical summaries, charts, and per-model breakdowns are available in one menu bar UI
-- Rate-limit windows, when available, are shown alongside spend and usage context
-- Cached views and background refreshes keep navigation responsive during normal use
+## Highlights
 
-## Data Sources
+- **Menu bar native**: compact popover UI with optional live tray spend display
+- **Provider-aware views**: Claude, Codex, and merged provider views with matching theming
+- **History that stays readable**: fast navigation across recent and historical windows
+- **Model breakdowns**: per-model cost and token summaries with filtering plus bar and line chart modes
+- **Calendar heatmap**: a month-level view for spotting expensive streaks and quiet periods
+- **Session pacing**: active-session footer with live burn rate and 5-hour spend context
+- **Rate-limit context**: utilization, reset timing, pace hints, and cooldown handling when available
+- **Desktop controls**: launch-at-login, theme, refresh, currency, and branding settings
+
+## Local Data
+
+TokenMonitor works from usage data you already have on disk. If no logs are present yet, the app stays idle until Claude Code or Codex generates them.
 
 ### Usage History
 
@@ -60,8 +69,6 @@ TokenMonitor is designed to make local usage data easier to read and act on.
 |---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | Also checks `$CLAUDE_CONFIG_DIR/projects` when set |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | Also respects `$CODEX_HOME/sessions` when set |
-
-TokenMonitor works from usage data you already have on disk. If no logs are present yet, the app stays idle until Claude Code or Codex generates them.
 
 ### Rate-Limit Data
 
@@ -72,17 +79,24 @@ Rate-limit visibility is separate from usage history parsing:
 
 Usage history and cost analytics stay local. Optional rate-limit panels may use authenticated provider data already available on the machine.
 
-## Pricing Fidelity
+## Privacy
 
-TokenMonitor is designed to answer the question that matters in practice: "What did this usage really cost?"
+- **Usage history stays local**: Claude Code and Codex logs are read from disk on your machine
+- **No cloud sync**: TokenMonitor does not need a remote account to show usage history
+- **No parsing dependency on external CLIs**: usage totals come from native parsing rather than shelling out to `ccusage`
+- **Optional provider context only where needed**: rate-limit panels may use provider-authenticated state already present on the machine
 
-For Claude models, cache traffic is not treated as a single bucket. TokenMonitor reads the cache-creation breakdown from Claude logs and distinguishes between 5-minute and 1-hour cache writes before pricing them.
+## Why The Numbers Are Useful
 
-For Codex and OpenAI models, cached input is kept separate from standard input, and Codex `token_count` events are normalized into billable deltas whether the source log emits per-turn usage or cumulative totals. Reasoning output is folded into output billing where applicable.
+TokenMonitor is built to answer the practical question: "What is this usage actually costing me?"
+
+For Claude models, cache traffic is not treated as one flat bucket. TokenMonitor reads cache-creation details from the logs and distinguishes between 5-minute and 1-hour cache writes before pricing them.
+
+For Codex and OpenAI models, cached input stays separate from standard input, and Codex `token_count` events are normalized into billable deltas whether the source log emits per-turn usage or cumulative totals. Reasoning output is folded into output billing where applicable.
 
 This keeps cost calculation aligned with provider-specific billing behavior reflected in the source logs.
 
-### Claude cache-write tiers
+### Claude Cache-Write Tiers
 
 | Model | 5m Cache Write | 1h Cache Write | Difference |
 |---|---:|---:|---:|
@@ -90,14 +104,12 @@ This keeps cost calculation aligned with provider-specific billing behavior refl
 | Sonnet 4.6 | $3.75 / MTok | $6.00 / MTok | +60% |
 | Haiku 4.5 | $1.25 / MTok | $2.00 / MTok | +60% |
 
-## Performance
+## Why It Feels Fast
 
-- **Native Rust parser** caches parsed file entries by file stamp, so unchanged log files are not reparsed unnecessarily
-- **Frontend payload cache** keys by provider, period, and offset for immediate repeat loads
-- **Stale-while-revalidate fetch path** shows cached data instantly and refreshes silently in the background
-- **Cache warming** preloads adjacent history windows and common periods so navigation feels immediate
-- **Selective scanning strategy** reduces unnecessary file work for short-lived views
-- **Background refresh** invalidates aggregate payloads without throwing away parsed-file reuse
+- Native Rust parser with parsed-file reuse so unchanged logs are not reparsed unnecessarily
+- In-memory caches keyed by provider, period, and offset for immediate repeat loads
+- Stale-while-revalidate loading so cached views appear instantly and refresh silently
+- Adjacent-window warming for quicker historical navigation
 
 ## Installation
 
@@ -143,6 +155,31 @@ graph LR
     B --> G["In-memory query + file caches"]
 ```
 
+### Core Modules
+
+```text
+src/
+├── App.svelte                   # Main popover shell and view orchestration
+└── lib/
+    ├── bootstrap.ts            # Startup wiring and runtime initialization
+    ├── stores/
+    │   ├── usage.ts            # Usage fetching, in-memory cache, period/provider state
+    │   ├── rateLimits.ts       # Rate-limit fetching and persistence
+    │   └── settings.ts         # Theme, tray, currency, and local preferences
+    ├── components/             # Metrics, charts, calendar, footer, settings UI
+    ├── traySync.ts             # Frontend-to-native tray state syncing
+    └── windowAppearance.ts     # macOS window surface syncing
+
+src-tauri/src/
+├── lib.rs                      # Tauri app setup, tray wiring, background refresh
+├── commands.rs                 # IPC commands exposed to the frontend
+├── parser.rs                   # Claude/Codex JSONL discovery, parsing, normalization
+├── pricing.rs                  # Provider-aware token pricing and cache-write billing
+├── rate_limits.rs              # Claude/Codex rate-limit acquisition and shaping
+├── tray_render.rs              # Native tray title and icon rendering
+└── models.rs                   # Shared backend payload types
+```
+
 ### Runtime Flow
 
 1. The UI requests a provider, period, and optional historical offset through Tauri IPC.
@@ -158,7 +195,19 @@ graph LR
 - Cross-provider merge mode preserves period semantics while combining totals
 - Historical navigation is offset-based, which keeps the UI simple while letting the backend stay date-aware
 
-## Validation
+### UI Architecture
+
+- `App.svelte` coordinates provider, period, offset, settings, and view switches
+- Svelte stores own fetch lifecycle, stale-while-revalidate caching, and persisted settings
+- UI components stay relatively dumb: charts, model lists, calendar, footer, and settings render from store payloads
+- Native-only concerns such as tray rendering and window surface behavior stay in the Tauri layer rather than leaking through the component tree
+
+## For Builders
+
+<details>
+<summary>Validation, project structure, and stack</summary>
+
+### Validation
 
 ```bash
 ./node_modules/.bin/tsc --noEmit
@@ -174,7 +223,7 @@ Convenience command:
 npm run test:all
 ```
 
-## Project Structure
+### Project Structure
 
 ```text
 TokenMonitor/
@@ -200,7 +249,7 @@ TokenMonitor/
 └── README.md
 ```
 
-## Tech Stack
+### Tech Stack
 
 | Layer | Technology |
 |---|---|
@@ -210,17 +259,19 @@ TokenMonitor/
 | Build tool | [Vite 6](https://vitejs.dev/) |
 | State path | Local JSONL parsing + Tauri IPC + Svelte stores |
 
+</details>
+
 ## Contributing
 
 Issues and pull requests are welcome, especially around:
 
-- new provider support
+- UI polish and distinctive menu bar workflows
 - pricing-model accuracy
 - performance on large local histories
-- UI polish and visualization improvements
 - packaging and distribution
+- new provider support
 
-If you use Claude Code or Codex heavily, this repo is intended to be a practical, inspectable foundation for local usage observability.
+If you use Claude Code or Codex heavily, this repo is intended to be a practical local utility and a solid foundation for usage observability on macOS.
 
 ## License
 

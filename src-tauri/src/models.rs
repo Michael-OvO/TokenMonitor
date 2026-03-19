@@ -141,7 +141,14 @@ pub fn normalize_codex_model(raw: &str) -> (String, String) {
         return (String::from("Unknown"), String::from("unknown"));
     }
 
-    (display_name.to_string(), display_name.to_ascii_lowercase())
+    let normalized_key = display_name.to_ascii_lowercase();
+    let normalized_display_name = if normalized_key.starts_with("gpt") {
+        format!("GPT{}", &display_name[3..])
+    } else {
+        display_name.to_string()
+    };
+
+    (normalized_display_name, normalized_key)
 }
 
 fn is_codex_model_name(raw: &str) -> bool {
@@ -236,7 +243,7 @@ mod tests {
     fn codex_gpt_5_4() {
         assert_eq!(
             normalize_codex_model("gpt-5.4-turbo"),
-            (String::from("gpt-5.4-turbo"), String::from("gpt-5.4-turbo"))
+            (String::from("GPT-5.4-turbo"), String::from("gpt-5.4-turbo"))
         );
     }
 
@@ -244,7 +251,7 @@ mod tests {
     fn codex_gpt_5_3() {
         assert_eq!(
             normalize_codex_model("gpt-5.3-codex"),
-            (String::from("gpt-5.3-codex"), String::from("gpt-5.3-codex"))
+            (String::from("GPT-5.3-codex"), String::from("gpt-5.3-codex"))
         );
     }
 
@@ -252,7 +259,7 @@ mod tests {
     fn codex_gpt_5_2() {
         assert_eq!(
             normalize_codex_model("gpt-5.2"),
-            (String::from("gpt-5.2"), String::from("gpt-5.2"))
+            (String::from("GPT-5.2"), String::from("gpt-5.2"))
         );
     }
 
@@ -261,7 +268,7 @@ mod tests {
         assert_eq!(
             normalize_codex_model("gpt-5.1-codex-max"),
             (
-                String::from("gpt-5.1-codex-max"),
+                String::from("GPT-5.1-codex-max"),
                 String::from("gpt-5.1-codex-max")
             )
         );
@@ -272,7 +279,7 @@ mod tests {
         assert_eq!(
             normalize_codex_model("gpt-5.1-codex-mini"),
             (
-                String::from("gpt-5.1-codex-mini"),
+                String::from("GPT-5.1-codex-mini"),
                 String::from("gpt-5.1-codex-mini")
             )
         );
@@ -282,7 +289,7 @@ mod tests {
     fn codex_gpt_5_1_codex() {
         assert_eq!(
             normalize_codex_model("gpt-5.1-codex"),
-            (String::from("gpt-5.1-codex"), String::from("gpt-5.1-codex"))
+            (String::from("GPT-5.1-codex"), String::from("gpt-5.1-codex"))
         );
     }
 
@@ -290,7 +297,7 @@ mod tests {
     fn codex_gpt_5_codex() {
         assert_eq!(
             normalize_codex_model("gpt-5-codex"),
-            (String::from("gpt-5-codex"), String::from("gpt-5-codex"))
+            (String::from("GPT-5-codex"), String::from("gpt-5-codex"))
         );
     }
 
@@ -370,7 +377,7 @@ mod tests {
         assert_eq!(
             known_model_from_raw("gpt-5.3-codex"),
             KnownModel {
-                display_name: String::from("gpt-5.3-codex"),
+                display_name: String::from("GPT-5.3-codex"),
                 model_key: String::from("gpt-5.3-codex"),
             }
         );

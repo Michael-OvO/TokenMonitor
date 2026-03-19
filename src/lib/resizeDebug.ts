@@ -187,6 +187,19 @@ export function captureResizeDebugSnapshot(
   return snapshot;
 }
 
+export function formatDebugError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message };
+  }
+  if (typeof error === "string") {
+    return { message: error };
+  }
+  if (error && typeof error === "object") {
+    return JSON.parse(JSON.stringify(error));
+  }
+  return { message: String(error) };
+}
+
 export async function copyResizeDebugToClipboard(): Promise<string> {
   const payload = JSON.stringify(get(resizeDebugState), null, 2);
   if (hasWindow() && navigator.clipboard?.writeText) {

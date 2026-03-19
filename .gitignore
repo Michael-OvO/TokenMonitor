@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 dist/
+coverage/
 src-tauri/target/
 
 # IDE
@@ -20,3 +21,7 @@ src-tauri/gen/
 
 # Superpowers
 .superpowers/
+
+# Code signing & notarization (keep locally, never commit)
+signing/
+CLAUDE.md

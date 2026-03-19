@@ -81,6 +81,7 @@
   let brandTheming = $state(true);
   let popEl: HTMLDivElement | null = null;
   let maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
+  let lastVisibleDetailHeight = 0;
 
   // Subscribe to stores
   $effect(() => {
@@ -262,10 +263,25 @@
 
   function measureContentHeight(): number | null {
     if (!popEl) return null;
-    // .pop has overflow:hidden → scrollHeight reports the FULL content
-    // height including any overflow below the viewport.  Add 2 for
-    // .pop's 1px top + 1px bottom border (excluded from scrollHeight).
-    return measureTargetWindowHeight(popEl.scrollHeight + 2);
+    const detailRoot = popEl.querySelector<HTMLElement>(".detail");
+    const detailEl = popEl.querySelector<HTMLElement>(".detail.visible");
+    if (!detailRoot) {
+      lastVisibleDetailHeight = 0;
+    }
+    if (detailEl?.scrollHeight) {
+      lastVisibleDetailHeight = detailEl.scrollHeight;
+    }
+    // The chart detail panel animates open via max-height. During that
+    // transition, popEl.scrollHeight only reflects the current interpolated
+    // height, which makes the window chase the animation and visibly glitch.
+    // Add the panel's hidden remainder so grow resizes can jump to the final
+    // target height in one pass.
+    const pendingDetailGrowth = detailEl
+      ? Math.max(0, detailEl.scrollHeight - detailEl.clientHeight)
+      : 0;
+    // .pop has overflow:hidden → scrollHeight reports the full content
+    // height including any overflow below the viewport.
+    return measureTargetWindowHeight(popEl.scrollHeight + pendingDetailGrowth);
   }
 
   function applyWindowHeight(targetHeight: number, source = "unknown") {
@@ -354,6 +370,9 @@
     if (measuredHeight == null) return;
     const nextHeight = clampWindowHeight(measuredHeight, maxWindowH, MIN_WINDOW_HEIGHT);
     const disposition = classifyResize(nextHeight, lastWindowH, MIN_WINDOW_HEIGHT);
+    const detailJustCollapsed = Boolean(popEl?.querySelector(".detail"))
+      && !popEl?.querySelector(".detail.visible")
+      && lastVisibleDetailHeight > 0;
 
     switch (disposition) {
       case "grow":
@@ -364,6 +383,13 @@
         scheduleSettledResize(100, `${source}:grow`);
         return;
       case "shrink":
+        if (detailJustCollapsed) {
+          clearPendingResize();
+          lastVisibleDetailHeight = 0;
+          applyWindowHeight(measuredHeight, `${source}:detail-shrink`);
+          scheduleSettledResize(0, `${source}:detail-shrink`);
+          return;
+        }
         scheduleSettledResize(RESIZE_SETTLE_DELAY_MS, `${source}:shrink`);
         return;
       default:
@@ -595,23 +621,10 @@
 
 <style>
   .pop {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 14px;
     width: 340px;
     min-height: 200px;
-    overflow: hidden;
     box-shadow: none;
     animation: popIn .32s cubic-bezier(.25,.8,.25,1) both;
-    /* Force GPU compositing layer — prevents macOS transparent window
-       compositor from retaining stale pixels during resize.
-       NOTE: do NOT use contain:paint here — it implies overflow:clip
-       which caps scrollHeight/getBoundingClientRect, breaking the
-       window-resize measurement. */
-    isolation: isolate;
-    -webkit-backface-visibility: hidden;
-    /* Provider theme tint — transparent when neutral */
-    background-image: linear-gradient(var(--provider-bg), var(--provider-bg));
   }
   .pop-content {
     min-width: 0;

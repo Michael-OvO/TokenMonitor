@@ -103,7 +103,7 @@ export type CostPrecision = 'whole' | 'full';
 
 export interface TrayConfig {
   barDisplay: BarDisplay;
-  barProvider: 'claude' | 'codex';
+  barProvider: DefaultProvider;
   showPercentages: boolean;
   percentageFormat: PercentageFormat;
   showCost: boolean;

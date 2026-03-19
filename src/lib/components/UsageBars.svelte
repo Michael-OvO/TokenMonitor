@@ -1,6 +1,7 @@
 <script lang="ts">
   import { formatRetryIn } from "../utils/format.js";
   import {
+    currentRateLimitWindows,
     providerHasActiveCooldown,
     providerRateLimitViewState,
     rateLimitWindowResetLabel,
@@ -12,8 +13,6 @@
     rateLimits: ProviderRateLimits;
   }
   let { providerLabel, rateLimits }: Props = $props();
-  let viewState = $derived(providerRateLimitViewState(rateLimits));
-  let hasActiveCooldown = $derived(providerHasActiveCooldown(rateLimits));
 
   // Refresh "Resets in" + pace every 30s
   let refreshTick = $state(0);
@@ -22,10 +21,23 @@
     return () => clearInterval(interval);
   });
 
+  let visibleWindows = $derived.by(() => {
+    void refreshTick;
+    return currentRateLimitWindows(rateLimits, Date.now());
+  });
+  let viewState = $derived.by(() => {
+    void refreshTick;
+    return providerRateLimitViewState(rateLimits, Date.now());
+  });
+  let hasActiveCooldown = $derived.by(() => {
+    void refreshTick;
+    return providerHasActiveCooldown(rateLimits, Date.now());
+  });
+
   function utilizationColor(pct: number): string {
-    if (pct >= 80) return "var(--red, #ef4444)";
-    if (pct >= 50) return "var(--yellow, #f59e0b)";
-    return "var(--accent, #22c55e)";
+    if (pct >= 80) return "var(--red, #C44B45)";
+    if (pct >= 50) return "var(--yellow, #C49A45)";
+    return "var(--accent)";
   }
 
   function resetsIn(isoString: string | null): string {
@@ -77,7 +89,7 @@
   function paceColor(w: RateLimitWindow, windowHours: number): string {
     const delta = paceDelta(w, windowHours);
     if (delta === null || Math.abs(delta) < 2) return "var(--t3)";
-    return delta > 0 ? "var(--green, #22c55e)" : "var(--yellow, #f59e0b)";
+    return delta > 0 ? "var(--accent)" : "var(--yellow, #C49A45)";
   }
 
   function windowHours(windowId: string): number {
@@ -97,12 +109,20 @@
     }).format(amount);
   }
 
+  function utilizationLabel(pct: number): string {
+    if (rateLimits.provider === "codex") return `${pct}% used`;
+    return `${pct}%`;
+  }
+
   function emptySummary(): string {
     void refreshTick;
     const retryLabel = formatRetryIn(rateLimits.cooldownUntil);
     if (viewState === "error") {
       const base = rateLimits.error ?? "Unable to load rate limits right now.";
       return retryLabel ? `${base} ${retryLabel}.` : base;
+    }
+    if (viewState === "idle") {
+      return "Usage is being recorded, but this Codex session has not emitted rate-limit metadata yet.";
     }
     return "No active rate limit windows were returned for this provider.";
   }
@@ -119,7 +139,7 @@
   {/if}
 
   {#if viewState === "ready"}
-    {#each rateLimits.windows as w}
+    {#each visibleWindows as w, i}
       {@const hours = windowHours(w.windowId)}
       {@const pace = paceLabel(w, hours)}
       {@const eta = etaToLimit(w, hours)}
@@ -130,13 +150,13 @@
             {#if pace}
               <span class="ub-pace-badge" style="color: {paceColor(w, hours)}">{pace}</span>
             {/if}
-            <span class="ub-val">{w.utilization}%</span>
+            <span class="ub-val">{utilizationLabel(w.utilization)}</span>
           </div>
         </div>
         <div class="ub-track">
           <div
             class="ub-fill"
-            style="width: {Math.min(w.utilization, 100)}%; background: {utilizationColor(w.utilization)};{w.utilization >= 80 ? ` box-shadow: 0 0 7px 1px ${utilizationColor(w.utilization)}55;` : ''}"
+            style="width: {Math.min(w.utilization, 100)}%; background: {utilizationColor(w.utilization)}; --bar-delay: {i * 0.09 + 0.04}s;{w.utilization >= 80 ? ` box-shadow: 0 0 7px 1px ${utilizationColor(w.utilization)}55;` : ''}"
           ></div>
         </div>
         <div class="ub-sub">
@@ -156,6 +176,8 @@
           Rate-limited
         {:else if viewState === "error"}
           Rate limits unavailable
+        {:else if viewState === "idle"}
+          No current usage
         {:else}
           No rate limit data
         {/if}
@@ -173,7 +195,7 @@
       <div class="ub-track">
         <div
           class="ub-fill"
-          style="width: {Math.min((rateLimits.extraUsage.utilization ?? 0), 100)}%; background: {utilizationColor(rateLimits.extraUsage.utilization ?? 0)};"
+          style="width: {Math.min((rateLimits.extraUsage.utilization ?? 0), 100)}%; background: {utilizationColor(rateLimits.extraUsage.utilization ?? 0)}; --bar-delay: {rateLimits.windows.length * 0.09 + 0.04}s;"
         ></div>
       </div>
       <div class="ub-sub">Monthly overuse budget</div>
@@ -246,7 +268,29 @@
     position: absolute;
     top: 0; left: 0; height: 100%;
     border-radius: 3px;
-    transition: width 0.5s cubic-bezier(.25,.8,.25,1);
+    overflow: hidden;
+    transform-origin: left center;
+    transition: width .5s cubic-bezier(.25,.8,.25,1), box-shadow .2s ease;
+    animation: hBarGrow .52s cubic-bezier(.22,1,.36,1) both;
+    animation-delay: var(--bar-delay, 0s);
+  }
+  @keyframes hBarGrow {
+    from { transform: scaleX(0); }
+    to   { transform: scaleX(1); }
+  }
+  .ub-fill::after {
+    content: '';
+    position: absolute;
+    top: 0; bottom: 0;
+    left: -100%; width: 100%;
+    background: linear-gradient(90deg, transparent 30%, rgba(255,255,255,.22) 50%, transparent 70%);
+    animation: hBarShimmer .5s ease-out both;
+    animation-delay: calc(var(--bar-delay, 0s) + .52s);
+    pointer-events: none;
+  }
+  @keyframes hBarShimmer {
+    from { transform: translateX(0); }
+    to   { transform: translateX(200%); opacity: 0; }
   }
   .ub-sub {
     font: 400 9px/1 'Inter', sans-serif;

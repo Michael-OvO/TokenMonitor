@@ -48,7 +48,7 @@ export function formatTimeAgo(isoString: string): string {
 export function formatResetsIn(isoString: string | null): string {
   if (!isoString) return "";
   const ms = new Date(isoString).getTime() - Date.now();
-  if (ms <= 0) return "resetting...";
+  if (ms <= 0) return "Resetting...";
   const hours = Math.floor(ms / 3_600_000);
   const minutes = Math.floor((ms % 3_600_000) / 60_000);
   if (hours >= 24) {

@@ -20,7 +20,7 @@
         "height": 300,
         "minHeight": 200,
         "maxHeight": 2400,
-        "resizable": true,
+        "resizable": false,
         "backgroundColor": "#141416",
         "decorations": false,
         "transparent": true,

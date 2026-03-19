@@ -1,6 +1,7 @@
 import { providerHasActiveCooldown } from "./rateLimitsView.js";
 import type {
   ProviderRateLimits,
+  RateLimitWindow,
   RateLimitProviderMonitorState,
   RateLimitRequestState,
   RateLimitsMonitorState,
@@ -95,6 +96,35 @@ export function inferLastSuccessfulAt(
   return hasUsableRateLimitWindows(rateLimits) ? rateLimits.fetchedAt : null;
 }
 
+function stabilizedCodexWindow(
+  freshWindow: RateLimitWindow,
+  cachedWindows: RateLimitWindow[],
+): RateLimitWindow {
+  const cachedWindow = cachedWindows.find(
+    (window) => window.windowId === freshWindow.windowId && window.resetsAt === freshWindow.resetsAt,
+  );
+  if (!cachedWindow || freshWindow.utilization >= cachedWindow.utilization) {
+    return freshWindow;
+  }
+
+  return {
+    ...freshWindow,
+    utilization: cachedWindow.utilization,
+  };
+}
+
+function stabilizeCodexRateLimits(
+  fresh: ProviderRateLimits,
+  cached: ProviderRateLimits,
+): ProviderRateLimits {
+  if (fresh.provider !== "codex" || cached.provider !== "codex") return fresh;
+
+  return {
+    ...fresh,
+    windows: fresh.windows.map((window) => stabilizedCodexWindow(window, cached.windows)),
+  };
+}
+
 export function mergeProviderRateLimits(
   fresh: ProviderRateLimits | null | undefined,
   cached: ProviderRateLimits | null | undefined,
@@ -108,6 +138,10 @@ export function mergeProviderRateLimits(
       cooldownUntil: fresh.cooldownUntil,
       fetchedAt: fresh.fetchedAt,
     };
+  }
+
+  if (fresh && cached) {
+    return stabilizeCodexRateLimits(fresh, cached);
   }
 
   return fresh ?? cached ?? null;

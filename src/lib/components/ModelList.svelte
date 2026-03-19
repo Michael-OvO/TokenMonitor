@@ -1,6 +1,5 @@
 <script lang="ts">
   import { modelColor, formatCost, formatTokens } from "../utils/format.js";
-  import { summarizeModelRows } from "../modelSummary.js";
   import { settings } from "../stores/settings.js";
   import type { ModelSummary } from "../types/index.js";
 
@@ -13,22 +12,21 @@
     return unsub;
   });
 
-  let sorted = $derived(
+  let rows = $derived(
     [...models]
       .filter((m) => !hiddenModels.includes(m.model_key))
       .sort((a, b) => b.cost - a.cost)
   );
-  let rows = $derived(summarizeModelRows(sorted));
 </script>
 
 <div class="mdl">
   <div class="mdl-head">
     <span class="mdl-title">Models</span>
-    <span class="mdl-count">{sorted.length}</span>
+    <span class="mdl-count">{rows.length}</span>
   </div>
   <div class="mdl-list">
     {#each rows as row}
-      <div class="mr" class:aggregate={row.isAggregate}>
+      <div class="mr">
         <span class="mb" style="background:{modelColor(row.model_key)}"></span>
         <span class="mn">{row.display_name}</span>
         <span class="mc">{formatCost(row.cost)}</span>
@@ -63,9 +61,6 @@
     transition: background .15s; gap: 7px;
   }
   .mr:hover { background: var(--surface-2); }
-  .mr.aggregate {
-    background: var(--surface-2);
-  }
   .mb { width: 2.5px; height: 14px; border-radius: 1.5px; flex-shrink: 0; }
   .mn { font: 400 10px/1.2 'Inter', sans-serif; color: var(--t2); flex: 1; letter-spacing: .1px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mc { font: 500 10px/1.2 'Inter', sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }

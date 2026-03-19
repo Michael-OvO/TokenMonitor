@@ -6,14 +6,16 @@ const ICON_H: u32 = 44;
 
 /// Bar area dimensions (@2x)
 const BAR_GAP: u32 = 8; // gap between icon and bars
-const BAR_W: u32 = 76; // bar width
+const BAR_W_BOTH: u32 = 68; // width for stacked two-bar display
+const BAR_W_SINGLE: u32 = 76; // width for single-bar display
 const BAR_H_BOTH: u32 = 6; // bar height when showing two bars
 const BAR_H_SINGLE: u32 = 10; // bar height when showing one bar
 const BAR_SPACING: u32 = 6; // vertical gap between two bars
 const BAR_RADIUS: u32 = 3; // rounded corner radius (@2x)
 
 /// Total canvas width when bars are shown
-const CANVAS_W: u32 = ICON_W + BAR_GAP + BAR_W; // 44 + 8 + 76 = 128
+const CANVAS_W_BOTH: u32 = ICON_W + BAR_GAP + BAR_W_BOTH; // 44 + 8 + 68 = 120
+const CANVAS_W_SINGLE: u32 = ICON_W + BAR_GAP + BAR_W_SINGLE; // 44 + 8 + 76 = 128
 
 /// RGBA color
 #[derive(Clone, Copy)]
@@ -75,6 +77,22 @@ fn has_utilization(config: &TrayConfig, claude_util: Option<f64>, codex_util: Op
     }
 }
 
+fn canvas_width(config: &TrayConfig) -> u32 {
+    match config.bar_display.as_str() {
+        "both" => CANVAS_W_BOTH,
+        "single" => CANVAS_W_SINGLE,
+        _ => ICON_W,
+    }
+}
+
+fn bar_width(config: &TrayConfig) -> u32 {
+    if config.bar_display == "both" {
+        BAR_W_BOTH
+    } else {
+        BAR_W_SINGLE
+    }
+}
+
 /// Render a tray icon with optional progress bars.
 /// Returns (rgba_bytes, width, height, should_use_template).
 /// When should_use_template is true, caller should set icon_as_template(true).
@@ -97,7 +115,7 @@ pub fn render_tray_icon(
     let icon_rgb: u8 = if dark_bar { 255 } else { 0 };
     let track_color = if dark_bar { TRACK_COLOR_DARK } else { TRACK_COLOR_LIGHT };
 
-    let width = CANVAS_W;
+    let width = canvas_width(config);
     let height = ICON_H;
     let mut buf = vec![0u8; (width * height * 4) as usize];
 
@@ -118,6 +136,7 @@ pub fn render_tray_icon(
     }
 
     let bar_x = ICON_W + BAR_GAP;
+    let bar_w = bar_width(config);
 
     if config.bar_display == "both" {
         // Utilization values are 0–100, normalize to 0–1 for pixel rendering
@@ -129,10 +148,10 @@ pub fn render_tray_icon(
         let top_y = (ICON_H - total_h) / 2;
 
         // Claude bar (top)
-        draw_bar(&mut buf, width, bar_x, top_y, BAR_W, BAR_H_BOTH, c_util, &CLAUDE_COLOR, &track_color);
+        draw_bar(&mut buf, width, bar_x, top_y, bar_w, BAR_H_BOTH, c_util, &CLAUDE_COLOR, &track_color);
         // Codex bar (bottom)
         let bottom_y = top_y + BAR_H_BOTH + BAR_SPACING;
-        draw_bar(&mut buf, width, bar_x, bottom_y, BAR_W, BAR_H_BOTH, x_util, &CODEX_COLOR, &track_color);
+        draw_bar(&mut buf, width, bar_x, bottom_y, bar_w, BAR_H_BOTH, x_util, &CODEX_COLOR, &track_color);
     } else if config.bar_display == "single" {
         let util = if config.bar_provider == "claude" {
             claude_util
@@ -148,7 +167,7 @@ pub fn render_tray_icon(
 
         // Vertically center single bar
         let top_y = (ICON_H - BAR_H_SINGLE) / 2;
-        draw_bar(&mut buf, width, bar_x, top_y, BAR_W, BAR_H_SINGLE, u, color, &track_color);
+        draw_bar(&mut buf, width, bar_x, top_y, bar_w, BAR_H_SINGLE, u, color, &track_color);
     }
 
     (buf, width, height, false) // false = don't use template mode, we rendered colors
@@ -266,9 +285,9 @@ mod tests {
         let icon = vec![0u8; (44 * 44 * 4) as usize];
         let (buf, w, h, tmpl) =
             render_tray_icon(&icon, &make_config("both"), Some(70.0), Some(30.0), true);
-        assert_eq!(w, CANVAS_W);
+        assert_eq!(w, CANVAS_W_BOTH);
         assert_eq!(h, 44);
-        assert_eq!(buf.len(), (CANVAS_W * 44 * 4) as usize);
+        assert_eq!(buf.len(), (CANVAS_W_BOTH * 44 * 4) as usize);
         assert!(!tmpl, "should NOT use template mode when bars are rendered");
         // Verify some pixels in the bar area have non-zero alpha
         let bar_start = (ICON_W + BAR_GAP) as usize;
@@ -282,9 +301,9 @@ mod tests {
         let icon = vec![0u8; (44 * 44 * 4) as usize];
         let (buf, w, h, tmpl) =
             render_tray_icon(&icon, &make_config("single"), Some(50.0), None, true);
-        assert_eq!(w, CANVAS_W);
+        assert_eq!(w, CANVAS_W_SINGLE);
         assert_eq!(h, 44);
-        assert_eq!(buf.len(), (CANVAS_W * 44 * 4) as usize);
+        assert_eq!(buf.len(), (CANVAS_W_SINGLE * 44 * 4) as usize);
         assert!(!tmpl);
     }
 

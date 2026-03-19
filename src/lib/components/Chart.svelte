@@ -204,11 +204,12 @@
               {@const x = barX(i)}
               {@const isActive = hoveredIdx === i}
               <g
+                class="bar-group"
                 role="img"
                 aria-label={bucketAriaLabel(bucket)}
                 onmouseenter={() => onEnter(i)}
                 onmouseleave={onLeave}
-                style="cursor:pointer"
+                style="cursor:pointer; --delay: {(i / Math.max(filteredBuckets.length - 1, 1)) * 0.35 + 0.04}s;"
               >
                 <!-- Invisible hit area -->
                 <rect x={x - 1} y="0" width={barWidth + 2} height={CHART_H} fill="transparent"/>
@@ -227,7 +228,6 @@
                     fill={modelColor(seg.model_key)}
                     opacity={isActive ? 1 : 0.7}
                     class="bar-seg"
-                    style="--delay: {i * 0.03 + 0.1}s; --origin-y: {CHART_H}px; transform-origin: {x + barWidth/2}px {CHART_H}px;"
                   />
                 {/each}
               </g>
@@ -321,7 +321,7 @@
             <span class="detail-total">{formatCost(displayed.total)}</span>
           </div>
           <div class="detail-models">
-            {#each displayed.segments as seg}
+            {#each displayed.segments.slice().sort((a, b) => b.cost - a.cost) as seg}
               <div class="detail-row">
                 <span class="detail-dot" style="background:{modelColor(seg.model_key)}"></span>
                 <span class="detail-name">{seg.model}</span>
@@ -340,17 +340,19 @@
 
   .ch-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
   .ch-t { font: 500 8px/1 'Inter', sans-serif; color: var(--t3); text-transform: uppercase; letter-spacing: .8px; }
-  .ch-right { display: flex; align-items: center; gap: 8px; }
-  .leg { display: flex; gap: 7px; }
+  .ch-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .leg { display: flex; gap: 7px; overflow: hidden; min-width: 0; }
   .leg-item {
     display: flex; align-items: center; gap: 3px;
-    font: 400 8px/1 'Inter', sans-serif; color: var(--t2);
+    font: 400 8px/1.3 'Inter', sans-serif; color: var(--t2);
+    white-space: nowrap; overflow: hidden; min-width: 20px;
   }
   .leg-dot { width: 5px; height: 5px; border-radius: 1.5px; flex-shrink: 0; }
 
   /* Mode toggle */
   .mode-toggle {
     display: flex;
+    flex-shrink: 0;
     background: var(--surface-2);
     border-radius: 4px;
     padding: 1.5px;
@@ -408,16 +410,18 @@
     overflow: visible;
   }
 
-  /* Bar segments — grow from bottom */
-  .bar-seg {
-    transition: opacity .2s ease;
-    animation: svgBarGrow .48s cubic-bezier(.34,1.3,.64,1) both;
+  /* Bar groups — grow whole column from chart floor */
+  .bar-group {
+    transform-box: fill-box;
+    transform-origin: center bottom;
+    animation: svgBarGrow .48s cubic-bezier(.22,1,.36,1) both;
     animation-delay: var(--delay, 0s);
   }
   @keyframes svgBarGrow {
     from { transform: scaleY(0); }
-    to { transform: scaleY(1); }
+    to   { transform: scaleY(1); }
   }
+  .bar-seg { transition: opacity .15s ease; }
 
   /* Line chart */
   .line-path {

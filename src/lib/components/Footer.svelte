@@ -12,9 +12,11 @@
   }
   let { data, provider, rateLimits, onSettings, onCalendar }: Props = $props();
 
-  let fiveHourPct = $derived(footerFiveHourPct(rateLimits, provider));
-
   let refreshTick = $state(0);
+  let fiveHourPct = $derived.by(() => {
+    refreshTick;
+    return footerFiveHourPct(rateLimits, provider, Date.now());
+  });
   let timeAgo = $derived.by(() => {
     refreshTick;
     return formatTimeAgo(data.last_updated);

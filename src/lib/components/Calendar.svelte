@@ -5,7 +5,7 @@
   import { formatCost } from "../utils/format.js";
   import { planTierCost } from "../utils/plans.js";
   import { intensityLevel, computeEarned, heatmapColor } from "../calendar-utils.js";
-  import { isResizeDebugEnabled, logResizeDebug } from "../resizeDebug.js";
+  import { formatDebugError, isResizeDebugEnabled, logResizeDebug } from "../resizeDebug.js";
   import { rateLimitsData } from "../stores/rateLimits.js";
   import type { MonthlyUsagePayload, RateLimitsPayload, UsageProvider } from "../types/index.js";
 
@@ -38,25 +38,6 @@
   $effect(() => {
     fetchMonth(provider, viewYear, viewMonth);
   });
-
-  function formatDebugError(error: unknown) {
-    if (error instanceof Error) {
-      return {
-        name: error.name,
-        message: error.message,
-      };
-    }
-
-    if (typeof error === "string") {
-      return { message: error };
-    }
-
-    if (error && typeof error === "object") {
-      return JSON.parse(JSON.stringify(error));
-    }
-
-    return { message: String(error) };
-  }
 
   async function logCalendarReadDebug(
     type: string,

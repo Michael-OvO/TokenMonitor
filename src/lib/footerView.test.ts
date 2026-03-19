@@ -42,11 +42,11 @@ function makePayload(): RateLimitsPayload {
 
 describe("footerFiveHourPct", () => {
   it("uses only the selected Claude provider window", () => {
-    expect(footerFiveHourPct(makePayload(), "claude")).toBe(61);
+    expect(footerFiveHourPct(makePayload(), "claude", Date.UTC(2026, 2, 17, 13, 0, 0))).toBe(61);
   });
 
   it("uses only the selected Codex provider window", () => {
-    expect(footerFiveHourPct(makePayload(), "codex")).toBe(4);
+    expect(footerFiveHourPct(makePayload(), "codex", Date.UTC(2026, 2, 17, 13, 0, 0))).toBe(4);
   });
 
   it("returns null when the selected provider has no usable 5h window", () => {
@@ -54,10 +54,29 @@ describe("footerFiveHourPct", () => {
     if (!payload.claude) throw new Error("expected claude payload");
     payload.claude.windows = [];
 
-    expect(footerFiveHourPct(payload, "claude")).toBeNull();
+    expect(footerFiveHourPct(payload, "claude", Date.UTC(2026, 2, 17, 13, 0, 0))).toBeNull();
   });
 
   it("returns null when all providers are selected", () => {
     expect(footerFiveHourPct(makePayload(), "all")).toBeNull();
+  });
+
+  it("returns 0 when codex has not emitted 5h metadata yet", () => {
+    const payload = makePayload();
+    if (!payload.codex) throw new Error("expected codex payload");
+    payload.codex.windows = [];
+    payload.codex.error = "No rate limit data in Codex session files";
+
+    expect(footerFiveHourPct(payload, "codex", Date.UTC(2026, 2, 17, 13, 0, 0))).toBe(0);
+  });
+
+  it("hides expired codex 5h usage after the refresh grace period", () => {
+    const payload = makePayload();
+    if (!payload.codex) throw new Error("expected codex payload");
+    payload.codex.fetchedAt = "2026-03-17T12:00:00.000Z";
+
+    expect(
+      footerFiveHourPct(payload, "codex", Date.UTC(2026, 2, 17, 14, 1, 30)),
+    ).toBeNull();
   });
 });

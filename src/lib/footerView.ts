@@ -1,28 +1,21 @@
 import type { RateLimitsPayload, UsageProvider } from "./types/index.js";
+import { providerPayload } from "./rateLimitMonitor.js";
+import { currentRateLimitWindows } from "./rateLimitsView.js";
 
-function fiveHourWindowsForProvider(
-  rateLimits: RateLimitsPayload,
-  provider: UsageProvider,
-) {
-  if (provider === "claude") {
-    return (rateLimits.claude?.windows ?? []).filter((w) => w.windowId === "five_hour");
-  }
-
-  if (provider === "codex") {
-    return (rateLimits.codex?.windows ?? []).filter((w) => w.windowId === "primary");
-  }
-
-  return [];
+function fiveHourWindowId(provider: "claude" | "codex"): string {
+  return provider === "claude" ? "five_hour" : "primary";
 }
 
 export function footerFiveHourPct(
   rateLimits: RateLimitsPayload | null | undefined,
   provider: UsageProvider,
+  now = Date.now(),
 ): number | null {
-  if (!rateLimits) return null;
+  if (!rateLimits || provider === "all") return null;
 
-  const windows = fiveHourWindowsForProvider(rateLimits, provider);
-  if (windows.length === 0) return null;
+  const windowId = fiveHourWindowId(provider);
+  const window = currentRateLimitWindows(providerPayload(rateLimits, provider), now)
+    .find((candidate) => candidate.windowId === windowId);
 
-  return Math.max(...windows.map((w) => w.utilization));
+  return window?.utilization ?? null;
 }

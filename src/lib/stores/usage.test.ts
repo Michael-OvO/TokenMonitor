@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("../resizeDebug.js", () => ({
   isResizeDebugEnabled: () => false,
   logResizeDebug: vi.fn(),
+  formatDebugError: (e: unknown) => ({ message: String(e) }),
 }));
 
 function deferred<T>() {
@@ -223,6 +224,41 @@ describe("fetchData", () => {
 
     expect(get(usageData)).toEqual(latest);
     expect(get(isLoading)).toBe(false);
+  });
+
+  it("caches stale responses even when they no longer apply to the UI", async () => {
+    const { usageData, fetchData } = await loadUsageModule();
+    const slow = deferred<UsagePayload>();
+    const fast = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise);
+
+    const firstCall = fetchData("claude", "5h");
+    const secondCall = fetchData("claude", "week");
+
+    const visiblePayload = makePayload({ total_cost: 9.5, period_label: "This week" });
+    fast.resolve(visiblePayload);
+    await secondCall;
+
+    const cachedOnlyPayload = makePayload({ total_cost: 1.0, period_label: "Last 5 hours" });
+    slow.resolve(cachedOnlyPayload);
+    await firstCall;
+
+    expect(get(usageData)).toEqual(visiblePayload);
+
+    const backgroundRefresh = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(backgroundRefresh.promise);
+
+    const thirdCall = fetchData("claude", "5h");
+
+    expect(get(usageData)).toEqual(cachedOnlyPayload);
+    await thirdCall;
+
+    backgroundRefresh.resolve(makePayload({ total_cost: 1.2, period_label: "Last 5 hours" }));
+    await vi.waitFor(() => {
+      expect(get(usageData)).toEqual(
+        expect.objectContaining({ total_cost: 1.2, period_label: "Last 5 hours" }),
+      );
+    });
   });
 });
 

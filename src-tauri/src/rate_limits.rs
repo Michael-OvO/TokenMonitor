@@ -385,22 +385,21 @@ fn rate_limits_from_claude_cli_info(
         .unwrap_or(false);
 
     let utilization = match info.utilization {
-        Some(utilization) => Some(utilization),
+        Some(utilization) => utilization,
         None => {
             if let Some(window) = cached_window {
                 used_cached_window_data = true;
-                Some(window.utilization)
+                window.utilization
             } else if info.status == "rejected" {
-                Some(100.0)
+                100.0
             } else {
-                None
+                // CLI no longer emits utilization when status is "allowed" —
+                // treat as 0% (not rate-limited) and mark the result stale.
+                used_cached_window_data = true;
+                0.0
             }
         }
     };
-
-    let utilization = utilization.ok_or_else(|| {
-        RateLimitFetchError::message("Claude CLI did not include usable utilization data")
-    })?;
 
     let mut windows = cached
         .map(|payload| payload.windows.clone())
@@ -1058,8 +1057,8 @@ mod tests {
     }
 
     #[test]
-    fn cli_fallback_rejects_allowed_window_without_utilization_or_cache() {
-        let error = rate_limits_from_claude_cli_info(
+    fn cli_fallback_marks_allowed_window_without_utilization_or_cache_as_stale_zeroed_data() {
+        let rate_limits = rate_limits_from_claude_cli_info(
             ClaudeCliRateLimitInfo {
                 status: "allowed".to_string(),
                 resets_at: Some(1_773_781_200),
@@ -1068,11 +1067,16 @@ mod tests {
             },
             None,
         )
-        .unwrap_err();
+        .unwrap();
 
+        assert!(rate_limits.stale);
+        assert_eq!(rate_limits.error, None);
+        assert_eq!(rate_limits.windows.len(), 1);
+        assert_eq!(rate_limits.windows[0].window_id, "five_hour");
+        assert_eq!(rate_limits.windows[0].utilization, 0.0);
         assert_eq!(
-            error.message,
-            "Claude CLI did not include usable utilization data"
+            rate_limits.windows[0].resets_at.as_deref(),
+            Some("2026-03-17T21:00:00+00:00")
         );
     }
 

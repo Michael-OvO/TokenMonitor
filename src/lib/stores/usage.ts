@@ -5,7 +5,7 @@ import type {
   UsagePeriod,
   UsageProvider,
 } from "../types/index.js";
-import { isResizeDebugEnabled, logResizeDebug } from "../resizeDebug.js";
+import { formatDebugError, isResizeDebugEnabled, logResizeDebug } from "../resizeDebug.js";
 
 export const activeProvider = writable<UsageProvider>("claude");
 export const activePeriod = writable<UsagePeriod>("day");
@@ -50,28 +50,29 @@ function cacheKey(provider: string, period: string, offset: number = 0) {
   return `${provider}:${period}:${offset}`;
 }
 
+function requestUsagePayload(
+  provider: UsageProvider,
+  period: UsagePeriod,
+  offset: number,
+) {
+  return invoke<UsagePayload>("get_usage_data", { provider, period, offset });
+}
+
+function cachePayload(key: string, data: UsagePayload) {
+  payloadCache.set(key, { data, at: Date.now() });
+}
+
+function applyUsageDataIfCurrent(requestId: number, data: UsagePayload): boolean {
+  const appliedToUi = requestId === currentRequestId;
+  if (appliedToUi) {
+    usageData.set(data);
+  }
+  return appliedToUi;
+}
+
 // Monotonically increasing request ID prevents stale responses from
 // overwriting fresh data when the user rapidly switches tabs.
 let currentRequestId = 0;
-
-function formatDebugError(error: unknown) {
-  if (error instanceof Error) {
-    return {
-      name: error.name,
-      message: error.message,
-    };
-  }
-
-  if (typeof error === "string") {
-    return { message: error };
-  }
-
-  if (error && typeof error === "object") {
-    return JSON.parse(JSON.stringify(error));
-  }
-
-  return { message: String(error) };
-}
 
 async function logUsageReadDebug(
   type: string,
@@ -133,19 +134,17 @@ export async function fetchData(
       cacheAgeMs: Date.now() - cached.at,
     });
     // Silent background refresh — no loading indicator
-    invoke<UsagePayload>("get_usage_data", { provider, period, offset })
+    requestUsagePayload(provider, period, offset)
       .then((fresh: UsagePayload) => {
-        payloadCache.set(key, { data: fresh, at: Date.now() });
-        if (requestId === currentRequestId) {
-          usageData.set(fresh);
-        }
+        cachePayload(key, fresh);
+        const appliedToUi = applyUsageDataIfCurrent(requestId, fresh);
         void logUsageReadDebug("usage:background-refresh-resolved", {
           provider,
           period,
           offset,
           requestId,
           cacheKey: key,
-          appliedToUi: requestId === currentRequestId,
+          appliedToUi,
           fromPayloadCache: fresh.from_cache,
         });
       })
@@ -173,22 +172,16 @@ export async function fetchData(
   }
   isLoading.set(true);
   try {
-    const data = await invoke<UsagePayload>("get_usage_data", {
-      provider,
-      period,
-      offset,
-    });
-    if (requestId === currentRequestId) {
-      payloadCache.set(key, { data, at: Date.now() });
-      usageData.set(data);
-    }
+    const data = await requestUsagePayload(provider, period, offset);
+    cachePayload(key, data);
+    const appliedToUi = applyUsageDataIfCurrent(requestId, data);
     await logUsageReadDebug("usage:fetch-resolved", {
       provider,
       period,
       offset,
       requestId,
       cacheKey: key,
-      appliedToUi: requestId === currentRequestId,
+      appliedToUi,
       fromPayloadCache: data.from_cache,
     });
   } catch (e) {
@@ -221,9 +214,9 @@ export function warmCache(
   offset: number = 0,
 ) {
   const key = cacheKey(provider, period, offset);
-  invoke<UsagePayload>("get_usage_data", { provider, period, offset })
+  requestUsagePayload(provider, period, offset)
     .then((data: UsagePayload) => {
-      payloadCache.set(key, { data, at: Date.now() });
+      cachePayload(key, data);
       void logUsageReadDebug("usage:warm-cache-resolved", {
         provider,
         period,
@@ -262,10 +255,10 @@ export function warmAllPeriods(provider: UsageProvider, skipPeriod?: UsagePeriod
  */
 export async function fetchSplitFiveHour() {
   const [claude, codex] = await Promise.all([
-    invoke<UsagePayload>("get_usage_data", { provider: "claude", period: "5h", offset: 0 }),
-    invoke<UsagePayload>("get_usage_data", { provider: "codex", period: "5h", offset: 0 }),
+    requestUsagePayload("claude", "5h", 0),
+    requestUsagePayload("codex", "5h", 0),
   ]);
-  payloadCache.set(cacheKey("claude", "5h", 0), { data: claude, at: Date.now() });
-  payloadCache.set(cacheKey("codex", "5h", 0), { data: codex, at: Date.now() });
+  cachePayload(cacheKey("claude", "5h", 0), claude);
+  cachePayload(cacheKey("codex", "5h", 0), codex);
   splitFiveHourData.set({ claude, codex });
 }

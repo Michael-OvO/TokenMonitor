@@ -270,40 +270,46 @@ export async function hydrateRateLimits(): Promise<void> {
   if (hydratePromise) return hydratePromise;
 
   hydratePromise = (async () => {
-    const [legacyPayload, claudeRecord, codexRecord] = await Promise.all([
-      readLegacyPayload(),
-      readPersistedProviderRecord("claude"),
-      readPersistedProviderRecord("codex"),
-    ]);
+    try {
+      const [legacyPayload, claudeRecord, codexRecord] = await Promise.all([
+        readLegacyPayload(),
+        readPersistedProviderRecord("claude"),
+        readPersistedProviderRecord("codex"),
+      ]);
 
-    const payload: RateLimitsPayload = {
-      claude: claudeRecord.payload ?? legacyPayload?.claude ?? null,
-      codex: codexRecord.payload ?? legacyPayload?.codex ?? null,
-    };
+      const payload: RateLimitsPayload = {
+        claude: claudeRecord.payload ?? legacyPayload?.claude ?? null,
+        codex: codexRecord.payload ?? legacyPayload?.codex ?? null,
+      };
 
-    const normalizedPayload = mergedPayloadOrNull(payload);
-    if (normalizedPayload) {
-      rateLimitsData.set(normalizedPayload);
-    }
-
-    const claudeLastSuccess = claudeRecord.lastSuccessfulAt ?? inferLastSuccessfulAt(payload.claude);
-    const codexLastSuccess = codexRecord.lastSuccessfulAt ?? inferLastSuccessfulAt(payload.codex);
-
-    hydrateProviderMonitorState("claude", payload.claude, claudeLastSuccess);
-    hydrateProviderMonitorState("codex", payload.codex, codexLastSuccess);
-
-    if (legacyPayload) {
-      const migrations: Promise<void>[] = [];
-      if (!claudeRecord.payload && payload.claude) {
-        migrations.push(persistProviderRecord("claude", payload.claude, claudeLastSuccess));
+      const normalizedPayload = mergedPayloadOrNull(payload);
+      if (normalizedPayload) {
+        rateLimitsData.set(normalizedPayload);
       }
-      if (!codexRecord.payload && payload.codex) {
-        migrations.push(persistProviderRecord("codex", payload.codex, codexLastSuccess));
-      }
-      await Promise.all(migrations);
-    }
 
-    scheduleScopeRetries(normalizedPayload, lastRequestedScope);
+      const claudeLastSuccess = claudeRecord.lastSuccessfulAt ?? inferLastSuccessfulAt(payload.claude);
+      const codexLastSuccess = codexRecord.lastSuccessfulAt ?? inferLastSuccessfulAt(payload.codex);
+
+      hydrateProviderMonitorState("claude", payload.claude, claudeLastSuccess);
+      hydrateProviderMonitorState("codex", payload.codex, codexLastSuccess);
+
+      if (legacyPayload) {
+        const migrations: Promise<void>[] = [];
+        if (!claudeRecord.payload && payload.claude) {
+          migrations.push(persistProviderRecord("claude", payload.claude, claudeLastSuccess));
+        }
+        if (!codexRecord.payload && payload.codex) {
+          migrations.push(persistProviderRecord("codex", payload.codex, codexLastSuccess));
+        }
+        await Promise.all(migrations);
+      }
+
+      scheduleScopeRetries(normalizedPayload, lastRequestedScope);
+    } catch (error) {
+      // Reset so the next call retries instead of returning a stale rejection.
+      hydratePromise = null;
+      throw error;
+    }
   })();
 
   return hydratePromise;
