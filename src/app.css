@@ -76,24 +76,30 @@
 
 /* ── Provider: Claude (warm terracotta) ── */
 [data-provider="claude"] {
-  --accent: #E0743E;
-  --accent-soft: rgba(224,116,62,0.10);
-  --provider-bg: rgba(224,116,62,0.04);
+  /* dark mode default — vivid against near-black */
+  --accent: #E8784A;
+  --accent-soft: rgba(232,120,74,0.12);
+  --provider-bg: rgba(232,120,74,0.04);
 }
 [data-theme="light"][data-provider="claude"] {
-  --accent-soft: rgba(224,116,62,0.14);
-  --provider-bg: rgba(224,116,62,0.04);
+  /* light mode — pull back saturation so it doesn't burn on white */
+  --accent: #C85E2A;
+  --accent-soft: rgba(200,94,42,0.14);
+  --provider-bg: rgba(200,94,42,0.05);
 }
 
 /* ── Provider: Codex (cool blue) ── */
 [data-provider="codex"] {
-  --accent: #4A9ED0;
-  --accent-soft: rgba(74,158,208,0.10);
-  --provider-bg: rgba(74,158,208,0.04);
+  /* dark mode default — bright cornflower blue */
+  --accent: #52A8DC;
+  --accent-soft: rgba(82,168,220,0.12);
+  --provider-bg: rgba(82,168,220,0.04);
 }
 [data-theme="light"][data-provider="codex"] {
-  --accent-soft: rgba(74,158,208,0.14);
-  --provider-bg: rgba(74,158,208,0.04);
+  /* light mode — deeper so it reads on white */
+  --accent: #2E7EB5;
+  --accent-soft: rgba(46,126,181,0.14);
+  --provider-bg: rgba(46,126,181,0.05);
 }
 
 /* ── System theme: follow OS preference ── */
@@ -117,12 +123,14 @@
     --splash-eye: #F5F5F7;
   }
   :root:not([data-theme])[data-provider="claude"] {
-    --accent-soft: rgba(224,116,62,0.14);
-    --provider-bg: rgba(224,116,62,0.04);
+    --accent: #C85E2A;
+    --accent-soft: rgba(200,94,42,0.14);
+    --provider-bg: rgba(200,94,42,0.05);
   }
   :root:not([data-theme])[data-provider="codex"] {
-    --accent-soft: rgba(74,158,208,0.14);
-    --provider-bg: rgba(74,158,208,0.04);
+    --accent: #2E7EB5;
+    --accent-soft: rgba(46,126,181,0.14);
+    --provider-bg: rgba(46,126,181,0.05);
   }
 }
 
