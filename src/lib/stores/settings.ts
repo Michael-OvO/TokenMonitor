@@ -16,6 +16,7 @@ export interface Settings {
   trayConfig: TrayConfig;
   claudePlan: number;
   codexPlan: number;
+  glassEffect: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -38,6 +39,7 @@ const DEFAULTS: Settings = {
   },
   claudePlan: 0,
   codexPlan: 0,
+  glassEffect: true,
 };
 
 export const settings = writable<Settings>({ ...DEFAULTS });
@@ -108,6 +110,10 @@ export function applyTheme(theme: Settings["theme"]) {
   } else {
     root.setAttribute("data-theme", theme);
   }
+}
+
+export function applyGlass(enabled: boolean) {
+  document.documentElement.setAttribute("data-glass", enabled ? "true" : "false");
 }
 
 export function applyProvider(provider: UsageProvider, brandTheming: boolean) {
