@@ -20,7 +20,7 @@ export interface Settings {
 }
 
 const DEFAULTS: Settings = {
-  theme: "dark",
+  theme: "system",
   defaultProvider: "claude",
   defaultPeriod: "day",
   refreshInterval: 30,

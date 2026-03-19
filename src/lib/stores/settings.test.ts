@@ -106,7 +106,7 @@ describe("loadSettings", () => {
     const fallback = await loadSettings();
 
     expect(fallback).toEqual({
-      theme: "dark",
+      theme: "system",
       defaultProvider: "claude",
       defaultPeriod: "day",
       refreshInterval: 30,
@@ -162,7 +162,7 @@ describe("loadSettings migration", () => {
 describe("updateSetting", () => {
   it("updates the store, persists the merged payload, and applies currency changes immediately", async () => {
     const store = makePersistedStore({
-      theme: "dark",
+      theme: "system",
       currency: "USD",
       hiddenModels: ["haiku"],
     });
@@ -190,7 +190,7 @@ describe("updateSetting", () => {
 
   it("keeps the in-memory update and warns when persistence fails", async () => {
     const store = makePersistedStore({
-      theme: "dark",
+      theme: "system",
       currency: "USD",
       brandTheming: true,
     });
