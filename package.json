@@ -4,6 +4,7 @@
   "version": "0.3.0",
   "type": "module",
   "scripts": {
+    "release": "bash scripts/release.sh",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
