@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-${{ hashFiles('package-lock.json') }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: Svelte type check
+        run: npx svelte-check
+
+      - name: Vitest
+        run: npm test
+
+      - name: Rust format check
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy -- -D warnings
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test
