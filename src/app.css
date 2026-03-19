@@ -126,6 +126,26 @@
   }
 }
 
+/* ── Glass effect overrides (semi-transparent surfaces for native blur) ── */
+[data-glass="true"][data-theme="dark"] {
+  --bg: rgba(12, 12, 14, 0.55);
+  --surface: rgba(20, 20, 22, 0.60);
+}
+[data-glass="true"][data-theme="light"] {
+  --bg: rgba(245, 245, 247, 0.55);
+  --surface: rgba(255, 255, 255, 0.55);
+}
+[data-glass="true"]:root:not([data-theme]) {
+  --bg: rgba(12, 12, 14, 0.55);
+  --surface: rgba(20, 20, 22, 0.60);
+}
+@media (prefers-color-scheme: light) {
+  [data-glass="true"]:root:not([data-theme]) {
+    --bg: rgba(245, 245, 247, 0.55);
+    --surface: rgba(255, 255, 255, 0.55);
+  }
+}
+
 @keyframes popIn {
   0% { opacity: 0; transform: translateY(-4px); }
   100% { opacity: 1; transform: translateY(0); }
