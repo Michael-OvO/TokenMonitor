@@ -150,6 +150,16 @@
   }
 }
 
+/* Glass dark mode: deeper accent colors for contrast against blurred bg */
+:root[data-glass="true"][data-theme="dark"][data-provider="claude"],
+:root[data-glass="true"]:not([data-theme])[data-provider="claude"] {
+  --accent: #C85E2A;
+}
+:root[data-glass="true"][data-theme="dark"][data-provider="codex"],
+:root[data-glass="true"]:not([data-theme])[data-provider="codex"] {
+  --accent: #2E7EB5;
+}
+
 @keyframes popIn {
   0% { opacity: 0; transform: translateY(-4px); }
   100% { opacity: 1; transform: translateY(0); }
