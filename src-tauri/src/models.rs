@@ -155,7 +155,7 @@ pub fn normalize_codex_model(raw: &str) -> (String, String) {
     (normalized_display_name, normalized_key)
 }
 
-fn is_codex_model_name(raw: &str) -> bool {
+pub(crate) fn is_codex_model_name(raw: &str) -> bool {
     raw.starts_with("gpt")
         || raw.starts_with("o1")
         || raw.starts_with("o3")
