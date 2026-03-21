@@ -51,6 +51,9 @@
 
   --ch-plus: #4ade80;
   --ch-minus: #f87171;
+
+  --scope-main: #6b8afd;
+  --scope-sub: #b07aff;
 }
 
 /* ── Light theme ── */
@@ -77,6 +80,9 @@
 
   --ch-plus: #16a34a;
   --ch-minus: #dc2626;
+
+  --scope-main: #6b8afd;
+  --scope-sub: #b07aff;
 }
 
 /* ── Accent defaults (neutral — no provider selected) ── */
@@ -145,6 +151,9 @@
 
     --ch-plus: #16a34a;
     --ch-minus: #dc2626;
+
+    --scope-main: #6b8afd;
+    --scope-sub: #b07aff;
   }
   :root:not([data-theme])[data-provider="claude"] {
     --accent: #C85E2A;

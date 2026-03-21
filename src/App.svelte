@@ -24,7 +24,15 @@
     hydrateRateLimits,
     fetchRateLimits,
   } from "./lib/stores/rateLimits.js";
-  import { loadSettings, settings, applyProvider } from "./lib/stores/settings.js";
+  import {
+    DEFAULT_HEADER_TABS,
+    areHeaderTabsEqual,
+    applyProvider,
+    getVisibleHeaderProviders,
+    loadSettings,
+    resolveVisibleProvider,
+    settings,
+  } from "./lib/stores/settings.js";
   import { initializeRuntimeFromSettings } from "./lib/bootstrap.js";
   import { syncTrayConfig } from "./lib/traySync.js";
   import {
@@ -52,13 +60,14 @@
   import Chart from "./lib/components/Chart.svelte";
   import UsageBars from "./lib/components/UsageBars.svelte";
   import ModelList from "./lib/components/ModelList.svelte";
+  import SubagentList from "./lib/components/SubagentList.svelte";
   import Footer from "./lib/components/Footer.svelte";
   import SetupScreen from "./lib/components/SetupScreen.svelte";
   import SplashScreen from "./lib/components/SplashScreen.svelte";
   import Settings from "./lib/components/Settings.svelte";
   import Calendar from "./lib/components/Calendar.svelte";
   import DateNav from "./lib/components/DateNav.svelte";
-  import type { UsagePeriod, UsageProvider, RateLimitsPayload } from "./lib/types/index.js";
+  import type { HeaderTabs, UsagePeriod, UsageProvider, RateLimitsPayload } from "./lib/types/index.js";
 
   let showSplash = $state(true);
   let appReady = $state(false);
@@ -79,14 +88,27 @@
     deferredUntil: null as string | null,
   });
   let brandTheming = $state(true);
+  let headerTabs = $state<HeaderTabs>(DEFAULT_HEADER_TABS);
   let popEl: HTMLDivElement | null = null;
   let maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
+
+  let headerToggleOptions = $derived.by(() =>
+    getVisibleHeaderProviders(headerTabs).map((value) => ({
+      value,
+      label: headerTabs[value].label,
+    })),
+  );
 
   // Subscribe to stores
   $effect(() => {
     const unsub1 = usageData.subscribe((v) => (data = v));
     const unsub2 = isLoading.subscribe((v) => (loading = v));
-    const unsub3 = settings.subscribe((s) => (brandTheming = s.brandTheming));
+    const unsub3 = settings.subscribe((s) => {
+      brandTheming = s.brandTheming;
+      if (!areHeaderTabsEqual(headerTabs, s.headerTabs)) {
+        headerTabs = s.headerTabs;
+      }
+    });
     const unsub4 = splitFiveHourData.subscribe((v) => (splitData = v));
     const unsub5 = rateLimitsData.subscribe((v) => (rateLimits = v));
     const unsub6 = rateLimitsRequestState.subscribe((v) => (rateLimitsRequest = v));
@@ -96,6 +118,13 @@
   // Apply/remove data-provider attribute reactively
   $effect(() => {
     applyProvider(provider, brandTheming);
+  });
+
+  $effect(() => {
+    const nextProvider = resolveVisibleProvider(provider, headerTabs);
+    if (nextProvider !== provider) {
+      void handleProviderChange(nextProvider);
+    }
   });
 
   // Only show refresh indicator after 300ms — hides it entirely for
@@ -121,18 +150,19 @@
   }
 
   async function handleProviderChange(p: UsageProvider) {
-    if (provider === p) return;
-    provider = p;
-    activeProvider.set(p);
-    await fetchData(p, period, offset);
-    if (provider !== p) return;
-    if (period === "5h") await fetchRateLimits(p);
-    if (provider !== p) return;
+    const nextProvider = resolveVisibleProvider(p, headerTabs);
+    if (provider === nextProvider) return;
+    provider = nextProvider;
+    activeProvider.set(nextProvider);
+    await fetchData(nextProvider, period, offset);
+    if (provider !== nextProvider) return;
+    if (period === "5h") await fetchRateLimits(nextProvider);
+    if (provider !== nextProvider) return;
     await tick();
     syncSizeAndVerify("provider-change");
-    warmAllPeriods(p, period);
-    if (p === "claude") warmCache("codex", period);
-    else if (p === "codex") warmCache("claude", period);
+    warmAllPeriods(nextProvider, period);
+    if (nextProvider === "claude") warmCache("codex", period);
+    else if (nextProvider === "codex") warmCache("claude", period);
   }
 
   async function handlePeriodChange(p: UsagePeriod) {
@@ -402,6 +432,20 @@
         ...captureDebugSnapshot("document-visibility-change"),
       });
     };
+    const handleWindowError = (event: ErrorEvent) => {
+      logResizeDebug("window:error", {
+        message: event.message,
+        filename: event.filename || null,
+        lineno: event.lineno || null,
+        colno: event.colno || null,
+        error: formatDebugError(event.error),
+      });
+    };
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      logResizeDebug("window:unhandledrejection", {
+        reason: formatDebugError(event.reason),
+      });
+    };
     initResizeDebug();
     logResizeDebug("app:mount", captureDebugSnapshot("mount"));
 
@@ -436,7 +480,11 @@
         ...captureDebugSnapshot("data-ready"),
       });
 
-      await hydrateRateLimits();
+      if (period === "5h") {
+        await fetchRateLimits(provider);
+      } else {
+        await hydrateRateLimits();
+      }
       if (cancelled) return;
       await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch(() => {});
       if (cancelled) return;
@@ -490,6 +538,8 @@
     window.addEventListener("resize", handleBrowserResize);
     window.addEventListener("focus", handleWindowFocus);
     window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("error", handleWindowError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     if (typeof colorScheme.addEventListener === "function") {
@@ -508,6 +558,8 @@
       window.removeEventListener("resize", handleBrowserResize);
       window.removeEventListener("focus", handleWindowFocus);
       window.removeEventListener("blur", handleWindowBlur);
+      window.removeEventListener("error", handleWindowError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (typeof colorScheme.removeEventListener === "function") {
         colorScheme.removeEventListener("change", handleColorSchemeChange);
@@ -530,7 +582,12 @@
       <Calendar onBack={handleCalendarClose} />
     {:else if data}
       {#if showRefresh}<div class="refresh-bar"></div>{/if}
-      <Toggle active={provider} onChange={handleProviderChange} {brandTheming} />
+      <Toggle
+        active={provider}
+        options={headerToggleOptions}
+        onChange={handleProviderChange}
+        {brandTheming}
+      />
       <TimeTabs active={period} onChange={handlePeriodChange} />
       {#if period !== "5h" && data}
         <DateNav
@@ -581,6 +638,10 @@
       {#if period !== "5h" && data.model_breakdown.length > 0}
         <div class="hr"></div>
         <ModelList models={data.model_breakdown} />
+      {/if}
+      {#if data.subagent_stats}
+        <div class="hr"></div>
+        <SubagentList stats={data.subagent_stats} />
       {/if}
       <Footer {data} {provider} {rateLimits} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} />
     {:else}
