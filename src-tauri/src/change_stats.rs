@@ -52,6 +52,8 @@ pub struct ParsedChangeEvent {
     pub added_lines: u64,
     pub removed_lines: u64,
     pub category: FileCategory,
+    pub dedupe_key: Option<String>,
+    pub agent_scope: crate::subagent_stats::AgentScope,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -169,10 +171,8 @@ pub fn aggregate_model_change_summary(
     events: &[ParsedChangeEvent],
     model_key: &str,
 ) -> Option<ModelChangeSummary> {
-    let model_events: Vec<&ParsedChangeEvent> = events
-        .iter()
-        .filter(|e| e.model == model_key)
-        .collect();
+    let model_events: Vec<&ParsedChangeEvent> =
+        events.iter().filter(|e| e.model == model_key).collect();
 
     if model_events.is_empty() {
         return None;
@@ -263,6 +263,8 @@ mod tests {
             added_lines: added,
             removed_lines: removed,
             category: classify_file(path),
+            dedupe_key: None,
+            agent_scope: crate::subagent_stats::AgentScope::Main,
         }
     }
 
@@ -292,8 +294,10 @@ mod tests {
             make_event("config.yaml", 8, 2, "opus-4-6"),
         ];
         let stats = aggregate_change_stats(&events, 5.0, 10000).unwrap();
-        let total = stats.code_lines_changed + stats.docs_lines_changed
-            + stats.config_lines_changed + stats.other_lines_changed;
+        let total = stats.code_lines_changed
+            + stats.docs_lines_changed
+            + stats.config_lines_changed
+            + stats.other_lines_changed;
         assert_eq!(total, stats.added_lines + stats.removed_lines);
     }
 

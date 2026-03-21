@@ -5,6 +5,8 @@ mod models;
 mod parser;
 mod pricing;
 mod rate_limits;
+#[allow(dead_code)] // Used by later tasks in the subagent-stats feature
+mod subagent_stats;
 mod tray_render;
 
 #[cfg(target_os = "macos")]

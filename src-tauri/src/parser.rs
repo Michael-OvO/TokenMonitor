@@ -27,6 +27,10 @@ pub struct ParsedEntry {
     pub cache_creation_1h_tokens: u64,
     pub cache_read_tokens: u64,
     pub unique_hash: Option<String>,
+    #[allow(dead_code)] // Will be populated in later subagent-stats tasks
+    pub session_key: String,
+    #[allow(dead_code)] // Will be used in later subagent-stats tasks
+    pub agent_scope: crate::subagent_stats::AgentScope,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -493,6 +497,7 @@ fn push_codex_change_event(
         added_lines,
         removed_lines,
         dedupe_key: None,
+        agent_scope: crate::subagent_stats::AgentScope::Main,
     });
 
     if model_key.is_none() {
@@ -716,6 +721,8 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                         cache_creation_1h_tokens: cw_1h,
                         cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
                         unique_hash,
+                        session_key: String::new(),
+                        agent_scope: crate::subagent_stats::AgentScope::Main,
                     });
                 }
             }
@@ -756,6 +763,7 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                         removed_lines,
                         category: classify_file(&path),
                         dedupe_key: pending.dedupe_key,
+                        agent_scope: crate::subagent_stats::AgentScope::Main,
                     });
                 }
             }
@@ -775,6 +783,7 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
             removed_lines: pending.fallback_removed_lines,
             category: classify_file(&path),
             dedupe_key: pending.dedupe_key,
+            agent_scope: crate::subagent_stats::AgentScope::Main,
         });
     }
 
@@ -1187,6 +1196,8 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: raw_usage.cached_input_tokens,
             unique_hash: None,
+            session_key: String::new(),
+            agent_scope: crate::subagent_stats::AgentScope::Main,
         });
         if entries.last().is_some_and(|entry| entry.model.is_empty()) {
             pending_entry_model_indices.push(entries.len() - 1);

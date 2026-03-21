@@ -1,6 +1,8 @@
-use crate::change_stats::{aggregate_change_stats, aggregate_model_change_summary};
+use crate::change_stats::{
+    aggregate_change_stats, aggregate_model_change_summary, ParsedChangeEvent,
+};
 use crate::models::*;
-use crate::parser::{parse_since_date, UsageParser, UsageQueryDebugReport};
+use crate::parser::{UsageParser, UsageQueryDebugReport};
 use chrono::{Datelike, Local, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -635,14 +637,9 @@ pub async fn get_usage_data(
             let mut merged = merge_payloads(claude, codex);
 
             // Re-aggregate change stats from all providers' change events
-            let since_date = compute_since_date(&period, offset);
-            let (_entries, all_change_events, _reports) =
-                parser.load_entries("all", since_date);
-            merged.change_stats = aggregate_change_stats(
-                &all_change_events,
-                merged.total_cost,
-                merged.total_tokens,
-            );
+            let all_change_events = load_change_events_for_period(parser, "all", &period, offset);
+            merged.change_stats =
+                aggregate_change_stats(&all_change_events, merged.total_cost, merged.total_tokens);
             for model in &mut merged.model_breakdown {
                 model.change_stats =
                     aggregate_model_change_summary(&all_change_events, &model.model_key);
@@ -704,39 +701,85 @@ fn filter_buckets_to_range(payload: &mut UsagePayload, start: NaiveDate, end: Na
     payload.output_tokens = 0;
 }
 
+fn load_change_events_for_period(
+    parser: &UsageParser,
+    provider: &str,
+    period: &str,
+    offset: i32,
+) -> Vec<ParsedChangeEvent> {
+    let Some((start_date, end_date)) = compute_date_bounds(period, offset) else {
+        return Vec::new();
+    };
+
+    let (_entries, mut change_events, _reports) = parser.load_entries(provider, Some(start_date));
+    change_events.retain(|event| {
+        let date = event.timestamp.date_naive();
+        date >= start_date && date < end_date
+    });
+    change_events
+}
+
+fn load_entries_for_period(
+    parser: &UsageParser,
+    provider: &str,
+    period: &str,
+    offset: i32,
+) -> Vec<crate::parser::ParsedEntry> {
+    let Some((start_date, end_date)) = compute_date_bounds(period, offset) else {
+        return Vec::new();
+    };
+
+    let (mut entries, _change_events, _reports) = parser.load_entries(provider, Some(start_date));
+    entries.retain(|entry| {
+        let date = entry.timestamp.date_naive();
+        date >= start_date && date < end_date
+    });
+    entries
+}
+
 fn parse_bucket_start_date(sort_key: &str) -> Result<NaiveDate, chrono::ParseError> {
     NaiveDate::parse_from_str(sort_key, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(&format!("{sort_key}-01"), "%Y-%m-%d"))
 }
 
-/// Compute the `since` NaiveDate for a given period and offset.
-fn compute_since_date(period: &str, offset: i32) -> Option<NaiveDate> {
+fn compute_date_bounds(period: &str, offset: i32) -> Option<(NaiveDate, NaiveDate)> {
     let now = Local::now();
     let today = now.date_naive();
     match period {
-        "5h" => parse_since_date(&today.format("%Y%m%d").to_string()),
+        "5h" => Some((today, today + chrono::Duration::days(1))),
         "day" => {
             let target = today + chrono::Duration::days(offset as i64);
-            parse_since_date(&target.format("%Y%m%d").to_string())
+            Some((target, target + chrono::Duration::days(1)))
         }
         "week" => {
             let current_monday =
                 today - chrono::Duration::days(now.weekday().num_days_from_monday() as i64);
             let target_monday = current_monday + chrono::Duration::days((offset * 7) as i64);
-            parse_since_date(&target_monday.format("%Y%m%d").to_string())
+            Some((target_monday, target_monday + chrono::Duration::days(7)))
         }
         "month" => {
             let mut ty = now.year();
             let mut tm = now.month() as i32 + offset;
-            while tm <= 0 { ty -= 1; tm += 12; }
-            while tm > 12 { ty += 1; tm -= 12; }
+            while tm <= 0 {
+                ty -= 1;
+                tm += 12;
+            }
+            while tm > 12 {
+                ty += 1;
+                tm -= 12;
+            }
             let first = NaiveDate::from_ymd_opt(ty, tm as u32, 1).unwrap();
-            parse_since_date(&first.format("%Y%m%d").to_string())
+            let end = if tm == 12 {
+                NaiveDate::from_ymd_opt(ty + 1, 1, 1).unwrap()
+            } else {
+                NaiveDate::from_ymd_opt(ty, (tm + 1) as u32, 1).unwrap()
+            };
+            Some((first, end))
         }
         "year" => {
             let ty = now.year() + offset;
             let first = NaiveDate::from_ymd_opt(ty, 1, 1).unwrap();
-            parse_since_date(&first.format("%Y%m%d").to_string())
+            Some((first, NaiveDate::from_ymd_opt(ty + 1, 1, 1).unwrap()))
         }
         _ => None,
     }
@@ -823,8 +866,7 @@ fn get_provider_data(
 
     // Load change events for this provider/period. The file cache is already
     // warm from the aggregation call above, so this is cheap.
-    let since_date = compute_since_date(period, offset);
-    let (_entries, change_events, _reports) = parser.load_entries(provider, since_date);
+    let change_events = load_change_events_for_period(parser, provider, period, offset);
 
     // Attach change stats to the payload
     payload.change_stats =
@@ -833,6 +875,12 @@ fn get_provider_data(
     // Attach per-model change stats
     for model in &mut payload.model_breakdown {
         model.change_stats = aggregate_model_change_summary(&change_events, &model.model_key);
+    }
+
+    if period != "5h" {
+        let entries = load_entries_for_period(parser, provider, period, offset);
+        payload.input_tokens = entries.iter().map(|entry| entry.input_tokens).sum();
+        payload.output_tokens = entries.iter().map(|entry| entry.output_tokens).sum();
     }
 
     Ok(payload)
@@ -1092,6 +1140,14 @@ mod tests {
 
     fn write_file(path: &Path, content: &str) {
         fs::write(path, content).unwrap();
+    }
+
+    fn local_timestamp(date: NaiveDate, hour: u32) -> String {
+        date.and_hms_opt(hour, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap()
+            .to_rfc3339()
     }
 
     #[test]
@@ -1665,9 +1721,113 @@ mod tests {
             .model_breakdown
             .iter()
             .find(|m| m.model_key == "sonnet-4-6");
-        assert!(sonnet.is_some(), "should have sonnet-4-6 in model breakdown");
+        assert!(
+            sonnet.is_some(),
+            "should have sonnet-4-6 in model breakdown"
+        );
         let sonnet_stats = sonnet.unwrap().change_stats.as_ref().unwrap();
         assert_eq!(sonnet_stats.added_lines, 1);
         assert_eq!(sonnet_stats.removed_lines, 1);
+    }
+
+    #[test]
+    fn historical_day_payload_filters_usage_and_change_stats_to_target_date() {
+        let dir = TempDir::new().unwrap();
+        let today = Local::now().date_naive();
+        let target_date = today - chrono::Duration::days(2);
+        let later_date = target_date + chrono::Duration::days(1);
+        let target_ts = local_timestamp(target_date, 9);
+        let later_ts = local_timestamp(later_date, 9);
+        let content = format!(
+            r#"{{"type":"assistant","timestamp":"{target_ts}","requestId":"req_1","message":{{"id":"msg_1","model":"claude-sonnet-4-6-20260301","role":"assistant","content":[{{"type":"tool_use","id":"tu_1","name":"Edit","input":{{"file_path":"src/target.rs","old_string":"old","new_string":"new\nextra"}}}}],"usage":{{"input_tokens":100,"output_tokens":50}}}}}}
+{{"type":"assistant","timestamp":"{later_ts}","requestId":"req_2","message":{{"id":"msg_2","model":"claude-sonnet-4-6-20260301","role":"assistant","content":[{{"type":"tool_use","id":"tu_2","name":"Edit","input":{{"file_path":"src/later.rs","old_string":"x","new_string":"y\nz\nw"}}}}],"usage":{{"input_tokens":200,"output_tokens":100}}}}}}"#,
+        );
+        write_file(&dir.path().join("session.jsonl"), &content);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let payload = get_provider_data(&parser, "claude", "day", -2).unwrap();
+
+        assert_eq!(
+            payload.total_tokens, 150,
+            "later-day usage should be excluded"
+        );
+        let stats = payload.change_stats.unwrap();
+        assert_eq!(stats.added_lines, 2);
+        assert_eq!(stats.removed_lines, 1);
+        assert_eq!(stats.files_touched, 1);
+        assert_eq!(stats.change_events, 1);
+    }
+
+    #[test]
+    fn month_payload_preserves_input_output_tokens_after_range_filtering() {
+        let dir = TempDir::new().unwrap();
+        let now = Local::now();
+        let current_month = NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap();
+        let later_month = if now.month() == 12 {
+            NaiveDate::from_ymd_opt(now.year() + 1, 1, 1).unwrap()
+        } else {
+            NaiveDate::from_ymd_opt(now.year(), now.month() + 1, 1).unwrap()
+        };
+        let current_ts = local_timestamp(current_month, 11);
+        let later_ts = local_timestamp(later_month, 11);
+        let content = format!(
+            r#"{{"type":"assistant","timestamp":"{current_ts}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":123,"output_tokens":45}},"stop_reason":"end_turn"}}}}
+{{"type":"assistant","timestamp":"{later_ts}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":999,"output_tokens":888}},"stop_reason":"end_turn"}}}}"#,
+        );
+        write_file(&dir.path().join("session.jsonl"), &content);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let payload = get_provider_data(&parser, "claude", "month", 0).unwrap();
+
+        assert_eq!(payload.input_tokens, 123);
+        assert_eq!(payload.output_tokens, 45);
+        assert_eq!(payload.total_tokens, 168);
+    }
+
+    #[test]
+    fn load_change_events_for_period_filters_later_months_for_all_provider() {
+        let claude_dir = TempDir::new().unwrap();
+        let codex_dir = TempDir::new().unwrap();
+
+        let now = Local::now();
+        let target_month = NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap();
+        let later_month = if now.month() == 12 {
+            NaiveDate::from_ymd_opt(now.year() + 1, 1, 1).unwrap()
+        } else {
+            NaiveDate::from_ymd_opt(now.year(), now.month() + 1, 1).unwrap()
+        };
+
+        let claude_ts = local_timestamp(target_month, 10);
+        let claude_content = format!(
+            r#"{{"type":"assistant","timestamp":"{claude_ts}","requestId":"req_1","message":{{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{{"type":"tool_use","id":"tu_1","name":"Edit","input":{{"file_path":"src/in_range.rs","old_string":"a","new_string":"b\nc"}}}}],"usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#,
+        );
+        write_file(&claude_dir.path().join("session.jsonl"), &claude_content);
+
+        let codex_session_dir = codex_dir
+            .path()
+            .join(later_month.format("%Y").to_string())
+            .join(later_month.format("%m").to_string())
+            .join(later_month.format("%d").to_string());
+        fs::create_dir_all(&codex_session_dir).unwrap();
+        let codex_ts = local_timestamp(later_month, 10);
+        let codex_content = format!(
+            r#"{{"type":"turn_context","payload":{{"cwd":"/tmp/demo","model":"gpt-5.4"}}}}
+{{"type":"response_item","timestamp":"{codex_ts}","payload":{{"type":"custom_tool_call","status":"completed","name":"apply_patch","input":"*** Begin Patch\n*** Update File: src/out_of_range.rs\n@@\n-old\n+new\n+extra"}}}}"#,
+        );
+        write_file(&codex_session_dir.join("session.jsonl"), &codex_content);
+
+        let parser = UsageParser::with_dirs(
+            claude_dir.path().to_path_buf(),
+            codex_dir.path().to_path_buf(),
+        );
+        let change_events = load_change_events_for_period(&parser, "all", "month", 0);
+
+        assert_eq!(
+            change_events.len(),
+            1,
+            "later-month edits should be excluded"
+        );
+        assert_eq!(change_events[0].provider, "claude");
+        assert_eq!(change_events[0].path, "src/in_range.rs");
     }
 }
