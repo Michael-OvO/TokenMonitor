@@ -43,6 +43,11 @@
 
   --splash-disc: rgba(255,255,255,0.93);
   --splash-eye: #111113;
+
+  --comp-code: #60a5fa;
+  --comp-docs: #a78bfa;
+  --comp-config: #fbbf24;
+  --comp-other: rgba(255,255,255,0.15);
 }
 
 /* ── Light theme ── */
@@ -61,6 +66,11 @@
 
   --splash-disc: rgba(0,0,0,0.85);
   --splash-eye: #F5F5F7;
+
+  --comp-code: #3b82f6;
+  --comp-docs: #8b5cf6;
+  --comp-config: #d97706;
+  --comp-other: rgba(0,0,0,0.10);
 }
 
 /* ── Accent defaults (neutral — no provider selected) ── */
@@ -121,6 +131,11 @@
 
     --splash-disc: rgba(0,0,0,0.85);
     --splash-eye: #F5F5F7;
+
+    --comp-code: #3b82f6;
+    --comp-docs: #8b5cf6;
+    --comp-config: #d97706;
+    --comp-other: rgba(0,0,0,0.10);
   }
   :root:not([data-theme])[data-provider="claude"] {
     --accent: #C85E2A;
