@@ -499,6 +499,7 @@ fn push_codex_change_event(
     kind: ChangeEventKind,
     added_lines: u64,
     removed_lines: u64,
+    agent_scope: crate::subagent_stats::AgentScope,
 ) {
     change_events.push(ParsedChangeEvent {
         timestamp,
@@ -510,7 +511,7 @@ fn push_codex_change_event(
         added_lines,
         removed_lines,
         dedupe_key: None,
-        agent_scope: crate::subagent_stats::AgentScope::Main,
+        agent_scope,
     });
 
     if model_key.is_none() {
@@ -1026,6 +1027,8 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
     let mut pending_entry_model_indices = Vec::new();
     let mut pending_change_model_indices = Vec::new();
     let mut lines_read = 0;
+    let mut session_key = format!("codex-file:{}", path_to_string(path));
+    let mut agent_scope = crate::subagent_stats::AgentScope::Main;
 
     for line in reader.lines() {
         lines_read += 1;
@@ -1038,6 +1041,18 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
             Ok(e) => e,
             Err(_) => continue,
         };
+
+        if entry.entry_type == "session_meta" {
+            if let Some(payload) = entry.payload.as_ref() {
+                if let Some(id) = payload.get("id").and_then(Value::as_str) {
+                    session_key = format!("codex:{id}");
+                }
+                if payload.pointer("/source/subagent").is_some() {
+                    agent_scope = crate::subagent_stats::AgentScope::Subagent;
+                }
+            }
+            continue;
+        }
 
         if entry.entry_type == "turn_context" {
             if let Some(payload) = entry.payload.as_ref() {
@@ -1122,6 +1137,7 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
                                     ChangeEventKind::PatchEdit,
                                     total_added,
                                     total_removed,
+                                    agent_scope,
                                 );
                             }
                         } else if paths.len() == 1 {
@@ -1134,6 +1150,7 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
                                 ChangeEventKind::PatchEdit,
                                 total_added,
                                 total_removed,
+                                agent_scope,
                             );
                         } else {
                             // Multiple files in one patch — split by file
@@ -1149,6 +1166,7 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
                                     ChangeEventKind::PatchEdit,
                                     file_added,
                                     file_removed,
+                                    agent_scope,
                                 );
                             }
                         }
@@ -1222,8 +1240,8 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: raw_usage.cached_input_tokens,
             unique_hash: None,
-            session_key: String::new(),
-            agent_scope: crate::subagent_stats::AgentScope::Main,
+            session_key: session_key.clone(),
+            agent_scope,
         });
         if entries.last().is_some_and(|entry| entry.model.is_empty()) {
             pending_entry_model_indices.push(entries.len() - 1);
@@ -3383,6 +3401,87 @@ diff --git a/src/main.rs b/src/main.rs
             2,
             "root and sidechain should both survive dedupe"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Codex subagent scope attribution
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn codex_no_session_meta_defaults_to_main() {
+        let dir = TempDir::new().unwrap();
+        let ts = Local::now().format("%Y-%m-%dT12:00:00+00:00").to_string();
+        let content = format!(
+            r#"{{"type":"turn_context","payload":{{"cwd":"/tmp","model":"gpt-5.4"}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":100,"output_tokens":50}}}}}}}}"#
+        );
+        write_file(&dir.path().join("session.jsonl"), &content);
+
+        let (entries, _, _, _) = parse_codex_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].agent_scope,
+            crate::subagent_stats::AgentScope::Main
+        );
+    }
+
+    #[test]
+    fn codex_session_meta_with_subagent_other_maps_to_subagent() {
+        let dir = TempDir::new().unwrap();
+        let ts = Local::now().format("%Y-%m-%dT12:00:00+00:00").to_string();
+        let content = format!(
+            r#"{{"type":"session_meta","payload":{{"id":"sess-abc","source":{{"subagent":{{"other":"guardian"}}}}}}}}
+{{"type":"turn_context","payload":{{"cwd":"/tmp","model":"gpt-5.4"}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":100,"output_tokens":50}}}}}}}}"#
+        );
+        write_file(&dir.path().join("session.jsonl"), &content);
+
+        let (entries, _, _, _) = parse_codex_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].agent_scope,
+            crate::subagent_stats::AgentScope::Subagent
+        );
+        assert_eq!(entries[0].session_key, "codex:sess-abc");
+    }
+
+    #[test]
+    fn codex_session_meta_with_thread_spawn_maps_to_subagent() {
+        let dir = TempDir::new().unwrap();
+        let ts = Local::now().format("%Y-%m-%dT12:00:00+00:00").to_string();
+        let content = format!(
+            r#"{{"type":"session_meta","payload":{{"id":"sess-xyz","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"parent-1","depth":1}}}}}}}}}}
+{{"type":"turn_context","payload":{{"cwd":"/tmp","model":"gpt-5.4"}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":200,"output_tokens":80}}}}}}}}"#
+        );
+        write_file(&dir.path().join("session.jsonl"), &content);
+
+        let (entries, _, _, _) = parse_codex_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].agent_scope,
+            crate::subagent_stats::AgentScope::Subagent
+        );
+        assert_eq!(entries[0].session_key, "codex:sess-xyz");
+    }
+
+    #[test]
+    fn codex_all_entries_in_file_share_same_session_key() {
+        let dir = TempDir::new().unwrap();
+        let ts1 = Local::now().format("%Y-%m-%dT12:00:00+00:00").to_string();
+        let ts2 = Local::now().format("%Y-%m-%dT12:05:00+00:00").to_string();
+        let content = format!(
+            r#"{{"type":"session_meta","payload":{{"id":"sess-shared"}}}}
+{{"type":"turn_context","payload":{{"cwd":"/tmp","model":"gpt-5.4"}}}}
+{{"type":"event_msg","timestamp":"{ts1}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":100,"output_tokens":50}}}}}}}}
+{{"type":"event_msg","timestamp":"{ts2}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":200,"output_tokens":80}}}}}}}}"#
+        );
+        write_file(&dir.path().join("session.jsonl"), &content);
+
+        let (entries, _, _, _) = parse_codex_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].session_key, entries[1].session_key);
+        assert_eq!(entries[0].session_key, "codex:sess-shared");
     }
 }
 
