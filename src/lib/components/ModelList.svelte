@@ -83,7 +83,7 @@
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }
-  .mcs-plus { color: #4ade80; }
-  .mcs-minus { color: #f87171; }
+  .mcs-plus { color: var(--ch-plus); }
+  .mcs-minus { color: var(--ch-minus); }
   .mcs-slash { color: var(--t4); font-size: 8px; margin: 0 1px; }
 </style>

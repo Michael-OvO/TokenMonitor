@@ -48,6 +48,9 @@
   --comp-docs: #a78bfa;
   --comp-config: #fbbf24;
   --comp-other: rgba(255,255,255,0.15);
+
+  --ch-plus: #4ade80;
+  --ch-minus: #f87171;
 }
 
 /* ── Light theme ── */
@@ -71,6 +74,9 @@
   --comp-docs: #8b5cf6;
   --comp-config: #d97706;
   --comp-other: rgba(0,0,0,0.10);
+
+  --ch-plus: #16a34a;
+  --ch-minus: #dc2626;
 }
 
 /* ── Accent defaults (neutral — no provider selected) ── */
@@ -136,6 +142,9 @@
     --comp-docs: #8b5cf6;
     --comp-config: #d97706;
     --comp-other: rgba(0,0,0,0.10);
+
+    --ch-plus: #16a34a;
+    --ch-minus: #dc2626;
   }
   :root:not([data-theme])[data-provider="claude"] {
     --accent: #C85E2A;

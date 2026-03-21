@@ -168,7 +168,7 @@
     border: 1px solid rgba(239, 68, 68, 0.25);
   }
   .m.alert .m-v { color: #ef4444; }
-  .m.alert .m-l { color: #f87171; }
+  .m.alert .m-l { color: var(--ch-minus); }
 
   /* Live dot */
   .live-dot {
@@ -183,10 +183,10 @@
   }
 
   /* Changes card */
-  .ch-plus { color: #4ade80; }
-  .ch-minus { color: #f87171; }
+  .ch-plus { color: var(--ch-plus); }
+  .ch-minus { color: var(--ch-minus); }
   .ch-slash { color: var(--t4); }
-  .ch-neg { color: #f87171; }
+  .ch-neg { color: var(--ch-minus); }
 
   /* Empty/quiet states */
   .m-quiet .m-v { color: var(--t4); }
