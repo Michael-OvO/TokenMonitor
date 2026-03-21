@@ -12,6 +12,12 @@
     return unsub;
   });
 
+  let showChanges = $state(false);
+  $effect(() => {
+    const unsub = settings.subscribe((s) => (showChanges = s.showModelChangeStats));
+    return unsub;
+  });
+
   let rows = $derived(
     [...models]
       .filter((m) => !hiddenModels.includes(m.model_key))
@@ -29,6 +35,13 @@
       <div class="mr">
         <span class="mb" style="background:{modelColor(row.model_key)}"></span>
         <span class="mn">{row.display_name}</span>
+        {#if showChanges && row.change_stats}
+          <span class="mcs">
+            <span class="mcs-plus">+{row.change_stats.added_lines.toLocaleString()}</span>
+            <span class="mcs-slash">/</span>
+            <span class="mcs-minus">−{row.change_stats.removed_lines.toLocaleString()}</span>
+          </span>
+        {/if}
         <span class="mc">{formatCost(row.cost)}</span>
         <span class="mt">{formatTokens(row.tokens)}</span>
       </div>
@@ -65,4 +78,12 @@
   .mn { font: 400 10px/1.2 'Inter', sans-serif; color: var(--t2); flex: 1; letter-spacing: .1px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mc { font: 500 10px/1.2 'Inter', sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }
   .mt { font: 400 9px/1.2 'Inter', sans-serif; color: var(--t3); font-variant-numeric: tabular-nums; min-width: 32px; text-align: right; }
+  .mcs {
+    font: 400 9px/1 'Inter', sans-serif;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+  .mcs-plus { color: #4ade80; }
+  .mcs-minus { color: #f87171; }
+  .mcs-slash { color: var(--t4); font-size: 8px; margin: 0 1px; }
 </style>
