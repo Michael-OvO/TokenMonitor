@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::change_stats::{ChangeStats, ModelChangeSummary};
+
 // ── Frontend payload (sent to Svelte via IPC) ──
 
 #[derive(Debug, Serialize, Clone)]
@@ -17,6 +19,7 @@ pub struct UsagePayload {
     pub from_cache: bool,
     pub period_label: String,
     pub has_earlier_data: bool,
+    pub change_stats: Option<ChangeStats>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -41,6 +44,7 @@ pub struct ModelSummary {
     pub model_key: String,
     pub cost: f64,
     pub tokens: u64,
+    pub change_stats: Option<ModelChangeSummary>,
 }
 
 #[derive(Debug, Serialize, Clone)]

@@ -678,6 +678,7 @@ fn filter_buckets_to_range(payload: &mut UsagePayload, start: NaiveDate, end: Na
             model_key: key,
             cost,
             tokens,
+            change_stats: None,
         })
         .collect();
 
@@ -797,6 +798,7 @@ fn merge_payloads(mut c: UsagePayload, x: UsagePayload) -> UsagePayload {
                 model_key: model.model_key.clone(),
                 cost: 0.0,
                 tokens: 0,
+                change_stats: None,
             });
         entry.cost += model.cost;
         entry.tokens += model.tokens;
@@ -1001,6 +1003,7 @@ mod tests {
             model_key: model_key.to_string(),
             cost,
             tokens,
+            change_stats: None,
         }
     }
 
@@ -1019,6 +1022,7 @@ mod tests {
             from_cache: false,
             period_label: String::new(),
             has_earlier_data: false,
+            change_stats: None,
         }
     }
 
@@ -1223,6 +1227,7 @@ mod tests {
             from_cache: true,
             period_label: String::new(),
             has_earlier_data: false,
+            change_stats: None,
         };
         let right = UsagePayload {
             total_cost: 2.0,
@@ -1243,6 +1248,7 @@ mod tests {
             from_cache: false,
             period_label: String::new(),
             has_earlier_data: false,
+            change_stats: None,
         };
 
         let merged = merge_payloads(left, right);

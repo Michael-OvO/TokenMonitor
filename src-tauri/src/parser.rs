@@ -766,6 +766,7 @@ fn segment_map_to_model_summaries(map: &HashMap<String, (String, f64, u64)>) -> 
             model_key: key.clone(),
             cost: *cost,
             tokens: *tokens,
+            change_stats: None,
         })
         .collect()
 }
@@ -1264,6 +1265,7 @@ impl UsageParser {
             from_cache: false,
             period_label: String::new(),
             has_earlier_data: false,
+            change_stats: None,
         };
 
         self.store_cache(&cache_key, payload.clone());
@@ -1365,6 +1367,7 @@ impl UsageParser {
             from_cache: false,
             period_label: String::new(),
             has_earlier_data: false,
+            change_stats: None,
         };
 
         self.store_cache(&cache_key, payload.clone());
@@ -1474,6 +1477,7 @@ impl UsageParser {
             from_cache: false,
             period_label: String::new(),
             has_earlier_data: false,
+            change_stats: None,
         };
 
         self.store_cache(&cache_key, payload.clone());
@@ -1625,6 +1629,7 @@ impl UsageParser {
             from_cache: false,
             period_label: String::new(),
             has_earlier_data: false,
+            change_stats: None,
         };
 
         self.store_cache(&cache_key, payload.clone());
