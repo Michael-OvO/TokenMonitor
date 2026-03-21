@@ -1,3 +1,6 @@
+use crate::change_stats::{classify_file, ChangeEventKind, ParsedChangeEvent};
+#[cfg(test)]
+use crate::change_stats::FileCategory;
 use crate::models::{ActiveBlock, ChartBucket, ChartSegment, ModelSummary, UsagePayload};
 use chrono::{DateTime, Local, NaiveDate, Timelike};
 use serde::{Deserialize, Serialize};
@@ -72,6 +75,7 @@ struct FileStamp {
 struct CachedFileEntries {
     stamp: FileStamp,
     entries: Vec<ParsedEntry>,
+    change_events: Vec<ParsedChangeEvent>,
     earliest_date: Option<NaiveDate>,
 }
 
@@ -83,6 +87,7 @@ enum ProviderFileKind {
 
 struct CachedFileLoad {
     entries: Vec<ParsedEntry>,
+    change_events: Vec<ParsedChangeEvent>,
     earliest_date: Option<NaiveDate>,
     lines_read: usize,
     opened: bool,
@@ -109,6 +114,34 @@ struct ClaudeJsonlMessage {
     model: Option<String>,
     usage: Option<ClaudeJsonlUsage>,
     id: Option<String>,
+    #[serde(default)]
+    content: Vec<ClaudeContentBlock>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ClaudeContentBlock {
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        name: String,
+        input: serde_json::Value,
+    },
+    #[serde(other)]
+    Other,
+}
+
+/// Input fields for the Edit tool_use.
+#[derive(Deserialize)]
+struct EditToolInput {
+    file_path: String,
+    old_string: String,
+    new_string: String,
+}
+
+/// Input fields for the Write tool_use.
+#[derive(Deserialize)]
+struct WriteToolInput {
+    file_path: String,
 }
 
 #[derive(Deserialize)]
@@ -392,16 +425,31 @@ fn modified_since(path: &Path, since: NaiveDate) -> bool {
         .unwrap_or(true) // if we can't read metadata, include the file
 }
 
-type ClaudeParseResult = (Vec<ParsedEntry>, usize, bool);
+/// Count lines in a string (an empty string has 0 lines).
+fn count_lines(s: &str) -> u64 {
+    if s.is_empty() {
+        0
+    } else {
+        s.lines().count() as u64
+    }
+}
+
+/// Returns true for provider-internal paths that should not be counted as user edits.
+fn is_provider_internal_path(path: &str) -> bool {
+    path.contains("/.claude/plans/")
+}
+
+type ClaudeParseResult = (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, usize, bool);
 
 fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
     let file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(_) => return (Vec::new(), 0, false),
+        Err(_) => return (Vec::new(), Vec::new(), 0, false),
     };
 
     let reader = BufReader::new(file);
     let mut entries = Vec::new();
+    let mut change_events = Vec::new();
     let mut lines_read = 0;
 
     for line in reader.lines() {
@@ -441,6 +489,50 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
             Err(_) => continue,
         };
 
+        // Extract change events from tool_use content blocks
+        let model_key = crate::models::normalize_claude_model(&model).1.to_string();
+        for block in &msg.content {
+            match block {
+                ClaudeContentBlock::ToolUse { name, input } if name == "Edit" => {
+                    if let Ok(edit) = serde_json::from_value::<EditToolInput>(input.clone()) {
+                        if is_provider_internal_path(&edit.file_path) {
+                            continue;
+                        }
+                        let added_lines = count_lines(&edit.new_string);
+                        let removed_lines = count_lines(&edit.old_string);
+                        change_events.push(ParsedChangeEvent {
+                            timestamp: ts,
+                            model: model_key.clone(),
+                            provider: "claude".to_string(),
+                            path: edit.file_path.clone(),
+                            kind: ChangeEventKind::PatchEdit,
+                            added_lines,
+                            removed_lines,
+                            category: classify_file(&edit.file_path),
+                        });
+                    }
+                }
+                ClaudeContentBlock::ToolUse { name, input } if name == "Write" => {
+                    if let Ok(write) = serde_json::from_value::<WriteToolInput>(input.clone()) {
+                        if is_provider_internal_path(&write.file_path) {
+                            continue;
+                        }
+                        change_events.push(ParsedChangeEvent {
+                            timestamp: ts,
+                            model: model_key.clone(),
+                            provider: "claude".to_string(),
+                            path: write.file_path.clone(),
+                            kind: ChangeEventKind::FullWrite,
+                            added_lines: 0,
+                            removed_lines: 0,
+                            category: classify_file(&write.file_path),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // Split cache creation into 5m and 1h tiers.
         // If the breakdown sub-object exists, use it directly.
         // Otherwise default all cache creation to 1h (Claude Code's default).
@@ -465,7 +557,7 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
         });
     }
 
-    (entries, lines_read, true)
+    (entries, change_events, lines_read, true)
 }
 
 /// Read all Claude assistant entries from JSONL files under `projects_dir`,
@@ -501,7 +593,8 @@ fn read_claude_entries_with_debug(
         report.attempted_paths += 1;
         push_sample_path(&mut report.sample_paths, &path);
 
-        let (parsed_entries, lines_read, opened) = parse_claude_session_file(&path);
+        let (parsed_entries, _change_events, lines_read, opened) =
+            parse_claude_session_file(&path);
         report.lines_read += lines_read;
         if opened {
             report.opened_paths += 1;
@@ -908,6 +1001,7 @@ impl UsageParser {
                     if &cached.stamp == stamp {
                         return CachedFileLoad {
                             entries: cached.entries.clone(),
+                            change_events: cached.change_events.clone(),
                             earliest_date: cached.earliest_date,
                             lines_read: 0,
                             opened: false,
@@ -918,9 +1012,12 @@ impl UsageParser {
             }
         }
 
-        let (entries, lines_read, opened) = match kind {
+        let (entries, change_events, lines_read, opened) = match kind {
             ProviderFileKind::Claude => parse_claude_session_file(path),
-            ProviderFileKind::Codex => parse_codex_session_file(path),
+            ProviderFileKind::Codex => {
+                let (e, lr, op) = parse_codex_session_file(path);
+                (e, Vec::new(), lr, op)
+            }
         };
         let earliest_date = earliest_entry_date(&entries);
 
@@ -932,6 +1029,7 @@ impl UsageParser {
                         CachedFileEntries {
                             stamp,
                             entries: entries.clone(),
+                            change_events: change_events.clone(),
                             earliest_date,
                         },
                     );
@@ -945,6 +1043,7 @@ impl UsageParser {
 
         CachedFileLoad {
             entries,
+            change_events,
             earliest_date,
             lines_read,
             opened,
@@ -955,8 +1054,9 @@ impl UsageParser {
     fn load_claude_entries_with_debug(
         &self,
         since: Option<NaiveDate>,
-    ) -> (Vec<ParsedEntry>, Vec<ProviderReadDebug>) {
+    ) -> (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, Vec<ProviderReadDebug>) {
         let mut entries = Vec::new();
+        let mut change_events = Vec::new();
         let mut reports = Vec::new();
         let mut processed_hashes = HashSet::new();
 
@@ -999,6 +1099,14 @@ impl UsageParser {
                     }
                 }
 
+                // Collect change events (filtered by since date)
+                for cev in loaded.change_events {
+                    if since.is_some_and(|since_date| cev.timestamp.date_naive() < since_date) {
+                        continue;
+                    }
+                    change_events.push(cev);
+                }
+
                 for entry in loaded.entries {
                     if since.is_some_and(|since_date| entry.timestamp.date_naive() < since_date) {
                         continue;
@@ -1016,7 +1124,7 @@ impl UsageParser {
             reports.push(report);
         }
 
-        (entries, reports)
+        (entries, change_events, reports)
     }
 
     fn load_codex_entries_with_debug(
@@ -1080,20 +1188,20 @@ impl UsageParser {
         &self,
         provider: &str,
         since: Option<NaiveDate>,
-    ) -> (Vec<ParsedEntry>, Vec<ProviderReadDebug>) {
+    ) -> (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, Vec<ProviderReadDebug>) {
         match provider {
             "claude" => self.load_claude_entries_with_debug(since),
             "codex" => {
                 let (entries, report) = self.load_codex_entries_with_debug(since);
-                (entries, vec![report])
+                (entries, Vec::new(), vec![report])
             }
             _ => {
-                let (mut claude_entries, mut claude_reports) =
+                let (mut claude_entries, change_events, mut claude_reports) =
                     self.load_claude_entries_with_debug(since);
                 let (codex_entries, codex_report) = self.load_codex_entries_with_debug(since);
                 claude_entries.extend(codex_entries);
                 claude_reports.push(codex_report);
-                (claude_entries, claude_reports)
+                (claude_entries, change_events, claude_reports)
             }
         }
     }
@@ -1192,7 +1300,7 @@ impl UsageParser {
         }
 
         let since_date = parse_since_date(since);
-        let (entries, sources) = self.load_entries(provider, since_date);
+        let (entries, _change_events, sources) = self.load_entries(provider, since_date);
         self.set_last_query_debug(UsageQueryDebugReport {
             provider: provider.to_string(),
             aggregation: String::from("daily"),
@@ -1290,7 +1398,7 @@ impl UsageParser {
         }
 
         let since_date = parse_since_date(since);
-        let (entries, sources) = self.load_entries(provider, since_date);
+        let (entries, _change_events, sources) = self.load_entries(provider, since_date);
         self.set_last_query_debug(UsageQueryDebugReport {
             provider: provider.to_string(),
             aggregation: String::from("monthly"),
@@ -1392,7 +1500,7 @@ impl UsageParser {
         }
 
         let since_date = parse_since_date(since);
-        let (entries, sources) = self.load_entries(provider, since_date);
+        let (entries, _change_events, sources) = self.load_entries(provider, since_date);
         self.set_last_query_debug(UsageQueryDebugReport {
             provider: provider.to_string(),
             aggregation: String::from("hourly"),
@@ -1502,7 +1610,7 @@ impl UsageParser {
         }
 
         let since_date = parse_since_date(since);
-        let (mut entries, sources) = self.load_entries(provider, since_date);
+        let (mut entries, _change_events, sources) = self.load_entries(provider, since_date);
         self.set_last_query_debug(UsageQueryDebugReport {
             provider: provider.to_string(),
             aggregation: String::from("blocks"),
@@ -1711,7 +1819,7 @@ mod tests {
         write_file(&dir.path().join("session.jsonl"), content);
 
         let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
-        let (entries, reports) = parser.load_entries("claude", parse_since_date("20260301"));
+        let (entries, _change_events, reports) = parser.load_entries("claude", parse_since_date("20260301"));
 
         assert_eq!(
             entries.len(),
@@ -2232,6 +2340,140 @@ mod tests {
         let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
         assert!(!parser.has_entries_before("claude", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Change event parsing (Edit / Write tool_use)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn count_lines_helper() {
+        assert_eq!(count_lines(""), 0);
+        assert_eq!(count_lines("one"), 1);
+        assert_eq!(count_lines("one\ntwo"), 2);
+        assert_eq!(count_lines("one\ntwo\nthree"), 3);
+    }
+
+    #[test]
+    fn parse_claude_edit_tool_use_emits_change_event() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/main.rs","old_string":"fn old()","new_string":"fn new()\nfn extra()"}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let (entries, change_events, _, _) = parse_claude_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(change_events.len(), 1);
+
+        let cev = &change_events[0];
+        assert_eq!(cev.path, "src/main.rs");
+        assert_eq!(cev.model, "opus-4-6");
+        assert_eq!(cev.provider, "claude");
+        assert_eq!(cev.kind, ChangeEventKind::PatchEdit);
+        assert_eq!(cev.removed_lines, 1); // "fn old()"
+        assert_eq!(cev.added_lines, 2); // "fn new()\nfn extra()"
+        assert_eq!(cev.category, FileCategory::Code);
+    }
+
+    #[test]
+    fn parse_claude_write_tool_use_emits_change_event() {
+        let dir = TempDir::new().unwrap();
+        let content = "{\"type\":\"assistant\",\"timestamp\":\"2026-03-21T10:00:00+00:00\",\"requestId\":\"req_1\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-4-6-20260301\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"Write\",\"input\":{\"file_path\":\"docs/README.md\",\"content\":\"# Hello\\nWorld\"}}],\"usage\":{\"input_tokens\":100,\"output_tokens\":50}}}";
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let (entries, change_events, _, _) = parse_claude_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(change_events.len(), 1);
+
+        let cev = &change_events[0];
+        assert_eq!(cev.path, "docs/README.md");
+        assert_eq!(cev.model, "sonnet-4-6");
+        assert_eq!(cev.kind, ChangeEventKind::FullWrite);
+        assert_eq!(cev.added_lines, 0); // conservative: no line count for Write
+        assert_eq!(cev.removed_lines, 0);
+        assert_eq!(cev.category, FileCategory::Docs);
+    }
+
+    #[test]
+    fn parse_claude_multiple_tool_uses_in_one_message() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/a.rs","old_string":"a","new_string":"b\nc"}},{"type":"tool_use","id":"tu_2","name":"Edit","input":{"file_path":"src/b.rs","old_string":"x\ny","new_string":"z"}},{"type":"text","text":"Done"}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let (_entries, change_events, _, _) = parse_claude_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(change_events.len(), 2);
+
+        assert_eq!(change_events[0].path, "src/a.rs");
+        assert_eq!(change_events[0].removed_lines, 1);
+        assert_eq!(change_events[0].added_lines, 2);
+
+        assert_eq!(change_events[1].path, "src/b.rs");
+        assert_eq!(change_events[1].removed_lines, 2);
+        assert_eq!(change_events[1].added_lines, 1);
+    }
+
+    #[test]
+    fn parse_claude_skips_provider_internal_paths() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Write","input":{"file_path":"/home/user/.claude/plans/plan_123.md","content":"step 1"}},{"type":"tool_use","id":"tu_2","name":"Edit","input":{"file_path":"src/real.rs","old_string":"old","new_string":"new"}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let (_entries, change_events, _, _) = parse_claude_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(change_events.len(), 1);
+        assert_eq!(change_events[0].path, "src/real.rs");
+    }
+
+    #[test]
+    fn change_events_flow_through_cached_load() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/main.rs","old_string":"fn old()","new_string":"fn new()"}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let (entries, change_events, _reports) =
+            parser.load_claude_entries_with_debug(None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(change_events.len(), 1);
+        assert_eq!(change_events[0].path, "src/main.rs");
+
+        // Second call should come from cache and still have change events
+        let (_entries2, change_events2, _reports2) =
+            parser.load_claude_entries_with_debug(None);
+        assert_eq!(change_events2.len(), 1);
+        assert_eq!(change_events2[0].path, "src/main.rs");
+    }
+
+    #[test]
+    fn change_events_filtered_by_since_date() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-01-01T10:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/old.rs","old_string":"a","new_string":"b"}}],"usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","requestId":"req_2","message":{"id":"msg_2","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_2","name":"Edit","input":{"file_path":"src/new.rs","old_string":"c","new_string":"d"}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let since = parse_since_date("20260301");
+        let (_entries, change_events, _reports) =
+            parser.load_claude_entries_with_debug(since);
+        assert_eq!(change_events.len(), 1);
+        assert_eq!(change_events[0].path, "src/new.rs");
+    }
+
+    #[test]
+    fn no_content_field_produces_no_change_events() {
+        let dir = TempDir::new().unwrap();
+        // A normal assistant message with no content array (usage only)
+        let content = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","message":{"model":"claude-opus-4-6-20260301","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let (_entries, change_events, _, _) = parse_claude_session_file(&dir.path().join("session.jsonl"));
+        assert!(change_events.is_empty());
+    }
+
+    #[test]
+    fn is_provider_internal_path_detects_plans() {
+        assert!(is_provider_internal_path("/home/user/.claude/plans/plan_abc.md"));
+        assert!(is_provider_internal_path("/Users/foo/.claude/plans/something"));
+        assert!(!is_provider_internal_path("src/main.rs"));
+        assert!(!is_provider_internal_path("/home/user/.claude/projects/foo.jsonl"));
+    }
 }
 
 #[cfg(test)]
@@ -2283,9 +2525,8 @@ mod debug_compare {
         let parser = UsageParser::new();
         let today = chrono::Local::now().format("%Y%m%d").to_string();
 
-        let claude = parser
-            .load_entries("claude", Some(parse_since_date(&today).unwrap()))
-            .0;
+        let (claude, _, _) = parser
+            .load_entries("claude", Some(parse_since_date(&today).unwrap()));
         print_provider("CLAUDE", &claude);
         println!("\n=== CLAUDE: ccusage ===");
         println!("  opus:   inp=19,875 out=129,193 cw=3,180,937 cr=74,758,016 total=78,088,021 cost=$65.768004");
@@ -2297,9 +2538,8 @@ mod debug_compare {
         );
         println!("  TOTAL: tokens=85,666,713 cost=$68.325146");
 
-        let codex = parser
-            .load_entries("codex", Some(parse_since_date(&today).unwrap()))
-            .0;
+        let (codex, _, _) = parser
+            .load_entries("codex", Some(parse_since_date(&today).unwrap()));
         print_provider("CODEX", &codex);
         println!("\n=== CODEX: ccusage ===");
         println!("  gpt-5.4: inp=231,247 out=7,338 reasoning=5,997 total=238,585 cost=$0.277788");

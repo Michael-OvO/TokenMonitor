@@ -573,7 +573,7 @@ pub async fn get_known_models(
 ) -> Result<Vec<KnownModel>, String> {
     match provider.as_str() {
         "claude" | "codex" | "all" => {
-            let (entries, _) = state.parser.load_entries(&provider, None);
+            let (entries, _, _) = state.parser.load_entries(&provider, None);
             let mut models = BTreeMap::<String, KnownModel>::new();
             for entry in entries {
                 let model = crate::models::known_model_from_raw(&entry.model);
