@@ -119,6 +119,12 @@ struct ClaudeJsonlEntry {
     #[serde(rename = "toolUseResult")]
     tool_use_result: Option<ClaudeToolUseResult>,
     message: Option<ClaudeJsonlMessage>,
+    #[serde(rename = "isSidechain", default)]
+    is_sidechain: Option<bool>,
+    #[serde(rename = "sessionId", default)]
+    session_id: Option<String>,
+    #[serde(rename = "agentId", default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -339,8 +345,14 @@ fn detect_codex_sessions_dir() -> PathBuf {
 fn create_claude_unique_hash(entry: &ClaudeJsonlEntry) -> Option<String> {
     let message_id = entry.message.as_ref()?.id.as_ref()?;
     let request_id = entry.request_id.as_ref()?;
+    let sidechain = if entry.is_sidechain == Some(true) {
+        "1"
+    } else {
+        "0"
+    };
+    let agent = entry.agent_id.as_deref().unwrap_or("");
 
-    Some(format!("{message_id}:{request_id}"))
+    Some(format!("{sidechain}:{agent}:{message_id}:{request_id}"))
 }
 
 struct PendingClaudeTool {
@@ -351,6 +363,7 @@ struct PendingClaudeTool {
     fallback_added_lines: u64,
     fallback_removed_lines: u64,
     dedupe_key: Option<String>,
+    agent_scope: crate::subagent_stats::AgentScope,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -637,6 +650,17 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                     _ => continue,
                 };
 
+                let agent_scope = if entry.is_sidechain == Some(true) {
+                    crate::subagent_stats::AgentScope::Subagent
+                } else {
+                    crate::subagent_stats::AgentScope::Main
+                };
+                let session_key = match (&entry.session_id, &entry.agent_id, entry.is_sidechain) {
+                    (Some(sid), Some(aid), Some(true)) => format!("claude:{sid}:subagent:{aid}"),
+                    (Some(sid), _, _) => format!("claude:{sid}:main"),
+                    _ => format!("claude:file:{}", path_to_string(path)),
+                };
+
                 let model_key = crate::models::normalize_claude_model(&model).1.to_string();
                 let unique_hash = create_claude_unique_hash(&entry);
                 for (block_index, block) in msg.content.iter().enumerate() {
@@ -660,6 +684,7 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                                             dedupe_key: unique_hash
                                                 .as_ref()
                                                 .map(|hash| format!("{hash}:{block_index}")),
+                                            agent_scope,
                                         },
                                     ))
                                 })
@@ -683,6 +708,7 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                                             dedupe_key: unique_hash
                                                 .as_ref()
                                                 .map(|hash| format!("{hash}:{block_index}")),
+                                            agent_scope,
                                         },
                                     ))
                                 })
@@ -721,8 +747,8 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                         cache_creation_1h_tokens: cw_1h,
                         cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
                         unique_hash,
-                        session_key: String::new(),
-                        agent_scope: crate::subagent_stats::AgentScope::Main,
+                        session_key: session_key.clone(),
+                        agent_scope,
                     });
                 }
             }
@@ -763,7 +789,7 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                         removed_lines,
                         category: classify_file(&path),
                         dedupe_key: pending.dedupe_key,
-                        agent_scope: crate::subagent_stats::AgentScope::Main,
+                        agent_scope: pending.agent_scope,
                     });
                 }
             }
@@ -783,7 +809,7 @@ fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
             removed_lines: pending.fallback_removed_lines,
             category: classify_file(&path),
             dedupe_key: pending.dedupe_key,
-            agent_scope: crate::subagent_stats::AgentScope::Main,
+            agent_scope: pending.agent_scope,
         });
     }
 
@@ -3298,6 +3324,65 @@ diff --git a/src/main.rs b/src/main.rs
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], "/Users/test/project/src/new.rs");
         assert_eq!(paths[1], "/Users/test/project/src/lib.rs");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Claude subagent scope attribution
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn claude_root_session_defaults_to_main_scope() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","sessionId":"sess-1","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let entries = read_claude_entries(dir.path(), None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].agent_scope,
+            crate::subagent_stats::AgentScope::Main
+        );
+        assert!(
+            entries[0].session_key.contains("main"),
+            "session_key should contain 'main', got: {}",
+            entries[0].session_key
+        );
+    }
+
+    #[test]
+    fn claude_sidechain_entry_maps_to_subagent_scope() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","isSidechain":true,"agentId":"a1b2c3d","sessionId":"sess-1","message":{"model":"claude-haiku-4-5","stop_reason":"end_turn","usage":{"input_tokens":50,"output_tokens":20}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let entries = read_claude_entries(dir.path(), None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].agent_scope,
+            crate::subagent_stats::AgentScope::Subagent
+        );
+        assert!(
+            entries[0].session_key.contains("a1b2c3d"),
+            "session_key should contain agentId, got: {}",
+            entries[0].session_key
+        );
+    }
+
+    #[test]
+    fn claude_dedupe_does_not_collapse_root_and_sidechain() {
+        let dir = TempDir::new().unwrap();
+        // Root and sidechain with same message.id and requestId
+        let root = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","sessionId":"sess-1","requestId":"req-1","message":{"id":"msg-1","model":"claude-opus-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let sidechain = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:01+00:00","isSidechain":true,"agentId":"agt-1","sessionId":"sess-1","requestId":"req-1","message":{"id":"msg-1","model":"claude-haiku-4-5","stop_reason":"end_turn","usage":{"input_tokens":30,"output_tokens":10}}}"#;
+        write_file(&dir.path().join("root.jsonl"), root);
+        write_file(&dir.path().join("sidechain.jsonl"), sidechain);
+
+        let entries = read_claude_entries(dir.path(), None);
+        assert_eq!(
+            entries.len(),
+            2,
+            "root and sidechain should both survive dedupe"
+        );
     }
 }
 
