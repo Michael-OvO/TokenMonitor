@@ -3,6 +3,13 @@ export type DefaultProvider = Exclude<UsageProvider, "all">;
 export type UsagePeriod = "5h" | "day" | "week" | "month" | "year";
 export type DefaultPeriod = Exclude<UsagePeriod, "year">;
 
+export interface HeaderTabConfig {
+  label: string;
+  enabled: boolean;
+}
+
+export type HeaderTabs = Record<UsageProvider, HeaderTabConfig>;
+
 export interface UsagePayload {
   total_cost: number;
   total_tokens: number;
@@ -17,6 +24,7 @@ export interface UsagePayload {
   from_cache: boolean;
   period_label: string;
   has_earlier_data: boolean;
+  change_stats: ChangeStats | null;
 }
 
 export interface ChartBucket {
@@ -38,6 +46,7 @@ export interface ModelSummary {
   model_key: string;
   cost: number;
   tokens: number;
+  change_stats: ModelChangeSummary | null;
 }
 
 export interface KnownModel {
@@ -50,6 +59,33 @@ export interface ActiveBlock {
   burn_rate_per_hour: number;
   projected_cost: number;
   is_active: boolean;
+}
+
+export interface ChangeStats {
+  added_lines: number;
+  removed_lines: number;
+  net_lines: number;  // Can be negative — only signed integer field
+  files_touched: number;
+  change_events: number;
+  write_events: number;
+  code_lines_changed: number;
+  docs_lines_changed: number;
+  config_lines_changed: number;
+  other_lines_changed: number;
+  avg_lines_per_event: number | null;
+  cost_per_100_net_lines: number | null;
+  tokens_per_net_line: number | null;
+  rewrite_ratio: number | null;
+  churn_ratio: number | null;
+  dominant_extension: string | null;
+}
+
+export interface ModelChangeSummary {
+  added_lines: number;
+  removed_lines: number;
+  net_lines: number;
+  files_touched: number;
+  change_events: number;
 }
 
 export interface CalendarDay {

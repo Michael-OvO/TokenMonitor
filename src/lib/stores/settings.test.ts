@@ -4,6 +4,7 @@ import type { Settings } from "./settings.js";
 
 const mockLoad = vi.fn();
 const mockSetCurrency = vi.fn();
+const mockLogResizeDebug = vi.fn();
 
 vi.mock("@tauri-apps/plugin-store", () => ({
   load: (...args: unknown[]) => mockLoad(...args),
@@ -12,6 +13,22 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 vi.mock("../utils/format.js", () => ({
   setCurrency: (...args: unknown[]) => mockSetCurrency(...args),
 }));
+
+vi.mock("../resizeDebug.js", () => ({
+  logResizeDebug: (...args: unknown[]) => mockLogResizeDebug(...args),
+  formatDebugError: (error: unknown) => {
+    if (error instanceof Error) {
+      return { name: error.name, message: error.message };
+    }
+    return { message: String(error) };
+  },
+}));
+
+const DEFAULT_HEADER_TABS = {
+  all: { label: "All", enabled: true },
+  claude: { label: "Claude", enabled: true },
+  codex: { label: "Codex", enabled: true },
+} as const;
 
 function makePersistedStore(saved: Partial<Settings> | null = {}) {
   return {
@@ -29,6 +46,7 @@ beforeEach(() => {
   vi.resetModules();
   mockLoad.mockReset();
   mockSetCurrency.mockReset();
+  mockLogResizeDebug.mockReset();
 });
 
 afterEach(() => {
@@ -72,6 +90,7 @@ describe("loadSettings", () => {
       launchAtLogin: false,
       currency: "EUR",
       hiddenModels: ["haiku"],
+      headerTabs: DEFAULT_HEADER_TABS,
       brandTheming: true,
       trayConfig: {
         barDisplay: 'both',
@@ -84,6 +103,7 @@ describe("loadSettings", () => {
       claudePlan: 0,
       codexPlan: 0,
       glassEffect: true,
+      showModelChangeStats: false,
     });
     expect(get(settings)).toEqual(loaded);
     expect(mockSetCurrency).toHaveBeenCalledWith("EUR");
@@ -114,6 +134,7 @@ describe("loadSettings", () => {
       launchAtLogin: false,
       currency: "USD",
       hiddenModels: [],
+      headerTabs: DEFAULT_HEADER_TABS,
       brandTheming: true,
       trayConfig: {
         barDisplay: 'both',
@@ -126,10 +147,18 @@ describe("loadSettings", () => {
       claudePlan: 0,
       codexPlan: 0,
       glassEffect: true,
+      showModelChangeStats: false,
     });
     expect(get(settings)).toEqual(fallback);
     expect(mockSetCurrency).toHaveBeenCalledWith("USD");
     expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it("defaults showModelChangeStats to false", async () => {
+    mockLoad.mockResolvedValueOnce(makePersistedStore({}));
+    const { loadSettings, settings } = await loadSettingsModule();
+    await loadSettings();
+    expect(get(settings).showModelChangeStats).toBe(false);
   });
 });
 
@@ -157,6 +186,145 @@ describe("loadSettings migration", () => {
     expect(loaded.trayConfig.showCost).toBe(false);
     expect(loaded.trayConfig.barDisplay).toBe('off');
   });
+
+  it("falls back to the first visible header tab when the saved default provider is hidden", async () => {
+    const store = makePersistedStore({
+      defaultProvider: "codex",
+      headerTabs: {
+        all: { label: "Overview", enabled: false },
+        claude: { label: "Claude Code", enabled: true },
+        codex: { label: "Codex", enabled: false },
+      },
+    });
+    mockLoad.mockResolvedValueOnce(store);
+
+    const { loadSettings } = await loadSettingsModule();
+    const loaded = await loadSettings();
+
+    expect(loaded.defaultProvider).toBe("claude");
+    expect(loaded.headerTabs).toEqual({
+      all: { label: "Overview", enabled: false },
+      claude: { label: "Claude Code", enabled: true },
+      codex: { label: "Codex", enabled: false },
+    });
+  });
+
+  it("normalizes invalid persisted values back into a coherent settings graph", async () => {
+    const store = makePersistedStore({
+      theme: "midnight" as Settings["theme"],
+      defaultProvider: "mystery" as Settings["defaultProvider"],
+      defaultPeriod: "year" as Settings["defaultPeriod"],
+      refreshInterval: "15" as unknown as Settings["refreshInterval"],
+      costAlertThreshold: "-42.345" as unknown as Settings["costAlertThreshold"],
+      launchAtLogin: "yes" as unknown as Settings["launchAtLogin"],
+      currency: "cad",
+      hiddenModels: ["", " Haiku ", "haiku", " GPT-5 ", 7 as unknown as string],
+      headerTabs: {
+        all: { label: "   ", enabled: false },
+        claude: { label: "Claude Claude Claude", enabled: false },
+        codex: { label: "Codex", enabled: false },
+      },
+      brandTheming: "yes" as unknown as Settings["brandTheming"],
+      trayConfig: {
+        barDisplay: "triple" as Settings["trayConfig"]["barDisplay"],
+        barProvider: "all" as Settings["trayConfig"]["barProvider"],
+        showPercentages: "yes" as unknown as Settings["trayConfig"]["showPercentages"],
+        percentageFormat: "long" as Settings["trayConfig"]["percentageFormat"],
+        showCost: "no" as unknown as Settings["trayConfig"]["showCost"],
+        costPrecision: "many" as Settings["trayConfig"]["costPrecision"],
+      },
+      claudePlan: "100" as unknown as Settings["claudePlan"],
+      codexPlan: 999,
+      glassEffect: "no" as unknown as Settings["glassEffect"],
+    });
+    mockLoad.mockResolvedValueOnce(store);
+
+    const { MAX_HEADER_TAB_LABEL_LENGTH, loadSettings } = await loadSettingsModule();
+    const loaded = await loadSettings();
+
+    expect(loaded).toMatchObject({
+      theme: "system",
+      defaultProvider: "all",
+      defaultPeriod: "day",
+      refreshInterval: 30,
+      costAlertThreshold: 0,
+      launchAtLogin: false,
+      currency: "USD",
+      hiddenModels: ["haiku", "gpt-5"],
+      brandTheming: true,
+      trayConfig: {
+        barDisplay: "both",
+        barProvider: "claude",
+        showPercentages: false,
+        percentageFormat: "compact",
+        showCost: true,
+        costPrecision: "full",
+      },
+      claudePlan: 100,
+      codexPlan: 0,
+      glassEffect: true,
+    });
+    expect(loaded.headerTabs).toEqual({
+      all: { label: "All", enabled: true },
+      claude: {
+        label: "Claude Claude Clau".slice(0, MAX_HEADER_TAB_LABEL_LENGTH),
+        enabled: false,
+      },
+      codex: { label: "Codex", enabled: false },
+    });
+    expect(loaded.headerTabs.claude.label).toHaveLength(MAX_HEADER_TAB_LABEL_LENGTH);
+  });
+});
+
+describe("header tab helpers", () => {
+  it("treats copied header tab objects with the same values as equal", async () => {
+    const { areHeaderTabsEqual } = await loadSettingsModule();
+
+    expect(
+      areHeaderTabsEqual(DEFAULT_HEADER_TABS, {
+        all: { label: "All", enabled: true },
+        claude: { label: "Claude", enabled: true },
+        codex: { label: "Codex", enabled: true },
+      }),
+    ).toBe(true);
+  });
+
+  it("detects label and enabled changes in header tabs", async () => {
+    const { areHeaderTabsEqual } = await loadSettingsModule();
+
+    expect(
+      areHeaderTabsEqual(DEFAULT_HEADER_TABS, {
+        all: { label: "Overview", enabled: true },
+        claude: { label: "Claude", enabled: true },
+        codex: { label: "Codex", enabled: true },
+      }),
+    ).toBe(false);
+
+    expect(
+      areHeaderTabsEqual(DEFAULT_HEADER_TABS, {
+        all: { label: "All", enabled: true },
+        claude: { label: "Claude", enabled: false },
+        codex: { label: "Codex", enabled: true },
+      }),
+    ).toBe(false);
+  });
+
+  it("forces at least one visible header tab when all are disabled", async () => {
+    const { normalizeHeaderTabs, resolveVisibleProvider } = await loadSettingsModule();
+
+    const normalized = normalizeHeaderTabs({
+      all: { label: "Overview", enabled: false },
+      claude: { label: "Claude Code", enabled: false },
+      codex: { label: "Codex", enabled: false },
+    });
+
+    expect(normalized).toEqual({
+      all: { label: "Overview", enabled: true },
+      claude: { label: "Claude Code", enabled: false },
+      codex: { label: "Codex", enabled: false },
+    });
+    expect(resolveVisibleProvider("codex", normalized)).toBe("all");
+  });
 });
 
 describe("updateSetting", () => {
@@ -175,6 +343,10 @@ describe("updateSetting", () => {
     await updateSetting("currency", "GBP");
 
     expect(get(settings).currency).toBe("GBP");
+    expect(mockLogResizeDebug).toHaveBeenCalledWith("settings:update", {
+      key: "currency",
+      value: "GBP",
+    });
     expect(store.set).toHaveBeenCalledWith(
       "settings",
       expect.objectContaining({
@@ -186,6 +358,33 @@ describe("updateSetting", () => {
       expect(store.save).toHaveBeenCalledTimes(1);
     });
     expect(mockSetCurrency).toHaveBeenCalledWith("GBP");
+  });
+
+  it("logs and persists the normalized value when an update input is invalid", async () => {
+    const store = makePersistedStore({
+      currency: "USD",
+    });
+    mockLoad.mockResolvedValueOnce(store);
+
+    const { loadSettings, settings, updateSetting } = await loadSettingsModule();
+    await loadSettings();
+    mockSetCurrency.mockClear();
+    mockLogResizeDebug.mockClear();
+
+    await updateSetting("currency", "cad" as unknown as Settings["currency"]);
+
+    expect(get(settings).currency).toBe("USD");
+    expect(mockLogResizeDebug).toHaveBeenCalledWith("settings:update", {
+      key: "currency",
+      value: "USD",
+    });
+    expect(store.set).toHaveBeenCalledWith(
+      "settings",
+      expect.objectContaining({
+        currency: "USD",
+      }),
+    );
+    expect(mockSetCurrency).toHaveBeenCalledWith("USD");
   });
 
   it("keeps the in-memory update and warns when persistence fails", async () => {
@@ -208,6 +407,36 @@ describe("updateSetting", () => {
     expect(warnSpy).toHaveBeenCalledWith(
       "Failed to persist settings:",
       expect.any(Error),
+    );
+  });
+
+  it("normalizes header tab changes so the default provider stays visible", async () => {
+    const store = makePersistedStore({
+      defaultProvider: "codex",
+      headerTabs: DEFAULT_HEADER_TABS,
+    });
+    mockLoad.mockResolvedValueOnce(store);
+
+    const { loadSettings, settings, updateSetting } = await loadSettingsModule();
+    await loadSettings();
+
+    await updateSetting("headerTabs", {
+      all: { label: "Overview", enabled: true },
+      claude: { label: "Claude Code", enabled: false },
+      codex: { label: "Codex", enabled: false },
+    });
+
+    expect(get(settings).defaultProvider).toBe("all");
+    expect(store.set).toHaveBeenCalledWith(
+      "settings",
+      expect.objectContaining({
+        defaultProvider: "all",
+        headerTabs: {
+          all: { label: "Overview", enabled: true },
+          claude: { label: "Claude Code", enabled: false },
+          codex: { label: "Codex", enabled: false },
+        },
+      }),
     );
   });
 });
