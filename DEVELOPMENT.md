@@ -47,6 +47,7 @@ TokenMonitor/
 │       │   ├── usage.ts          # Svelte stores + IPC fetch logic
 │       │   ├── rateLimits.ts     # Rate limit store + fetch logic
 │       │   └── settings.ts       # Settings store + persistence
+│       ├── providerMetadata.ts   # Frontend provider metadata + tab ordering
 │       ├── types/
 │       │   └── index.ts          # TypeScript interfaces (mirrors Rust structs)
 │       └── utils/
@@ -60,8 +61,9 @@ TokenMonitor/
 │   └── src/
 │       ├── main.rs               # Entry point
 │       ├── lib.rs                # Tauri setup, tray icon, background polling
-│       ├── parser.rs             # JSONL reader — daily/monthly/blocks/hourly aggregation
-│       ├── pricing.rs            # Hardcoded pricing table + fuzzy model matching
+│       ├── integrations.rs       # Usage integration IDs, selection, and root discovery
+│       ├── parser.rs             # Integration-driven JSONL reader + aggregations
+│       ├── pricing.rs            # Pricing table + model-family-aware fallback logic
 │       ├── commands.rs           # IPC handlers + data transformation
 │       ├── rate_limits.rs        # Rate limit fetching + caching
 │       └── models.rs             # Serde structs for frontend payload
@@ -111,10 +113,11 @@ Output: `src-tauri/target/release/bundle/dmg/TokenMonitor_0.1.0_aarch64.dmg`
 ## Data Flow
 
 ```
-~/.claude/projects/**/*.jsonl       (Claude Code usage logs)
-~/.codex/sessions/YYYY/MM/DD/*.jsonl (Codex usage logs)
+~/.claude/projects/**/*.jsonl        (Claude Code integration)
+~/.codex/sessions/YYYY/MM/DD/*.jsonl (Codex CLI integration)
     ↓ native Rust file I/O
-parser.rs + pricing.rs (JSONL parsing, token aggregation, cost calculation)
+integrations.rs + parser.rs + pricing.rs
+    (integration selection, JSONL parsing, token aggregation, cost calculation)
     ↓ IPC invoke
 Svelte frontend (stores/usage.ts → components)
 ```
@@ -138,9 +141,10 @@ Background polling refreshes every 120 seconds and emits a `data-updated` event.
 
 ### Pricing
 
-`pricing.rs` contains a hardcoded pricing table for Claude and OpenAI/Codex models,
-matched by pattern (most-specific first). Unknown models fall back to family-based
-fuzzy matching. Pricing version is stamped as `PRICING_VERSION` constant for debugging.
+`pricing.rs` contains a hardcoded pricing table for Anthropic and OpenAI-family models,
+matched by pattern (most-specific first). Known families fall back within-family; unsupported
+families currently price at zero until explicit rates are added. Pricing version is stamped as
+`PRICING_VERSION` for debugging.
 
 ### Data Sources
 

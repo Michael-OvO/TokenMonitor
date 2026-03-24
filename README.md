@@ -25,6 +25,22 @@
   <img src="docs/assets/hero.png" alt="TokenMonitor hero – Understand Your AI Usage. Instantly." width="800" />
 </p>
 
+<p align="center">
+  <a href="https://github.com/Michael-OvO/TokenMonitor/releases/latest">
+    <img src="https://img.shields.io/badge/Download-latest%20macOS%20.dmg-111827?style=for-the-badge&logo=apple&logoColor=white" alt="Download latest macOS dmg" />
+  </a>
+  <a href="#build-from-source">
+    <img src="https://img.shields.io/badge/Build-from%20source-2563EB?style=for-the-badge&logo=rust&logoColor=white" alt="Build from source" />
+  </a>
+</p>
+
+<p align="center">
+  <strong>Install in 30 seconds:</strong>
+  download the latest <code>.dmg</code> from the
+  <a href="https://github.com/Michael-OvO/TokenMonitor/releases/latest">latest release</a>,
+  open it, and drag TokenMonitor into Applications.
+</p>
+
 ---
 
 TokenMonitor is a local-first macOS menu bar app for people who use Claude Code and Codex heavily and want a cleaner, faster way to monitor usage.
@@ -32,6 +48,18 @@ TokenMonitor is a local-first macOS menu bar app for people who use Claude Code 
 It reads the session logs already on your machine, applies provider-aware pricing rules, and turns them into a compact macOS interface for current-session spend, history, model mix, and rate-limit context.
 
 No API keys. No cloud sync. No runtime dependency on `ccusage` or any other external CLI.
+
+Internally, usage parsing is now organized around a usage-integration registry so new CLI log sources can be added without threading one-off Claude/Codex branches through the parser and command layer.
+
+## Quick Install
+
+### Download The App
+
+<strong><a href="https://github.com/Michael-OvO/TokenMonitor/releases/latest">Download the latest macOS release</a></strong>
+
+- Get the newest `.dmg` from the latest release page
+- Open the downloaded `.dmg`
+- Drag TokenMonitor into `Applications`
 
 ## Features
 
@@ -174,6 +202,7 @@ src/
     │   ├── usage.ts            # Usage fetching, in-memory cache, period/provider state
     │   ├── rateLimits.ts       # Rate-limit fetching and persistence
     │   └── settings.ts         # Theme, tray, currency, and local preferences
+    ├── providerMetadata.ts     # Central usage/rate-limit provider metadata for the UI
     ├── components/             # Metrics, charts, calendar, footer, settings UI
     ├── traySync.ts             # Frontend-to-native tray state syncing
     └── windowAppearance.ts     # macOS window surface syncing
@@ -181,8 +210,9 @@ src/
 src-tauri/src/
 ├── lib.rs                      # Tauri app setup, tray wiring, background refresh
 ├── commands.rs                 # IPC commands exposed to the frontend
-├── parser.rs                   # Claude/Codex JSONL discovery, parsing, normalization
-├── pricing.rs                  # Provider-aware token pricing and cache-write billing
+├── integrations.rs             # Usage integration IDs, selection, and root discovery
+├── parser.rs                   # Integration-driven JSONL discovery, parsing, normalization
+├── pricing.rs                  # Model-family-aware token pricing and cache-write billing
 ├── rate_limits.rs              # Claude/Codex rate-limit acquisition and shaping
 ├── tray_render.rs              # Native tray title and icon rendering
 └── models.rs                   # Shared backend payload types
@@ -191,7 +221,7 @@ src-tauri/src/
 ### Runtime Flow
 
 1. The UI requests a provider, period, and optional historical offset through Tauri IPC.
-2. The Rust backend scans relevant JSONL logs, normalizes provider-specific events, and prices each entry locally.
+2. The Rust backend resolves one or more usage integrations, scans their JSONL logs, normalizes integration-specific events, and prices each entry locally.
 3. Aggregated payloads are cached in memory for fast repeat requests.
 4. The frontend renders metrics, charts, model summaries, calendar views, and footer state.
 5. A background loop refreshes the tray title and emits update events on the configured interval.
@@ -200,6 +230,7 @@ src-tauri/src/
 
 - Claude parsing skips non-assistant entries and intermediate streaming noise
 - Codex parsing normalizes both per-turn and cumulative `token_count` events into deltas
+- Log-source integrations are separate from model families, so a future CLI can emit non-Anthropic/OpenAI model names without breaking normalization
 - Cross-provider merge mode preserves period semantics while combining totals
 - Historical navigation is offset-based, which keeps the UI simple while letting the backend stay date-aware
 
@@ -207,6 +238,7 @@ src-tauri/src/
 
 - `App.svelte` coordinates provider, period, offset, settings, and view switches
 - Svelte stores own fetch lifecycle, stale-while-revalidate caching, and persisted settings
+- `providerMetadata.ts` is the frontend source of truth for tab order, provider labels, logos, and which usage integrations support rate limits
 - UI components stay relatively dumb: charts, model lists, calendar, footer, and settings render from store payloads
 - Native-only concerns such as tray rendering and window surface behavior stay in the Tauri layer rather than leaking through the component tree
 
@@ -230,6 +262,27 @@ Convenience command:
 ```bash
 npm run test:all
 ```
+
+### Manual Cache Benchmark
+
+There is also an ignored Rust benchmark test for the integrated caching paths. It is kept in the test suite for manual performance checks, but it does not run as part of normal `cargo test`.
+
+```bash
+cargo test benchmark_real_log_cache_paths --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture
+```
+
+It benchmarks the real local log roots the app uses and prints `BENCH ...` lines for:
+
+- `claude/month`
+- `all/month`
+- `calendar/all/<year>-<month>`
+- `tray/day`
+
+Each line reports:
+
+- `cold_ms`: uncached request time
+- `full_hit_avg_ms`: average time for a full request-cache hit
+- `warm_lower_cache_ms`: time after clearing only the payload cache, leaving lower-level file and directory caches warm
 
 ### Project Structure
 
