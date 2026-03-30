@@ -733,16 +733,16 @@ mod tests {
     #[test]
     fn dispatch_routes_gemini_to_generic() {
         let (d, k) = normalize_model("gemini-2.5-pro");
-        assert_eq!((d.as_str(), k.as_str()), ("Gemini-2.5-pro", "gemini-2.5-pro"));
+        assert_eq!(
+            (d.as_str(), k.as_str()),
+            ("Gemini-2.5-pro", "gemini-2.5-pro")
+        );
     }
 
     #[test]
     fn dispatch_routes_deepseek_to_generic() {
         let (d, k) = normalize_model("deepseek-chat");
-        assert_eq!(
-            (d.as_str(), k.as_str()),
-            ("DeepSeek-chat", "deepseek-chat")
-        );
+        assert_eq!((d.as_str(), k.as_str()), ("DeepSeek-chat", "deepseek-chat"));
     }
 
     #[test]
@@ -760,18 +760,12 @@ mod tests {
 
     #[test]
     fn model_key_for_claude() {
-        assert_eq!(
-            normalized_model_key("claude-opus-4-6-20260301"),
-            "opus-4-6"
-        );
+        assert_eq!(normalized_model_key("claude-opus-4-6-20260301"), "opus-4-6");
     }
 
     #[test]
     fn model_key_for_codex() {
-        assert_eq!(
-            normalized_model_key("gpt-5.1-codex"),
-            "gpt-5.1-codex"
-        );
+        assert_eq!(normalized_model_key("gpt-5.1-codex"), "gpt-5.1-codex");
     }
 
     #[test]
@@ -815,10 +809,7 @@ mod tests {
 
     #[test]
     fn detects_unknown_family() {
-        assert_eq!(
-            detect_model_family("my-custom-model"),
-            ModelFamily::Unknown
-        );
+        assert_eq!(detect_model_family("my-custom-model"), ModelFamily::Unknown);
     }
 
     #[test]

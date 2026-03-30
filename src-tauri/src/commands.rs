@@ -14,6 +14,7 @@ use crate::usage::integrations::UsageIntegrationSelection;
 use crate::usage::parser::{UsageParser, UsageQueryDebugReport};
 use crate::usage::ssh_remote::{SshCacheManager, SshHostConfig};
 use serde::Serialize;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -29,6 +30,9 @@ pub struct AppState {
     pub float_ball_state: Arc<RwLock<float_ball::FloatBallState>>,
     pub ssh_hosts: Arc<RwLock<Vec<SshHostConfig>>>,
     pub ssh_cache: Arc<RwLock<Option<SshCacheManager>>>,
+    /// When true, the main window blur handler skips hiding once.
+    /// Set by commands that cause transient focus loss (float ball, dock icon, etc.).
+    pub suppress_auto_hide: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -44,6 +48,7 @@ impl AppState {
             float_ball_state: Arc::new(RwLock::new(float_ball::FloatBallState::default())),
             ssh_hosts: Arc::new(RwLock::new(Vec::new())),
             ssh_cache: Arc::new(RwLock::new(None)),
+            suppress_auto_hide: Arc::new(AtomicBool::new(false)),
         }
     }
 }

@@ -34,9 +34,20 @@ fn validate_ssh_alias(alias: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Remote SSH usage currently contains Claude records only.
+/// Remote SSH usage may contain both Claude and Codex records.
 fn provider_includes_remote_ssh_usage(provider: &str) -> bool {
-    matches!(provider, ALL_USAGE_INTEGRATIONS_ID | "claude")
+    matches!(provider, ALL_USAGE_INTEGRATIONS_ID | "claude" | "codex")
+}
+
+/// Check if a compact record's model matches the requested provider.
+fn compact_record_matches_provider(record: &CompactUsageRecord, provider: &str) -> bool {
+    use crate::models::{detect_model_family, ModelFamily};
+    match provider {
+        ALL_USAGE_INTEGRATIONS_ID => true,
+        "claude" => detect_model_family(&record.model) == ModelFamily::Anthropic,
+        "codex" => detect_model_family(&record.model) == ModelFamily::OpenAI,
+        _ => true,
+    }
 }
 
 /// Get all SSH hosts discovered from ~/.ssh/config.
@@ -168,7 +179,7 @@ pub async fn sync_ssh_host(
 
     let diagnostic = if count == 0 {
         Some(
-            "No Claude usage data found. Verify ~/.claude/projects/ exists on the remote host."
+            "No usage data found. Verify ~/.claude/projects/ or ~/.codex/sessions/ exists on the remote host."
                 .to_string(),
         )
     } else {
@@ -424,8 +435,15 @@ pub(crate) async fn build_device_breakdown_for_payload(
     if let Some(mgr) = cache_mgr.as_ref() {
         let statuses = mgr.host_statuses(&configs);
         for cfg in configs.iter().filter(|c| c.enabled) {
-            let records = mgr.load_cached_records(&cfg.alias);
-            let mut summary = build_device_summary_from_compact(&cfg.alias, &records, since);
+            let all_records = mgr.load_cached_records(&cfg.alias);
+            let filtered: Vec<_> = all_records
+                .into_iter()
+                .filter(|r| compact_record_matches_provider(r, provider))
+                .collect();
+            if filtered.is_empty() {
+                continue;
+            }
+            let mut summary = build_device_summary_from_compact(&cfg.alias, &filtered, since);
 
             if let Some(host_status) = statuses.iter().find(|s| s.alias == cfg.alias) {
                 summary.last_synced = host_status.last_sync.clone();
@@ -489,7 +507,10 @@ pub(crate) async fn build_included_devices_payload(
 
     for cfg in &included {
         let records = mgr.load_cached_records(&cfg.alias);
-        for record in &records {
+        for record in records
+            .iter()
+            .filter(|r| compact_record_matches_provider(r, provider))
+        {
             // Skip synthetic/internal models.
             if record.model.starts_with('<') {
                 continue;
@@ -667,7 +688,10 @@ pub(crate) async fn build_device_time_chart_buckets(
         if let Some(mgr) = cache_mgr.as_ref() {
             for cfg in configs.iter().filter(|c| c.enabled) {
                 let records = mgr.load_cached_records(&cfg.alias);
-                for record in &records {
+                for record in records
+                    .iter()
+                    .filter(|r| compact_record_matches_provider(r, provider))
+                {
                     let parsed_ts =
                         chrono::DateTime::parse_from_rfc3339(&record.ts).or_else(|_| {
                             chrono::DateTime::parse_from_str(&record.ts, "%Y-%m-%dT%H:%M:%S%.f%z")
@@ -1053,6 +1077,98 @@ mod tests {
                 .flat_map(|bucket| bucket.segments.iter())
                 .all(|segment| segment.model_key == "Local"),
             "codex buckets should stay local-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_codex_records_included_in_codex_provider() {
+        let (state, _claude_dir, _codex_dir, app_data_dir) =
+            build_state_with_remote_claude_data().await;
+
+        let now = Local::now();
+        let timestamp = now.to_rfc3339();
+
+        // Append a Codex model record (gpt-5.4) to remote-a cache.
+        let cache_path = app_data_dir
+            .path()
+            .join("remote-cache")
+            .join("remote-a")
+            .join("usage.jsonl");
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&cache_path)
+            .unwrap();
+        // Ensure newline separator from the existing record, then write new one.
+        writeln!(file).unwrap();
+        writeln!(file, "{}", remote_record(&timestamp, "gpt-5.4", 500, 200)).unwrap();
+
+        // Codex provider should now include the remote Codex record.
+        let codex_payload = build_included_devices_payload(&state, "codex", "day", 0)
+            .await
+            .expect("codex provider should include remote Codex data");
+        assert!(codex_payload.total_cost > 0.0);
+        assert_eq!(codex_payload.input_tokens, 500);
+        assert_eq!(codex_payload.output_tokens, 200);
+
+        // Claude provider should still only include Claude records from remote.
+        let claude_payload = build_included_devices_payload(&state, "claude", "day", 0)
+            .await
+            .expect("claude provider should include remote Claude data");
+        assert_eq!(claude_payload.input_tokens, 2_000);
+        assert_eq!(claude_payload.output_tokens, 1_000);
+
+        // All provider should include both.
+        let all_payload = build_included_devices_payload(&state, "all", "day", 0)
+            .await
+            .expect("all provider should include all remote data");
+        assert_eq!(all_payload.input_tokens, 2_500);
+        assert_eq!(all_payload.output_tokens, 1_200);
+    }
+
+    #[tokio::test]
+    async fn device_breakdown_shows_remote_for_codex_when_codex_records_exist() {
+        let (state, _claude_dir, _codex_dir, app_data_dir) =
+            build_state_with_remote_claude_data().await;
+
+        let now = Local::now();
+        let timestamp = now.to_rfc3339();
+
+        // Append Codex model record to remote cache.
+        let cache_path = app_data_dir
+            .path()
+            .join("remote-cache")
+            .join("remote-a")
+            .join("usage.jsonl");
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&cache_path)
+            .unwrap();
+        writeln!(file).unwrap();
+        writeln!(file, "{}", remote_record(&timestamp, "gpt-5.4", 500, 200)).unwrap();
+
+        let codex_devices = build_device_breakdown_for_payload(&state, "codex", "day", 0)
+            .await
+            .expect("codex device breakdown should exist");
+
+        assert!(
+            codex_devices.iter().any(|d| d.device == "remote-a"),
+            "codex pages should now include remote device with Codex data"
+        );
+
+        // Remote device should only have Codex model costs.
+        let remote = codex_devices
+            .iter()
+            .find(|d| d.device == "remote-a")
+            .unwrap();
+        assert!(remote.total_cost > 0.0);
+        assert!(
+            remote
+                .model_breakdown
+                .iter()
+                .all(|m| !m.model_key.contains("claude")),
+            "remote device in codex view should not contain Claude models"
         );
     }
 }

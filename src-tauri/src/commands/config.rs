@@ -37,7 +37,20 @@ pub async fn set_refresh_interval(interval: u64, state: State<'_, AppState>) -> 
 pub async fn set_dock_icon_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        use tauri::Manager;
+        // Changing the activation policy may deactivate the app, causing the
+        // main window to lose focus.  Suppress the resulting auto-hide.
+        app.state::<AppState>()
+            .suppress_auto_hide
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
         crate::platform::macos::set_dock_icon_visible(&app, visible)?;
+
+        // Re-focus main window after the policy change so it stays visible.
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
     }
 
     #[cfg(not(target_os = "macos"))]

@@ -380,6 +380,11 @@ pub async fn create_float_ball(app: tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
+    // Suppress main-window auto-hide: creating a new window may steal focus.
+    app.state::<AppState>()
+        .suppress_auto_hide
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
     let window = tauri::WebviewWindowBuilder::new(
         &app,
         "float-ball",
@@ -581,7 +586,12 @@ pub async fn snap_float_ball(app: tauri::AppHandle) -> Result<(), String> {
 
 /// Initialize and embed the taskbar panel. Windows only; noop on other platforms.
 #[tauri::command]
-pub async fn init_taskbar_panel() -> Result<bool, String> {
+pub async fn init_taskbar_panel(app: tauri::AppHandle) -> Result<bool, String> {
+    // Suppress main-window auto-hide: taskbar panel creation may shift focus.
+    app.state::<AppState>()
+        .suppress_auto_hide
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
     #[cfg(target_os = "windows")]
     {
         crate::platform::windows::taskbar::init_taskbar_panel().map_err(|e| e.to_string())

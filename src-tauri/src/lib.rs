@@ -102,12 +102,37 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Hide window on focus loss (popover behavior)
+            // Hide window on focus loss (popover behavior), but not when
+            // focus moves to another app window (e.g. float-ball) or when a
+            // settings toggle causes transient focus loss (dock icon, etc.).
             if let Some(window) = app.get_webview_window("main") {
                 let window_clone = window.clone();
                 window.on_window_event(move |event| {
                     if let WindowEvent::Focused(false) = event {
-                        let _ = window_clone.hide();
+                        let handle = window_clone.app_handle().clone();
+                        let win = window_clone.clone();
+                        std::thread::spawn(move || {
+                            // Brief delay to let the OS settle focus on the new window.
+                            std::thread::sleep(Duration::from_millis(150));
+
+                            // A command (create_float_ball, set_dock_icon_visible, etc.)
+                            // requested that the next blur be ignored.
+                            let state = handle.state::<AppState>();
+                            if state
+                                .suppress_auto_hide
+                                .swap(false, std::sync::atomic::Ordering::SeqCst)
+                            {
+                                return;
+                            }
+
+                            let any_app_window_focused = handle
+                                .webview_windows()
+                                .values()
+                                .any(|w| w.is_focused().unwrap_or(false));
+                            if !any_app_window_focused {
+                                let _ = win.hide();
+                            }
+                        });
                     }
                 });
             }

@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { fly } from "svelte/transition";
   import { modelColor, formatCost, currencySymbol, convertCost, deviceColor } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
   import { chartMode, chartSegmentMode } from "../stores/usage.js";
@@ -11,7 +10,6 @@
   const DETAIL_CONFIG = {
     HOVER_DELAY_MS: 80,
     LEAVE_DELAY_MS: 150,
-    MAX_VISIBLE_ROWS: 3,
   } as const;
 
   interface Props {
@@ -65,8 +63,6 @@
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let leaveTimer: ReturnType<typeof setTimeout> | null = null;
   let previousDataKey = $state("");
-  let detailModelPage = $state(0);
-  let scrollDirection = $state<1 | -1>(1);
 
   let displayed = $derived(displayedIdx >= 0 ? filteredBuckets[displayedIdx] : null);
 
@@ -98,11 +94,6 @@
     displayedIdx = -1;
   });
 
-  // Reset carousel page when a different bar is hovered.
-  $effect(() => {
-    void displayedIdx;
-    detailModelPage = 0;
-  });
 
   $effect(() => {
     return () => {
@@ -168,18 +159,6 @@
     return Array.from(merged.values()).sort((a, b) => b.cost - a.cost);
   }
 
-  function onDetailWheel(e: WheelEvent) {
-    const segs = sortedSegments(displayed);
-    if (segs.length <= DETAIL_CONFIG.MAX_VISIBLE_ROWS) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const dir = e.deltaY > 0 ? 1 : -1;
-    const maxPage = segs.length - DETAIL_CONFIG.MAX_VISIBLE_ROWS;
-    const next = detailModelPage + dir;
-    if (next < 0 || next > maxPage) return;
-    scrollDirection = dir;
-    detailModelPage = next;
-  }
 
   // Bar chart geometry — fill full width, small gaps
   let barGap = $derived(Math.max(Math.min(2, CHART_W / filteredBuckets.length * 0.15), 1));
@@ -286,31 +265,20 @@
   <div class="detail" class:visible={displayed != null}>
     {#if displayed}
       {@const segs = sortedSegments(displayed)}
-      {@const visibleSegs = segs.slice(detailModelPage, detailModelPage + DETAIL_CONFIG.MAX_VISIBLE_ROWS)}
-      <div class="detail-inner" onwheel={onDetailWheel}>
+      <div class="detail-inner">
         <div class="detail-head">
           <span class="detail-label">{displayed.label}</span>
           <span class="detail-total">{formatCost(displayed.total)}</span>
         </div>
-        {#if visibleSegs.length > 0}
-          <div class="detail-model-slide">
-            {#key detailModelPage}
-              <div class="detail-rows" in:fly={{ y: scrollDirection * 4, duration: 120 }}>
-                {#each visibleSegs as seg}
-                  <div class="detail-row">
-                    <span class="detail-dot" style="background:{segmentColorFn(seg.model_key)}"></span>
-                    <span class="detail-name">{seg.model}</span>
-                    <span class="detail-cost">{formatCost(seg.cost)}</span>
-                  </div>
-                {/each}
+        {#if segs.length > 0}
+          <div class="detail-rows">
+            {#each segs as seg}
+              <div class="detail-row">
+                <span class="detail-dot" style="background:{segmentColorFn(seg.model_key)}"></span>
+                <span class="detail-name">{seg.model}</span>
+                <span class="detail-cost">{formatCost(seg.cost)}</span>
               </div>
-            {/key}
-          </div>
-        {/if}
-        {#if segs.length > DETAIL_CONFIG.MAX_VISIBLE_ROWS}
-          <div class="detail-index">
-            {detailModelPage + 1}–{Math.min(detailModelPage + DETAIL_CONFIG.MAX_VISIBLE_ROWS, segs.length)} / {segs.length}
-            <span class="detail-scroll-hint">Scroll &#8597;</span>
+            {/each}
           </div>
         {/if}
       </div>
@@ -512,12 +480,13 @@
     background: var(--surface-2);
     border-radius: 8px;
     overflow: hidden;
-    max-height: 0;
+    display: grid;
+    grid-template-rows: 0fr;
     opacity: 0;
-    transition: max-height 0.25s ease-out, opacity 0.2s ease;
+    transition: grid-template-rows 0.25s ease-out, opacity 0.2s ease;
   }
   .detail.visible {
-    max-height: 120px;
+    grid-template-rows: 1fr;
     opacity: 1;
   }
   .ch.detail-above .detail { margin-bottom: 10px; }
@@ -598,6 +567,8 @@
 
   .detail-inner {
     padding: 8px 10px;
+    min-height: 0;
+    overflow: hidden;
   }
   .detail-head {
     display: flex; justify-content: space-between; align-items: baseline;
@@ -605,9 +576,6 @@
   }
   .detail-label { font: 600 10px/1 "Inter", sans-serif; color: var(--t1); }
   .detail-total { font: 600 10px/1 "Inter", sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }
-  .detail-model-slide {
-    overflow: hidden;
-  }
   .detail-rows {
     display: flex;
     flex-direction: column;
@@ -617,20 +585,5 @@
   .detail-dot { width: 5px; height: 5px; border-radius: 1.5px; flex-shrink: 0; }
   .detail-name { font: 400 10px/1 "Inter", sans-serif; color: var(--t2); flex: 1; }
   .detail-cost { font: 500 10px/1 "Inter", sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }
-  .detail-index {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    margin-top: 3px;
-    font: 500 9px/1 "Inter", sans-serif;
-    color: var(--t3);
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0.3px;
-  }
-  .detail-scroll-hint {
-    font: 400 9px/1 "Inter", sans-serif;
-    color: var(--t4);
-    margin-left: 2px;
-  }
 
 </style>

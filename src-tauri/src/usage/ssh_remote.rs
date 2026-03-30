@@ -142,16 +142,23 @@ fn build_extraction_script(since_epoch: Option<u64>) -> String {
         .map(|ts| format!("touch -d @{ts} /tmp/.tm-marker-{ts} 2>/dev/null; "))
         .unwrap_or_default();
 
-    // Find command shared by all branches.
-    let find_cmd = format!(
+    // Claude: search both config locations.
+    let claude_find = format!(
         "for d in ~/.claude/projects ~/.config/claude/projects; do \
            [ -d \"$d\" ] && find \"$d\" -name '*.jsonl'{newer_filter} -type f 2>/dev/null; \
          done"
     );
 
-    // Python extraction script — uses explicit \n + indentation to avoid
+    // Codex: search session directory.
+    let codex_find = format!(
+        "for d in ~/.codex/sessions; do \
+           [ -d \"$d\" ] && find \"$d\" -name '*.jsonl'{newer_filter} -type f 2>/dev/null; \
+         done"
+    );
+
+    // Claude python extraction — uses explicit \n + indentation to avoid
     // Rust's trailing-backslash line continuation eating the leading spaces.
-    let py_script = concat!(
+    let claude_py = concat!(
         "import json,sys\n",
         "for f in sys.argv[1:]:\n",
         " try:\n",
@@ -170,21 +177,62 @@ fn build_extraction_script(since_epoch: Option<u64>) -> String {
         " except:pass\n",
     );
 
+    // Codex python extraction — stateful: tracks model from turn_context,
+    // extracts token deltas from last_token_usage / total_token_usage.
+    // Normalizes cached_input out of input_tokens (Codex includes cached in input).
+    let codex_py = concat!(
+        "import json,sys\n",
+        "for f in sys.argv[1:]:\n",
+        " try:\n",
+        "  m='';pi=0;po=0;pc=0\n",
+        "  for line in open(f):\n",
+        "   try:\n",
+        "    d=json.loads(line)\n",
+        "    t=d.get('type','')\n",
+        "    if t=='turn_context':m=d.get('payload',{}).get('model','')\n",
+        "    elif t=='event_msg':\n",
+        "     p=d.get('payload',{})\n",
+        "     if p.get('type')=='token_count':\n",
+        "      nf=p.get('info') or {}\n",
+        "      tu=nf.get('total_token_usage')\n",
+        "      lu=nf.get('last_token_usage')\n",
+        "      if tu:\n",
+        "       i=tu.get('input_tokens',0);o=tu.get('output_tokens',0);c=tu.get('cached_input_tokens',0)\n",
+        "       di=max(0,i-pi);do2=max(0,o-po);dc=max(0,c-pc)\n",
+        "       pi=i;po=o;pc=c\n",
+        "       if di>0 or do2>0:print(json.dumps({'ts':d.get('timestamp',''),'m':m,'in':max(0,di-dc),'out':do2,'c5':0,'cr':dc}))\n",
+        "      elif lu:\n",
+        "       i=lu.get('input_tokens',0);o=lu.get('output_tokens',0);c=lu.get('cached_input_tokens',0)\n",
+        "       print(json.dumps({'ts':d.get('timestamp',''),'m':m,'in':max(0,i-c),'out':o,'c5':0,'cr':c}))\n",
+        "   except:pass\n",
+        " except:pass\n",
+    );
+
     format!(
         "{touch_cmd}\
-         FILES=$({find_cmd}); \
-         [ -z \"$FILES\" ] && exit 0; \
-         if command -v jq >/dev/null 2>&1; then \
-           echo \"$FILES\" | xargs jq -c 'select(.type==\"assistant\" and .message.usage) | \
-             {{ts:.timestamp, m:.message.model, \
-               \"in\":.message.usage.input_tokens, \
-               out:.message.usage.output_tokens, \
-               c5:(.message.usage.cache_creation_input_tokens // 0), \
-               cr:(.message.usage.cache_read_input_tokens // 0)}}' 2>/dev/null; \
-         elif command -v python3 >/dev/null 2>&1; then \
-           echo \"$FILES\" | tr '\\n' '\\0' | xargs -0 python3 -c \"{py_script}\" 2>/dev/null; \
-         else \
-           echo \"$FILES\" | xargs grep -lh '\"usage\"' 2>/dev/null | xargs grep -h '\"assistant\"' 2>/dev/null; \
+         CLAUDE_FILES=$({claude_find}); \
+         CODEX_FILES=$({codex_find}); \
+         [ -z \"$CLAUDE_FILES\" ] && [ -z \"$CODEX_FILES\" ] && exit 0; \
+         if [ -n \"$CLAUDE_FILES\" ]; then \
+           if command -v jq >/dev/null 2>&1; then \
+             echo \"$CLAUDE_FILES\" | xargs jq -c 'select(.type==\"assistant\" and .message.usage) | \
+               {{ts:.timestamp, m:.message.model, \
+                 \"in\":.message.usage.input_tokens, \
+                 out:.message.usage.output_tokens, \
+                 c5:(.message.usage.cache_creation_input_tokens // 0), \
+                 cr:(.message.usage.cache_read_input_tokens // 0)}}' 2>/dev/null; \
+           elif command -v python3 >/dev/null 2>&1; then \
+             echo \"$CLAUDE_FILES\" | tr '\\n' '\\0' | xargs -0 python3 -c \"{claude_py}\" 2>/dev/null; \
+           else \
+             echo \"$CLAUDE_FILES\" | xargs grep -lh '\"usage\"' 2>/dev/null | xargs grep -h '\"assistant\"' 2>/dev/null; \
+           fi; \
+         fi; \
+         if [ -n \"$CODEX_FILES\" ]; then \
+           if command -v python3 >/dev/null 2>&1; then \
+             echo \"$CODEX_FILES\" | tr '\\n' '\\0' | xargs -0 python3 -c \"{codex_py}\" 2>/dev/null; \
+           elif command -v python >/dev/null 2>&1; then \
+             echo \"$CODEX_FILES\" | tr '\\n' '\\0' | xargs -0 python -c \"{codex_py}\" 2>/dev/null; \
+           fi; \
          fi; \
          true"
     )
