@@ -23,13 +23,16 @@ use tauri::WebviewWindow;
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn clamp_window_to_work_area(window: &WebviewWindow) {
     let Some(monitor) = window.current_monitor().ok().flatten() else {
+        tracing::debug!("clamp_window_to_work_area: no current monitor, skipping");
         return;
     };
 
     let Ok(outer_pos) = window.outer_position() else {
+        tracing::debug!("clamp_window_to_work_area: cannot read window position, skipping");
         return;
     };
     let Ok(outer_size) = window.outer_size() else {
+        tracing::debug!("clamp_window_to_work_area: cannot read window size, skipping");
         return;
     };
 

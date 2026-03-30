@@ -103,7 +103,10 @@ fn float_ball_bounds(window: &WebviewWindow) -> Result<FloatBallBounds, String> 
     let monitor = window
         .current_monitor()
         .map_err(|e| e.to_string())?
-        .or_else(|| window.primary_monitor().ok().flatten())
+        .or_else(|| {
+            tracing::debug!("float_ball_bounds: current_monitor returned None, using primary");
+            window.primary_monitor().ok().flatten()
+        })
         .ok_or_else(|| String::from("No monitor found for float ball"))?;
     let position = monitor.position();
     let size = monitor.size();

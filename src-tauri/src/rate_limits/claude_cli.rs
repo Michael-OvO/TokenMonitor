@@ -165,13 +165,13 @@ fn resolve_claude_cli_path_uncached() -> Result<PathBuf, String> {
     };
 
     #[cfg(not(target_os = "windows"))]
-    let output = StdCommand::new("/bin/zsh")
-        .args(["-lc", CLAUDE_CLI_RESOLVE_COMMAND])
+    let output = StdCommand::new("/usr/bin/env")
+        .args(["zsh", "-lc", CLAUDE_CLI_RESOLVE_COMMAND])
         .output()
         .or_else(|_| {
             // Fallback to bash if zsh is not available (Linux)
-            StdCommand::new("/bin/bash")
-                .args(["-lc", CLAUDE_CLI_RESOLVE_COMMAND])
+            StdCommand::new("/usr/bin/env")
+                .args(["bash", "-lc", CLAUDE_CLI_RESOLVE_COMMAND])
                 .output()
         })
         .map_err(|error| format!("Failed to resolve Claude CLI path: {error}"))?;

@@ -23,6 +23,22 @@ use tauri_plugin_autostart::MacosLauncher;
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_positioner::{Position, WindowExt};
 
+/// Try to position the window near the tray icon.
+/// `tauri-plugin-positioner` panics (instead of returning `Err`) when the tray
+/// position has not been recorded yet — common on Linux where `on_tray_event`
+/// may never capture coordinates.  We catch the panic and fall back to TopRight.
+#[cfg(not(target_os = "windows"))]
+fn move_window_near_tray(window: &tauri::WebviewWindow) {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let ok = catch_unwind(AssertUnwindSafe(|| window.move_window(Position::TrayCenter)))
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
+    if !ok {
+        tracing::debug!("TrayCenter unavailable (common on Linux), falling back to TopRight");
+        let _ = window.move_window(Position::TopRight);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -74,12 +90,7 @@ pub fn run() {
                                 }
                                 #[cfg(not(target_os = "windows"))]
                                 {
-                                    // TrayCenter works for both macOS menu bar and
-                                    // Linux top-panel desktops (GNOME, etc.).
-                                    // Fall back to TopRight if tray position is unavailable.
-                                    if window.move_window(Position::TrayCenter).is_err() {
-                                        let _ = window.move_window(Position::TopRight);
-                                    }
+                                    move_window_near_tray(&window);
                                     platform::clamp_window_to_work_area(&window);
                                 }
                             }
@@ -110,12 +121,7 @@ pub fn run() {
                                     }
                                     #[cfg(not(target_os = "windows"))]
                                     {
-                                        // TrayCenter works for both macOS menu bar and
-                                        // Linux top-panel desktops (GNOME, etc.).
-                                        // Fall back to TopRight if tray position is unavailable.
-                                        if window.move_window(Position::TrayCenter).is_err() {
-                                            let _ = window.move_window(Position::TopRight);
-                                        }
+                                        move_window_near_tray(&window);
                                         platform::clamp_window_to_work_area(&window);
                                     }
                                 }
