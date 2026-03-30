@@ -40,22 +40,14 @@ pub fn run() {
                 app.manage(logging_state);
             }
 
-            // Build tray menu.
-            // On Linux (libappindicator), ANY click shows the menu — there is
-            // no separate left-click event — so we add a "Show" item so the
-            // user can still open the main window.
+            // Build tray menu (right-click on macOS/Windows, any click on Linux).
+            let show = MenuItemBuilder::with_id("show", "Show TokenMonitor").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit TokenMonitor").build(app)?;
-            let menu = if cfg!(target_os = "linux") {
-                let show =
-                    MenuItemBuilder::with_id("show", "Show TokenMonitor").build(app)?;
-                MenuBuilder::new(app)
-                    .item(&show)
-                    .separator()
-                    .item(&quit)
-                    .build()?
-            } else {
-                MenuBuilder::new(app).item(&quit).build()?
-            };
+            let menu = MenuBuilder::new(app)
+                .item(&show)
+                .separator()
+                .item(&quit)
+                .build()?;
 
             // Build tray icon (44×44 @2x retina base icon)
             let tray_icon = Image::new_owned(
@@ -75,15 +67,21 @@ pub fn run() {
                         app.exit(0);
                     } else if event.id() == "show" {
                         if let Some(window) = app.get_webview_window("main") {
-                            #[cfg(not(target_os = "windows"))]
-                            {
-                                let position = if cfg!(target_os = "macos") {
-                                    Position::TrayCenter
-                                } else {
-                                    Position::TrayBottomCenter
-                                };
-                                let _ = window.move_window(position);
-                                platform::clamp_window_to_work_area(&window);
+                            if window.current_monitor().ok().flatten().is_some() {
+                                #[cfg(target_os = "windows")]
+                                {
+                                    platform::windows::window::position_near_tray(&window);
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    let position = if cfg!(target_os = "macos") {
+                                        Position::TrayCenter
+                                    } else {
+                                        Position::TrayBottomCenter
+                                    };
+                                    let _ = window.move_window(position);
+                                    platform::clamp_window_to_work_area(&window);
+                                }
                             }
                             let _ = window.show();
                             let _ = window.set_focus();

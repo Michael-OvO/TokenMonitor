@@ -102,6 +102,39 @@
   let deviceToggleGuard = 0;
   const REMOTE_USAGE_CACHE_PROVIDERS: UsageProvider[] = [ALL_USAGE_PROVIDER_ID, "claude"];
 
+  // ── Swipe gesture state for date navigation ──
+  const SWIPE_THRESHOLD_PX = 50;
+  let swipeStart: { x: number; y: number; id: number } | null = null;
+
+  function onSwipePointerDown(e: PointerEvent) {
+    if (period === "5h" || swipeStart) return;
+    swipeStart = { x: e.clientX, y: e.clientY, id: e.pointerId };
+  }
+
+  function onSwipePointerMove(e: PointerEvent) {
+    if (!swipeStart || e.pointerId !== swipeStart.id) return;
+    // If vertical movement dominates, cancel the swipe so scrolling works
+    const dy = Math.abs(e.clientY - swipeStart.y);
+    const dx = Math.abs(e.clientX - swipeStart.x);
+    if (dy > dx && dy > 10) {
+      swipeStart = null;
+    }
+  }
+
+  function onSwipePointerUp(e: PointerEvent) {
+    if (!swipeStart || e.pointerId !== swipeStart.id) return;
+    const dx = e.clientX - swipeStart.x;
+    const dy = Math.abs(e.clientY - swipeStart.y);
+    swipeStart = null;
+    // Only trigger if horizontal and exceeds threshold
+    if (Math.abs(dx) < SWIPE_THRESHOLD_PX || dy > Math.abs(dx)) return;
+    if (dx < 0 && data?.has_earlier_data) {
+      handleOffsetChange(-1);
+    } else if (dx > 0 && offset !== 0) {
+      handleOffsetChange(1);
+    }
+  }
+
   let headerToggleOptions = $derived.by(() =>
     getVisibleHeaderProviders(headerTabs).map((value) => ({
       value,
@@ -556,6 +589,14 @@
     {:else if showDevices}
       <DevicesView onBack={() => { showDevices = false; }} onDeviceSelect={handleDeviceSelect} onSettings={handleSettingsOpen} />
     {:else if data}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="swipe-region"
+        onpointerdown={onSwipePointerDown}
+        onpointermove={onSwipePointerMove}
+        onpointerup={onSwipePointerUp}
+        onpointercancel={() => { swipeStart = null; }}
+      >
       {#if showRefresh}<div class="refresh-bar" aria-hidden="true"></div>{/if}
       <Toggle
         active={provider}
@@ -619,6 +660,7 @@
         />
       {/if}
       <Footer {data} {provider} {rateLimits} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} onDevices={() => { showDevices = true; }} />
+      </div>
     {:else}
       <div class="loading">
         <div class="spinner"></div>
@@ -698,5 +740,8 @@
     color: var(--t3);
     font: 400 10px/1 'Inter', sans-serif;
     padding: 32px 0;
+  }
+  .swipe-region {
+    touch-action: pan-y;
   }
 </style>
