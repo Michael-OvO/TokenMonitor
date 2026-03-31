@@ -319,8 +319,9 @@ export function createResizeOrchestrator(
     );
 
     if (disposition === "shrink") {
-      animateWindowHeight(
-        measurement.nextHeight,
+      // Follow content rather than independent animation — prevents bottom gap
+      // on top-anchored windows (Linux) where window > content during JS animation.
+      followContentDuringTransition(
         SHRINK_ANIMATE_MS,
         `${source}:shrink`,
       );

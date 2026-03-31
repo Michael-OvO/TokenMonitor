@@ -20,11 +20,11 @@ use tauri::{
     Emitter, Manager, WindowEvent,
 };
 use tauri_plugin_autostart::MacosLauncher;
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 use tauri_plugin_positioner::{Position, WindowExt};
 
 /// Extract (x, y) from a `tauri::Position` enum as physical-pixel f64.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn pos_xy(p: &tauri::Position) -> (f64, f64) {
     match p {
         tauri::Position::Physical(ph) => (ph.x as f64, ph.y as f64),
@@ -33,7 +33,7 @@ fn pos_xy(p: &tauri::Position) -> (f64, f64) {
 }
 
 /// Extract (w, h) from a `tauri::Size` enum as physical-pixel f64.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn size_wh(s: &tauri::Size) -> (f64, f64) {
     match s {
         tauri::Size::Physical(ph) => (ph.width as f64, ph.height as f64),
@@ -44,7 +44,7 @@ fn size_wh(s: &tauri::Size) -> (f64, f64) {
 /// Position the window centered below the tray icon using the rect from the
 /// click event.  Falls back to `tauri-plugin-positioner` if the rect looks
 /// invalid (zero-sized), and ultimately to `TopRight`.
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn move_window_below_tray(window: &tauri::WebviewWindow, tray_rect: &tauri::Rect) {
     let (tw, th) = size_wh(&tray_rect.size);
     let (tx, ty) = pos_xy(&tray_rect.position);
@@ -78,7 +78,7 @@ fn move_window_below_tray(window: &tauri::WebviewWindow, tray_rect: &tauri::Rect
 }
 
 /// Fallback positioning when no tray rect is available (e.g. right-click menu "Show").
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn move_window_near_tray(window: &tauri::WebviewWindow) {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     let ok = catch_unwind(AssertUnwindSafe(|| window.move_window(Position::TrayCenter)))
@@ -138,7 +138,12 @@ pub fn run() {
                             {
                                 platform::windows::window::position_near_tray(&window);
                             }
-                            #[cfg(not(target_os = "windows"))]
+                            #[cfg(target_os = "linux")]
+                            {
+                                platform::linux::position_top_right(&window);
+                                platform::clamp_window_to_work_area(&window);
+                            }
+                            #[cfg(target_os = "macos")]
                             {
                                 move_window_near_tray(&window);
                                 platform::clamp_window_to_work_area(&window);
@@ -154,7 +159,7 @@ pub fn run() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
-                        #[cfg(not(target_os = "windows"))]
+                        #[cfg(target_os = "macos")]
                         rect,
                         ..
                     } = event
@@ -168,7 +173,12 @@ pub fn run() {
                                 {
                                     platform::windows::window::position_near_tray(&window);
                                 }
-                                #[cfg(not(target_os = "windows"))]
+                                #[cfg(target_os = "linux")]
+                                {
+                                    platform::linux::position_top_right(&window);
+                                    platform::clamp_window_to_work_area(&window);
+                                }
+                                #[cfg(target_os = "macos")]
                                 {
                                     move_window_below_tray(&window, &rect);
                                     platform::clamp_window_to_work_area(&window);
