@@ -1,7 +1,7 @@
 //! Linux-specific platform code.
 
 use std::time::Duration;
-use tauri::{Manager, WebviewWindow};
+use tauri::WebviewWindow;
 
 /// Position the window in the top-right corner of the work area.
 ///
