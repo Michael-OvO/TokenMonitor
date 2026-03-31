@@ -29,6 +29,8 @@ jobs:
             platform: linux
             arch: x64
     runs-on: ${{ matrix.os }}
+    env:
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -88,7 +90,7 @@ jobs:
 
       # ── macOS code signing setup (skipped if secrets not configured) ────────
       - name: Set up ephemeral keychain
-        if: matrix.platform == 'macos' && secrets.APPLE_CERTIFICATE != ''
+        if: matrix.platform == 'macos' && env.HAS_APPLE_CERT == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -116,7 +118,7 @@ jobs:
             -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
       - name: Write API key
-        if: matrix.platform == 'macos' && secrets.APPLE_API_KEY != ''
+        if: matrix.platform == 'macos' && env.HAS_APPLE_CERT == 'true'
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: |
@@ -126,7 +128,7 @@ jobs:
 
       # ── Build installers ───────────────────────────────────────────────────
       - name: Build installers (macOS — signed)
-        if: matrix.platform == 'macos' && secrets.APPLE_SIGNING_IDENTITY != ''
+        if: matrix.platform == 'macos' && env.HAS_APPLE_CERT == 'true'
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -135,7 +137,7 @@ jobs:
         run: npm run build:installers -- --platform ${{ matrix.platform }} --ci
 
       - name: Build installers (macOS — unsigned)
-        if: matrix.platform == 'macos' && secrets.APPLE_SIGNING_IDENTITY == ''
+        if: matrix.platform == 'macos' && env.HAS_APPLE_CERT != 'true'
         run: npm run build:installers -- --platform ${{ matrix.platform }} --ci
 
       - name: Build installers (Windows / Linux)
@@ -144,7 +146,7 @@ jobs:
 
       # ── Cleanup macOS secrets ──────────────────────────────────────────────
       - name: Cleanup secrets
-        if: matrix.platform == 'macos' && secrets.APPLE_CERTIFICATE != '' && always()
+        if: matrix.platform == 'macos' && env.HAS_APPLE_CERT == 'true' && always()
         run: |
           security delete-keychain "$RUNNER_TEMP/build.keychain" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/apikey.p8" \
