@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 use tokio::process::Command;
 
+/// Windows: CREATE_NO_WINDOW flag prevents a console window from flashing.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Per-host sync state tracked by the cache manager.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,20 +76,21 @@ pub struct CompactUsageRecord {
 pub async fn test_connection(alias: &str) -> SshTestResult {
     let start = std::time::Instant::now();
 
-    let result = Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "-o",
-            "LogLevel=ERROR",
-            alias,
-            "echo",
-            "ok",
-        ])
-        .output()
-        .await;
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "LogLevel=ERROR",
+        alias,
+        "echo",
+        "ok",
+    ]);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let result = cmd.output().await;
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -355,20 +360,23 @@ fn parse_full_entry_to_compact(line: &str) -> Option<CompactUsageRecord> {
 async fn ssh_command(alias: &str, script: &str) -> Result<String, String> {
     use tokio::io::AsyncWriteExt;
 
-    let mut child = Command::new("ssh")
-        .args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "-o",
-            "LogLevel=ERROR",
-            alias,
-            "bash -s",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "LogLevel=ERROR",
+        alias,
+        "bash -s",
+    ])
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped());
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn ssh: {e}"))?;
 
