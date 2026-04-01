@@ -8,7 +8,7 @@ use crate::usage::integrations::{UsageIntegrationId, UsageIntegrationSelection};
 use chrono::{DateTime, Local, NaiveDate, Timelike};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -375,14 +375,85 @@ fn earliest_entry_date(entries: &[ParsedEntry]) -> Option<NaiveDate> {
 fn create_claude_unique_hash(entry: &ClaudeJsonlEntry) -> Option<String> {
     let message_id = entry.message.as_ref()?.id.as_ref()?;
     let request_id = entry.request_id.as_ref()?;
-    let sidechain = if entry.is_sidechain == Some(true) {
-        "1"
-    } else {
-        "0"
-    };
-    let agent = entry.agent_id.as_deref().unwrap_or("");
+    Some(format!("{message_id}:{request_id}"))
+}
 
-    Some(format!("{sidechain}:{agent}:{message_id}:{request_id}"))
+fn claude_scope_priority(scope: crate::stats::subagent::AgentScope) -> u8 {
+    match scope {
+        crate::stats::subagent::AgentScope::Main => 0,
+        crate::stats::subagent::AgentScope::Subagent => 1,
+    }
+}
+
+fn should_prefer_claude_entry(candidate: &ParsedEntry, existing: &ParsedEntry) -> bool {
+    if candidate.output_tokens != existing.output_tokens {
+        return candidate.output_tokens > existing.output_tokens;
+    }
+
+    let candidate_scope = claude_scope_priority(candidate.agent_scope);
+    let existing_scope = claude_scope_priority(existing.agent_scope);
+    if candidate_scope != existing_scope {
+        return candidate_scope > existing_scope;
+    }
+
+    if candidate.timestamp != existing.timestamp {
+        return candidate.timestamp > existing.timestamp;
+    }
+
+    if candidate.session_key != existing.session_key {
+        return candidate.session_key < existing.session_key;
+    }
+
+    if candidate.model != existing.model {
+        return candidate.model < existing.model;
+    }
+
+    false
+}
+
+fn should_prefer_claude_change_event(
+    candidate: &ParsedChangeEvent,
+    existing: &ParsedChangeEvent,
+) -> bool {
+    let candidate_lines = candidate.added_lines + candidate.removed_lines;
+    let existing_lines = existing.added_lines + existing.removed_lines;
+    if candidate_lines != existing_lines {
+        return candidate_lines > existing_lines;
+    }
+
+    let candidate_scope = claude_scope_priority(candidate.agent_scope);
+    let existing_scope = claude_scope_priority(existing.agent_scope);
+    if candidate_scope != existing_scope {
+        return candidate_scope > existing_scope;
+    }
+
+    if candidate.timestamp != existing.timestamp {
+        return candidate.timestamp > existing.timestamp;
+    }
+
+    if candidate.path != existing.path {
+        return candidate.path < existing.path;
+    }
+
+    if candidate.model != existing.model {
+        return candidate.model < existing.model;
+    }
+
+    false
+}
+
+fn create_claude_tool_dedupe_key(
+    unique_hash: Option<&String>,
+    tool_id: Option<&String>,
+    block_index: usize,
+) -> Option<String> {
+    let hash = unique_hash?;
+    let suffix = tool_id.as_ref().map(|id| id.as_str()).unwrap_or_else(|| "");
+    if suffix.is_empty() {
+        Some(format!("{hash}:{block_index}"))
+    } else {
+        Some(format!("{hash}:{suffix}"))
+    }
 }
 
 struct PendingClaudeTool {
@@ -708,9 +779,11 @@ pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                                             kind: ChangeEventKind::PatchEdit,
                                             fallback_added_lines: count_lines(&edit.new_string),
                                             fallback_removed_lines: count_lines(&edit.old_string),
-                                            dedupe_key: unique_hash
-                                                .as_ref()
-                                                .map(|hash| format!("{hash}:{block_index}")),
+                                            dedupe_key: create_claude_tool_dedupe_key(
+                                                unique_hash.as_ref(),
+                                                id.as_ref(),
+                                                block_index,
+                                            ),
                                             agent_scope,
                                         },
                                     ))
@@ -732,9 +805,11 @@ pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                                             kind: ChangeEventKind::FullWrite,
                                             fallback_added_lines: 0,
                                             fallback_removed_lines: 0,
-                                            dedupe_key: unique_hash
-                                                .as_ref()
-                                                .map(|hash| format!("{hash}:{block_index}")),
+                                            dedupe_key: create_claude_tool_dedupe_key(
+                                                unique_hash.as_ref(),
+                                                id.as_ref(),
+                                                block_index,
+                                            ),
                                             agent_scope,
                                         },
                                     ))
@@ -843,6 +918,62 @@ pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
     (entries, change_events, lines_read, true)
 }
 
+enum ClaudeDedupeAction {
+    Inserted,
+    Replaced(usize),
+    Skipped,
+}
+
+fn upsert_claude_entry(
+    entries: &mut Vec<ParsedEntry>,
+    processed_hashes: &mut HashMap<String, usize>,
+    entry: ParsedEntry,
+) -> ClaudeDedupeAction {
+    let Some(unique_hash) = entry.unique_hash.clone() else {
+        entries.push(entry);
+        return ClaudeDedupeAction::Inserted;
+    };
+
+    if let Some(existing_idx) = processed_hashes.get(&unique_hash).copied() {
+        if should_prefer_claude_entry(&entry, &entries[existing_idx]) {
+            entries[existing_idx] = entry;
+            ClaudeDedupeAction::Replaced(existing_idx)
+        } else {
+            ClaudeDedupeAction::Skipped
+        }
+    } else {
+        let idx = entries.len();
+        entries.push(entry);
+        processed_hashes.insert(unique_hash, idx);
+        ClaudeDedupeAction::Inserted
+    }
+}
+
+fn upsert_claude_change_event(
+    change_events: &mut Vec<ParsedChangeEvent>,
+    processed_change_keys: &mut HashMap<String, usize>,
+    change_event: ParsedChangeEvent,
+) -> ClaudeDedupeAction {
+    let Some(dedupe_key) = change_event.dedupe_key.clone() else {
+        change_events.push(change_event);
+        return ClaudeDedupeAction::Inserted;
+    };
+
+    if let Some(existing_idx) = processed_change_keys.get(&dedupe_key).copied() {
+        if should_prefer_claude_change_event(&change_event, &change_events[existing_idx]) {
+            change_events[existing_idx] = change_event;
+            ClaudeDedupeAction::Replaced(existing_idx)
+        } else {
+            ClaudeDedupeAction::Skipped
+        }
+    } else {
+        let idx = change_events.len();
+        change_events.push(change_event);
+        processed_change_keys.insert(dedupe_key, idx);
+        ClaudeDedupeAction::Inserted
+    }
+}
+
 /// Read all Claude assistant entries from JSONL files under `projects_dir`,
 /// optionally filtering to entries on or after `since`.
 fn read_claude_entries_with_debug(
@@ -850,7 +981,7 @@ fn read_claude_entries_with_debug(
     since: Option<NaiveDate>,
 ) -> (Vec<ParsedEntry>, ProviderReadDebug) {
     let mut entries = Vec::new();
-    let mut processed_hashes = HashSet::new();
+    let mut processed_hashes = HashMap::new();
     let files = glob_jsonl_files(projects_dir);
     let mut report = ProviderReadDebug {
         provider: String::from("claude"),
@@ -889,12 +1020,7 @@ fn read_claude_entries_with_debug(
             if since.is_some_and(|since_date| entry.timestamp.date_naive() < since_date) {
                 continue;
             }
-            if let Some(unique_hash) = entry.unique_hash.as_ref() {
-                if !processed_hashes.insert(unique_hash.clone()) {
-                    continue;
-                }
-            }
-            entries.push(entry);
+            let _ = upsert_claude_entry(&mut entries, &mut processed_hashes, entry);
         }
     }
     report.emitted_entries = entries.len();
@@ -1805,12 +1931,13 @@ impl UsageParser {
         let mut entries = Vec::new();
         let mut change_events = Vec::new();
         let mut reports = Vec::new();
-        let mut processed_hashes = HashSet::new();
-        let mut processed_change_keys = HashSet::new();
+        let mut entry_report_indices = Vec::new();
+        let mut processed_hashes = HashMap::new();
+        let mut processed_change_keys = HashMap::new();
 
         for root_dir in &config.roots {
             let (files, listing_cache_hit) = self.cached_jsonl_files(root_dir);
-            let mut report = ProviderReadDebug {
+            reports.push(ProviderReadDebug {
                 provider: String::from(config.id.as_str()),
                 root_dir: path_to_string(root_dir),
                 root_exists: root_dir.exists(),
@@ -1819,11 +1946,15 @@ impl UsageParser {
                 listing_cache_hit,
                 discovered_paths: files.len(),
                 ..ProviderReadDebug::default()
-            };
+            });
+            let report_idx = reports.len() - 1;
 
             for path in files.iter() {
                 if let Some(since_date) = since {
                     if !modified_since(path, since_date) {
+                        let report = reports
+                            .get_mut(report_idx)
+                            .expect("report should exist for current root");
                         report.skipped_paths += 1;
                         report.skipped_by_mtime += 1;
                         push_sample_path(&mut report.sample_skipped_paths, path);
@@ -1831,20 +1962,30 @@ impl UsageParser {
                     }
                 }
 
-                report.attempted_paths += 1;
-                push_sample_path(&mut report.sample_paths, path);
+                {
+                    let report = reports
+                        .get_mut(report_idx)
+                        .expect("report should exist for current root");
+                    report.attempted_paths += 1;
+                    push_sample_path(&mut report.sample_paths, path);
+                }
 
                 let loaded = self.load_cached_file(path, config.file_kind());
-                report.lines_read += loaded.lines_read;
-                if loaded.from_cache {
-                    report.cache_hits += 1;
-                } else {
-                    report.cache_misses += 1;
-                    if loaded.opened {
-                        report.opened_paths += 1;
+                {
+                    let report = reports
+                        .get_mut(report_idx)
+                        .expect("report should exist for current root");
+                    report.lines_read += loaded.lines_read;
+                    if loaded.from_cache {
+                        report.cache_hits += 1;
                     } else {
-                        report.failed_paths += 1;
-                        continue;
+                        report.cache_misses += 1;
+                        if loaded.opened {
+                            report.opened_paths += 1;
+                        } else {
+                            report.failed_paths += 1;
+                            continue;
+                        }
                     }
                 }
 
@@ -1854,13 +1995,12 @@ impl UsageParser {
                         continue;
                     }
                     if config.dedupe_change_events() {
-                        let Some(dedupe_key) = cev.dedupe_key.as_ref() else {
-                            change_events.push(cev.clone());
-                            continue;
-                        };
-                        if !processed_change_keys.insert(dedupe_key.clone()) {
-                            continue;
-                        }
+                        let _ = upsert_claude_change_event(
+                            &mut change_events,
+                            &mut processed_change_keys,
+                            cev.clone(),
+                        );
+                        continue;
                     }
                     change_events.push(cev.clone());
                 }
@@ -1870,21 +2010,36 @@ impl UsageParser {
                         continue;
                     }
                     if config.dedupe_entry_hashes() {
-                        let Some(unique_hash) = entry.unique_hash.as_ref() else {
-                            report.emitted_entries += 1;
-                            entries.push(entry.clone());
-                            continue;
-                        };
-                        if !processed_hashes.insert(unique_hash.clone()) {
-                            continue;
+                        match upsert_claude_entry(
+                            &mut entries,
+                            &mut processed_hashes,
+                            entry.clone(),
+                        ) {
+                            ClaudeDedupeAction::Inserted => {
+                                entry_report_indices.push(report_idx);
+                                reports[report_idx].emitted_entries += 1;
+                            }
+                            ClaudeDedupeAction::Replaced(existing_idx) => {
+                                let old_report_idx = entry_report_indices
+                                    .get(existing_idx)
+                                    .copied()
+                                    .expect("existing deduped entry should track its origin");
+                                if old_report_idx != report_idx {
+                                    let previous_count =
+                                        reports[old_report_idx].emitted_entries.saturating_sub(1);
+                                    reports[old_report_idx].emitted_entries = previous_count;
+                                    reports[report_idx].emitted_entries += 1;
+                                }
+                                entry_report_indices[existing_idx] = report_idx;
+                            }
+                            ClaudeDedupeAction::Skipped => {}
                         }
+                        continue;
                     }
-                    report.emitted_entries += 1;
+                    reports[report_idx].emitted_entries += 1;
                     entries.push(entry.clone());
                 }
             }
-
-            reports.push(report);
         }
 
         (entries, change_events, reports)
@@ -2546,6 +2701,23 @@ mod tests {
         assert_eq!(entries[0].output_tokens, 5);
         assert_eq!(entries[0].cache_creation_1h_tokens, 20);
         assert_eq!(entries[0].cache_read_tokens, 30);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].emitted_entries, 1);
+    }
+
+    #[test]
+    fn parse_claude_dedupe_keeps_latest_output_tokens() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":35,"cache_creation_input_tokens":20,"cache_read_input_tokens":30}}}
+{"type":"assistant","timestamp":"2026-03-15T12:00:02+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6","stop_reason":"tool_use","usage":{"input_tokens":10,"output_tokens":954,"cache_creation_input_tokens":20,"cache_read_input_tokens":30}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let (entries, _change_events, reports) =
+            parser.load_entries("claude", parse_since_date("20260301"));
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].output_tokens, 954);
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].emitted_entries, 1);
     }
@@ -3332,6 +3504,53 @@ mod tests {
     }
 
     #[test]
+    fn load_claude_entries_keeps_distinct_tool_use_change_events_for_same_request() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/a.rs","old_string":"old-a","new_string":"new-a"}}],"usage":{"input_tokens":100,"output_tokens":10}}}
+{"type":"user","timestamp":"2026-03-21T10:00:01+00:00","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"Applied patch"}]},"toolUseResult":{"filePath":"src/a.rs","structuredPatch":[{"lines":["@@","-old-a","+new-a"]}]}}
+{"type":"assistant","timestamp":"2026-03-21T10:00:02+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_2","name":"Edit","input":{"file_path":"src/b.rs","old_string":"old-b","new_string":"new-b\nextra-b"}}],"usage":{"input_tokens":100,"output_tokens":20}}}
+{"type":"user","timestamp":"2026-03-21T10:00:03+00:00","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_2","content":"Applied patch"}]},"toolUseResult":{"filePath":"src/b.rs","structuredPatch":[{"lines":["@@","-old-b","+new-b","+extra-b"]}]}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let (entries, change_events, _reports) = parser.load_claude_entries_with_debug(None);
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "usage entries should still dedupe by request"
+        );
+        assert_eq!(change_events.len(), 2);
+        assert_eq!(change_events[0].path, "src/a.rs");
+        assert_eq!(change_events[1].path, "src/b.rs");
+    }
+
+    #[test]
+    fn load_claude_entries_prefers_subagent_scope_for_mirrored_change_events() {
+        let dir = TempDir::new().unwrap();
+        let root = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","sessionId":"sess-1","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/main.rs","old_string":"old","new_string":"new"}}],"usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"user","timestamp":"2026-03-21T10:00:01+00:00","sessionId":"sess-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"Applied patch"}]},"toolUseResult":{"filePath":"src/main.rs","structuredPatch":[{"lines":["@@","-old","+new"]}]}}"#;
+        let sidechain = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","isSidechain":true,"agentId":"agt-1","sessionId":"sess-1","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/main.rs","old_string":"old","new_string":"new"}}],"usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"user","timestamp":"2026-03-21T10:00:01+00:00","isSidechain":true,"agentId":"agt-1","sessionId":"sess-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"Applied patch"}]},"toolUseResult":{"filePath":"src/main.rs","structuredPatch":[{"lines":["@@","-old","+new"]}]}}"#;
+        write_file(&dir.path().join("root.jsonl"), root);
+        write_file(&dir.path().join("sidechain.jsonl"), sidechain);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let (entries, change_events, _reports) = parser.load_claude_entries_with_debug(None);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].agent_scope,
+            crate::stats::subagent::AgentScope::Subagent
+        );
+        assert_eq!(change_events.len(), 1);
+        assert_eq!(
+            change_events[0].agent_scope,
+            crate::stats::subagent::AgentScope::Subagent
+        );
+    }
+
+    #[test]
     fn no_content_field_produces_no_change_events() {
         let dir = TempDir::new().unwrap();
         // A normal assistant message with no content array (usage only)
@@ -3614,19 +3833,27 @@ diff --git a/src/main.rs b/src/main.rs
     }
 
     #[test]
-    fn claude_dedupe_does_not_collapse_root_and_sidechain() {
+    fn claude_dedupe_collapses_root_and_sidechain_and_prefers_subagent_scope() {
         let dir = TempDir::new().unwrap();
         // Root and sidechain with same message.id and requestId
         let root = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","sessionId":"sess-1","requestId":"req-1","message":{"id":"msg-1","model":"claude-opus-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#;
-        let sidechain = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:01+00:00","isSidechain":true,"agentId":"agt-1","sessionId":"sess-1","requestId":"req-1","message":{"id":"msg-1","model":"claude-haiku-4-5","stop_reason":"end_turn","usage":{"input_tokens":30,"output_tokens":10}}}"#;
+        let sidechain = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:01+00:00","isSidechain":true,"agentId":"agt-1","sessionId":"sess-1","requestId":"req-1","message":{"id":"msg-1","model":"claude-opus-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         write_file(&dir.path().join("root.jsonl"), root);
         write_file(&dir.path().join("sidechain.jsonl"), sidechain);
 
         let entries = read_claude_entries(dir.path(), None);
         assert_eq!(
             entries.len(),
-            2,
-            "root and sidechain should both survive dedupe"
+            1,
+            "root and sidechain mirrors should collapse"
+        );
+        assert_eq!(
+            entries[0].agent_scope,
+            crate::stats::subagent::AgentScope::Subagent
+        );
+        assert!(
+            entries[0].session_key.contains("agt-1"),
+            "subagent mirror should keep the sidechain session_key"
         );
     }
 
