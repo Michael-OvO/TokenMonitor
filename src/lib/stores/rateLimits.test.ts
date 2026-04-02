@@ -150,6 +150,65 @@ describe("hydrateRateLimits", () => {
 });
 
 describe("fetchRateLimits", () => {
+  it("keeps an existing provider error visible while a retry request is loading", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-17T12:10:00.000Z"));
+
+    const legacyStore = makeStore();
+    const claudeStore = makeStore({
+      payload: providerRateLimits("claude", {
+        windows: [],
+        error: "Usage API returned 429",
+        cooldownUntil: null,
+        fetchedAt: "2026-03-17T11:59:00.000Z",
+      }),
+      lastSuccessfulAt: "2026-03-17T11:55:00.000Z",
+    });
+    const codexStore = makeStore();
+    installStoreMap({
+      "rate-limits.json": legacyStore,
+      "rate-limits-claude.json": claudeStore,
+      "rate-limits-codex.json": codexStore,
+    });
+
+    const request = deferred<RateLimitsPayload>();
+    mockInvoke.mockReturnValueOnce(request.promise);
+
+    const { fetchRateLimits, rateLimitsMonitorState, rateLimitsRequestState } =
+      await loadRateLimitStore();
+
+    const fetchPromise = fetchRateLimits("claude");
+
+    await vi.waitFor(() => {
+      expect(get(rateLimitsMonitorState).claude.loading).toBe(true);
+    });
+
+    expect(get(rateLimitsMonitorState).claude.error).toBe("Usage API returned 429");
+    expect(get(rateLimitsRequestState).error).toBe("Usage API returned 429");
+
+    request.resolve(
+      makePayload({
+        claude: providerRateLimits("claude", {
+          windows: [
+            {
+              windowId: "five_hour",
+              label: "Session (5hr)",
+              utilization: 19,
+              resetsAt: "2026-03-17T14:10:00.000Z",
+            },
+          ],
+          error: null,
+          fetchedAt: "2026-03-17T12:10:10.000Z",
+        }),
+        codex: null,
+      }),
+    );
+    await fetchPromise;
+
+    expect(get(rateLimitsMonitorState).claude.error).toBeNull();
+    expect(get(rateLimitsRequestState).error).toBeNull();
+  });
+
   it("fetches and persists only the requested provider while keeping provider-level monitor state", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-17T12:01:30.000Z"));
@@ -273,6 +332,57 @@ describe("fetchRateLimits", () => {
     expect(get(rateLimitsMonitorState).claude.lastSuccessAt).toBe("2026-03-17T12:05:00.000Z");
   });
 
+  it("clamps very short retry delays to avoid sub-second error thrash", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-17T12:00:00.000Z"));
+
+    const legacyStore = makeStore();
+    const claudeStore = makeStore();
+    const codexStore = makeStore({
+      payload: providerRateLimits("codex", {
+        windows: [],
+        error: "No rate limit data in Codex session files",
+        cooldownUntil: "2026-03-17T12:00:00.100Z",
+        fetchedAt: "2026-03-17T11:58:00.000Z",
+      }),
+      lastSuccessfulAt: "2026-03-17T11:58:00.000Z",
+    });
+    installStoreMap({
+      "rate-limits.json": legacyStore,
+      "rate-limits-claude.json": claudeStore,
+      "rate-limits-codex.json": codexStore,
+    });
+
+    mockInvoke.mockResolvedValueOnce(
+      makePayload({
+        claude: null,
+        codex: providerRateLimits("codex", {
+          windows: [
+            {
+              windowId: "primary",
+              label: "Session (5hr)",
+              utilization: 11,
+              resetsAt: "2026-03-17T13:00:00.000Z",
+            },
+          ],
+          error: null,
+          fetchedAt: "2026-03-17T12:00:01.200Z",
+        }),
+      }),
+    );
+
+    const { fetchRateLimits } = await loadRateLimitStore();
+
+    await fetchRateLimits("codex");
+    expect(mockInvoke).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(200);
+    expect(mockInvoke).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(900);
+    expect(mockInvoke).toHaveBeenCalledWith("get_rate_limits", { provider: "codex" });
+  });
+
   it("fetches only the eligible provider in all-scope mode", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-17T12:00:30.000Z"));
@@ -373,7 +483,6 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": codexStore,
     });
 
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockInvoke.mockRejectedValueOnce(new Error("backend unavailable"));
 
     const { fetchRateLimits, rateLimitsMonitorState, rateLimitsRequestState } =
@@ -384,6 +493,5 @@ describe("fetchRateLimits", () => {
     expect(get(rateLimitsMonitorState).claude.failureStreak).toBe(1);
     expect(get(rateLimitsMonitorState).claude.error).toBeNull();
     expect(get(rateLimitsRequestState).error).toBeNull();
-    expect(errorSpy).toHaveBeenCalled();
   });
 });

@@ -85,52 +85,102 @@ function hashedModelColor(key: string): string {
   return `hsl(${hue} 58% 56%)`;
 }
 
+const EXACT_COLORS: Record<string, string> = {
+  opus: "var(--opus)",
+  sonnet: "var(--sonnet)",
+  haiku: "var(--haiku)",
+  gpt54: "var(--gpt54)",
+  gpt53: "var(--gpt53)",
+  gpt52: "var(--gpt52)",
+  gpt51max: "var(--gpt53)",
+  gpt51mini: "var(--o3mini)",
+  gpt51: "var(--gpt52)",
+  gpt5codex: "var(--codex)",
+  codexmini: "var(--o4mini)",
+  gpt5mini: "var(--o3mini)",
+  gpt5nano: "var(--o1mini)",
+  gpt5: "var(--codex)",
+  o3: "var(--o3)",
+  o3mini: "var(--o3mini)",
+  o4mini: "var(--o4mini)",
+  o1: "var(--o1)",
+  o1mini: "var(--o1mini)",
+  codex: "var(--codex)",
+  unknown: "var(--t3)",
+};
+
+interface IncludesRule {
+  readonly pattern: string;
+  readonly color: string;
+}
+
+interface PrefixRule {
+  readonly prefix: string;
+  readonly color: string;
+}
+
+const INCLUDES_RULES: readonly IncludesRule[] = [
+  { pattern: "opus", color: EXACT_COLORS.opus },
+  { pattern: "sonnet", color: EXACT_COLORS.sonnet },
+  { pattern: "haiku", color: EXACT_COLORS.haiku },
+] as const;
+
+// Order matters: longer prefixes must come before shorter ones (e.g. "gpt-5.1-codex-mini" before "gpt-5.1")
+const PREFIX_RULES: readonly PrefixRule[] = [
+  { prefix: "gpt-5.4", color: EXACT_COLORS.gpt54 },
+  { prefix: "gpt-5.3", color: EXACT_COLORS.gpt53 },
+  { prefix: "gpt-5.2", color: EXACT_COLORS.gpt52 },
+  { prefix: "gpt-5.1-codex-mini", color: EXACT_COLORS.gpt51mini },
+  { prefix: "gpt-5.1-codex-max", color: EXACT_COLORS.gpt51max },
+  { prefix: "gpt-5.1-codex", color: EXACT_COLORS.codex },
+  { prefix: "gpt-5.1", color: EXACT_COLORS.codex },
+  { prefix: "gpt-5-mini", color: EXACT_COLORS.gpt5mini },
+  { prefix: "gpt-5-nano", color: EXACT_COLORS.gpt5nano },
+  { prefix: "gpt-5-codex", color: EXACT_COLORS.gpt5codex },
+  { prefix: "gpt-5", color: EXACT_COLORS.gpt5 },
+  { prefix: "codex-mini", color: EXACT_COLORS.codexmini },
+  { prefix: "o4-mini", color: EXACT_COLORS.o4mini },
+  { prefix: "o3-mini", color: EXACT_COLORS.o3mini },
+  { prefix: "o3", color: EXACT_COLORS.o3 },
+  { prefix: "o1-mini", color: EXACT_COLORS.o1mini },
+  { prefix: "o1", color: EXACT_COLORS.o1 },
+] as const;
+
+// ── Device colors ──
+// Palette chosen to be visually distinct from model colors and from each other.
+// Deterministic: same alias always maps to the same color.
+const DEVICE_COLOR_PALETTE = [
+  "#6366f1", // indigo
+  "#f59e0b", // amber
+  "#10b981", // emerald
+  "#ef4444", // red
+  "#8b5cf6", // violet
+  "#06b6d4", // cyan
+  "#f97316", // orange
+  "#ec4899", // pink
+  "#14b8a6", // teal
+  "#a855f7", // purple
+];
+
+export function deviceColor(alias: string): string {
+  const idx = hashString(alias) % DEVICE_COLOR_PALETTE.length;
+  return DEVICE_COLOR_PALETTE[idx];
+}
+
+// ── Model colors ──
+
 export function modelColor(key: string): string {
   const normalized = key.trim().toLowerCase();
-  const colors: Record<string, string> = {
-    opus: "var(--opus)",
-    sonnet: "var(--sonnet)",
-    haiku: "var(--haiku)",
-    gpt54: "var(--gpt54)",
-    gpt53: "var(--gpt53)",
-    gpt52: "var(--gpt52)",
-    gpt51max: "var(--gpt53)",
-    gpt51mini: "var(--o3mini)",
-    gpt51: "var(--gpt52)",
-    gpt5codex: "var(--codex)",
-    codexmini: "var(--o4mini)",
-    gpt5mini: "var(--o3mini)",
-    gpt5nano: "var(--o1mini)",
-    gpt5: "var(--codex)",
-    o3: "var(--o3)",
-    o3mini: "var(--o3mini)",
-    o4mini: "var(--o4mini)",
-    o1: "var(--o1)",
-    o1mini: "var(--o1mini)",
-    codex: "var(--codex)",
-    unknown: "var(--t3)",
-  };
-  if (colors[normalized]) return colors[normalized];
-  if (normalized.includes("opus")) return colors.opus;
-  if (normalized.includes("sonnet")) return colors.sonnet;
-  if (normalized.includes("haiku")) return colors.haiku;
-  if (normalized.startsWith("gpt-5.4")) return colors.gpt54;
-  if (normalized.startsWith("gpt-5.3")) return colors.gpt53;
-  if (normalized.startsWith("gpt-5.2")) return colors.gpt52;
-  if (normalized.startsWith("gpt-5.1-codex-mini")) return colors.gpt51mini;
-  if (normalized.startsWith("gpt-5.1-codex-max")) return colors.gpt51max;
-  if (normalized.startsWith("gpt-5.1-codex")) return colors.codex;
-  if (normalized.startsWith("gpt-5.1")) return colors.codex;
-  if (normalized.startsWith("gpt-5-mini")) return colors.gpt5mini;
-  if (normalized.startsWith("gpt-5-nano")) return colors.gpt5nano;
-  if (normalized.startsWith("gpt-5-codex")) return colors.gpt5codex;
-  if (normalized.startsWith("gpt-5")) return colors.gpt5;
-  if (normalized.startsWith("codex-mini")) return colors.codexmini;
-  if (normalized.startsWith("o4-mini")) return colors.o4mini;
-  if (normalized.startsWith("o3-mini")) return colors.o3mini;
-  if (normalized.startsWith("o3")) return colors.o3;
-  if (normalized.startsWith("o1-mini")) return colors.o1mini;
-  if (normalized.startsWith("o1")) return colors.o1;
-  if (normalized === "unknown") return colors.unknown;
+
+  const exact = EXACT_COLORS[normalized];
+  if (exact) return exact;
+
+  for (const rule of INCLUDES_RULES) {
+    if (normalized.includes(rule.pattern)) return rule.color;
+  }
+  for (const rule of PREFIX_RULES) {
+    if (normalized.startsWith(rule.prefix)) return rule.color;
+  }
+
   return hashedModelColor(normalized);
 }

@@ -5,7 +5,7 @@
 <h1 align="center">TokenMonitor</h1>
 
 <p align="center">
-  <strong>Local-first macOS menu bar usage monitor for Claude Code and Codex</strong>
+  <strong>Local-first cross-platform system tray app for monitoring Claude Code and Codex CLI token usage</strong>
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-macOS%2013%2B-black?style=flat-square&logo=apple&logoColor=white" alt="macOS" />
+  <img src="https://img.shields.io/badge/platform-macOS%20|%20Windows%20|%20Linux-black?style=flat-square" alt="Cross-platform" />
   <img src="https://img.shields.io/badge/Tauri-v2-24C8D8?style=flat-square&logo=tauri&logoColor=white" alt="Tauri v2" />
   <img src="https://img.shields.io/badge/Svelte-5-FF3E00?style=flat-square&logo=svelte&logoColor=white" alt="Svelte 5" />
   <img src="https://img.shields.io/badge/Rust-native-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust" />
@@ -27,39 +27,38 @@
 
 <p align="center">
   <a href="https://github.com/Michael-OvO/TokenMonitor/releases/latest">
-    <img src="https://img.shields.io/badge/Download-latest%20macOS%20.dmg-111827?style=for-the-badge&logo=apple&logoColor=white" alt="Download latest macOS dmg" />
+    <img src="https://img.shields.io/badge/Download-macOS%20.dmg-111827?style=for-the-badge&logo=apple&logoColor=white" alt="Download macOS dmg" />
+  </a>
+  <a href="https://github.com/Michael-OvO/TokenMonitor/releases/latest">
+    <img src="https://img.shields.io/badge/Download-Windows%20.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download Windows exe" />
+  </a>
+  <a href="https://github.com/Michael-OvO/TokenMonitor/releases/latest">
+    <img src="https://img.shields.io/badge/Download-Linux%20.deb-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Download Linux deb" />
   </a>
   <a href="#build-from-source">
     <img src="https://img.shields.io/badge/Build-from%20source-2563EB?style=for-the-badge&logo=rust&logoColor=white" alt="Build from source" />
   </a>
 </p>
 
-<p align="center">
-  <strong>Install in 30 seconds:</strong>
-  download the latest <code>.dmg</code> from the
-  <a href="https://github.com/Michael-OvO/TokenMonitor/releases/latest">latest release</a>,
-  open it, and drag TokenMonitor into Applications.
-</p>
-
 ---
 
-TokenMonitor is a local-first macOS menu bar app for people who use Claude Code and Codex heavily and want a cleaner, faster way to monitor usage.
+TokenMonitor is a local-first cross-platform system tray app for people who use Claude Code and Codex heavily and want a cleaner, faster way to monitor usage.
 
-It reads the session logs already on your machine, applies provider-aware pricing rules, and turns them into a compact macOS interface for current-session spend, history, model mix, and rate-limit context.
+It reads the session logs already on your machine, applies provider-aware pricing rules in Rust, and turns them into a compact desktop interface for current-session spend, history, model mix, and rate-limit context.
 
 No API keys. No cloud sync. No runtime dependency on `ccusage` or any other external CLI.
 
-Internally, usage parsing is now organized around a usage-integration registry so new CLI log sources can be added without threading one-off Claude/Codex branches through the parser and command layer.
-
 ## Quick Install
 
-### Download The App
+### Download
 
-<strong><a href="https://github.com/Michael-OvO/TokenMonitor/releases/latest">Download the latest macOS release</a></strong>
+Grab the installer for your platform from the [latest release](https://github.com/Michael-OvO/TokenMonitor/releases/latest):
 
-- Get the newest `.dmg` from the latest release page
-- Open the downloaded `.dmg`
-- Drag TokenMonitor into `Applications`
+| Platform | Installer | Notes |
+|----------|-----------|-------|
+| **macOS** | `.dmg` | Open the DMG, drag to Applications |
+| **Windows** | `.exe` (NSIS) | Run the installer, follow prompts |
+| **Linux** | `.deb` | `sudo dpkg -i token-monitor_*.deb` |
 
 ## Features
 
@@ -69,7 +68,7 @@ Internally, usage parsing is now organized around a usage-integration registry s
 - Period views for `5h`, `day`, `week`, `month`, and `year`
 - Historical navigation with offset-based browsing
 - Claude-only, Codex-only, and merged provider views
-- Optional live tray spend display for quick menu bar check-ins
+- Optional live tray spend display for quick check-ins
 
 ### Analysis & Visualization
 
@@ -85,12 +84,25 @@ Internally, usage parsing is now organized around a usage-integration registry s
 - Utilization, reset timing, cooldown state, and pace hints
 - Local fallback paths for rate-limit context when direct provider data is incomplete
 
+### SSH Remote Devices
+
+- Fetch usage logs from remote machines via SSH
+- Auto-discover hosts from `~/.ssh/config`
+- Per-host sync state and caching
+- Unified view merging local and remote usage data
+
+### FloatBall Overlay
+
+- Always-on-top draggable overlay ball showing live spend
+- Separate Vite entry point, independent of the main window
+- Toggle on/off from settings
+
 ### Desktop UX & Settings
 
-- Native macOS menu bar popover workflow
-- Launch-at-login support
+- Native system tray popover on all platforms
+- Launch-at-login support (LaunchAgent / Registry / XDG autostart)
 - Theme, currency, refresh interval, and branding controls
-- macOS glass (vibrancy) effect with a toggle for opaque fallback
+- macOS glass (vibrancy) effect with toggle (opaque on Windows/Linux)
 - Integrated settings and calendar panels inside the same popover flow
 
 ### Pricing Accuracy
@@ -119,9 +131,23 @@ Internally, usage parsing is now organized around a usage-integration registry s
 ### Performance
 
 - Parsed-file reuse avoids reparsing unchanged logs
-- In-memory caches keyed by provider, period, and offset
+- In-memory caches keyed by provider, period, and offset (Arc<RwLock<>>, 2-min TTL)
 - Stale-while-revalidate loading for fast repeat views
+- Frontend payload cache eliminates IPC round-trips on tab switches
 - Adjacent-window warming for quicker historical navigation
+
+## Platform Differences
+
+| Feature | macOS | Windows | Linux |
+|---------|-------|---------|-------|
+| System tray icon | Menu bar | System tray | System tray |
+| Cost display | `set_title()` text beside icon | Tooltip on hover | Tooltip on hover |
+| Rate limits (Claude) | OAuth via Keychain + API, CLI probe fallback | CLI probe only | CLI probe only |
+| Rate limits (Codex) | JSONL session files | JSONL session files | JSONL session files |
+| Glass blur effect | Supported (toggle in Settings) | Not available (opaque) | Not available (opaque) |
+| Dock icon toggle | Supported | Not applicable | Not applicable |
+| Autostart | LaunchAgent | Registry | XDG autostart |
+| Installer | DMG (signed + notarized) | NSIS .exe | .deb package |
 
 ## Local Data
 
@@ -138,18 +164,25 @@ TokenMonitor works from usage data you already have on disk. If no logs are pres
 
 Rate-limit visibility is separate from usage history parsing:
 
-- Claude rate limits use the local Claude authentication state already present on the machine and fall back to Claude CLI rate-limit events when needed
+- Claude rate limits use local authentication state already on the machine and fall back to CLI probe when needed
 - Codex rate limits are read from recent session metadata in local Codex JSONL files
-
-Usage history and cost analytics stay local. Optional rate-limit panels may use authenticated provider data already available on the machine.
 
 ## Installation
 
 ### Download
 
-Grab the latest `.dmg` from the [Releases](https://github.com/Michael-OvO/TokenMonitor/releases/latest) page, open it, and drag TokenMonitor to your Applications folder.
+Grab the latest installer from the [Releases](https://github.com/Michael-OvO/TokenMonitor/releases/latest) page.
 
 ### Build From Source
+
+**Prerequisites:**
+
+- Node.js >= 18 and npm
+- Rust toolchain (install via [rustup](https://rustup.rs/))
+- Platform-specific Tauri dependencies:
+  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+  - **Windows**: Visual Studio C++ Build Tools, WebView2 (pre-installed on Windows 11)
+  - **Linux**: `sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`
 
 ```bash
 git clone https://github.com/Michael-OvO/TokenMonitor.git
@@ -158,26 +191,29 @@ npm install
 npx tauri build
 ```
 
-Bundle output:
+Platform-specific bundle output:
 
-```text
-src-tauri/target/release/bundle/
-```
+| Platform | Output |
+|----------|--------|
+| macOS | `src-tauri/target/release/bundle/dmg/TokenMonitor_x.y.z_aarch64.dmg` |
+| Windows | `src-tauri/target/release/bundle/nsis/TokenMonitor_x.y.z_x64-setup.exe` |
+| Linux | `src-tauri/target/release/bundle/deb/token-monitor_x.y.z_amd64.deb` |
 
 ### Development
 
 ```bash
 npm install
-npx tauri dev
+npx tauri dev          # full app: hot-reload frontend + debug Rust backend
+npm run dev            # frontend only at http://localhost:1420 (no Rust)
 ```
 
-The app runs as a menu bar utility. Click the tray icon to open the popover.
+### Testing
 
-## Requirements
-
-- macOS 13 or newer
-- Existing Claude Code and/or Codex usage logs on disk
-- Node.js 18+ and Rust toolchain only if you are building from source
+```bash
+npm test               # vitest (frontend unit tests)
+npm run test:rust      # cargo test (Rust backend tests)
+npm run test:all       # both Rust and frontend tests sequentially
+```
 
 ## Architecture
 
@@ -185,37 +221,86 @@ The app runs as a menu bar utility. Click the tray icon to open the popover.
 graph LR
     A["Claude logs<br/><sub>~/.claude/projects/**/*.jsonl</sub>"] --> B["Rust parser + pricing engine"]
     D["Codex logs<br/><sub>~/.codex/sessions/YYYY/MM/DD/*.jsonl</sub>"] --> B
+    S["SSH remote logs"] --> B
     B --> C["Tauri IPC layer"]
     C --> E["Svelte 5 desktop UI"]
-    C --> F["Menu bar title updater"]
+    C --> F["System tray updater"]
+    C --> H["FloatBall overlay"]
     B --> G["In-memory query + file caches"]
 ```
 
-### Core Modules
+### Project Structure
 
 ```text
 src/
-├── App.svelte                   # Main popover shell and view orchestration
+├── App.svelte                     # Main popover shell and view orchestration
+├── float-ball.ts                  # FloatBall entry point
 └── lib/
-    ├── bootstrap.ts            # Startup wiring and runtime initialization
+    ├── bootstrap.ts               # Startup wiring and runtime initialization
     ├── stores/
-    │   ├── usage.ts            # Usage fetching, in-memory cache, period/provider state
-    │   ├── rateLimits.ts       # Rate-limit fetching and persistence
-    │   └── settings.ts         # Theme, tray, currency, and local preferences
-    ├── providerMetadata.ts     # Central usage/rate-limit provider metadata for the UI
-    ├── components/             # Metrics, charts, calendar, footer, settings UI
-    ├── traySync.ts             # Frontend-to-native tray state syncing
-    └── windowAppearance.ts     # macOS window surface syncing
+    │   ├── usage.ts               # Usage fetching, in-memory cache, period/provider state
+    │   ├── rateLimits.ts          # Rate-limit fetching and persistence
+    │   └── settings.ts            # Theme, tray, currency, and local preferences
+    ├── providerMetadata.ts        # Central usage/rate-limit provider metadata for the UI
+    ├── components/                # Metrics, charts, calendar, footer, settings UI
+    │   ├── Chart.svelte           # Bar/line chart visualization
+    │   ├── Breakdown.svelte       # Per-model cost breakdown
+    │   ├── Calendar.svelte        # Heatmap calendar view
+    │   ├── DevicesView.svelte     # SSH remote device management
+    │   ├── FloatBall.svelte       # Always-on-top overlay component
+    │   ├── Footer.svelte          # Active session, burn rate
+    │   ├── Settings.svelte        # Settings panel
+    │   └── UsageBars.svelte       # Rate limit utilization bars
+    ├── tray/
+    │   ├── sync.ts                # Frontend-to-native tray state syncing
+    │   └── title.ts               # Tray title formatting
+    ├── views/                     # View-model logic (footer, rate limits, devices)
+    ├── window/
+    │   ├── appearance.ts          # Window surface syncing
+    │   └── sizing.ts              # Window size management
+    └── utils/
+        ├── platform.ts            # OS detection (macOS/Windows/Linux)
+        ├── calendar.ts            # Calendar utilities
+        ├── format.ts              # Number/currency formatting
+        └── logger.ts              # Frontend logging via Rust file writer
 
 src-tauri/src/
-├── lib.rs                      # Tauri app setup, tray wiring, background refresh
-├── commands.rs                 # IPC commands exposed to the frontend
-├── integrations.rs             # Usage integration IDs, selection, and root discovery
-├── parser.rs                   # Integration-driven JSONL discovery, parsing, normalization
-├── pricing.rs                  # Model-family-aware token pricing and cache-write billing
-├── rate_limits.rs              # Claude/Codex rate-limit acquisition and shaping
-├── tray_render.rs              # Native tray title and icon rendering
-└── models.rs                   # Shared backend payload types
+├── lib.rs                         # Tauri app setup, tray wiring, background refresh
+├── commands.rs                    # IPC dispatch hub
+│   └── commands/
+│       ├── usage_query.rs         # Data fetching
+│       ├── calendar.rs            # Heatmap queries
+│       ├── period.rs              # Time range selection
+│       ├── config.rs              # Settings sync
+│       ├── tray.rs                # Title/utilization rendering
+│       ├── ssh.rs                 # Remote device management
+│       ├── float_ball.rs          # Overlay state
+│       └── logging.rs             # Log-level control
+├── logging.rs                     # tracing + rolling file appender
+├── models.rs                      # Shared backend payload types
+├── usage/
+│   ├── parser.rs                  # JSONL discovery, parsing, normalization
+│   ├── pricing.rs                 # Model-family-aware token pricing
+│   ├── integrations.rs            # Usage integration registry
+│   ├── ssh_remote.rs              # SSH remote log sync
+│   └── ssh_config.rs              # SSH host discovery
+├── rate_limits/
+│   ├── claude.rs                  # OAuth Keychain + API (macOS)
+│   ├── claude_cli.rs              # CLI probe fallback (all platforms)
+│   ├── codex.rs                   # Session file parsing
+│   └── http.rs                    # Shared HTTP client
+├── tray/
+│   └── render.rs                  # Native tray icon + utilization bars (RGBA)
+├── stats/
+│   ├── change.rs                  # Change statistics
+│   └── subagent.rs                # Subagent statistics
+└── platform/
+    ├── mod.rs                     # Cross-platform helpers
+    ├── macos/                     # macOS window management
+    ├── windows/
+    │   ├── taskbar.rs             # GDI taskbar panel
+    │   └── window.rs              # Taskbar-aligned positioning
+    └── linux/                     # Linux window management
 ```
 
 ### Runtime Flow
@@ -225,90 +310,6 @@ src-tauri/src/
 3. Aggregated payloads are cached in memory for fast repeat requests.
 4. The frontend renders metrics, charts, model summaries, calendar views, and footer state.
 5. A background loop refreshes the tray title and emits update events on the configured interval.
-
-### Parsing Notes
-
-- Claude parsing skips non-assistant entries and intermediate streaming noise
-- Codex parsing normalizes both per-turn and cumulative `token_count` events into deltas
-- Log-source integrations are separate from model families, so a future CLI can emit non-Anthropic/OpenAI model names without breaking normalization
-- Cross-provider merge mode preserves period semantics while combining totals
-- Historical navigation is offset-based, which keeps the UI simple while letting the backend stay date-aware
-
-### UI Architecture
-
-- `App.svelte` coordinates provider, period, offset, settings, and view switches
-- Svelte stores own fetch lifecycle, stale-while-revalidate caching, and persisted settings
-- `providerMetadata.ts` is the frontend source of truth for tab order, provider labels, logos, and which usage integrations support rate limits
-- UI components stay relatively dumb: charts, model lists, calendar, footer, and settings render from store payloads
-- Native-only concerns such as tray rendering and window surface behavior stay in the Tauri layer rather than leaking through the component tree
-
-## For Builders
-
-<details>
-<summary>Validation, project structure, and stack</summary>
-
-### Validation
-
-```bash
-./node_modules/.bin/tsc --noEmit
-npm test -- --run
-npm run build
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml
-```
-
-Convenience command:
-
-```bash
-npm run test:all
-```
-
-### Manual Cache Benchmark
-
-There is also an ignored Rust benchmark test for the integrated caching paths. It is kept in the test suite for manual performance checks, but it does not run as part of normal `cargo test`.
-
-```bash
-cargo test benchmark_real_log_cache_paths --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture
-```
-
-It benchmarks the real local log roots the app uses and prints `BENCH ...` lines for:
-
-- `claude/month`
-- `all/month`
-- `calendar/all/<year>-<month>`
-- `tray/day`
-
-Each line reports:
-
-- `cold_ms`: uncached request time
-- `full_hit_avg_ms`: average time for a full request-cache hit
-- `warm_lower_cache_ms`: time after clearing only the payload cache, leaving lower-level file and directory caches warm
-
-### Project Structure
-
-```text
-TokenMonitor/
-├── src/
-│   ├── App.svelte
-│   └── lib/
-│       ├── bootstrap.ts
-│       ├── components/
-│       ├── stores/
-│       ├── types/
-│       └── utils/
-├── src-tauri/
-│   └── src/
-│       ├── commands.rs
-│       ├── lib.rs
-│       ├── models.rs
-│       ├── parser.rs
-│       ├── pricing.rs
-│       └── rate_limits.rs
-├── docs/
-├── DEVELOPMENT.md
-├── package.json
-└── README.md
-```
 
 ### Tech Stack
 
@@ -320,19 +321,59 @@ TokenMonitor/
 | Build tool | [Vite 6](https://vitejs.dev/) |
 | State path | Local JSONL parsing + Tauri IPC + Svelte stores |
 
+## For Builders
+
+<details>
+<summary>Validation, benchmarks, and versioning</summary>
+
+### Validation
+
+```bash
+npx svelte-check                # Svelte type checking
+npm test                        # Vitest
+cd src-tauri && cargo fmt --check       # Rust format
+cd src-tauri && cargo clippy -- -D warnings  # Rust lints
+cd src-tauri && cargo test      # Rust tests
+```
+
+Convenience command:
+
+```bash
+npm run test:all
+```
+
+### Manual Cache Benchmark
+
+There is an ignored Rust benchmark test for the integrated caching paths:
+
+```bash
+cargo test benchmark_real_log_cache_paths --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture
+```
+
+### Versioning
+
+Version must stay in sync across three files: `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`.
+
+```bash
+npm run release -- X.Y.Z    # bumps all 3 files, commits, tags, pushes
+```
+
+Tag push triggers GitHub Actions release workflow which builds for all three platforms.
+
 </details>
 
 ## Contributing
 
 Issues and pull requests are welcome, especially around:
 
-- UI polish and distinctive menu bar workflows
-- pricing-model accuracy
-- performance on large local histories
-- packaging and distribution
-- new provider support
+- UI polish and distinctive tray workflows
+- Pricing-model accuracy
+- Performance on large local histories
+- Packaging and distribution
+- New provider support
+- Cross-platform compatibility
 
-If you use Claude Code or Codex heavily, this repo is intended to be a practical local utility and a solid foundation for usage observability on macOS.
+If you use Claude Code or Codex heavily, this repo is intended to be a practical local utility and a solid foundation for usage observability across macOS, Windows, and Linux.
 
 ## License
 

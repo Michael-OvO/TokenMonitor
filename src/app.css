@@ -36,10 +36,10 @@
   --border: rgba(255,255,255,0.055);
   --border-subtle: rgba(255,255,255,0.035);
 
-  --t1: rgba(255,255,255,0.88);
-  --t2: rgba(255,255,255,0.58);
-  --t3: rgba(255,255,255,0.38);
-  --t4: rgba(255,255,255,0.28);
+  --t1: rgba(255,255,255,0.93);
+  --t2: rgba(255,255,255,0.65);
+  --t3: rgba(255,255,255,0.45);
+  --t4: rgba(255,255,255,0.32);
 
   --splash-disc: rgba(255,255,255,0.93);
   --splash-eye: #111113;
@@ -203,8 +203,8 @@
 }
 
 @keyframes popIn {
-  0% { opacity: 0; transform: translateY(-4px); }
-  100% { opacity: 1; transform: translateY(0); }
+  0% { opacity: 0; transform: scale(0.96); }
+  100% { opacity: 1; transform: scale(1); }
 }
 @keyframes fadeUp {
   from { opacity: 0; transform: translateY(3px); }
@@ -254,9 +254,9 @@ html {
   background-image: linear-gradient(var(--provider-bg), var(--provider-bg));
   border-radius: 14px;
   overflow: hidden;
-  box-shadow: inset 0 0 0 1px var(--border);
   isolation: isolate;
   -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
 }
 
 body {

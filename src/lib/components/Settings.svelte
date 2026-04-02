@@ -2,43 +2,18 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
-  import {
-    DEFAULT_HEADER_TABS,
-    MAX_HEADER_TAB_LABEL_LENGTH,
-    areHeaderTabsEqual,
-    applyGlass,
-    applyTheme,
-    getVisibleHeaderProviders,
-    settings,
-    updateSetting,
-    type Settings as SettingsType,
-  } from "../stores/settings.js";
+  import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
   import { clearUsageCache } from "../stores/usage.js";
-  import { currencySymbol, modelColor } from "../utils/format.js";
-  import { copyResizeDebugToClipboard, logResizeDebug } from "../resizeDebug.js";
-  import { syncNativeWindowSurface } from "../windowAppearance.js";
-  import type {
-    HeaderTabConfig,
-    KnownModel,
-    RateLimitProviderId,
-    TrayConfig,
-    RateLimitsPayload,
-    UsageProvider,
-  } from "../types/index.js";
-  import { rateLimitsData } from "../stores/rateLimits.js";
-  import { syncTrayConfig } from "../traySync.js";
-  import { formatTrayTitle } from "../trayTitle.js";
-  import {
-    getRateLimitPrimaryWindowId,
-    getUsageProviderBrandColor,
-    getUsageProviderLabel,
-    getUsageProviderTitle,
-    RATE_LIMIT_PROVIDER_ORDER,
-    USAGE_PROVIDER_ORDER,
-  } from "../providerMetadata.js";
-  import SegmentedControl from "./SegmentedControl.svelte";
-  import ToggleSwitch from "./ToggleSwitch.svelte";
+  import { isMacOS, isWindows } from "../utils/platform.js";
+  import { logger } from "../utils/logger.js";
   import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+  import ToggleSwitch from "./ToggleSwitch.svelte";
+
+  import ThemeSettings from "./ThemeSettings.svelte";
+  import HeaderTabsSettings from "./HeaderTabsSettings.svelte";
+  import TrayConfigSettings from "./TrayConfigSettings.svelte";
+  import HiddenModelsSettings from "./HiddenModelsSettings.svelte";
+  import SshHostsSettings from "./SshHostsSettings.svelte";
 
   interface Props {
     onBack: () => void;
@@ -46,117 +21,18 @@
 
   let { onBack }: Props = $props();
   let current = $derived($settings as SettingsType);
-
-  let costInput = $state("50.00");
-  let costEnabled = $state(true);
-  let copiedDebug = $state(false);
   let appVersion = $state("");
-  let availableModels = $state<KnownModel[]>([]);
-  let headerLabelInputs = $state<Record<string, string>>(createHeaderLabelInputs(DEFAULT_HEADER_TABS));
 
-  const HEADER_TAB_FIELDS: Array<{ provider: UsageProvider; title: string }> = USAGE_PROVIDER_ORDER.map(
-    (provider) => ({
-      provider,
-      title: getUsageProviderTitle(provider),
-    }),
-  );
-  const PREVIEW_UTILIZATIONS = [72, 35, 58, 24];
-
-  const PREVIEW_RATE_LIMITS: RateLimitsPayload = RATE_LIMIT_PROVIDER_ORDER.reduce((payload, provider, index) => {
-    payload[provider] = {
-      provider,
-      planTier: null,
-      windows: [{
-        windowId: getRateLimitPrimaryWindowId(provider),
-        label: "Primary",
-        utilization: PREVIEW_UTILIZATIONS[index % PREVIEW_UTILIZATIONS.length] ?? 50,
-        resetsAt: null,
-      }],
-      extraUsage: null,
-      stale: false,
-      error: null,
-      cooldownUntil: null,
-      retryAfterSeconds: null,
-      fetchedAt: "",
-    };
-    return payload;
-  }, {} as RateLimitsPayload);
-
-  // Use a function call to ensure Svelte tracks all trayConfig fields
-  let titlePreview = $derived.by(() => {
-    const cfg = current.trayConfig;
-    return formatTrayTitle(cfg, PREVIEW_RATE_LIMITS, 17.19);
-  });
-
-  let previewBarDisplay = $derived(current.trayConfig.barDisplay);
-  let previewBarProvider = $derived(current.trayConfig.barProvider);
-  let verbosePercentagePreview = $derived.by(() =>
-    RATE_LIMIT_PROVIDER_ORDER
-      .map((provider) => `${getUsageProviderTitle(provider)} ${previewUtilization(provider)}%`)
-      .join(" "),
-  );
-  let defaultProviderOptions = $derived.by(() =>
-    getVisibleHeaderProviders(current.headerTabs).map((provider) => ({
-      value: provider,
-      label: current.headerTabs[provider].label,
-    })),
-  );
-
-  function createHeaderLabelInputs(nextHeaderTabs: SettingsType["headerTabs"]): Record<string, string> {
-    const inputs: Record<string, string> = {};
-    for (const provider of USAGE_PROVIDER_ORDER) {
-      inputs[provider] = nextHeaderTabs[provider]?.label ?? DEFAULT_HEADER_TABS[provider]?.label ?? provider;
-    }
-    return inputs;
-  }
-
-  function syncHeaderLabelInputs(nextHeaderTabs: SettingsType["headerTabs"]) {
-    headerLabelInputs = createHeaderLabelInputs(nextHeaderTabs);
-  }
-
-  function describeActiveElement() {
-    if (typeof document === "undefined") return null;
-    const el = document.activeElement as HTMLElement | null;
-    if (!el) return null;
-    return {
-      tagName: el.tagName,
-      id: el.id || null,
-      className: el.className || null,
-      ariaLabel: el.getAttribute("aria-label"),
-      text: el.textContent?.trim().slice(0, 80) || null,
-    };
-  }
-
-  $effect(() => {
-    costEnabled = current.costAlertThreshold > 0;
-    costInput = current.costAlertThreshold > 0 ? current.costAlertThreshold.toFixed(2) : "50.00";
-  });
-
-  let syncedHeaderTabs = $state(DEFAULT_HEADER_TABS);
-  $effect(() => {
-    const nextHeaderTabs = current.headerTabs;
-    if (!areHeaderTabsEqual(syncedHeaderTabs, nextHeaderTabs)) {
-      syncHeaderLabelInputs(nextHeaderTabs);
-      syncedHeaderTabs = nextHeaderTabs;
-    }
-  });
+  const currencies = [
+    { value: "USD", label: "USD ($)" },
+    { value: "EUR", label: "EUR (\u20ac)" },
+    { value: "GBP", label: "GBP (\u00a3)" },
+    { value: "JPY", label: "JPY (\u00a5)" },
+    { value: "CNY", label: "CNY (\u00a5)" },
+  ];
 
   onMount(() => {
-    logResizeDebug("settings:view-open", {
-      defaultProvider: current.defaultProvider,
-      activeElement: describeActiveElement(),
-    });
     getVersion().then((v) => { appVersion = v; }).catch(() => {});
-    invoke<KnownModel[]>("get_known_models", { provider: "all" })
-      .then((models) => {
-        availableModels = [...models].sort((a, b) =>
-          a.display_name.localeCompare(b.display_name, undefined, { sensitivity: "base" })
-        );
-      })
-      .catch((error) => {
-        console.error("Failed to load known models:", error);
-      });
-
     isEnabled()
       .then((enabled) => {
         if (enabled !== current.launchAtLogin) {
@@ -164,105 +40,24 @@
         }
       })
       .catch(() => {});
-
-    return () => {
-      logResizeDebug("settings:view-close", {
-        activeElement: describeActiveElement(),
-      });
-    };
   });
-
-  function handleTheme(val: string) {
-    const theme = val as SettingsType["theme"];
-    updateSetting("theme", theme);
-    applyTheme(theme);
-    void syncNativeWindowSurface(invoke, current.glassEffect).catch(() => {});
-  }
-
-  async function handleGlassEffect(checked: boolean) {
-    updateSetting("glassEffect", checked);
-    applyGlass(checked);
-    try {
-      await invoke("set_glass_effect", { enabled: checked });
-      await syncNativeWindowSurface(invoke, checked);
-    } catch (e) {
-      console.error("Failed to toggle glass effect:", e);
-    }
-  }
-
-  function handleProvider(val: string) {
-    updateSetting("defaultProvider", val as SettingsType["defaultProvider"]);
-  }
-
-  function handleBrandTheming(checked: boolean) {
-    updateSetting("brandTheming", checked);
-  }
-
-  function updateHeaderTab(
-    provider: UsageProvider,
-    patch: Partial<HeaderTabConfig>,
-  ) {
-    updateSetting("headerTabs", {
-      ...current.headerTabs,
-      [provider]: {
-        ...current.headerTabs[provider],
-        ...patch,
-      },
-    });
-  }
-
-  function handleHeaderTabEnabled(provider: UsageProvider, enabled: boolean) {
-    updateHeaderTab(provider, { enabled });
-  }
-
-  function handleHeaderLabelInput(provider: UsageProvider, value: string) {
-    headerLabelInputs = {
-      ...headerLabelInputs,
-      [provider]: value,
-    };
-  }
-
-  function persistHeaderLabel(provider: UsageProvider) {
-    updateHeaderTab(provider, { label: headerLabelInputs[provider] });
-  }
-
-  function previewUtilization(provider: RateLimitProviderId): number {
-    return PREVIEW_RATE_LIMITS[provider]?.windows[0]?.utilization ?? 0;
-  }
-
-  function previewFillStyle(provider: RateLimitProviderId): string {
-    const utilization = previewUtilization(provider);
-    const color = getUsageProviderBrandColor(provider, 1) ?? "var(--accent)";
-    return `width:${Math.max(0, Math.min(utilization, 100))}%; background:${color}`;
-  }
-
-  function handleHeaderLabelKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") {
-      (e.target as HTMLInputElement).blur();
-    }
-  }
-
-  function handleTrayConfig<K extends keyof TrayConfig>(key: K, value: TrayConfig[K]) {
-    const next = { ...current.trayConfig, [key]: value };
-    updateSetting("trayConfig", next);
-    void syncTrayConfig(next, $rateLimitsData).catch(() => {});
-  }
-
-  function handlePeriod(val: string) {
-    updateSetting("defaultPeriod", val as SettingsType["defaultPeriod"]);
-  }
-
-  function handleRefresh(val: string) {
-    const interval = parseInt(val, 10) || 0;
-    updateSetting("refreshInterval", interval);
-    invoke("set_refresh_interval", { interval }).catch(() => {});
-  }
 
   function handleCurrency(val: string) {
     updateSetting("currency", val as string);
   }
 
+  async function handleDebugLogging(checked: boolean) {
+    logger.info("settings", `Debug logging: ${checked}`);
+    updateSetting("debugLogging", checked);
+    try {
+      await invoke("set_log_level", { level: checked ? "debug" : "info" });
+    } catch (e) {
+      console.error("Failed to set log level:", e);
+    }
+  }
+
   async function handleAutostart(checked: boolean) {
+    logger.info("settings", `Autostart: ${checked}`);
     try {
       if (checked) {
         await enable();
@@ -275,7 +70,36 @@
     }
   }
 
+  async function handleFloatBall(checked: boolean) {
+    logger.info("settings", `Float ball: ${checked}`);
+    updateSetting("floatBall", checked);
+    try {
+      if (checked) {
+        await invoke("create_float_ball");
+      } else {
+        await invoke("destroy_float_ball");
+      }
+    } catch (e) {
+      console.error("Failed to toggle floating ball:", e);
+    }
+  }
+
+  async function handleTaskbarPanel(checked: boolean) {
+    logger.info("settings", `Taskbar panel: ${checked}`);
+    updateSetting("taskbarPanel", checked);
+    try {
+      if (checked) {
+        await invoke("init_taskbar_panel");
+      } else {
+        await invoke("destroy_taskbar_panel_cmd");
+      }
+    } catch (e) {
+      console.error("Failed to toggle taskbar panel:", e);
+    }
+  }
+
   async function handleDockIcon(checked: boolean) {
+    logger.info("settings", `Dock icon: ${checked}`);
     updateSetting("showDockIcon", checked);
     try {
       await invoke("set_dock_icon_visible", { visible: checked });
@@ -284,30 +108,8 @@
     }
   }
 
-  function handleCostBlur() {
-    const val = parseFloat(costInput);
-    if (!isNaN(val) && val >= 0) {
-      updateSetting("costAlertThreshold", val);
-      costInput = val.toFixed(2);
-    } else {
-      costInput = current.costAlertThreshold.toFixed(2);
-    }
-  }
-
-  function handleCostKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") {
-      (e.target as HTMLInputElement).blur();
-    }
-  }
-
-  function toggleModel(key: string) {
-    const hidden = current.hiddenModels.includes(key)
-      ? current.hiddenModels.filter((m) => m !== key)
-      : [...current.hiddenModels, key];
-    updateSetting("hiddenModels", hidden);
-  }
-
   async function resetCache() {
+    logger.info("settings", "Cache reset by user");
     clearUsageCache();
     try {
       await invoke("clear_cache");
@@ -315,36 +117,6 @@
       console.error("Failed to clear backend cache:", error);
     }
   }
-
-  async function copyDebugLog() {
-    logResizeDebug("debug:copy-requested", {
-      source: "settings",
-      activeElement: describeActiveElement(),
-      defaultProvider: current.defaultProvider,
-      defaultPeriod: current.defaultPeriod,
-      theme: current.theme,
-      showCostAlert: costEnabled,
-      headerTabs: current.headerTabs,
-    });
-    try {
-      await copyResizeDebugToClipboard();
-      copiedDebug = true;
-      setTimeout(() => {
-        copiedDebug = false;
-      }, 1500);
-    } catch (error) {
-      copiedDebug = false;
-      console.error("Failed to copy debug log:", error);
-    }
-  }
-
-  const currencies = [
-    { value: "USD", label: "USD ($)" },
-    { value: "EUR", label: "EUR (€)" },
-    { value: "GBP", label: "GBP (£)" },
-    { value: "JPY", label: "JPY (¥)" },
-    { value: "CNY", label: "CNY (¥)" },
-  ];
 </script>
 
 <div class="settings">
@@ -360,263 +132,11 @@
   </div>
 
   <div class="scroll">
-    <!-- General -->
-    <div class="group">
-      <div class="group-label">General</div>
-      <div class="card">
-        <div class="row border">
-          <span class="label">Theme</span>
-          <SegmentedControl
-            options={[
-              { value: "light", label: "Light" },
-              { value: "dark", label: "Dark" },
-              { value: "system", label: "System" },
-            ]}
-            value={current.theme}
-            onChange={handleTheme}
-          />
-        </div>
-        <div class="row border">
-          <span class="label">Default Provider</span>
-          <SegmentedControl
-            options={defaultProviderOptions}
-            value={current.defaultProvider}
-            onChange={handleProvider}
-          />
-        </div>
-        <div class="row border">
-          <span class="label">Default Period</span>
-          <SegmentedControl
-            options={[
-              { value: "5h", label: "5H" },
-              { value: "day", label: "Day" },
-              { value: "week", label: "Week" },
-              { value: "month", label: "Mo" },
-            ]}
-            value={current.defaultPeriod}
-            onChange={handlePeriod}
-          />
-        </div>
-        <div class="row border">
-          <span class="label">Refresh</span>
-          <SegmentedControl
-            options={[
-              { value: "30", label: "30s" },
-              { value: "60", label: "1m" },
-              { value: "300", label: "5m" },
-              { value: "0", label: "Off" },
-            ]}
-            value={String(current.refreshInterval)}
-            onChange={handleRefresh}
-          />
-        </div>
-        <div class="row border">
-          <span class="label">Brand Theming</span>
-          <ToggleSwitch
-            checked={current.brandTheming}
-            onChange={handleBrandTheming}
-          />
-        </div>
-        <div class="row">
-          <span class="label">Glass Effect</span>
-          <ToggleSwitch
-            checked={current.glassEffect}
-            onChange={handleGlassEffect}
-          />
-        </div>
-      </div>
-    </div>
-
-    <!-- Header -->
-    <div class="group">
-      <div class="group-label">Header</div>
-      <div class="card">
-        {#each HEADER_TAB_FIELDS as tab, index}
-          <div class="row header-tab-row" class:border={index < HEADER_TAB_FIELDS.length - 1}>
-            <span class="header-source">{tab.title}</span>
-            <input
-              class="text-input"
-              type="text"
-              maxlength={MAX_HEADER_TAB_LABEL_LENGTH}
-              value={headerLabelInputs[tab.provider]}
-              oninput={(e) => handleHeaderLabelInput(tab.provider, (e.target as HTMLInputElement).value)}
-              onblur={() => persistHeaderLabel(tab.provider)}
-              onkeydown={handleHeaderLabelKeydown}
-            />
-            <ToggleSwitch
-              checked={current.headerTabs[tab.provider].enabled}
-              onChange={(checked) => handleHeaderTabEnabled(tab.provider, checked)}
-            />
-          </div>
-        {/each}
-      </div>
-      <div class="setting-note">Labels are cosmetic. Usage data is still backed by the registered usage integrations.</div>
-    </div>
-
-    <!-- Menu Bar -->
-    <div class="group">
-      <div class="group-label">Menu Bar</div>
-
-      <div class="tray-preview">
-        <div class="tp-inner">
-          <!-- Icon (TokenMonitor winking face) -->
-          <svg class="tp-icon" width="14" height="14" viewBox="0 0 44 44" fill="none">
-            <circle cx="22" cy="22" r="20" fill="currentColor"/>
-            <circle cx="16" cy="23" r="3" fill="#262628"/>
-            <path d="M28 20l-4 3.5 4 3.5" stroke="#262628" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-          </svg>
-          <!-- Bars -->
-          {#if previewBarDisplay === 'both'}
-            <div class="tp-bars">
-              {#each RATE_LIMIT_PROVIDER_ORDER as provider}
-                <div class="tp-track"><div class="tp-fill" style={previewFillStyle(provider)}></div></div>
-              {/each}
-            </div>
-          {:else if previewBarDisplay === 'single'}
-            <div class="tp-bars">
-              <div class="tp-track single">
-                <div class="tp-fill" style={previewFillStyle(previewBarProvider)}></div>
-              </div>
-            </div>
-          {/if}
-          <!-- Text -->
-          {#if titlePreview}
-            <span class="tp-text">{titlePreview}</span>
-          {/if}
-        </div>
-      </div>
-
-      <!-- Bars card -->
-      <div class="card" style="margin-bottom: 4px;">
-        <div class="row border">
-          <span class="label">Display</span>
-          <SegmentedControl
-            options={[
-              { value: "off", label: "Off" },
-              { value: "single", label: "Single" },
-              { value: "both", label: "Both" },
-            ]}
-            value={current.trayConfig.barDisplay}
-            onChange={(v) => handleTrayConfig("barDisplay", v as TrayConfig["barDisplay"])}
-          />
-        </div>
-        <div class="row" class:dim={current.trayConfig.barDisplay !== 'single'}>
-          <span class="label">Provider</span>
-          <SegmentedControl
-            options={RATE_LIMIT_PROVIDER_ORDER.map((provider) => ({
-              value: provider,
-              label: getUsageProviderLabel(provider),
-            }))}
-            value={current.trayConfig.barProvider}
-            onChange={(v) => handleTrayConfig("barProvider", v as TrayConfig["barProvider"])}
-          />
-        </div>
-      </div>
-
-      <!-- Percentages card -->
-      <div class="card" style="margin-bottom: 4px;">
-        <div class="row border">
-          <span class="label">Show Percentages</span>
-          <ToggleSwitch
-            checked={current.trayConfig.showPercentages}
-            onChange={(checked) => handleTrayConfig("showPercentages", checked)}
-          />
-        </div>
-        <div class="row" class:dim={!current.trayConfig.showPercentages}>
-          <span class="label">Format</span>
-          <SegmentedControl
-            options={[
-              { value: "compact", label: "72 · 35" },
-              { value: "verbose", label: verbosePercentagePreview },
-            ]}
-            value={current.trayConfig.percentageFormat}
-            onChange={(v) => handleTrayConfig("percentageFormat", v as TrayConfig["percentageFormat"])}
-          />
-        </div>
-      </div>
-
-      <!-- Cost card -->
-      <div class="card">
-        <div class="row border">
-          <span class="label">Show Cost</span>
-          <ToggleSwitch
-            checked={current.trayConfig.showCost}
-            onChange={(checked) => handleTrayConfig("showCost", checked)}
-          />
-        </div>
-        <div class="row" class:dim={!current.trayConfig.showCost}>
-          <span class="label">Precision</span>
-          <SegmentedControl
-            options={[
-              { value: "whole", label: "$17" },
-              { value: "full", label: "$17.19" },
-            ]}
-            value={current.trayConfig.costPrecision}
-            onChange={(v) => handleTrayConfig("costPrecision", v as TrayConfig["costPrecision"])}
-          />
-        </div>
-      </div>
-    </div>
-
-    <!-- Monitoring -->
-    <div class="group">
-      <div class="group-label">Monitoring</div>
-      <div class="card">
-        <div class="row border">
-          <span class="label">Cost Alert</span>
-          <div class="cost-row-right">
-            {#if costEnabled}
-              <div class="cost-input">
-                <span class="dollar">{currencySymbol()}</span>
-                <input
-                  type="text"
-                  bind:value={costInput}
-                  onblur={handleCostBlur}
-                  onkeydown={handleCostKeydown}
-                  class="cost-field"
-                />
-              </div>
-            {/if}
-            <ToggleSwitch
-              checked={costEnabled}
-              onChange={(checked) => {
-                costEnabled = checked;
-                if (!checked) {
-                  updateSetting("costAlertThreshold", 0);
-                } else {
-                  const val = parseFloat(costInput);
-                  updateSetting("costAlertThreshold", !isNaN(val) && val > 0 ? val : 50);
-                }
-              }}
-            />
-          </div>
-        </div>
-        <div class="row border">
-          <span class="label">Model Change Stats</span>
-          <ToggleSwitch
-            checked={current.showModelChangeStats}
-            onChange={(checked) => updateSetting("showModelChangeStats", checked)}
-          />
-        </div>
-        {#if availableModels.length > 0}
-          <div class="model-grid">
-            {#each availableModels as model}
-              <div class="model-cell">
-                <div class="dot" style:background={modelColor(model.model_key)}></div>
-                <span class="model-name">{model.display_name}</span>
-                <ToggleSwitch
-                  checked={!current.hiddenModels.includes(model.model_key)}
-                  color={modelColor(model.model_key)}
-                  onChange={() => toggleModel(model.model_key)}
-                />
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <div class="model-empty">No models discovered yet</div>
-        {/if}
-      </div>
-    </div>
+    <ThemeSettings />
+    <HeaderTabsSettings />
+    <TrayConfigSettings />
+    <HiddenModelsSettings />
+    <SshHostsSettings />
 
     <!-- System -->
     <div class="group">
@@ -630,10 +150,35 @@
           />
         </div>
         <div class="row border">
+          <span class="label">Floating Ball</span>
+          <ToggleSwitch
+            checked={current.floatBall}
+            onChange={handleFloatBall}
+          />
+        </div>
+        {#if isWindows()}
+        <div class="row border">
+          <span class="label">Taskbar Panel</span>
+          <ToggleSwitch
+            checked={current.taskbarPanel}
+            onChange={handleTaskbarPanel}
+          />
+        </div>
+        {/if}
+        {#if isMacOS()}
+        <div class="row border">
           <span class="label">Show Dock Icon</span>
           <ToggleSwitch
             checked={current.showDockIcon}
             onChange={handleDockIcon}
+          />
+        </div>
+        {/if}
+        <div class="row border">
+          <span class="label">Debug Logging</span>
+          <ToggleSwitch
+            checked={current.debugLogging}
+            onChange={handleDebugLogging}
           />
         </div>
         <div class="row border">
@@ -650,9 +195,6 @@
         </div>
         <div class="row center">
           <div class="actions">
-            <button class="reset-btn" onclick={copyDebugLog}>
-              {copiedDebug ? "Copied Debug Log" : "Copy Debug Log"}
-            </button>
             <button class="reset-btn" onclick={resetCache}>Reset Cache</button>
           </div>
         </div>
@@ -663,15 +205,9 @@
 
 <style>
   .settings {
-    animation: slideIn 0.22s cubic-bezier(.25,.8,.25,1) both;
     height: 460px;
     display: flex;
     flex-direction: column;
-  }
-
-  @keyframes slideIn {
-    from { opacity: 0; transform: translateX(12px); }
-    to { opacity: 1; transform: translateX(0); }
   }
 
   .header {
@@ -737,11 +273,6 @@
   .row.center {
     justify-content: center;
   }
-  .row.dim {
-    opacity: 0.25;
-    pointer-events: none;
-    transition: opacity 0.15s ease;
-  }
 
   .actions {
     display: flex;
@@ -752,104 +283,6 @@
   .label {
     font: 400 10px/1 'Inter', sans-serif;
     color: var(--t1);
-  }
-
-  .header-tab-row {
-    gap: 8px;
-  }
-
-  .header-source {
-    width: 46px;
-    flex-shrink: 0;
-    font: 500 9px/1 'Inter', sans-serif;
-    color: var(--t2);
-  }
-
-  .text-input {
-    min-width: 0;
-    flex: 1;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    background: var(--surface-hover);
-    color: var(--t1);
-    font: 400 9px/1 'Inter', sans-serif;
-    padding: 5px 7px;
-  }
-
-  .text-input:focus {
-    outline: none;
-    border-color: var(--border);
-  }
-
-  .setting-note {
-    font: 400 8px/1.35 'Inter', sans-serif;
-    color: var(--t4);
-    padding: 4px 4px 0;
-  }
-
-  .model-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    padding: 2px 0;
-  }
-
-  .model-empty {
-    padding: 10px;
-    font: 400 9px/1.4 'Inter', sans-serif;
-    color: var(--t3);
-  }
-
-  .model-cell {
-    display: flex;
-    align-items: center;
-    min-height: 24px;
-    gap: 5px;
-    padding: 6px 10px;
-  }
-
-  .model-name {
-    flex: 1;
-    font: 400 9px/1.25 'Inter', sans-serif;
-    color: var(--t1);
-  }
-
-  .dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .cost-row-right {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .cost-input {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-  }
-
-  .dollar {
-    font: 400 9px/1 'Inter', sans-serif;
-    color: var(--t3);
-  }
-
-  .cost-field {
-    background: var(--surface-hover);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 3px 6px;
-    width: 54px;
-    text-align: right;
-    font: 400 9px/1 'Inter', sans-serif;
-    color: var(--t1);
-    outline: none;
-  }
-  .cost-field:focus {
-    border-color: var(--t3);
   }
 
   .currency-select {
@@ -875,61 +308,5 @@
   }
   .reset-btn:hover {
     color: var(--t2);
-  }
-
-  /* Tray preview — always renders as a dark macOS menu bar fragment,
-     regardless of app theme (the real menu bar is always dark). */
-  .tray-preview {
-    background: var(--surface-2);
-    border-radius: 8px;
-    padding: 8px 10px;
-    margin-bottom: 4px;
-    display: flex;
-    justify-content: center;
-  }
-  .tp-inner {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    /* Always dark — matches real macOS dark menu bar */
-    background: #262628;
-    border-radius: 5px;
-    padding: 4px 8px;
-    height: 22px;
-    border: 0.5px solid rgba(255,255,255,0.06);
-  }
-  .tp-icon {
-    /* Always white inside the dark preview strip */
-    color: rgba(255,255,255,0.85);
-    flex-shrink: 0;
-  }
-  .tp-bars {
-    display: flex;
-    flex-direction: column;
-    gap: 1.5px;
-  }
-  .tp-track {
-    width: 30px;
-    height: 2.5px;
-    background: rgba(255,255,255,0.12);
-    border-radius: 1.25px;
-    overflow: hidden;
-  }
-  .tp-track.single {
-    width: 38px;
-    height: 3.5px;
-    border-radius: 1.75px;
-  }
-  .tp-fill {
-    height: 100%;
-    border-radius: inherit;
-  }
-  .tp-text {
-    font: 400 10px/1 'Inter', -apple-system, sans-serif;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -0.2px;
-    /* Always light text inside dark preview strip */
-    color: rgba(255,255,255,0.88);
-    white-space: nowrap;
   }
 </style>

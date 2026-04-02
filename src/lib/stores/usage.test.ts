@@ -8,7 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
 }));
 
-vi.mock("../resizeDebug.js", () => ({
+vi.mock("../uiStability.js", () => ({
   isResizeDebugEnabled: () => false,
   logResizeDebug: vi.fn(),
   formatDebugError: (e: unknown) => ({ message: String(e) }),
@@ -41,6 +41,10 @@ function makePayload(overrides: Partial<UsagePayload> = {}): UsagePayload {
     has_earlier_data: false,
     change_stats: null,
     subagent_stats: null,
+    usage_source: "parser",
+    usage_warning: null,
+    device_breakdown: null,
+    device_chart_buckets: null,
     ...overrides,
   };
 }
@@ -189,7 +193,6 @@ describe("fetchData", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-16T12:00:00.000Z"));
 
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const { usageData, isLoading, fetchData } = await loadUsageModule();
     const cached = makePayload({ total_cost: 4.0 });
     mockInvoke.mockResolvedValueOnce(cached);
@@ -202,7 +205,29 @@ describe("fetchData", () => {
 
     expect(get(usageData)).toEqual(cached);
     expect(get(isLoading)).toBe(false);
-    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it("dedupes concurrent IPC invokes for the same provider/period/offset", async () => {
+    const { usageData, isLoading, fetchData } = await loadUsageModule();
+    const shared = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(shared.promise);
+
+    const first = fetchData("claude", "day");
+    const second = fetchData("claude", "day");
+
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("get_usage_data", {
+      provider: "claude",
+      period: "day",
+      offset: 0,
+    });
+
+    const resolved = makePayload({ total_cost: 3.33, period_label: "Today" });
+    shared.resolve(resolved);
+    await Promise.all([first, second]);
+
+    expect(get(usageData)).toEqual(resolved);
+    expect(get(isLoading)).toBe(false);
   });
 
   it("ignores stale responses from earlier requests", async () => {
@@ -330,6 +355,143 @@ describe("warmCache", () => {
     await fetchPromise;
 
     expect(get(usageData)).toEqual(expect.objectContaining({ total_cost: 7.1 }));
+  });
+});
+
+describe("selective cache invalidation", () => {
+  it("clears only the targeted providers and keeps unrelated warm caches", async () => {
+    const { usageData, isLoading, fetchData, clearUsageCacheForProviders } = await loadUsageModule();
+    const claude = makePayload({ total_cost: 6.4, period_label: "Claude month" });
+    const codex = makePayload({ total_cost: 2.5, period_label: "Codex month" });
+    mockInvoke.mockResolvedValueOnce(claude);
+    await fetchData("claude", "month");
+    mockInvoke.mockResolvedValueOnce(codex);
+    await fetchData("codex", "month");
+
+    clearUsageCacheForProviders(["claude"]);
+
+    const codexRefresh = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(codexRefresh.promise);
+    const codexFetchPromise = fetchData("codex", "month");
+
+    expect(get(usageData)).toEqual(codex);
+    expect(get(isLoading)).toBe(false);
+    await codexFetchPromise;
+
+    const claudeRefetch = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(claudeRefetch.promise);
+    const claudeFetchPromise = fetchData("claude", "month");
+
+    expect(get(isLoading)).toBe(true);
+    expect(get(usageData)).toEqual(
+      expect.objectContaining({
+        total_cost: 0,
+        total_tokens: 0,
+        session_count: 0,
+      }),
+    );
+
+    claudeRefetch.resolve(claude);
+    await claudeFetchPromise;
+    codexRefresh.resolve(codex);
+  });
+
+  it("allows the current view to be re-seeded after a targeted invalidation", async () => {
+    const { usageData, isLoading, fetchData, clearUsageCacheForProviders, seedUsageCache } =
+      await loadUsageModule();
+    const initial = makePayload({ total_cost: 4.2, period_label: "Today" });
+    mockInvoke.mockResolvedValueOnce(initial);
+    await fetchData("claude", "day");
+
+    clearUsageCacheForProviders(["claude"]);
+
+    const reseeded = makePayload({ total_cost: 8.8, period_label: "Today" });
+    seedUsageCache("claude", "day", 0, reseeded);
+
+    const refresh = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(refresh.promise);
+    const fetchPromise = fetchData("claude", "day");
+
+    expect(get(usageData)).toEqual(reseeded);
+    expect(get(isLoading)).toBe(false);
+    await fetchPromise;
+
+    refresh.resolve(reseeded);
+  });
+});
+
+describe("shallowPayloadEqual", () => {
+  it("returns true for structurally identical payloads", async () => {
+    const { shallowPayloadEqual } = await loadUsageModule();
+    const a = makePayload();
+    const b = makePayload();
+    expect(shallowPayloadEqual(a, b)).toBe(true);
+  });
+
+  it("returns false when a key numeric field differs", async () => {
+    const { shallowPayloadEqual } = await loadUsageModule();
+    const a = makePayload({ total_cost: 10.02 });
+    const b = makePayload({ total_cost: 0.85 });
+    expect(shallowPayloadEqual(a, b)).toBe(false);
+  });
+
+  it("returns false when chart_buckets length differs", async () => {
+    const { shallowPayloadEqual } = await loadUsageModule();
+    const a = makePayload({ chart_buckets: [] });
+    const b = makePayload({
+      chart_buckets: [{ label: "12:00", sort_key: "2026-03-16T12:00:00", total: 1.0, segments: [] }],
+    });
+    expect(shallowPayloadEqual(a, b)).toBe(false);
+  });
+
+  it("returns false when period_label differs", async () => {
+    const { shallowPayloadEqual } = await loadUsageModule();
+    const a = makePayload({ period_label: "Today" });
+    const b = makePayload({ period_label: "March 16, 2026" });
+    expect(shallowPayloadEqual(a, b)).toBe(false);
+  });
+
+  it("returns false when model breakdown costs differ", async () => {
+    const { shallowPayloadEqual } = await loadUsageModule();
+    const a = makePayload({
+      model_breakdown: [{ display_name: "Sonnet", model_key: "sonnet-4-6", cost: 1, tokens: 100, change_stats: null }],
+    });
+    const b = makePayload({
+      model_breakdown: [{ display_name: "Sonnet", model_key: "sonnet-4-6", cost: 2, tokens: 100, change_stats: null }],
+    });
+    expect(shallowPayloadEqual(a, b)).toBe(false);
+  });
+});
+
+describe("fetchData — shallow equality dedup", () => {
+  it("skips usageData.set when background refresh returns identical data", async () => {
+    const { usageData, fetchData } = await loadUsageModule();
+    const initial = makePayload({ total_cost: 5.0 });
+    mockInvoke.mockResolvedValueOnce(initial);
+    await fetchData("claude", "day");
+
+    // Track store updates
+    const updates: unknown[] = [];
+    const unsub = usageData.subscribe((v) => updates.push(v));
+    updates.length = 0;
+
+    // Background refresh returns identical payload (same key fields)
+    const identical = makePayload({ total_cost: 5.0 });
+    mockInvoke.mockResolvedValueOnce(identical);
+    await fetchData("claude", "day");
+
+    // Wait for background refresh to resolve
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledTimes(2);
+    });
+    // Give the .then() callback time to run
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The cache hit may fire one set (reference check), but the background
+    // refresh should NOT fire another set since data is shallowly equal.
+    // At most 1 update from the cache-hit path (if reference differs).
+    expect(updates.length).toBeLessThanOrEqual(1);
+    unsub();
   });
 });
 

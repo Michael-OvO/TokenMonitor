@@ -4,8 +4,6 @@ import type { Settings } from "./settings.js";
 
 const mockLoad = vi.fn();
 const mockSetCurrency = vi.fn();
-const mockLogResizeDebug = vi.fn();
-
 vi.mock("@tauri-apps/plugin-store", () => ({
   load: (...args: unknown[]) => mockLoad(...args),
 }));
@@ -14,14 +12,8 @@ vi.mock("../utils/format.js", () => ({
   setCurrency: (...args: unknown[]) => mockSetCurrency(...args),
 }));
 
-vi.mock("../resizeDebug.js", () => ({
-  logResizeDebug: (...args: unknown[]) => mockLogResizeDebug(...args),
-  formatDebugError: (error: unknown) => {
-    if (error instanceof Error) {
-      return { name: error.name, message: error.message };
-    }
-    return { message: String(error) };
-  },
+vi.mock("../utils/logger.js", () => ({
+  logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 const DEFAULT_HEADER_TABS = {
@@ -46,7 +38,6 @@ beforeEach(() => {
   vi.resetModules();
   mockLoad.mockReset();
   mockSetCurrency.mockReset();
-  mockLogResizeDebug.mockReset();
 });
 
 afterEach(() => {
@@ -101,8 +92,12 @@ describe("loadSettings", () => {
         showCost: false,
         costPrecision: 'full',
       },
-      glassEffect: true,
+      glassEffect: false,
       showModelChangeStats: false,
+      floatBall: false,
+      taskbarPanel: false,
+      sshHosts: [],
+      debugLogging: false,
     });
     expect(get(settings)).toEqual(loaded);
     expect(mockSetCurrency).toHaveBeenCalledWith("EUR");
@@ -144,8 +139,12 @@ describe("loadSettings", () => {
         showCost: true,
         costPrecision: 'full',
       },
-      glassEffect: true,
+      glassEffect: false,
       showModelChangeStats: false,
+      floatBall: false,
+      taskbarPanel: false,
+      sshHosts: [],
+      debugLogging: false,
     });
     expect(get(settings)).toEqual(fallback);
     expect(mockSetCurrency).toHaveBeenCalledWith("USD");
@@ -164,6 +163,24 @@ describe("loadSettings", () => {
     const { loadSettings, settings } = await loadSettingsModule();
     await loadSettings();
     expect(get(settings).showDockIcon).toBe(false);
+  });
+
+  it("normalizes ssh host include_in_stats flags", async () => {
+    const store = makePersistedStore({
+      sshHosts: [
+        { alias: "devbox", enabled: true, include_in_stats: true },
+        { alias: "lab", enabled: false },
+      ],
+    });
+    mockLoad.mockResolvedValueOnce(store);
+
+    const { loadSettings } = await loadSettingsModule();
+    const loaded = await loadSettings();
+
+    expect(loaded.sshHosts).toEqual([
+      { alias: "devbox", enabled: true, include_in_stats: true },
+      { alias: "lab", enabled: false, include_in_stats: false },
+    ]);
   });
 });
 
@@ -263,7 +280,7 @@ describe("loadSettings migration", () => {
         showCost: true,
         costPrecision: "full",
       },
-      glassEffect: true,
+      glassEffect: false,
     });
     expect(loaded.headerTabs).toEqual({
       all: { label: "All", enabled: true },
@@ -344,10 +361,6 @@ describe("updateSetting", () => {
     await updateSetting("currency", "GBP");
 
     expect(get(settings).currency).toBe("GBP");
-    expect(mockLogResizeDebug).toHaveBeenCalledWith("settings:update", {
-      key: "currency",
-      value: "GBP",
-    });
     expect(store.set).toHaveBeenCalledWith(
       "settings",
       expect.objectContaining({
@@ -370,15 +383,10 @@ describe("updateSetting", () => {
     const { loadSettings, settings, updateSetting } = await loadSettingsModule();
     await loadSettings();
     mockSetCurrency.mockClear();
-    mockLogResizeDebug.mockClear();
 
     await updateSetting("currency", "cad" as unknown as Settings["currency"]);
 
     expect(get(settings).currency).toBe("USD");
-    expect(mockLogResizeDebug).toHaveBeenCalledWith("settings:update", {
-      key: "currency",
-      value: "USD",
-    });
     expect(store.set).toHaveBeenCalledWith(
       "settings",
       expect.objectContaining({

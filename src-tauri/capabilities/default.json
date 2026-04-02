@@ -1,11 +1,14 @@
 {
-  "$schema": "https://raw.githubusercontent.com/nicehash/tauri/refs/heads/v2/crates/tauri-utils/schema/capability.json",
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/refs/heads/v2/crates/tauri-utils/schema/capability.json",
   "identifier": "default",
   "description": "Default capabilities for TokenMonitor",
-  "windows": ["main"],
+  "windows": ["main", "float-ball"],
   "permissions": [
     "core:default",
     "core:window:allow-set-size",
+    "core:window:allow-outer-position",
+    "core:window:allow-scale-factor",
+    "core:window:allow-current-monitor",
     "positioner:default",
     "store:default",
     "autostart:default"

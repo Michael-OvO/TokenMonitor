@@ -23,6 +23,20 @@ src-tauri/gen/
 .superpowers/
 docs/superpowers/
 
+# Build outputs & caches
+outputs/
+build/cache/
+
 # Code signing & notarization (keep locally, never commit)
 signing/
 CLAUDE.md
+
+# Pre-built binaries (build from source via CI instead)
+scripts/*.exe
+
+# Build/lint artifacts
+src-tauri/clippy_ascii.txt
+src-tauri/clippy_errors.txt
+
+# User-specific Claude Code settings
+.claude/settings.local.json

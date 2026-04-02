@@ -15,12 +15,13 @@ import type {
   DefaultPeriod,
   HeaderTabs,
   PercentageFormat,
+  SshHostConfig,
   TrayConfig,
   UsageProvider,
 } from "../types/index.js";
 import { setCurrency } from "../utils/format.js";
-import { formatDebugError, logResizeDebug } from "../resizeDebug.js";
-
+import { logger } from "../utils/logger.js";
+import { isMacOS } from "../utils/platform.js";
 export interface Settings {
   theme: "light" | "dark" | "system";
   defaultProvider: UsageProvider;
@@ -36,6 +37,10 @@ export interface Settings {
   trayConfig: TrayConfig;
   glassEffect: boolean;
   showModelChangeStats: boolean;
+  floatBall: boolean;
+  taskbarPanel: boolean;
+  sshHosts: SshHostConfig[];
+  debugLogging: boolean;
 }
 
 export const HEADER_TAB_ORDER: UsageProvider[] = [...USAGE_PROVIDER_ORDER];
@@ -72,8 +77,12 @@ const DEFAULTS: Settings = {
     showCost: true,
     costPrecision: 'full',
   },
-  glassEffect: true,
+  glassEffect: false,
   showModelChangeStats: false,
+  floatBall: false,
+  taskbarPanel: false,
+  sshHosts: [],
+  debugLogging: false,
 };
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
@@ -182,6 +191,31 @@ export function resolveVisibleProvider(
   return getVisibleHeaderProviders(headerTabs)[0] ?? HEADER_TAB_ORDER[0] ?? DEFAULTS.defaultProvider;
 }
 
+function normalizeSshHosts(value: unknown): SshHostConfig[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item !== "object" || item === null) {
+      return [];
+    }
+
+    const candidate = item as Record<string, unknown>;
+    if (
+      typeof candidate.alias !== "string" ||
+      candidate.alias.trim() === "" ||
+      typeof candidate.enabled !== "boolean"
+    ) {
+      return [];
+    }
+
+    return [{
+      alias: candidate.alias.trim(),
+      enabled: candidate.enabled,
+      include_in_stats:
+        typeof candidate.include_in_stats === "boolean" ? candidate.include_in_stats : false,
+    }];
+  });
+}
+
 function normalizeTrayConfig(trayConfig?: Partial<TrayConfig> | null): TrayConfig {
   return {
     barDisplay: normalizeStringChoice(
@@ -237,6 +271,10 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
     trayConfig: normalizeTrayConfig(saved?.trayConfig),
     glassEffect: normalizeBoolean(saved?.glassEffect, DEFAULTS.glassEffect),
     showModelChangeStats: normalizeBoolean(saved?.showModelChangeStats, DEFAULTS.showModelChangeStats),
+    floatBall: normalizeBoolean(saved?.floatBall, DEFAULTS.floatBall),
+    taskbarPanel: normalizeBoolean(saved?.taskbarPanel, DEFAULTS.taskbarPanel),
+    sshHosts: normalizeSshHosts(saved?.sshHosts),
+    debugLogging: normalizeBoolean(saved?.debugLogging, DEFAULTS.debugLogging),
   };
 }
 
@@ -265,22 +303,12 @@ export async function loadSettings(): Promise<Settings> {
 
     settings.set(merged);
     setCurrency(merged.currency);
-    logResizeDebug("settings:loaded", {
-      theme: merged.theme,
-      defaultProvider: merged.defaultProvider,
-      defaultPeriod: merged.defaultPeriod,
-      refreshInterval: merged.refreshInterval,
-      headerTabs: merged.headerTabs,
-    });
     return merged;
   } catch (e) {
     const fallback = normalizeSettings();
     storeInstance = null;
     settings.set(fallback);
     setCurrency(fallback.currency);
-    logResizeDebug("settings:load-failed", {
-      error: formatDebugError(e),
-    });
     console.warn("Failed to load settings, using defaults:", e);
     return fallback;
   }
@@ -293,9 +321,6 @@ async function persistSettings(next: Settings): Promise<void> {
     await storeInstance.set("settings", next);
     await storeInstance.save();
   } catch (error) {
-    logResizeDebug("settings:persist-failed", {
-      error: formatDebugError(error),
-    });
     console.warn("Failed to persist settings:", error);
   }
 }
@@ -304,13 +329,9 @@ export async function updateSetting<K extends keyof Settings>(
   key: K,
   value: Settings[K],
 ) {
+  logger.info("settings", `Changed: ${key}=${JSON.stringify(value)}`);
   const updated = normalizeSettings({ ...get(settings), [key]: value });
-  const normalizedValue = updated[key];
   settings.set(updated);
-  logResizeDebug("settings:update", {
-    key,
-    value: normalizedValue,
-  });
 
   if (key === "currency") {
     setCurrency(updated.currency);
@@ -329,7 +350,11 @@ export function applyTheme(theme: Settings["theme"]) {
 }
 
 export function applyGlass(enabled: boolean) {
-  document.documentElement.setAttribute("data-glass", enabled ? "true" : "false");
+  // Glass effect requires native NSVisualEffectView blur — macOS only.
+  // On Windows/Linux, enabling glass makes the window semi-transparent
+  // with no blur backing, so force it off.
+  const effective = enabled && isMacOS();
+  document.documentElement.setAttribute("data-glass", effective ? "true" : "false");
 }
 
 export function applyProvider(provider: UsageProvider, brandTheming: boolean) {

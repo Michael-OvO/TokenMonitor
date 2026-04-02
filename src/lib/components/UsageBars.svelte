@@ -10,7 +10,7 @@
     providerHasActiveCooldown,
     providerRateLimitViewState,
     rateLimitWindowResetLabel,
-  } from "../rateLimitsView.js";
+  } from "../views/rateLimits.js";
   import type { ProviderRateLimits, RateLimitWindow } from "../types/index.js";
 
   interface Props {

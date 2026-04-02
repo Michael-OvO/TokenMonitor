@@ -1,4 +1,4 @@
-import { writable } from "svelte/store";
+import { writable, get } from "svelte/store";
 import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_USAGE_PROVIDER } from "../providerMetadata.js";
 import type {
@@ -6,12 +6,14 @@ import type {
   UsagePeriod,
   UsageProvider,
 } from "../types/index.js";
-import { formatDebugError, isResizeDebugEnabled, logResizeDebug } from "../resizeDebug.js";
+import { formatDebugError, isResizeDebugEnabled, logResizeDebug } from "../uiStability.js";
+import { logger } from "../utils/logger.js";
 
 export const activeProvider = writable<UsageProvider>(DEFAULT_USAGE_PROVIDER);
 export const activePeriod = writable<UsagePeriod>("day");
 export const activeOffset = writable<number>(0);
 export const chartMode = writable<"bar" | "line">("bar");
+export const chartSegmentMode = writable<"model" | "device">("model");
 export const usageData = writable<UsagePayload | null>(null);
 export const isLoading = writable(false);
 
@@ -32,8 +34,42 @@ function emptyPayload(): UsagePayload {
     has_earlier_data: false,
     change_stats: null,
     subagent_stats: null,
+    usage_source: "parser",
+    usage_warning: null,
+    device_breakdown: null,
+    device_chart_buckets: null,
   };
 }
+/**
+ * Shallow comparison of the key numeric fields that drive UI rendering.
+ * Avoids triggering a Svelte store update (and downstream re-renders /
+ * ResizeObserver cycles) when the background refresh returns identical data.
+ */
+export function shallowPayloadEqual(a: UsagePayload, b: UsagePayload): boolean {
+  return (
+    a.total_cost === b.total_cost &&
+    a.total_tokens === b.total_tokens &&
+    a.five_hour_cost === b.five_hour_cost &&
+    a.session_count === b.session_count &&
+    a.input_tokens === b.input_tokens &&
+    a.output_tokens === b.output_tokens &&
+    a.chart_buckets.length === b.chart_buckets.length &&
+    a.model_breakdown.length === b.model_breakdown.length &&
+    a.model_breakdown.every((model, i) =>
+      model.model_key === b.model_breakdown[i]?.model_key &&
+      model.cost === b.model_breakdown[i]?.cost &&
+      model.tokens === b.model_breakdown[i]?.tokens,
+    ) &&
+    a.period_label === b.period_label &&
+    a.has_earlier_data === b.has_earlier_data &&
+    (a.device_breakdown?.length ?? 0) === (b.device_breakdown?.length ?? 0) &&
+    (a.device_breakdown?.[0]?.total_cost ?? 0) === (b.device_breakdown?.[0]?.total_cost ?? 0) &&
+    (a.device_breakdown ?? []).every((d, i) =>
+      d.include_in_stats === b.device_breakdown?.[i]?.include_in_stats,
+    )
+  );
+}
+
 export const setupStatus = writable({ ready: false, installing: false, error: null as string | null });
 
 // ── Frontend payload cache ──────────────────────────────────────────
@@ -44,8 +80,63 @@ export const setupStatus = writable({ ready: false, installing: false, error: nu
 const payloadCache = new Map<string, { data: UsagePayload; at: number }>();
 const CACHE_TTL = 300_000; // 5 min — generous; background refresh keeps it current
 
+/** Cold-path fetchData only: concurrent calls for the same key share one IPC round-trip. */
+const fetchInFlight = new Map<string, Promise<UsagePayload>>();
+
 function cacheKey(provider: string, period: string, offset: number = 0) {
   return `${provider}:${period}:${offset}`;
+}
+
+type CacheEntryScope = {
+  key: string;
+  provider: UsageProvider;
+  period: UsagePeriod;
+  offset: number;
+};
+
+function parseCacheEntryScope(key: string): CacheEntryScope | null {
+  const [provider, period, offsetText, ...rest] = key.split(":");
+  if (
+    rest.length > 0 ||
+    !provider ||
+    (period !== "5h" && period !== "day" && period !== "week" && period !== "month" && period !== "year")
+  ) {
+    return null;
+  }
+
+  const offset = Number(offsetText);
+  if (!Number.isInteger(offset)) {
+    return null;
+  }
+
+  return {
+    key,
+    provider,
+    period,
+    offset,
+  };
+}
+
+function invalidateMatchingUsageCache(
+  matches: (entry: CacheEntryScope) => boolean,
+) {
+  for (const key of [...payloadCache.keys()]) {
+    const entry = parseCacheEntryScope(key);
+    if (entry && matches(entry)) {
+      payloadCache.delete(key);
+    }
+  }
+
+  for (const key of [...fetchInFlight.keys()]) {
+    const entry = parseCacheEntryScope(key);
+    if (entry && matches(entry)) {
+      fetchInFlight.delete(key);
+    }
+  }
+
+  currentCacheEpoch += 1;
+  currentRequestId += 1;
+  isLoading.set(false);
 }
 
 function requestUsagePayload(
@@ -65,7 +156,12 @@ function cachePayload(key: string, data: UsagePayload, epoch: number = currentCa
 function applyUsageDataIfCurrent(requestId: number, data: UsagePayload): boolean {
   const appliedToUi = requestId === currentRequestId;
   if (appliedToUi) {
-    usageData.set(data);
+    const current = get(usageData);
+    // Skip .set() when the new payload is structurally identical to what's
+    // already displayed — prevents unnecessary re-renders and resize cycles.
+    if (current === null || !shallowPayloadEqual(current, data)) {
+      usageData.set(data);
+    }
   }
   return appliedToUi;
 }
@@ -76,10 +172,23 @@ let currentRequestId = 0;
 let currentCacheEpoch = 0;
 
 export function clearUsageCache() {
-  payloadCache.clear();
-  currentCacheEpoch += 1;
-  currentRequestId += 1;
-  isLoading.set(false);
+  logger.info("usage", "Cache cleared");
+  invalidateMatchingUsageCache(() => true);
+}
+
+export function clearUsageCacheForProviders(providers: Iterable<UsageProvider>) {
+  const affectedProviders = new Set(providers);
+  logger.info("usage", `Cache cleared for providers: ${[...affectedProviders].join(", ")}`);
+  invalidateMatchingUsageCache(({ provider }) => affectedProviders.has(provider));
+}
+
+export function seedUsageCache(
+  provider: UsageProvider,
+  period: UsagePeriod,
+  offset: number,
+  data: UsagePayload,
+) {
+  cachePayload(cacheKey(provider, period, offset), data);
 }
 
 async function logUsageReadDebug(
@@ -102,6 +211,33 @@ async function logUsageReadDebug(
   }
 }
 
+/** Shared context for debug logging within a single fetch call. */
+interface FetchCtx {
+  provider: string;
+  period: string;
+  offset: number;
+  requestId: number;
+  cacheKey: string;
+}
+
+function logBackgroundRefreshResult(
+  ctx: FetchCtx,
+  prev: UsagePayload,
+  fresh: UsagePayload,
+  appliedToUi: boolean,
+) {
+  if (isResizeDebugEnabled() && appliedToUi) {
+    const costDelta = fresh.total_cost - prev.total_cost;
+    const tokenDelta = Number(fresh.total_tokens) - Number(prev.total_tokens);
+    if (Math.abs(costDelta) > 0.0001 || tokenDelta !== 0) {
+      logResizeDebug("usage:background-refresh-delta", { ...ctx, costDelta, tokenDelta });
+    }
+  }
+  void logUsageReadDebug("usage:background-refresh-resolved", {
+    ...ctx, appliedToUi, fromPayloadCache: fresh.from_cache,
+  });
+}
+
 /**
  * Fetch data for a provider/period.
  *
@@ -118,93 +254,56 @@ export async function fetchData(
   const requestId = ++currentRequestId;
   const cacheEpoch = currentCacheEpoch;
   const key = cacheKey(provider, period, offset);
-  logResizeDebug("usage:fetch-start", {
-    provider,
-    period,
-    offset,
-    requestId,
-    cacheKey: key,
-    hadFrontendCache: payloadCache.has(key),
-  });
+  const ctx: FetchCtx = { provider, period, offset, requestId, cacheKey: key };
+  logger.debug("usage", `Fetch: ${provider}/${period} offset=${offset}`);
+  logResizeDebug("usage:fetch-start", { ...ctx, hadFrontendCache: payloadCache.has(key) });
 
   // ── Stale-while-revalidate: instant show + silent refresh ──
   const cached = payloadCache.get(key);
   if (cached && Date.now() - cached.at < CACHE_TTL) {
-    usageData.set(cached.data);
-    // A warm-cache navigation should never inherit a stale blocking
-    // loader from an earlier cold request that is no longer the active view.
+    if (get(usageData) !== cached.data) {
+      usageData.set(cached.data);
+    }
     isLoading.set(false);
-    logResizeDebug("usage:frontend-cache-hit", {
-      provider,
-      period,
-      offset,
-      requestId,
-      cacheKey: key,
-      cacheAgeMs: Date.now() - cached.at,
-    });
+    logger.debug("usage", `Cache hit: ${key}`);
+    logResizeDebug("usage:frontend-cache-hit", { ...ctx, cacheAgeMs: Date.now() - cached.at });
     // Silent background refresh — no loading indicator
     requestUsagePayload(provider, period, offset)
       .then((fresh: UsagePayload) => {
         cachePayload(key, fresh, cacheEpoch);
         const appliedToUi = applyUsageDataIfCurrent(requestId, fresh);
-        void logUsageReadDebug("usage:background-refresh-resolved", {
-          provider,
-          period,
-          offset,
-          requestId,
-          cacheKey: key,
-          appliedToUi,
-          fromPayloadCache: fresh.from_cache,
-        });
+        logBackgroundRefreshResult(ctx, cached.data, fresh, appliedToUi);
       })
       .catch((error) => {
-        logResizeDebug("usage:background-refresh-rejected", {
-          provider,
-          period,
-          offset,
-          requestId,
-          cacheKey: key,
-          error: formatDebugError(error),
-        });
+        logResizeDebug("usage:background-refresh-rejected", { ...ctx, error: formatDebugError(error) });
       });
     return;
   }
 
   // ── Cold path: no cache — show loading indicator ──
   if (cached) {
-    // Expired but exists — show stale data while we fetch
     usageData.set(cached.data);
   } else {
-    // No cache at all — clear stale data from a potentially different
-    // provider/period so the UI never shows wrong-provider models.
     usageData.set(emptyPayload());
   }
   isLoading.set(true);
   try {
-    const data = await requestUsagePayload(provider, period, offset);
+    let pending = fetchInFlight.get(key);
+    if (!pending) {
+      pending = requestUsagePayload(provider, period, offset).finally(() => {
+        fetchInFlight.delete(key);
+      });
+      fetchInFlight.set(key, pending);
+    }
+    const data = await pending;
     cachePayload(key, data, cacheEpoch);
     const appliedToUi = applyUsageDataIfCurrent(requestId, data);
     await logUsageReadDebug("usage:fetch-resolved", {
-      provider,
-      period,
-      offset,
-      requestId,
-      cacheKey: key,
-      appliedToUi,
-      fromPayloadCache: data.from_cache,
+      ...ctx, appliedToUi, fromPayloadCache: data.from_cache,
     });
   } catch (e) {
-    if (requestId === currentRequestId) {
-      console.error("Failed to fetch usage data:", e);
-    }
-    logResizeDebug("usage:fetch-rejected", {
-      provider,
-      period,
-      offset,
-      requestId,
-      cacheKey: key,
-      error: formatDebugError(e),
-    });
+    logger.error("usage", `Fetch failed: provider=${provider} period=${period} offset=${offset} error=${formatDebugError(e)}`);
+    logResizeDebug("usage:fetch-rejected", { ...ctx, error: formatDebugError(e) });
   } finally {
     if (requestId === currentRequestId) {
       isLoading.set(false);

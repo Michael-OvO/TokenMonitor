@@ -7,16 +7,26 @@ on:
 
 jobs:
   ci:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Cache node_modules
         uses: actions/cache@v4
         with:
           path: node_modules
-          key: node-${{ hashFiles('package-lock.json') }}
+          key: node-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -25,9 +35,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             src-tauri/target
-          key: cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            cargo-
+            cargo-${{ runner.os }}-
 
       - name: Install Node deps
         run: npm ci

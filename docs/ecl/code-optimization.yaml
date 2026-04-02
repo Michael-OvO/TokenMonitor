@@ -1,0 +1,376 @@
+ecl_version: "1.0"
+feature: "code-optimization-2026-03"
+status: completed
+created: 2026-03-30
+updated: 2026-03-30
+
+prompt_calibration:
+  raw_input: "请帮我优化 (following /optimize analysis)"
+  intent_decomposition:
+    total_intents: 1
+    total_tracks: 3
+    tracks:
+      - track_id: T1
+        name: "Large file decomposition"
+        priority: 1
+        relationship_to_other_tracks:
+          T2: independent
+          T3: related
+      - track_id: T2
+        name: "Rust backend simplification"
+        priority: 2
+        relationship_to_other_tracks:
+          T1: independent
+          T3: independent
+      - track_id: T3
+        name: "Frontend local optimizations"
+        priority: 3
+        relationship_to_other_tracks:
+          T1: related
+          T2: independent
+
+# ============================================================
+# REQUIREMENTS (post Phase 5 adversarial review)
+# ============================================================
+requirements:
+  # --- T1: Large File Decomposition ---
+  - id: REQ-T1-1
+    text: "Split Settings.svelte into focused sub-components"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "Settings.svelte < 200 lines (coordinator only)"
+      - "Each sub-component < 400 lines"
+      - "All 202 frontend tests pass"
+      - "No visual UI changes"
+    decomposition:
+      features: [FEAT-T1-1a, FEAT-T1-1b, FEAT-T1-1c, FEAT-T1-1d, FEAT-T1-1e]
+
+  - id: REQ-T1-2
+    text: "Extract pure computation logic from App.svelte into utility modules"
+    status: verified
+    confidence: 0.85
+    note: "Revised from original: keep Svelte reactive state in component, extract only pure functions"
+    acceptance_criteria:
+      - "App.svelte < 800 lines"
+      - "Extracted modules are stateless pure functions"
+      - "All 202 frontend tests pass"
+      - "No visual UI changes"
+    decomposition:
+      features: [FEAT-T1-2a, FEAT-T1-2b]
+
+  - id: REQ-T1-3
+    text: "Refactor Breakdown.svelte accordion to map-based approach"
+    status: verified
+    confidence: 0.90
+    acceptance_criteria:
+      - "Accordion toggle uses Record<scope, state> instead of if-else chains"
+      - "Mutual exclusion logic is data-driven"
+      - "All frontend tests pass"
+    decomposition:
+      features: [FEAT-T1-3]
+
+  # --- T2: Rust Backend ---
+  - id: REQ-T2-1
+    text: "Convert models.rs normalize functions to ordered lookup table"
+    status: verified
+    confidence: 0.90
+    note: "Must use ordered &[...] slice, NOT HashMap. Order-dependent contains() semantics must be preserved."
+    acceptance_criteria:
+      - "Normalize functions use CLAUDE_ALIASES/CODEX_ALIASES const slices"
+      - "Tests cover every model variant including substring edge cases"
+      - "cargo clippy passes"
+    decomposition:
+      features: [FEAT-T2-1a, FEAT-T2-1b]
+
+  - id: REQ-T2-2
+    text: "Eliminate duplicate calendar day parsing in calendar.rs"
+    status: verified
+    confidence: 0.95
+    note: "Replace inline filter_map in fetch_for_provider with call to existing calendar_days_from_payload()"
+    acceptance_criteria:
+      - "Only one parsing implementation exists"
+      - "Rust tests pass, cargo clippy clean"
+    decomposition:
+      features: [FEAT-T2-2]
+
+  - id: REQ-T2-3
+    text: "Clean up float_ball.rs: remove unused params + extract compute_scaled_sizes()"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "apply_float_ball_window_rect() has only window + rect params"
+      - "compute_scaled_sizes(scale) replaces 4 duplicate constructions"
+      - "cargo clippy passes, all call sites updated"
+    decomposition:
+      features: [FEAT-T2-3a, FEAT-T2-3b]
+
+  # --- T3: Frontend Local ---
+  - id: REQ-T3-1
+    text: "Consolidate Chart.svelte magic numbers into DETAIL_CONFIG object"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "All 10 detail-panel constants in one frozen object"
+      - "No standalone DETAIL_* consts remain"
+      - "All frontend tests pass"
+    decomposition:
+      features: [FEAT-T3-1]
+
+  - id: REQ-T3-2
+    text: "Add typed ModelColorRule[] with explicit priority to format.ts"
+    status: verified
+    confidence: 0.85
+    note: "Keep three-tier structure (exact/includes/prefix) but add types per tier. Do NOT merge into single array."
+    acceptance_criteria:
+      - "Each tier has typed interface (PrefixRule, IncludesRule)"
+      - "Order-dependent comment replaced by explicit type contract"
+      - "All frontend tests pass"
+    decomposition:
+      features: [FEAT-T3-2]
+
+  - id: REQ-T3-3
+    text: "Improve float-ball.ts error handling"
+    status: verified
+    confidence: 0.90
+    note: "Use trace-level logging, not debug. Add platform guard."
+    acceptance_criteria:
+      - "setBackgroundColor guarded by isWindows() check"
+      - "Failure logged at trace level with platform context"
+    decomposition:
+      features: [FEAT-T3-3]
+
+  # --- REMOVED items (with reasons from Phase 5) ---
+  - id: REQ-REMOVED-1
+    text: "Remove unnecessary clone() in config.rs line 164"
+    status: invalidated
+    reason: "Clone is required by Rust ownership: merged is both stored in cache and returned by value"
+
+  - id: REQ-REMOVED-2
+    text: "Create generic normalizer factory in settings.ts"
+    status: invalidated
+    reason: "Existing normalizer architecture is already well-factored; factory adds complexity without reducing code"
+
+  - id: REQ-REMOVED-3
+    text: "Simplify bootstrap.ts conditional array with spread+ternary"
+    status: invalidated
+    reason: "Spread+ternary is less readable than current if+push; file is only 74 lines"
+
+  - id: REQ-REMOVED-4
+    text: "Add memoization cache to deviceColor()"
+    status: invalidated
+    reason: "hashString is O(n) with n=5-20 chars; cache adds unbounded memory for negligible gain"
+
+  - id: REQ-REMOVED-5
+    text: "Deduplicate rateLimits.ts success/error handling"
+    status: invalidated
+    reason: "Shared logic already extracted into updateProviderMonitorState/scheduleProviderRetry; remaining code is branch-specific"
+
+# ============================================================
+# FEATURES
+# ============================================================
+features:
+  # T1-1: Settings decomposition
+  - id: FEAT-T1-1a
+    name: "Extract SshHostsSettings.svelte"
+    parent: REQ-T1-1
+    complexity: medium
+    dependencies: []
+
+  - id: FEAT-T1-1b
+    name: "Extract TrayConfigSettings.svelte"
+    parent: REQ-T1-1
+    complexity: small
+    dependencies: []
+
+  - id: FEAT-T1-1c
+    name: "Extract ThemeSettings.svelte"
+    parent: REQ-T1-1
+    complexity: small
+    dependencies: []
+
+  - id: FEAT-T1-1d
+    name: "Extract HiddenModelsSettings.svelte"
+    parent: REQ-T1-1
+    complexity: small
+    dependencies: []
+
+  - id: FEAT-T1-1e
+    name: "Extract HeaderTabsSettings.svelte"
+    parent: REQ-T1-1
+    complexity: small
+    dependencies: []
+
+  # T1-2: App.svelte logic extraction
+  - id: FEAT-T1-2a
+    name: "Extract resize measurement math to windowResize.ts"
+    parent: REQ-T1-2
+    complexity: medium
+    dependencies: []
+    note: "Pure functions only: computeWindowHeight, clampHeight, shouldAnimate. No $state."
+
+  - id: FEAT-T1-2b
+    name: "Extract navigation helpers to navigationFlow.ts"
+    parent: REQ-T1-2
+    complexity: small
+    dependencies: []
+    note: "Pure functions: buildFetchParams, shouldWarmCache. No $state."
+
+  # T1-3: Breakdown accordion
+  - id: FEAT-T1-3
+    name: "Refactor accordion to map-based state + mutual exclusion table"
+    parent: REQ-T1-3
+    complexity: small
+    dependencies: []
+
+  # T2-1: models.rs lookup table
+  - id: FEAT-T2-1a
+    name: "Write tests for all normalize_*_model() variants"
+    parent: REQ-T2-1
+    complexity: medium
+    dependencies: []
+
+  - id: FEAT-T2-1b
+    name: "Refactor to ordered const slice lookup"
+    parent: REQ-T2-1
+    complexity: small
+    dependencies: [FEAT-T2-1a]
+
+  # T2-2: calendar.rs dedup
+  - id: FEAT-T2-2
+    name: "Replace inline filter_map with existing helper call"
+    parent: REQ-T2-2
+    complexity: trivial
+    dependencies: []
+
+  # T2-3: float_ball.rs cleanup
+  - id: FEAT-T2-3a
+    name: "Remove 3 unused params from apply_float_ball_window_rect()"
+    parent: REQ-T2-3
+    complexity: trivial
+    dependencies: []
+
+  - id: FEAT-T2-3b
+    name: "Extract compute_scaled_sizes(scale) helper"
+    parent: REQ-T2-3
+    complexity: trivial
+    dependencies: [FEAT-T2-3a]
+
+  # T3-1: Chart magic numbers
+  - id: FEAT-T3-1
+    name: "Create DETAIL_CONFIG frozen object in Chart.svelte"
+    parent: REQ-T3-1
+    complexity: trivial
+    dependencies: []
+
+  # T3-2: format.ts color rule types
+  - id: FEAT-T3-2
+    name: "Add PrefixRule/IncludesRule types to format.ts"
+    parent: REQ-T3-2
+    complexity: small
+    dependencies: []
+
+  # T3-3: float-ball.ts error handling
+  - id: FEAT-T3-3
+    name: "Add platform guard + trace logging to float-ball.ts"
+    parent: REQ-T3-3
+    complexity: trivial
+    dependencies: []
+
+# ============================================================
+# DEPENDENCY GRAPH
+# ============================================================
+dependency_graph:
+  # T2 (Rust) - independent track, do first (needs tests)
+  FEAT-T2-1a: []                          # Write model tests first
+  FEAT-T2-1b: [FEAT-T2-1a]               # Then refactor models
+  FEAT-T2-2: []                           # Calendar dedup (independent)
+  FEAT-T2-3a: []                          # Float ball param cleanup
+  FEAT-T2-3b: [FEAT-T2-3a]               # Then extract helper
+
+  # T3 (Frontend local) - can run parallel with T2
+  FEAT-T3-1: []                           # Chart magic numbers
+  FEAT-T3-2: []                           # Format.ts types
+  FEAT-T3-3: []                           # Float-ball.ts error handling
+
+  # T1 (Large file decomposition) - do last, depends on T3 completing
+  FEAT-T1-1a: [FEAT-T3-1, FEAT-T3-2]     # SSH settings extraction (after T3 done)
+  FEAT-T1-1b: []                          # Tray config extraction
+  FEAT-T1-1c: []                          # Theme extraction
+  FEAT-T1-1d: []                          # Hidden models extraction
+  FEAT-T1-1e: []                          # Header tabs extraction
+  FEAT-T1-2a: []                          # Resize math extraction
+  FEAT-T1-2b: []                          # Navigation helpers extraction
+  FEAT-T1-3: []                           # Breakdown accordion refactor
+
+# ============================================================
+# IMPLEMENTATION PHASES (execution order)
+# ============================================================
+implementation_order:
+  phase_1_parallel:
+    description: "Rust tests + Rust refactors + Frontend local optimizations"
+    items:
+      rust_serial:
+        - FEAT-T2-1a  # Write model normalize tests
+        - FEAT-T2-1b  # Refactor to lookup table
+      rust_parallel:
+        - FEAT-T2-2   # Calendar dedup
+        - FEAT-T2-3a  # Float ball param removal
+        - FEAT-T2-3b  # Float ball helper extraction
+      frontend_parallel:
+        - FEAT-T3-1   # Chart DETAIL_CONFIG
+        - FEAT-T3-2   # Format.ts types
+        - FEAT-T3-3   # Float-ball.ts error handling
+
+  phase_2_sequential:
+    description: "Large file decomposition (Settings.svelte)"
+    items:
+      - FEAT-T1-1a  # SshHostsSettings.svelte
+      - FEAT-T1-1b  # TrayConfigSettings.svelte
+      - FEAT-T1-1c  # ThemeSettings.svelte
+      - FEAT-T1-1d  # HiddenModelsSettings.svelte
+      - FEAT-T1-1e  # HeaderTabsSettings.svelte
+
+  phase_3_sequential:
+    description: "App.svelte + Breakdown decomposition"
+    items:
+      - FEAT-T1-2a  # Resize math extraction
+      - FEAT-T1-2b  # Navigation helpers
+      - FEAT-T1-3   # Breakdown accordion refactor
+
+# ============================================================
+# CONFRONTATION RESULTS
+# ============================================================
+confrontation:
+  removed_items: 5
+  removed_reasons:
+    - "T2-3 clone: Rust ownership requires it"
+    - "T3-3 normalizer factory: existing architecture sufficient"
+    - "T3-4 bootstrap spread: readability regression"
+    - "T3-1 deviceColor cache: negligible perf gain"
+    - "T3-7 rateLimits dedup: shared logic already extracted"
+  key_mitigations:
+    - "T2-1: Must use ordered slice, not HashMap. Tests mandatory BEFORE refactor."
+    - "T1-2: Extract pure functions only. No $state in extracted modules."
+    - "T3-2: Keep three-tier color structure. Add types per tier, do NOT merge."
+  surviving_risks:
+    - risk: "Settings.svelte decomposition may break two-way binding on settings store"
+      severity: medium
+      mitigation: "Each sub-component receives settings as props + emits update events"
+    - risk: "App.svelte extraction may miss implicit $effect dependencies"
+      severity: medium
+      mitigation: "Run full test suite after each extraction step"
+
+# ============================================================
+# VERIFICATION GATES
+# ============================================================
+verification:
+  after_each_feature:
+    frontend: "npm test -- --run"
+    rust: "cd src-tauri && cargo clippy -- -D warnings && cargo test"
+    typecheck: "npx svelte-check"
+  after_all:
+    - "npm test -- --run"
+    - "cd src-tauri && cargo clippy -- -D warnings"
+    - "cd src-tauri && cargo test"
+    - "npx svelte-check"

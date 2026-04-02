@@ -4,6 +4,17 @@ import { initializeRuntimeFromSettings } from "./bootstrap.js";
 import { activePeriod, activeProvider } from "./stores/usage.js";
 import type { Settings } from "./stores/settings.js";
 
+let mockIsMacOS = true;
+let mockUsesFloatingStatusWidget = false;
+let mockIsWindows = false;
+
+// Mock platform helpers so tests exercise all IPC paths deterministically.
+vi.mock("./utils/platform.js", () => ({
+  isMacOS: () => mockIsMacOS,
+  isWindows: () => mockIsWindows,
+  usesFloatingStatusWidget: () => mockUsesFloatingStatusWidget,
+}));
+
 function makeSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     theme: "dark",
@@ -31,6 +42,10 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     },
     glassEffect: true,
     showModelChangeStats: false,
+    floatBall: false,
+    taskbarPanel: false,
+    sshHosts: [],
+    debugLogging: false,
     ...overrides,
   };
 }
@@ -38,6 +53,8 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
 beforeEach(() => {
   activeProvider.set("claude");
   activePeriod.set("day");
+  mockIsMacOS = true;
+  mockUsesFloatingStatusWidget = false;
 });
 
 describe("initializeRuntimeFromSettings", () => {
@@ -175,5 +192,37 @@ describe("initializeRuntimeFromSettings", () => {
     );
 
     expect(invokeFn).toHaveBeenCalledWith("set_dock_icon_visible", { visible: true });
+  });
+
+  it("creates the floating widget when floatBall setting is enabled", async () => {
+    mockIsMacOS = false;
+    mockUsesFloatingStatusWidget = true;
+    const invokeFn = vi.fn().mockResolvedValue(undefined);
+    const applyGlassFn = vi.fn();
+    const applyThemeFn = vi.fn();
+    const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
+
+    await initializeRuntimeFromSettings(
+      makeSettings({ floatBall: true }),
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowSurfaceFn },
+    );
+
+    expect(invokeFn).toHaveBeenCalledWith("create_float_ball");
+  });
+
+  it("does not create the floating widget when floatBall setting is disabled", async () => {
+    mockIsMacOS = false;
+    mockUsesFloatingStatusWidget = true;
+    const invokeFn = vi.fn().mockResolvedValue(undefined);
+    const applyGlassFn = vi.fn();
+    const applyThemeFn = vi.fn();
+    const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
+
+    await initializeRuntimeFromSettings(
+      makeSettings({ floatBall: false }),
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowSurfaceFn },
+    );
+
+    expect(invokeFn).not.toHaveBeenCalledWith("create_float_ball");
   });
 });

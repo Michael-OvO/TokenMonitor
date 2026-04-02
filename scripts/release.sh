@@ -3,7 +3,7 @@
 # Example: ./scripts/release.sh 0.3.0
 #
 # Bumps version in all 3 files, commits, tags, and pushes.
-# The GitHub Actions release workflow picks up the tag and builds the signed DMG.
+# The GitHub Actions release workflow picks up the tag and builds the native installers.
 
 set -e
 
@@ -102,5 +102,5 @@ git push origin "$TAG"
 
 echo ""
 echo "✓ Released $TAG"
-echo "  GitHub Actions will now build, sign, and publish the DMG."
+echo "  GitHub Actions will now build, sign where configured, and publish the installers."
 echo "  Track progress: https://github.com/Michael-OvO/TokenMonitor/actions"

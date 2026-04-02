@@ -2,9 +2,9 @@
   import { onMount, tick } from "svelte";
   import { get } from "svelte/store";
   import { listen } from "@tauri-apps/api/event";
-  import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+  import { invoke } from "@tauri-apps/api/core";
+  import { logger } from "./lib/utils/logger.js";
   import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
-  import { LogicalSize } from "@tauri-apps/api/dpi";
   import {
     activeProvider,
     activePeriod,
@@ -14,6 +14,8 @@
     fetchData,
     warmCache,
     warmAllPeriods,
+    clearUsageCacheForProviders,
+    seedUsageCache,
   } from "./lib/stores/usage.js";
   import {
     ALL_USAGE_PROVIDER_ID,
@@ -31,7 +33,8 @@
     hydrateRateLimits,
     fetchRateLimits,
   } from "./lib/stores/rateLimits.js";
-  import { providerPayload } from "./lib/rateLimitMonitor.js";
+  import { providerPayload } from "./lib/views/rateLimitMonitor.js";
+  import { setDeviceIncludeFlag, setSshHostIncludeFlag } from "./lib/views/deviceStats.js";
   import {
     DEFAULT_HEADER_TABS,
     areHeaderTabsEqual,
@@ -40,27 +43,20 @@
     loadSettings,
     resolveVisibleProvider,
     settings,
+    updateSetting,
   } from "./lib/stores/settings.js";
   import { initializeRuntimeFromSettings } from "./lib/bootstrap.js";
-  import { syncTrayConfig } from "./lib/traySync.js";
-  import {
-    DEFAULT_MAX_WINDOW_HEIGHT,
-    MIN_WINDOW_HEIGHT,
-    RESIZE_SETTLE_DELAY_MS,
-    WINDOW_WIDTH,
-    clampWindowHeight,
-    classifyResize,
-    measureTargetWindowHeight,
-    resolveMonitorMaxWindowHeight,
-  } from "./lib/windowSizing.js";
-  import { syncNativeWindowSurface } from "./lib/windowAppearance.js";
+  import { syncTrayConfig } from "./lib/tray/sync.js";
+  import { DEFAULT_MAX_WINDOW_HEIGHT } from "./lib/windowSizing.js";
+  import { createResizeOrchestrator, type ResizeOrchestrator } from "./lib/resizeOrchestrator.js";
+  import { syncNativeWindowSurface } from "./lib/window/appearance.js";
   import {
     captureResizeDebugSnapshot,
     formatDebugError,
     initResizeDebug,
     isResizeDebugEnabled,
     logResizeDebug,
-  } from "./lib/resizeDebug.js";
+  } from "./lib/uiStability.js";
 
   import Toggle from "./lib/components/Toggle.svelte";
   import TimeTabs from "./lib/components/TimeTabs.svelte";
@@ -74,12 +70,16 @@
   import Settings from "./lib/components/Settings.svelte";
   import Calendar from "./lib/components/Calendar.svelte";
   import DateNav from "./lib/components/DateNav.svelte";
-  import type { AccordionToggleDetail, HeaderTabs, UsagePeriod, UsageProvider, RateLimitsPayload } from "./lib/types/index.js";
+  import DevicesView from "./lib/components/DevicesView.svelte";
+  import SingleDeviceView from "./lib/components/SingleDeviceView.svelte";
+  import type { HeaderTabs, UsagePayload, UsagePeriod, UsageProvider, RateLimitsPayload } from "./lib/types/index.js";
 
   let showSplash = $state(true);
   let appReady = $state(false);
   let showSettings = $state(false);
   let showCalendar = $state(false);
+  let showDevices = $state(false);
+  let selectedDevice = $state<string | null>(null);
   let provider = $state<UsageProvider>(DEFAULT_USAGE_PROVIDER);
   let period = $state<UsagePeriod>("day");
   let offset = $state(0);
@@ -96,7 +96,11 @@
   let brandTheming = $state(true);
   let headerTabs = $state<HeaderTabs>(DEFAULT_HEADER_TABS);
   let popEl: HTMLDivElement | null = null;
-  let maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
+  let resizeOrch: ResizeOrchestrator | null = null;
+  let scrollThresholdH = $state(DEFAULT_MAX_WINDOW_HEIGHT);
+  let isScrollLocked = $state(false);
+  let deviceToggleGuard = 0;
+  const REMOTE_USAGE_CACHE_PROVIDERS: UsageProvider[] = [ALL_USAGE_PROVIDER_ID, "claude"];
 
   let headerToggleOptions = $derived.by(() =>
     getVisibleHeaderProviders(headerTabs).map((value) => ({
@@ -110,7 +114,7 @@
 
   // Subscribe to stores
   $effect(() => {
-    const unsub1 = usageData.subscribe((v) => (data = v));
+    const unsub1 = usageData.subscribe((v) => { if (deviceToggleGuard === 0) data = v; });
     const unsub2 = isLoading.subscribe((v) => (loading = v));
     const unsub3 = settings.subscribe((s) => {
       brandTheming = s.brandTheming;
@@ -160,6 +164,7 @@
   async function handleProviderChange(p: UsageProvider) {
     const nextProvider = resolveVisibleProvider(p, headerTabs);
     if (provider === nextProvider) return;
+    logger.info("navigation", `Provider: ${nextProvider}`);
     provider = nextProvider;
     activeProvider.set(nextProvider);
     await fetchData(nextProvider, period, offset);
@@ -176,6 +181,7 @@
 
   async function handlePeriodChange(p: UsagePeriod) {
     if (period === p && offset === 0) return;
+    logger.info("navigation", `Period: ${p}`);
     const prov = provider;
     period = p;
     offset = 0;
@@ -190,6 +196,7 @@
   }
 
   async function handleOffsetChange(delta: number) {
+    logger.info("navigation", `Offset: delta=${delta}`);
     const prov = provider;
     const per = period;
     offset += delta;
@@ -205,6 +212,7 @@
 
   async function handleOffsetReset() {
     if (offset === 0) return;
+    logger.info("navigation", "Offset reset");
     const prov = provider;
     const per = period;
     offset = 0;
@@ -216,6 +224,7 @@
   }
 
   async function handleSettingsOpen() {
+    logger.info("navigation", "Settings opened");
     showCalendar = false;
     showSettings = true;
     await tick();
@@ -223,12 +232,14 @@
   }
 
   async function handleSettingsClose() {
+    logger.info("navigation", "Settings closed");
     showSettings = false;
     await tick();
     syncSizeAndVerify("settings-close");
   }
 
   async function handleCalendarOpen() {
+    logger.info("navigation", "Calendar opened");
     showSettings = false;
     showCalendar = true;
     await tick();
@@ -236,268 +247,98 @@
   }
 
   async function handleCalendarClose() {
+    logger.info("navigation", "Calendar closed");
     showCalendar = false;
     await tick();
     syncSizeAndVerify("calendar-close");
   }
 
-  // ── Window resize ──────────────────────────────────────────────
+  function handleDeviceSelect(device: string) {
+    logger.info("device", `Selected: ${device}`);
+    selectedDevice = device;
+  }
+
+  async function handleDeviceBack() {
+    logger.info("device", "Device view closed");
+    selectedDevice = null;
+    await tick();
+    syncSizeAndVerify("device-back");
+  }
+
+  async function handleToggleDeviceStats(device: string, includeInStats: boolean) {
+    logger.info("device", `Stats toggle: ${device} include=${includeInStats}`);
+    const previousData = data;
+    const previousHosts = get(settings).sshHosts;
+
+    // Guard: prevent background fetchData refreshes from overwriting the
+    // optimistic update via the usageData subscription during the async flow.
+    // Without this, a pending stale-while-revalidate background refresh can
+    // resolve mid-toggle and revert the checkbox via usageData.set(oldData).
+    deviceToggleGuard++;
+    // Reject any in-flight background refreshes by bumping the request ID.
+    clearUsageCacheForProviders(REMOTE_USAGE_CACHE_PROVIDERS);
+
+    // Optimistic UI: immediately flip the checkbox so the user sees instant feedback.
+    data = setDeviceIncludeFlag(data, device, includeInStats);
+
+    let failed = false;
+    try {
+      // 1. Update Rust in-memory state + persist to settings.
+      await invoke("toggle_device_include_in_stats", { alias: device, includeInStats });
+      const updatedHosts = setSshHostIncludeFlag(previousHosts, device, includeInStats);
+      await updateSetting("sshHosts", updatedHosts);
+
+      // 2. Clear only the final usage-view cache so provider aggregates stay warm.
+      await invoke("clear_usage_view_cache");
+
+      // 3. Direct IPC fetch + store update (bypasses fetchData's stale-while-revalidate).
+      const freshData = await invoke<UsagePayload>("get_usage_data", { provider, period, offset });
+      seedUsageCache(provider, period, offset, freshData);
+      data = freshData;
+      usageData.set(freshData);
+    } catch (err) {
+      console.error("Failed to toggle device stats:", err);
+      failed = true;
+      data = previousData;
+      if (previousData) {
+        seedUsageCache(provider, period, offset, previousData);
+        usageData.set(previousData);
+      }
+    } finally {
+      deviceToggleGuard--;
+    }
+
+    // Rollback Rust state + settings after the guard is released so the
+    // subscription is active again for any store updates from persistence.
+    if (failed) {
+      try {
+        await invoke("toggle_device_include_in_stats", {
+          alias: device,
+          includeInStats: !includeInStats,
+        });
+      } catch (rollbackErr) {
+        console.error("Failed to rollback device stats toggle:", rollbackErr);
+      }
+      try {
+        await updateSetting("sshHosts", previousHosts);
+      } catch (settingsRollbackErr) {
+        console.error("Failed to rollback sshHosts setting:", settingsRollbackErr);
+      }
+    }
+  }
+
+  // ── Window resize (delegated to resizeOrchestrator.ts) ──
   //
-  //  syncSize()        — measure .pop's full content height via
-  //                      scrollHeight (immune to viewport capping) and
-  //                      call setSize() immediately.  Used after
-  //                      await tick() in every user-initiated view swap.
-  //
-  //  resizeToContent() — called by ResizeObserver.
-  //    • GROW  → immediate.  Prevents clipping during CSS
-  //              transitions (detail-panel, ModelList expand).
-  //    • SHRINK → debounced (16 ms + double-rAF).  Lets {#key}
-  //              destroy→create and transition-end settle first.
-  let resizeRaf = 0;
-  let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastWindowH = typeof window === "undefined" ? 0 : window.innerHeight;
-  let windowAnimationRaf = 0;
-  let windowAnimationToken = 0;
-  let isWindowHeightAnimating = false;
-  const webviewWindow = getCurrentWebviewWindow();
+  // All resize state, measurement, throttling, and animation logic lives in
+  // the orchestrator closure. App.svelte only holds the reactive Svelte state
+  // (scrollThresholdH, isScrollLocked) which the orchestrator updates via
+  // callbacks, and delegates all calls through resizeOrch.
+
   const tauriWindow = getCurrentWindow();
 
-  function captureDebugSnapshot(reason: string) {
-    return isResizeDebugEnabled()
-      ? captureResizeDebugSnapshot(reason, popEl, { lastWindowH, maxWindowH })
-      : {};
-  }
-
-  function clearPendingResize() {
-    logResizeDebug("resize:clear-pending", {
-      hadTimer: Boolean(resizeTimer),
-      hadRaf: resizeRaf !== 0,
-      ...captureDebugSnapshot("clear-pending"),
-    });
-    if (resizeTimer) {
-      clearTimeout(resizeTimer);
-      resizeTimer = null;
-    }
-
-    cancelAnimationFrame(resizeRaf);
-    resizeRaf = 0;
-  }
-
-  function clearWindowHeightAnimation() {
-    if (windowAnimationRaf !== 0) {
-      cancelAnimationFrame(windowAnimationRaf);
-      windowAnimationRaf = 0;
-    }
-    windowAnimationToken += 1;
-    isWindowHeightAnimating = false;
-  }
-
-  async function refreshWindowMetrics() {
-    try {
-      const monitor = await currentMonitor();
-      if (!monitor) return;
-      maxWindowH = resolveMonitorMaxWindowHeight(
-        monitor.workArea.size.height,
-        monitor.scaleFactor,
-      );
-      logResizeDebug("resize:monitor-metrics", {
-        workAreaHeight: monitor.workArea.size.height,
-        scaleFactor: monitor.scaleFactor,
-        maxWindowH,
-      });
-    } catch {
-      maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
-      logResizeDebug("resize:monitor-metrics-fallback", { maxWindowH });
-    }
-  }
-
-  function measureContentHeight(): number | null {
-    if (!popEl) return null;
-    // .pop can be clipped by the current native window height, so use the
-    // intrinsic scroll height rather than the rendered box height.
-    return measureTargetWindowHeight(popEl.scrollHeight);
-  }
-
-  function applyWindowHeight(targetHeight: number, source = "unknown") {
-    const nextHeight = clampWindowHeight(targetHeight, maxWindowH, MIN_WINDOW_HEIGHT);
-    const disposition = classifyResize(nextHeight, lastWindowH, MIN_WINDOW_HEIGHT);
-    logResizeDebug("resize:apply-request", {
-      source,
-      targetHeight,
-      nextHeight,
-      disposition,
-      ...captureDebugSnapshot(`apply-${source}`),
-    });
-    if (disposition === "skip") return;
-    lastWindowH = nextHeight;
-    webviewWindow
-      .setSize(new LogicalSize(WINDOW_WIDTH, nextHeight))
-      .then(() => {
-        logResizeDebug("resize:set-size-resolved", {
-          source,
-          nextHeight,
-          ...captureDebugSnapshot(`set-size-resolved-${source}`),
-        });
-      })
-      .catch((error) => {
-        logResizeDebug("resize:set-size-rejected", {
-          source,
-          nextHeight,
-          error: formatDebugError(error),
-          ...captureDebugSnapshot(`set-size-rejected-${source}`),
-        });
-        if (typeof window !== "undefined") {
-          lastWindowH = window.innerHeight;
-        }
-      });
-  }
-
-  function syncSize(source = "unknown") {
-    const nextHeight = measureContentHeight();
-    logResizeDebug("resize:sync-size", {
-      source,
-      measuredHeight: nextHeight,
-      ...captureDebugSnapshot(`sync-${source}`),
-    });
-    if (nextHeight == null) return;
-    applyWindowHeight(nextHeight, source);
-  }
-
-  function easeWindowHeight(progress: number): number {
-    const t = Math.max(0, Math.min(progress, 1));
-    const inverse = 1 - t;
-    return 1 - inverse * inverse * inverse;
-  }
-
-  function animateWindowHeight(
-    targetHeight: number,
-    durationMs: number,
-    source = "unknown",
-  ) {
-    const startHeight = typeof window === "undefined" ? lastWindowH : window.innerHeight;
-    const nextHeight = clampWindowHeight(targetHeight, maxWindowH, MIN_WINDOW_HEIGHT);
-    const disposition = classifyResize(nextHeight, startHeight, MIN_WINDOW_HEIGHT);
-    logResizeDebug("resize:animate-request", {
-      source,
-      durationMs,
-      startHeight,
-      targetHeight,
-      nextHeight,
-      disposition,
-      ...captureDebugSnapshot(`animate-${source}`),
-    });
-
-    if (disposition === "skip" || durationMs <= 0) {
-      clearWindowHeightAnimation();
-      applyWindowHeight(nextHeight, `${source}:immediate`);
-      syncSizeAndVerify(`${source}:verify`);
-      return;
-    }
-
-    clearPendingResize();
-    clearWindowHeightAnimation();
-
-    const animationToken = windowAnimationToken;
-    const startedAt = performance.now();
-    isWindowHeightAnimating = true;
-    lastWindowH = startHeight;
-
-    const step = (now: number) => {
-      if (animationToken !== windowAnimationToken) return;
-
-      const progress = Math.min((now - startedAt) / durationMs, 1);
-      const eased = easeWindowHeight(progress);
-      const interpolatedHeight = Math.round(startHeight + ((nextHeight - startHeight) * eased));
-      applyWindowHeight(interpolatedHeight, `${source}:frame`);
-
-      if (progress >= 1) {
-        windowAnimationRaf = 0;
-        isWindowHeightAnimating = false;
-        syncSizeAndVerify(`${source}:complete`);
-        return;
-      }
-
-      windowAnimationRaf = requestAnimationFrame(step);
-    };
-
-    windowAnimationRaf = requestAnimationFrame(step);
-  }
-
-  /** syncSize + schedule a delayed re-measurement.
-   *  Catches content whose layout settles a frame or two after the
-   *  initial measurement (e.g. chart detail panel pushing footer down). */
-  function syncSizeAndVerify(source = "unknown") {
-    logResizeDebug("resize:sync-and-verify", { source });
-    syncSize(`${source}:initial`);
-    scheduleSettledResize(100, `${source}:verify`);
-  }
-
-  function scheduleSettledResize(delay = RESIZE_SETTLE_DELAY_MS, source = "unknown") {
-    logResizeDebug("resize:schedule-settled", {
-      source,
-      delay,
-      ...captureDebugSnapshot(`schedule-${source}`),
-    });
-    clearPendingResize();
-    resizeTimer = setTimeout(() => {
-      resizeTimer = null;
-      resizeRaf = requestAnimationFrame(() => {
-        resizeRaf = requestAnimationFrame(() => {
-          resizeRaf = 0;
-          logResizeDebug("resize:settled-fire", {
-            source,
-            ...captureDebugSnapshot(`settled-fire-${source}`),
-          });
-          syncSize(`${source}:settled`);
-        });
-      });
-    }, delay);
-  }
-
-  function resizeToContent(source = "observer") {
-    if (isWindowHeightAnimating) {
-      logResizeDebug("resize:observer-skipped-animation", {
-        source,
-        ...captureDebugSnapshot(`observer-skipped-${source}`),
-      });
-      return;
-    }
-
-    const measuredHeight = measureContentHeight();
-    logResizeDebug("resize:observer-measure", {
-      source,
-      measuredHeight,
-      ...captureDebugSnapshot(`resize-to-content-${source}`),
-    });
-    if (measuredHeight == null) return;
-    const nextHeight = clampWindowHeight(measuredHeight, maxWindowH, MIN_WINDOW_HEIGHT);
-    const disposition = classifyResize(nextHeight, lastWindowH, MIN_WINDOW_HEIGHT);
-
-    switch (disposition) {
-      case "grow":
-        clearPendingResize();
-        applyWindowHeight(measuredHeight, `${source}:grow`);
-        // Re-measure after setSize settles — the first scrollHeight
-        // can miss content still laying out (e.g. detail panel + footer).
-        scheduleSettledResize(100, `${source}:grow`);
-        return;
-      case "shrink":
-        scheduleSettledResize(RESIZE_SETTLE_DELAY_MS, `${source}:shrink`);
-        return;
-      default:
-        return;
-    }
-  }
-
-  function handleBreakdownAccordionToggle(detail: AccordionToggleDetail) {
-    const direction = detail.expanding ? "expand" : "collapse";
-    const currentHeight = typeof window === "undefined" ? lastWindowH : window.innerHeight;
-    const targetHeight = currentHeight + (detail.expanding ? detail.height : -detail.height);
-    animateWindowHeight(
-      targetHeight,
-      detail.durationMs,
-      `breakdown-${detail.scope}-${direction}`,
-    );
+  /** Convenience wrapper — forwards to orchestrator or no-ops before init. */
+  function syncSizeAndVerify(source?: string) {
+    resizeOrch?.syncSizeAndVerify(source);
   }
 
   onMount(() => {
@@ -506,6 +347,36 @@
     let unlisten: (() => void) | undefined;
     let unlistenWindowResize: (() => void) | undefined;
     const colorScheme = window.matchMedia("(prefers-color-scheme: light)");
+
+    // Create the resize orchestrator (all resize state lives in its closure)
+    resizeOrch = createResizeOrchestrator({
+      getPopEl: () => popEl,
+      invoke: (cmd, args) => invoke(cmd, args),
+      onScrollLockChange: (locked) => {
+        isScrollLocked = locked;
+      },
+      currentMonitor: () => currentMonitor(),
+      logDebug: logResizeDebug,
+      captureDebugSnapshot: (reason) =>
+        captureResizeDebugSnapshot(reason, popEl, {
+          maxWindowH: resizeOrch?.getMaxWindowH() ?? DEFAULT_MAX_WINDOW_HEIGHT,
+          scrollThresholdH: resizeOrch?.getScrollThresholdH() ?? DEFAULT_MAX_WINDOW_HEIGHT,
+          isScrollLocked: resizeOrch?.getIsScrollLocked() ?? false,
+        }),
+      formatDebugError,
+      isDebugEnabled: isResizeDebugEnabled,
+    });
+
+    /** Local snapshot helper for event handlers that need debug snapshots. */
+    const captureSnapshot = (reason: string) =>
+      isResizeDebugEnabled()
+        ? captureResizeDebugSnapshot(reason, popEl, {
+            maxWindowH: resizeOrch?.getMaxWindowH() ?? DEFAULT_MAX_WINDOW_HEIGHT,
+            scrollThresholdH: resizeOrch?.getScrollThresholdH() ?? DEFAULT_MAX_WINDOW_HEIGHT,
+            isScrollLocked: resizeOrch?.getIsScrollLocked() ?? false,
+          })
+        : {};
+
     const handleColorSchemeChange = () => {
       if (!document.documentElement.hasAttribute("data-theme")) {
         logResizeDebug("theme:system-change", {
@@ -515,21 +386,21 @@
       }
     };
     const handleBrowserResize = () => {
-      logResizeDebug("browser:resize", captureDebugSnapshot("browser-resize"));
+      logResizeDebug("browser:resize", captureSnapshot("browser-resize"));
     };
     const handleWindowFocus = () => {
-      logResizeDebug("window:focus", captureDebugSnapshot("window-focus"));
+      logResizeDebug("window:focus", captureSnapshot("window-focus"));
       void syncNativeWindowSurface(undefined, get(settings).glassEffect).catch(() => {});
       syncSizeAndVerify("window-focus");
     };
     const handleWindowBlur = () => {
-      logResizeDebug("window:blur", captureDebugSnapshot("window-blur"));
+      logResizeDebug("window:blur", captureSnapshot("window-blur"));
     };
     const handleVisibilityChange = () => {
       logResizeDebug("document:visibility-change", {
         hidden: document.hidden,
         visibilityState: document.visibilityState,
-        ...captureDebugSnapshot("document-visibility-change"),
+        ...captureSnapshot("document-visibility-change"),
       });
     };
     const handleWindowError = (event: ErrorEvent) => {
@@ -547,10 +418,11 @@
       });
     };
     initResizeDebug();
-    logResizeDebug("app:mount", captureDebugSnapshot("mount"));
+    logResizeDebug("app:mount", captureSnapshot("mount"));
 
     const init = async () => {
-      await refreshWindowMetrics();
+      await resizeOrch!.refreshWindowMetrics();
+      scrollThresholdH = resizeOrch!.getScrollThresholdH();
 
       // Load persisted settings and apply theme + defaults (non-blocking)
       try {
@@ -566,7 +438,7 @@
         });
       } catch {
         // Settings load failed — continue with defaults
-        logResizeDebug("app:settings-load-failed");
+        logResizeDebug("app:settings-load-failed", {});
       }
 
       await fetchData(provider, period, offset);
@@ -575,7 +447,7 @@
         provider,
         period,
         offset,
-        ...captureDebugSnapshot("data-ready"),
+        ...captureSnapshot("data-ready"),
       });
 
       if (period === "5h") {
@@ -599,9 +471,9 @@
               width: entry.contentRect.width,
               height: entry.contentRect.height,
             })),
-            ...captureDebugSnapshot("resize-observer"),
+            ...captureSnapshot("resize-observer"),
           });
-          resizeToContent("resize-observer");
+          resizeOrch?.resizeToContent("resize-observer");
         });
         observer.observe(popEl);
         syncSizeAndVerify("initial-mount");
@@ -621,7 +493,7 @@
         logResizeDebug("tauri:window-resized", {
           width: payload.width,
           height: payload.height,
-          ...captureDebugSnapshot("tauri-window-resized"),
+          ...captureSnapshot("tauri-window-resized"),
         });
       });
 
@@ -652,9 +524,8 @@
       unlisten?.();
       unlistenWindowResize?.();
       observer?.disconnect();
-      if (resizeTimer) clearTimeout(resizeTimer);
-      cancelAnimationFrame(resizeRaf);
-      clearWindowHeightAnimation();
+      resizeOrch?.destroy();
+      resizeOrch = null;
       window.removeEventListener("resize", handleBrowserResize);
       window.removeEventListener("focus", handleWindowFocus);
       window.removeEventListener("blur", handleWindowBlur);
@@ -671,7 +542,7 @@
 </script>
 
 <div class="pop" bind:this={popEl}>
-  <div class="pop-content">
+  <div class="pop-content" style:max-height="{scrollThresholdH}px" style:overflow-y={scrollThresholdH < DEFAULT_MAX_WINDOW_HEIGHT ? 'auto' : 'visible'}>
     {#if showSplash}
       <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
     {:else if appReady && !data}
@@ -680,8 +551,12 @@
       <Settings onBack={handleSettingsClose} />
     {:else if showCalendar}
       <Calendar onBack={handleCalendarClose} />
+    {:else if selectedDevice}
+      <SingleDeviceView device={selectedDevice} onBack={handleDeviceBack} />
+    {:else if showDevices}
+      <DevicesView onBack={() => { showDevices = false; }} onDeviceSelect={handleDeviceSelect} onSettings={handleSettingsOpen} />
     {:else if data}
-      {#if showRefresh}<div class="refresh-bar"></div>{/if}
+      {#if showRefresh}<div class="refresh-bar" aria-hidden="true"></div>{/if}
       <Toggle
         active={provider}
         options={headerToggleOptions}
@@ -728,18 +603,22 @@
       {:else if data.total_cost === 0 && data.total_tokens === 0}
         <div class="empty-period">{emptyPeriodLabel(period, offset)}</div>
       {:else}
-        <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} />
+        <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} />
       {/if}
 
-      {#if (period !== "5h" && data.model_breakdown.length > 0) || data.subagent_stats}
+      {#if (period !== "5h" && data.model_breakdown.length > 0) || data.subagent_stats || (data.device_breakdown && data.device_breakdown.length > 0)}
         <div class="hr"></div>
         <Breakdown
           models={period !== "5h" ? data.model_breakdown : []}
-          onAccordionToggle={handleBreakdownAccordionToggle}
+          onAccordionToggle={(detail) => resizeOrch?.handleBreakdownAccordionToggle(detail)}
           subagentStats={data.subagent_stats}
+          deviceBreakdown={data.device_breakdown}
+          onDeviceSelect={handleDeviceSelect}
+          onShowAllDevices={() => { showDevices = true; }}
+          onToggleDeviceStats={handleToggleDeviceStats}
         />
       {/if}
-      <Footer {data} {provider} {rateLimits} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} />
+      <Footer {data} {provider} {rateLimits} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} onDevices={() => { showDevices = true; }} />
     {:else}
       <div class="loading">
         <div class="spinner"></div>
@@ -757,8 +636,14 @@
     animation: popIn .32s cubic-bezier(.25,.8,.25,1) both;
   }
   .pop-content {
+    position: relative;
     min-width: 0;
     min-height: 100%;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .pop-content::-webkit-scrollbar {
+    display: none;
   }
   .hr { height: 1px; background: var(--border-subtle); margin: 0 12px; }
   .loading {
@@ -797,7 +682,13 @@
     color: var(--t3);
   }
   .refresh-bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
     height: 2px;
+    z-index: 2;
+    pointer-events: none;
     background: linear-gradient(90deg, transparent 0%, var(--t3) 50%, transparent 100%);
     background-size: 200% 100%;
     animation: shimmer 1.2s ease-in-out infinite;

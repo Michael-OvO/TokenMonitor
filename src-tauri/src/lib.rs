@@ -1,18 +1,17 @@
-#[allow(dead_code)] // Used by later tasks in the change-stats feature
-mod change_stats;
 mod commands;
-mod integrations;
+mod logging;
 mod models;
-mod parser;
-mod pricing;
+mod platform;
 mod rate_limits;
-#[allow(dead_code)] // Used by later tasks in the subagent-stats feature
-mod subagent_stats;
-mod tray_render;
+mod stats;
+mod tray;
+mod usage;
 
-#[cfg(target_os = "macos")]
-use commands::apply_default_window_surface;
-use commands::{sync_tray_title, AppState};
+use commands::{
+    sync_tray_title,
+    tray::{patch_tray_utilization, tray_utilization_from_rate_limits},
+    AppState,
+};
 use std::time::Duration;
 use tauri::{
     image::Image,
@@ -21,7 +20,83 @@ use tauri::{
     Emitter, Manager, WindowEvent,
 };
 use tauri_plugin_autostart::MacosLauncher;
+#[cfg(target_os = "macos")]
 use tauri_plugin_positioner::{Position, WindowExt};
+
+/// Extract (x, y) from a `tauri::Position` enum as physical-pixel f64.
+#[cfg(target_os = "macos")]
+fn pos_xy(p: &tauri::Position) -> (f64, f64) {
+    match p {
+        tauri::Position::Physical(ph) => (ph.x as f64, ph.y as f64),
+        tauri::Position::Logical(lo) => (lo.x, lo.y),
+    }
+}
+
+/// Extract (w, h) from a `tauri::Size` enum as physical-pixel f64.
+#[cfg(target_os = "macos")]
+fn size_wh(s: &tauri::Size) -> (f64, f64) {
+    match s {
+        tauri::Size::Physical(ph) => (ph.width as f64, ph.height as f64),
+        tauri::Size::Logical(lo) => (lo.width, lo.height),
+    }
+}
+
+/// Position the window centered below the tray icon using the rect from the
+/// click event.  Falls back to `tauri-plugin-positioner` if the rect looks
+/// invalid (zero-sized), and ultimately to `TopRight`.
+#[cfg(target_os = "macos")]
+fn move_window_below_tray(window: &tauri::WebviewWindow, tray_rect: &tauri::Rect) {
+    let (tw, th) = size_wh(&tray_rect.size);
+    let (tx, ty) = pos_xy(&tray_rect.position);
+
+    // Only use manual positioning when the rect is plausible.
+    if tw > 0.0 && th > 0.0 {
+        let win_size = window
+            .outer_size()
+            .unwrap_or(tauri::PhysicalSize::new(680, 600));
+        let x = tx + tw / 2.0 - win_size.width as f64 / 2.0;
+        let y = ty + th;
+        tracing::debug!(
+            tray_x = tx,
+            tray_y = ty,
+            tray_w = tw,
+            tray_h = th,
+            win_x = x,
+            win_y = y,
+            "Positioning window below tray icon"
+        );
+        let _ = window.set_position(tauri::PhysicalPosition::new(x as i32, y as i32));
+        return;
+    }
+
+    // Fallback: positioner plugin → TopRight
+    tracing::debug!("Tray rect invalid, falling back to positioner plugin");
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let ok = catch_unwind(AssertUnwindSafe(|| {
+        window.move_window(Position::TrayCenter)
+    }))
+    .map(|r| r.is_ok())
+    .unwrap_or(false);
+    if !ok {
+        tracing::debug!("TrayCenter unavailable, falling back to TopRight");
+        let _ = window.move_window(Position::TopRight);
+    }
+}
+
+/// Fallback positioning when no tray rect is available (e.g. right-click menu "Show").
+#[cfg(target_os = "macos")]
+fn move_window_near_tray(window: &tauri::WebviewWindow) {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let ok = catch_unwind(AssertUnwindSafe(|| {
+        window.move_window(Position::TrayCenter)
+    }))
+    .map(|r| r.is_ok())
+    .unwrap_or(false);
+    if !ok {
+        tracing::debug!("TrayCenter unavailable, falling back to TopRight");
+        let _ = window.move_window(Position::TopRight);
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -34,11 +109,22 @@ pub fn run() {
         ))
         .manage(AppState::new())
         .setup(|app| {
-            // Build quit menu for right-click
-            let quit = MenuItemBuilder::with_id("quit", "Quit TokenMonitor").build(app)?;
-            let menu = MenuBuilder::new(app).item(&quit).build()?;
+            // Initialize logging first — must happen before any tracing macros.
+            if let Ok(app_data) = app.path().app_data_dir() {
+                let logging_state = logging::init_logging(&app_data);
+                app.manage(logging_state);
+            }
 
-            // Build tray icon with dedicated high-res menu bar icon (44×44 @2x)
+            // Build tray menu (right-click on macOS/Windows, any click on Linux).
+            let show = MenuItemBuilder::with_id("show", "Show TokenMonitor").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "Quit TokenMonitor").build(app)?;
+            let menu = MenuBuilder::new(app)
+                .item(&show)
+                .separator()
+                .item(&quit)
+                .build()?;
+
+            // Build tray icon (44×44 @2x retina base icon)
             let tray_icon = Image::new_owned(
                 include_bytes!("../icons/tray-icon@2x.rgba").to_vec(),
                 44,
@@ -48,11 +134,38 @@ pub fn run() {
                 .icon(tray_icon)
                 .icon_as_template(true)
                 .title("$--.--")
+                .tooltip("TokenMonitor")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     if event.id() == "quit" {
                         app.exit(0);
+                    } else if event.id() == "show" {
+                        if let Some(window) = app.get_webview_window("main") {
+                            #[cfg(target_os = "windows")]
+                            {
+                                platform::windows::window::position_near_tray(&window);
+                                let _ = window.show();
+                            }
+                            #[cfg(target_os = "linux")]
+                            {
+                                // Pre-hint position before show (WM may respect this).
+                                platform::linux::position_top_right(&window);
+                                let _ = window.show();
+                                // Immediate re-position (works if WM realized fast enough).
+                                platform::linux::position_top_right(&window);
+                                platform::clamp_window_to_work_area(&window);
+                                // Deferred re-position to catch slow WM realization.
+                                platform::linux::deferred_reposition(window.clone());
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                move_window_near_tray(&window);
+                                platform::clamp_window_to_work_area(&window);
+                                let _ = window.show();
+                            }
+                            let _ = window.set_focus();
+                        }
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -61,6 +174,8 @@ pub fn run() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
+                        #[cfg(target_os = "macos")]
+                        rect,
                         ..
                     } = event
                     {
@@ -69,9 +184,27 @@ pub fn run() {
                             if window.is_visible().unwrap_or(false) {
                                 let _ = window.hide();
                             } else {
-                                let _ = window.show();
-                                if window.current_monitor().ok().flatten().is_some() {
-                                    let _ = window.move_window(Position::TrayCenter);
+                                #[cfg(target_os = "windows")]
+                                {
+                                    platform::windows::window::position_near_tray(&window);
+                                    let _ = window.show();
+                                }
+                                #[cfg(target_os = "linux")]
+                                {
+                                    // Pre-hint position before show (WM may respect this).
+                                    platform::linux::position_top_right(&window);
+                                    let _ = window.show();
+                                    // Immediate re-position (works if WM realized fast enough).
+                                    platform::linux::position_top_right(&window);
+                                    platform::clamp_window_to_work_area(&window);
+                                    // Deferred re-position to catch slow WM realization.
+                                    platform::linux::deferred_reposition(window.clone());
+                                }
+                                #[cfg(target_os = "macos")]
+                                {
+                                    move_window_below_tray(&window, &rect);
+                                    platform::clamp_window_to_work_area(&window);
+                                    let _ = window.show();
                                 }
                                 let _ = window.set_focus();
                             }
@@ -80,29 +213,68 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Set autosaveName so macOS remembers the user's chosen menu bar position
-            #[cfg(target_os = "macos")]
-            if let Some(tray) = app.tray_by_id("main-tray") {
-                let _ = tray.with_inner_tray_icon(|inner| {
-                    if let Some(ns_status_item) = inner.ns_status_item() {
-                        let name = objc2_foundation::NSString::from_str("TokenMonitor");
-                        ns_status_item.setAutosaveName(Some(&name));
+            // Hide window on focus loss (popover behavior), but not when
+            // focus moves to another app window (e.g. float-ball) or when a
+            // settings toggle causes transient focus loss (dock icon, etc.).
+            if let Some(window) = app.get_webview_window("main") {
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::Focused(false) = event {
+                        let handle = window_clone.app_handle().clone();
+                        let win = window_clone.clone();
+                        std::thread::spawn(move || {
+                            // Brief delay to let the OS settle focus on the new window.
+                            std::thread::sleep(Duration::from_millis(150));
+
+                            // A command (create_float_ball, set_dock_icon_visible, etc.)
+                            // requested that the next blur be ignored.
+                            let state = handle.state::<AppState>();
+                            if state
+                                .suppress_auto_hide
+                                .swap(false, std::sync::atomic::Ordering::SeqCst)
+                            {
+                                return;
+                            }
+
+                            let any_app_window_focused = handle
+                                .webview_windows()
+                                .values()
+                                .any(|w| w.is_focused().unwrap_or(false));
+                            if !any_app_window_focused {
+                                let _ = win.hide();
+                            }
+                        });
                     }
                 });
             }
 
-            // Hide window on focus loss (popover behavior)
-            let window = app.get_webview_window("main").unwrap();
-            #[cfg(target_os = "macos")]
-            if let Err(err) = apply_default_window_surface(app.handle()) {
-                eprintln!("failed to apply default native window surface: {err}");
-            }
-            let window_clone = window.clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::Focused(false) = event {
-                    let _ = window_clone.hide();
+            // Initialize SSH cache manager with Tauri app data dir.
+            if let Ok(app_data) = app.path().app_data_dir() {
+                let state = app.state::<commands::AppState>();
+                let mut cache = state.ssh_cache.blocking_write();
+                *cache = Some(usage::ssh_remote::SshCacheManager::new(&app_data));
+
+                // Load cached dynamic pricing immediately (non-blocking).
+                if let Some(rates) = usage::litellm::load_cached(&app_data) {
+                    usage::pricing::set_dynamic_pricing(rates);
                 }
-            });
+
+                // Spawn async refresh if cache is stale (>24h).
+                if usage::litellm::should_refresh(&app_data) {
+                    let data_dir = app_data.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match usage::litellm::fetch_and_cache(&data_dir).await {
+                            Ok(rates) => {
+                                usage::pricing::set_dynamic_pricing(rates);
+                                tracing::info!("LiteLLM pricing refreshed");
+                            }
+                            Err(e) => {
+                                tracing::warn!("LiteLLM fetch failed (using fallback): {e}");
+                            }
+                        }
+                    });
+                }
+            }
 
             // Spawn background setup + polling
             let app_handle = app.handle().clone();
@@ -113,30 +285,87 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::get_usage_data,
-            commands::get_monthly_usage,
-            commands::get_known_models,
-            commands::get_last_usage_debug,
-            commands::set_window_surface,
-            commands::set_glass_effect,
-            commands::set_dock_icon_visible,
-            commands::set_refresh_interval,
-            commands::set_tray_config,
-            commands::clear_cache,
-            commands::get_rate_limits,
+            commands::usage_query::get_usage_data,
+            commands::calendar::get_monthly_usage,
+            commands::usage_query::get_known_models,
+            commands::config::get_last_usage_debug,
+            commands::config::set_window_surface,
+            commands::config::set_glass_effect,
+            commands::config::set_dock_icon_visible,
+            commands::config::set_refresh_interval,
+            commands::tray::set_tray_config,
+            commands::tray::get_status_widget_summary,
+            commands::config::clear_cache,
+            commands::config::clear_payload_cache,
+            commands::config::clear_usage_view_cache,
+            commands::config::reposition_window,
+            commands::config::set_window_size_and_align,
+            commands::config::get_rate_limits,
+            commands::float_ball::create_float_ball,
+            commands::float_ball::destroy_float_ball,
+            commands::float_ball::set_float_ball_expanded,
+            commands::float_ball::move_float_ball_to,
+            commands::float_ball::snap_float_ball,
+            commands::float_ball::init_taskbar_panel,
+            commands::float_ball::destroy_taskbar_panel_cmd,
+            commands::ssh::get_ssh_hosts,
+            commands::ssh::get_ssh_host_statuses,
+            commands::ssh::init_ssh_hosts,
+            commands::ssh::add_ssh_host,
+            commands::ssh::remove_ssh_host,
+            commands::ssh::toggle_ssh_host,
+            commands::ssh::test_ssh_connection,
+            commands::ssh::sync_ssh_host,
+            commands::ssh::get_device_usage,
+            commands::ssh::get_single_device_usage,
+            commands::ssh::toggle_device_include_in_stats,
+            commands::logging::log_frontend_message,
+            commands::logging::set_log_level,
+            commands::logging::get_log_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error running TokenMonitor");
 }
 
+/// Fetch fresh rate limits and update cached state + tray utilization.
+async fn refresh_rate_limits(app: &tauri::AppHandle, state: &AppState) {
+    let codex_dir = state.parser.codex_dir().to_path_buf();
+    let cached = state.cached_rate_limits.read().await.clone();
+    let fresh = rate_limits::fetch_selected_rate_limits(
+        &codex_dir,
+        rate_limits::RateLimitSelection::All,
+        cached.as_ref(),
+    )
+    .await;
+
+    let merged = rate_limits::merge_rate_limits(fresh, cached.as_ref());
+
+    *state.cached_rate_limits.write().await = Some(merged.clone());
+    patch_tray_utilization(state, tray_utilization_from_rate_limits(Some(&merged))).await;
+
+    tracing::debug!("Background rate-limit refresh complete");
+
+    // Emit so the float ball and main window pick up the new data.
+    let _ = app.emit("status-widget-updated", ());
+}
+
 async fn background_loop(app: tauri::AppHandle) {
     tokio::time::sleep(Duration::from_secs(1)).await;
+    tracing::info!("Background refresh loop started");
 
     let state = app.state::<AppState>();
 
     sync_tray_title(&app, &state).await;
 
     let mut update_counter: u64 = 0;
+    let mut ssh_sync_counter: u64 = 0;
+    let mut rate_limit_counter: u64 = 0;
+
+    // SSH sync interval: every 10 local refresh cycles (~5 min at 30s interval).
+    const SSH_SYNC_EVERY_N_CYCLES: u64 = 10;
+    // Rate limit refresh: every 5 cycles (~2.5 min at 30s interval).
+    const RATE_LIMIT_REFRESH_EVERY_N_CYCLES: u64 = 5;
+
     loop {
         let interval_secs = {
             let interval = state.refresh_interval.read().await;
@@ -150,9 +379,86 @@ async fn background_loop(app: tauri::AppHandle) {
 
         tokio::time::sleep(Duration::from_secs(interval_secs)).await;
         update_counter += 1;
+        ssh_sync_counter += 1;
+        rate_limit_counter += 1;
 
-        state.parser.clear_payload_cache();
+        let changed = state.parser.invalidate_if_changed();
+        if changed {
+            tracing::debug!(
+                cycle = update_counter,
+                "Parser cache invalidated, data changed"
+            );
+        }
+
+        // Periodically refresh rate limits so the tray icon and float ball
+        // stay up to date even when the main window is hidden.
+        if rate_limit_counter >= RATE_LIMIT_REFRESH_EVERY_N_CYCLES {
+            rate_limit_counter = 0;
+            refresh_rate_limits(&app, &state).await;
+        }
+
         sync_tray_title(&app, &state).await;
-        let _ = app.emit("data-updated", update_counter);
+
+        // Periodically sync SSH hosts in background.
+        if ssh_sync_counter >= SSH_SYNC_EVERY_N_CYCLES {
+            ssh_sync_counter = 0;
+            let ssh_changed = sync_ssh_hosts(&state).await;
+            if ssh_changed {
+                // Invalidate parser cache so device data reflects new remote files.
+                state.parser.invalidate_if_changed();
+                let _ = app.emit("data-updated", update_counter);
+            }
+        }
+
+        if changed {
+            let _ = app.emit("data-updated", update_counter);
+        }
     }
+}
+
+/// Sync all enabled SSH hosts sequentially. Returns true if any data changed.
+async fn sync_ssh_hosts(state: &AppState) -> bool {
+    let configs = state.ssh_hosts.read().await;
+    let enabled: Vec<String> = configs
+        .iter()
+        .filter(|c| c.enabled)
+        .map(|c| c.alias.clone())
+        .collect();
+    drop(configs); // Release read lock before async work.
+
+    if enabled.is_empty() {
+        return false;
+    }
+
+    let cache_mgr = state.ssh_cache.read().await;
+    let mgr = match cache_mgr.as_ref() {
+        Some(m) => m,
+        None => return false,
+    };
+
+    let mut any_synced = false;
+    for alias in &enabled {
+        // Pre-test: skip sync if connection fails.
+        let test = usage::ssh_remote::test_connection(alias).await;
+        if !test.success {
+            tracing::warn!(
+                alias = %alias,
+                error = %test.message,
+                "SSH connection test failed, skipping sync"
+            );
+            continue;
+        }
+
+        match mgr.sync_host(alias).await {
+            Ok(count) if count > 0 => {
+                any_synced = true;
+            }
+            Err(e) => {
+                tracing::error!(alias = %alias, error = %e, "SSH sync failed");
+            }
+            _ => {}
+        }
+    }
+
+    any_synced
 }

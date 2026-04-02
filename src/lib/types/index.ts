@@ -4,6 +4,7 @@ export type UsageProvider = string;
 export type RateLimitProviderId = string;
 export type UsagePeriod = "5h" | "day" | "week" | "month" | "year";
 export type DefaultPeriod = Exclude<UsagePeriod, "year">;
+export type UsageSource = "ccusage" | "parser" | "mixed";
 
 export interface HeaderTabConfig {
   label: string;
@@ -24,10 +25,14 @@ export interface UsagePayload {
   five_hour_cost: number;
   last_updated: string;
   from_cache: boolean;
+  usage_source: UsageSource;
+  usage_warning: string | null;
   period_label: string;
   has_earlier_data: boolean;
   change_stats: ChangeStats | null;
   subagent_stats: SubagentStats | null;
+  device_breakdown: DeviceSummary[] | null;
+  device_chart_buckets: ChartBucket[] | null;
 }
 
 export interface ChartBucket {
@@ -123,7 +128,13 @@ export type AccordionToggleDetail = {
   durationMs: number;
   expanding: boolean;
   height: number;
-  scope: "main" | "subagents";
+  scope: "main" | "subagents" | "devices";
+};
+
+export type ChartDetailToggleDetail = {
+  durationMs: number;
+  fromHeight: number;
+  toHeight: number;
 };
 
 export interface CalendarDay {
@@ -136,6 +147,8 @@ export interface MonthlyUsagePayload {
   month: number;
   days: CalendarDay[];
   total_cost: number;
+  usage_source: UsageSource;
+  usage_warning: string | null;
 }
 
 // ── Rate limits ──
@@ -180,6 +193,82 @@ export interface TrayConfig {
   showCost: boolean;
   costPrecision: CostPrecision;
 }
+
+export interface StatusWidgetSummary {
+  config: TrayConfig;
+  totalCost: number;
+  claudeUtil: number | null;
+  codexUtil: number | null;
+  title: string;
+}
+
+// ── SSH / Device usage ──
+
+export interface SshHostInfo {
+  alias: string;
+  hostname: string;
+  user: string | null;
+  port: number;
+}
+
+export interface SshHostConfig {
+  alias: string;
+  enabled: boolean;
+  include_in_stats?: boolean;
+}
+
+export interface SshHostStatus {
+  alias: string;
+  enabled: boolean;
+  lastSync: string | null;
+  lastError: string | null;
+  fileCount: number;
+}
+
+export interface SshTestResult {
+  success: boolean;
+  message: string;
+  durationMs: number;
+}
+
+export interface SshSyncResult {
+  testSuccess: boolean;
+  testMessage: string;
+  testDurationMs: number;
+  recordsSynced: number;
+}
+
+export interface DeviceModelSummary {
+  display_name: string;
+  model_key: string;
+  cost: number;
+  tokens: number;
+}
+
+export interface DeviceSummary {
+  device: string;
+  total_cost: number;
+  total_tokens: number;
+  model_breakdown: DeviceModelSummary[];
+  is_local: boolean;
+  status: "online" | "offline" | "syncing" | "error";
+  last_synced: string | null;
+  error_message: string | null;
+  cost_percentage: number;
+  include_in_stats: boolean;
+}
+
+export interface DeviceUsagePayload {
+  devices: DeviceSummary[];
+  total_cost: number;
+  chart_buckets: ChartBucket[];
+  last_updated: string;
+  period_label: string;
+}
+
+export type ChartSegmentMode = "model" | "device";
+
+export type FloatBallExpandDirection = "left" | "right";
 
 export interface RateLimitRequestState {
   loading: boolean;

@@ -18,16 +18,18 @@ import {
   shouldSuppressProviderError,
   type RateLimitProvider,
   type RateLimitScope,
-} from "../rateLimitMonitor.js";
+} from "../views/rateLimitMonitor.js";
 import type {
   ProviderRateLimits,
   RateLimitsMonitorState,
   RateLimitsPayload,
 } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 
 const CACHE_KEY = "payload";
 const LEGACY_CACHE_FILE = "rate-limits.json";
 const LAST_SUCCESSFUL_AT_KEY = "lastSuccessfulAt";
+const MIN_RETRY_DELAY_MS = 1_000;
 
 interface PersistedProviderRateLimitRecord {
   payload: ProviderRateLimits | null;
@@ -97,7 +99,7 @@ async function persistProviderRecord(
     await store.set(LAST_SUCCESSFUL_AT_KEY, lastSuccessfulAt);
     await store.save();
   } catch (error) {
-    console.warn(`Failed to persist ${provider} rate limits:`, error);
+    logger.warn("rateLimits", `Failed to persist ${provider} rate limits: ${error}`);
   }
 }
 
@@ -140,11 +142,12 @@ function scheduleProviderRetry(
 
   const delay = new Date(deferredUntil).getTime() - Date.now();
   if (delay <= 0) return;
+  const retryDelayMs = Math.max(delay, MIN_RETRY_DELAY_MS);
 
   retryTimers[provider] = setTimeout(() => {
     delete retryTimers[provider];
     void fetchRateLimits(provider);
-  }, delay + 50);
+  }, retryDelayMs + 50);
 }
 
 function scheduleScopeRetries(
@@ -191,7 +194,9 @@ async function fetchProviderRateLimits(provider: RateLimitProvider): Promise<voi
   updateProviderMonitorState(provider, (state) => ({
     ...state,
     loading: true,
-    error: null,
+    // Keep the previous visible error while retrying so the UI does not
+    // oscillate between empty/error states on quick retries.
+    error: state.error,
     deferredUntil: providerDeferredUntil(cachedProvider, provider),
   }));
 
@@ -239,7 +244,7 @@ async function fetchProviderRateLimits(provider: RateLimitProvider): Promise<voi
       await persistProviderRecord(provider, mergedProvider, lastSuccessfulAt);
       scheduleProviderRetry(nextPayload, provider);
     } catch (error) {
-      console.error(`Failed to fetch ${provider} rate limits:`, error);
+      logger.error("rateLimits", `Failed to fetch ${provider} rate limits: ${error}`);
       const previousMonitor = get(rateLimitsMonitorState)[provider];
       const currentData = get(rateLimitsData);
       const currentProvider = providerPayload(currentData, provider);
@@ -269,6 +274,7 @@ async function fetchProviderRateLimits(provider: RateLimitProvider): Promise<voi
 
 export async function hydrateRateLimits(): Promise<void> {
   if (hydratePromise) return hydratePromise;
+  logger.debug("rateLimits", "Hydrating from cache");
 
   hydratePromise = (async () => {
     try {
@@ -324,6 +330,7 @@ export async function hydrateRateLimits(): Promise<void> {
 }
 
 export async function fetchRateLimits(scope: RateLimitScope = "all"): Promise<void> {
+  logger.debug("rateLimits", `Fetching: scope=${scope}`);
   lastRequestedScope = scope;
   requestedScopeStore.set(scope);
   await hydrateRateLimits();

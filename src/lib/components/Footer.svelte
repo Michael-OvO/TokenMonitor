@@ -1,6 +1,6 @@
 <script lang="ts">
   import { formatCost, formatTimeAgo } from "../utils/format.js";
-  import { footerFiveHourPct } from "../footerView.js";
+  import { footerFiveHourPct } from "../views/footer.js";
   import type { UsagePayload, RateLimitsPayload, UsageProvider } from "../types/index.js";
 
   interface Props {
@@ -9,8 +9,9 @@
     rateLimits?: RateLimitsPayload | null;
     onSettings: () => void;
     onCalendar: () => void;
+    onDevices?: () => void;
   }
-  let { data, provider, rateLimits, onSettings, onCalendar }: Props = $props();
+  let { data, provider, rateLimits, onSettings, onCalendar, onDevices }: Props = $props();
 
   let refreshTick = $state(0);
   let fiveHourPct = $derived.by(() => {
@@ -45,6 +46,15 @@
     {#if data.from_cache}cached · {/if}{timeAgo}
   </span>
   <div class="ft-actions">
+    {#if onDevices}
+    <button class="gear" onclick={onDevices} aria-label="Devices">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+        <line x1="8" y1="21" x2="16" y2="21"></line>
+        <line x1="12" y1="17" x2="12" y2="21"></line>
+      </svg>
+    </button>
+    {/if}
     <button class="gear" onclick={onCalendar} aria-label="Calendar">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>

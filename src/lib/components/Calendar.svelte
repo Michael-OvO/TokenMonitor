@@ -4,10 +4,10 @@
   import { activeProvider } from "../stores/usage.js";
   import { formatCost } from "../utils/format.js";
   import { planTierCost } from "../utils/plans.js";
-  import { intensityLevel, computeEarned, heatmapColor } from "../calendar-utils.js";
-  import { formatDebugError, isResizeDebugEnabled, logResizeDebug } from "../resizeDebug.js";
+  import { intensityLevel, computeEarned, heatmapColor } from "../utils/calendar.js";
   import { rateLimitsData } from "../stores/rateLimits.js";
   import { isRateLimitProvider } from "../providerMetadata.js";
+  import { logger } from "../utils/logger.js";
   import type { MonthlyUsagePayload, RateLimitsPayload, UsageProvider } from "../types/index.js";
 
   interface Props {
@@ -40,59 +40,35 @@
     fetchMonth(provider, viewYear, viewMonth);
   });
 
-  async function logCalendarReadDebug(
-    type: string,
-    details: Record<string, unknown>,
-  ) {
-    if (!isResizeDebugEnabled()) return;
-
-    try {
-      const backendReport = await invoke("get_last_usage_debug");
-      logResizeDebug(type, {
-        ...details,
-        backendReport,
-      });
-    } catch (error) {
-      logResizeDebug(type, {
-        ...details,
-        backendDebugError: formatDebugError(error),
-      });
-    }
-  }
-
   async function fetchMonth(prov: UsageProvider, year: number, month: number) {
     loading = true;
-    logResizeDebug("calendar:fetch-start", {
-      provider: prov,
-      year,
-      month,
-    });
     try {
       data = await invoke<MonthlyUsagePayload>("get_monthly_usage", {
         provider: prov,
         year,
         month,
       });
-      await logCalendarReadDebug("calendar:fetch-resolved", {
-        provider: prov,
-        year,
-        month,
-      });
     } catch (e) {
       console.error("Failed to fetch monthly usage:", e);
-      logResizeDebug("calendar:fetch-rejected", {
-        provider: prov,
+      data = {
         year,
         month,
-        error: formatDebugError(e),
-      });
-      data = { year, month, days: [], total_cost: 0 };
+        days: [],
+        total_cost: 0,
+        usage_source: "parser",
+        usage_warning: typeof e === "string"
+          ? e
+          : e instanceof Error
+            ? e.message
+            : "Failed to load monthly usage.",
+      };
     } finally {
       loading = false;
     }
   }
 
   function prevMonth() {
+    logger.info("calendar", "Previous month");
     if (viewMonth === 1) {
       viewYear -= 1;
       viewMonth = 12;
@@ -104,6 +80,7 @@
   function nextMonth() {
     const now = new Date();
     if (viewYear === now.getFullYear() && viewMonth === now.getMonth() + 1) return;
+    logger.info("calendar", "Next month");
     if (viewMonth === 12) {
       viewYear += 1;
       viewMonth = 1;
@@ -196,6 +173,18 @@
         disabled={isCurrentMonth}
       >›</button>
     </div>
+    {#if data?.usage_warning}
+      <div class="usage-warning">
+        <div class="usage-warning-title">
+          {#if data.usage_source === "mixed"}
+            Mixed usage sources
+          {:else}
+            Using legacy usage calculation
+          {/if}
+        </div>
+        <div class="usage-warning-text">{data.usage_warning}</div>
+      </div>
+    {/if}
 
     <!-- Day-of-week headers -->
     <div class="day-headers">
@@ -295,6 +284,23 @@
     justify-content: space-between;
     align-items: center;
     padding: 4px 4px 8px;
+  }
+  .usage-warning {
+    margin: 0 4px 10px;
+    padding: 9px 10px;
+    border-radius: 10px;
+    background: color-mix(in srgb, #d88d31 14%, var(--surface));
+    border: 1px solid color-mix(in srgb, #d88d31 30%, transparent);
+  }
+  .usage-warning-title {
+    font: 600 10px/1.2 'Inter', sans-serif;
+    color: var(--t1);
+    margin-bottom: 4px;
+  }
+  .usage-warning-text {
+    font: 400 9px/1.35 'Inter', sans-serif;
+    color: var(--t2);
+    white-space: pre-wrap;
   }
 
   .nav-arrow {
