@@ -118,7 +118,9 @@ pub(crate) fn normalize_claude_extra_usage(extra_usage: ClaudeExtraUsageData) ->
         // The OAuth usage endpoint reports credit values in cents.
         monthly_limit: extra_usage.monthly_limit / 100.0,
         used_credits: extra_usage.used_credits / 100.0,
-        utilization: extra_usage.utilization,
+        utilization: extra_usage
+            .utilization
+            .map(crate::models::normalize_utilization),
     }
 }
 
@@ -196,12 +198,12 @@ pub(super) async fn fetch_claude_rate_limits() -> Result<ProviderRateLimits, Rat
 
     for (id, label, data) in window_specs {
         if let Some(w) = data {
-            windows.push(RateLimitWindow {
-                window_id: id.to_string(),
-                label: label.to_string(),
-                utilization: w.utilization,
-                resets_at: Some(w.resets_at.clone()),
-            });
+            windows.push(RateLimitWindow::from_maybe_fraction(
+                id.to_string(),
+                label.to_string(),
+                w.utilization,
+                Some(w.resets_at.clone()),
+            ));
         }
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "token-monitor"
-version = "0.6.1"
+version = "0.6.2"
 description = "Cross-platform system tray token usage monitor for Claude Code and Codex"
 edition = "2021"
 
@@ -36,6 +36,19 @@ windows = { version = "0.58", features = [
     "Win32_UI_Shell",
     "Win32_System_Registry",
     "Win32_Graphics_Dwm",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", features = [
+    "NSAppearance",
+    "NSButton",
+    "NSControl",
+    "NSResponder",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
 ] }
 
 [dev-dependencies]

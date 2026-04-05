@@ -460,6 +460,11 @@ unsafe extern "system" fn panel_wnd_proc(
             let _ = InvalidateRect(hwnd, None, true);
             LRESULT(0)
         }
+        WM_THEMECHANGED | WM_SETTINGCHANGE => {
+            detect_taskbar_theme();
+            let _ = InvalidateRect(hwnd, None, true);
+            LRESULT(0)
+        }
         WM_DESTROY => {
             PANEL_EMBEDDED.store(false, Ordering::Relaxed);
             LRESULT(0)

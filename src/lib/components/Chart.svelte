@@ -1,15 +1,16 @@
 <script lang="ts">
   import { modelColor, formatCost, currencySymbol, convertCost, deviceColor } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
-  import { chartMode, chartSegmentMode } from "../stores/usage.js";
+  import { activeOffset, activePeriod, chartMode, chartSegmentMode } from "../stores/usage.js";
   import { isMacOS } from "../utils/platform.js";
   import { logger } from "../utils/logger.js";
   import type { ChartBucket } from "../types/index.js";
+  import { filterVisibleChartBuckets, getXAxisLabels } from "./chartBuckets.js";
 
   const detailAbove = false;
   const DETAIL_CONFIG = {
-    HOVER_DELAY_MS: 80,
-    LEAVE_DELAY_MS: 150,
+    HOVER_DELAY_MS: 0,
+    LEAVE_DELAY_MS: 120,
   } as const;
 
   interface Props {
@@ -53,10 +54,12 @@
           return { ...b, segments: segs, total: segs.reduce((sum, s) => sum + s.cost, 0) };
         })
   );
+  let visibleBuckets = $derived(filterVisibleChartBuckets(filteredBuckets, $activePeriod, $activeOffset));
+  let xAxisLabels = $derived(getXAxisLabels(visibleBuckets));
 
   const CHART_H = 108;
   const CHART_W = 280; // SVG viewbox width (y-axis labels sit outside)
-  let maxCost = $derived(Math.max(...filteredBuckets.map((b) => b.total), 0.01));
+  let maxCost = $derived(Math.max(...visibleBuckets.map((b) => b.total), 0.01));
   let hoveredIdx = $state(-1);
 
   let displayedIdx = $state(-1);
@@ -64,17 +67,13 @@
   let leaveTimer: ReturnType<typeof setTimeout> | null = null;
   let previousDataKey = $state("");
 
-  let displayed = $derived(displayedIdx >= 0 ? filteredBuckets[displayedIdx] : null);
+  let displayed = $derived(displayedIdx >= 0 ? visibleBuckets[displayedIdx] ?? null : null);
 
   function onEnter(i: number) {
     if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
     hoveredIdx = i;
-    if (hoverTimer) clearTimeout(hoverTimer);
-    hoverTimer = setTimeout(() => {
-      hoverTimer = null;
-      if (hoveredIdx !== i) return;
-      if (filteredBuckets[i]?.total > 0) displayedIdx = i;
-    }, DETAIL_CONFIG.HOVER_DELAY_MS);
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+    displayedIdx = visibleBuckets[i]?.total > 0 ? i : -1;
   }
 
   function onLeave() {
@@ -94,6 +93,12 @@
     displayedIdx = -1;
   });
 
+  $effect(() => {
+    const bucketCount = visibleBuckets.length;
+    if (hoveredIdx >= bucketCount) hoveredIdx = -1;
+    if (displayedIdx >= bucketCount) displayedIdx = -1;
+  });
+
 
   $effect(() => {
     return () => {
@@ -104,7 +109,7 @@
 
   let legendModels = $derived(() => {
     const seen = new Map<string, string>();
-    for (const b of filteredBuckets) {
+    for (const b of visibleBuckets) {
       for (const s of b.segments) {
         if (!seen.has(s.model_key)) seen.set(s.model_key, s.model);
       }
@@ -161,8 +166,16 @@
 
 
   // Bar chart geometry — fill full width, small gaps
-  let barGap = $derived(Math.max(Math.min(2, CHART_W / filteredBuckets.length * 0.15), 1));
-  let barWidth = $derived((CHART_W - barGap * Math.max(filteredBuckets.length - 1, 0)) / filteredBuckets.length);
+  let barGap = $derived(
+    visibleBuckets.length > 1
+      ? Math.max(Math.min(2, CHART_W / visibleBuckets.length * 0.15), 1)
+      : 1
+  );
+  let barWidth = $derived(
+    visibleBuckets.length > 0
+      ? (CHART_W - barGap * Math.max(visibleBuckets.length - 1, 0)) / visibleBuckets.length
+      : CHART_W
+  );
 
   function barX(i: number): number {
     return i * (barWidth + barGap);
@@ -172,13 +185,13 @@
   let lineData = $derived(() => {
     const models = legendModels();
     const niceM = niceMax(maxCost);
-    const stepX = filteredBuckets.length > 1 ? CHART_W / (filteredBuckets.length - 1) : CHART_W / 2;
+    const stepX = visibleBuckets.length > 1 ? CHART_W / (visibleBuckets.length - 1) : CHART_W / 2;
 
     return models.map((m) => {
-      const points = filteredBuckets.map((b, i) => {
+      const points = visibleBuckets.map((b, i) => {
         const seg = b.segments.find((s) => s.model_key === m.key);
         const cost = seg?.cost ?? 0;
-        const x = filteredBuckets.length > 1 ? i * stepX : CHART_W / 2;
+        const x = visibleBuckets.length > 1 ? i * stepX : CHART_W / 2;
         const y = CHART_H - (cost / niceM) * CHART_H;
         return { x, y, cost };
       });
@@ -305,7 +318,7 @@
               <line x1="0" y1={tick.y} x2={CHART_W} y2={tick.y} style="stroke: var(--border-subtle)" stroke-width="0.5"/>
             {/each}
 
-            {#each filteredBuckets as bucket, i}
+            {#each visibleBuckets as bucket, i}
               {@const niceM = niceMax(maxCost)}
               {@const x = barX(i)}
               {@const isActive = hoveredIdx === i}
@@ -316,7 +329,7 @@
                 aria-label={bucketAriaLabel(bucket)}
                 onmouseenter={() => onEnter(i)}
                 onmouseleave={onLeave}
-                style="cursor:pointer; --delay: {(i / Math.max(filteredBuckets.length - 1, 1)) * 0.35 + 0.04}s;"
+                style="cursor:pointer; --delay: {(i / Math.max(visibleBuckets.length - 1, 1)) * 0.35 + 0.04}s;"
               >
                 <!-- Invisible hit area -->
                 <rect x={x - 1} y="0" width={barWidth + 2} height={CHART_H} fill="transparent"/>
@@ -362,7 +375,16 @@
               <!-- Area fill -->
               <path d={areaPath(ld.points)} fill="url(#grad-{ld.key})" class="area-path"/>
               <!-- Line -->
-              <path d={smoothPath(ld.points)} fill="none" stroke={segmentColorFn(ld.key)} stroke-width="1.5" stroke-linecap="round" class="line-path"/>
+              <path
+                d={smoothPath(ld.points)}
+                pathLength="1"
+                fill="none"
+                stroke={segmentColorFn(ld.key)}
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                class="line-path"
+              />
               <!-- Dots -->
               {#each ld.points as pt, i}
                 <circle
@@ -375,9 +397,9 @@
             {/each}
 
             <!-- Hover hit areas (invisible columns) -->
-            {#each filteredBuckets as bucket, i}
-              {@const stepX = filteredBuckets.length > 1 ? CHART_W / (filteredBuckets.length - 1) : CHART_W}
-              {@const x = filteredBuckets.length > 1 ? i * stepX : CHART_W / 2}
+            {#each visibleBuckets as bucket, i}
+              {@const stepX = visibleBuckets.length > 1 ? CHART_W / (visibleBuckets.length - 1) : CHART_W}
+              {@const x = visibleBuckets.length > 1 ? i * stepX : CHART_W / 2}
               <g
                 role="img"
                 aria-label={bucketAriaLabel(bucket)}
@@ -397,8 +419,8 @@
 
             <!-- Hover vertical line -->
             {#if hoveredIdx >= 0}
-              {@const stepX = filteredBuckets.length > 1 ? CHART_W / (filteredBuckets.length - 1) : CHART_W / 2}
-              {@const hx = filteredBuckets.length > 1 ? hoveredIdx * stepX : CHART_W / 2}
+              {@const stepX = visibleBuckets.length > 1 ? CHART_W / (visibleBuckets.length - 1) : CHART_W / 2}
+              {@const hx = visibleBuckets.length > 1 ? hoveredIdx * stepX : CHART_W / 2}
               <line x1={hx} y1="0" x2={hx} y2={CHART_H} style="stroke: var(--border)" stroke-width="0.5" stroke-dasharray="2,2"/>
             {/if}
           </svg>
@@ -408,13 +430,11 @@
     </div>
   </div>
 
-  {#if buckets.length > 0}
+  {#if xAxisLabels.length > 0}
     <div class="xa">
-      <span>{buckets[0]?.label ?? ""}</span>
-      {#if buckets.length > 4}
-        <span>{buckets[Math.floor(buckets.length / 2)]?.label ?? ""}</span>
-      {/if}
-      <span>{buckets[buckets.length - 1]?.label ?? ""}</span>
+      {#each xAxisLabels as label}
+        <span>{label}</span>
+      {/each}
     </div>
   {/if}
 
@@ -423,7 +443,7 @@
 <style>
   .ch {
     padding: 14px 12px;
-    animation: fadeUp .28s ease both .09s;
+    animation: fadeUp var(--t-slow) var(--ease-out) both .09s;
     display: flex;
     flex-direction: column;
     position: relative;
@@ -461,8 +481,8 @@
     width: 20px; height: 16px;
     border: none; background: none;
     color: var(--t3); cursor: pointer;
-    border-radius: 3px;
-    transition: color .15s, background .15s;
+    border-radius: 4px;
+    transition: color var(--t-fast) ease, background var(--t-fast) ease;
   }
   .mode-toggle button.on {
     color: var(--t1);
@@ -481,14 +501,14 @@
     background: var(--surface-2);
     border-radius: 8px;
     overflow: hidden;
-    display: grid;
-    grid-template-rows: 0fr;
     opacity: 0;
-    transition: grid-template-rows 0.25s ease-out, opacity 0.2s ease;
+    max-height: 0;
+    will-change: opacity;
+    transition: opacity 0.12s ease;
   }
   .detail.visible {
-    grid-template-rows: 1fr;
     opacity: 1;
+    max-height: 200px;
   }
   .ch.detail-above .detail { margin-bottom: 10px; }
   .ch:not(.detail-above) .detail { margin-top: 10px; }
@@ -535,17 +555,19 @@
   .bar-group {
     transform-box: fill-box;
     transform-origin: center bottom;
-    animation: svgBarGrow .48s cubic-bezier(.22,1,.36,1) both;
+    animation: svgBarGrow var(--t-slow) var(--ease-out) both;
     animation-delay: var(--delay, 0s);
   }
   @keyframes svgBarGrow {
     from { transform: scaleY(0); }
     to   { transform: scaleY(1); }
   }
-  .bar-seg { transition: opacity .15s ease; }
+  .bar-seg { transition: opacity var(--t-fast) ease; will-change: opacity; }
 
   /* Line chart */
   .line-path {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
     animation: drawLine .6s ease both;
   }
   .area-path {
@@ -555,8 +577,7 @@
     transition: all .15s ease;
   }
   @keyframes drawLine {
-    from { stroke-dashoffset: 500; stroke-dasharray: 500; }
-    to { stroke-dashoffset: 0; stroke-dasharray: 500; }
+    to { stroke-dashoffset: 0; }
   }
   @keyframes fadeIn {
     from { opacity: 0; }

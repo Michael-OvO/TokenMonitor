@@ -27,7 +27,7 @@
 
     invoke<SshHostInfo[]>("get_ssh_hosts")
       .then((hosts) => { sshHosts = hosts; })
-      .catch(() => {});
+      .catch((e) => { logger.warn("ssh", `Failed to load SSH hosts: ${e}`); });
     invoke<{ alias: string; enabled: boolean }[]>("get_ssh_host_statuses")
       .then((statuses) => {
         sshConfiguredHosts = statuses.map((s) => ({
@@ -39,7 +39,7 @@
             false,
         }));
       })
-      .catch(() => {});
+      .catch((e) => { logger.warn("ssh", `Failed to load SSH host statuses: ${e}`); });
 
     return () => {
       destroyed = true;

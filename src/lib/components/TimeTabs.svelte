@@ -28,19 +28,20 @@
 </div>
 
 <style>
-  .tabs { display: flex; padding: 8px 12px 0; animation: fadeUp .28s ease both .05s; }
+  .tabs { display: flex; padding: 8px 12px 0; animation: fadeUp var(--t-slow) var(--ease-out) both .05s; }
   button {
-    padding: 5px 7px; border: none; background: none;
+    padding: 4px 8px; border: none; background: none;
     font: 500 9px/1 'Inter', sans-serif;
     color: var(--t3); cursor: pointer; letter-spacing: .5px;
-    text-transform: uppercase; position: relative; transition: color .2s;
+    text-transform: uppercase; position: relative;
+    transition: color var(--t-fast) ease, background var(--t-fast) ease;
     border-radius: 4px;
   }
   button:hover { color: var(--t2); background: rgba(255,255,255,0.02); }
   button.on { color: var(--t1); }
   button.on::after {
-    content: ''; position: absolute; bottom: 0; left: 7px; right: 7px;
+    content: ''; position: absolute; bottom: 0; left: 8px; right: 8px;
     height: 1.5px; background: var(--accent); border-radius: .5px;
-    animation: tabUnderline .22s ease both; transform-origin: left;
+    animation: tabUnderline var(--t-normal) var(--ease-out) both; transform-origin: left;
   }
 </style>

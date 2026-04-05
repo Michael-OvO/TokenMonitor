@@ -1,4 +1,6 @@
 use crate::commands::tray::{BarDisplay, TrayConfig};
+#[cfg(target_os = "windows")]
+use windows::core::w;
 
 /// Original tray icon dimensions (@2x retina)
 const ICON_W: u32 = 44;
@@ -65,11 +67,58 @@ const TRACK_COLOR_LIGHT: Color = Color {
     a: 40,
 }; // black @ ~16% for light bar
 
-/// Detect whether the system tray area uses a dark appearance.
-/// Currently defaults to true (dark). Can be improved with platform-specific
-/// detection in the future (e.g., Windows registry, Tauri theme API).
-pub fn is_menu_bar_dark() -> bool {
+#[cfg(target_os = "macos")]
+fn system_tray_is_dark() -> bool {
+    std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleInterfaceStyle"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .eq_ignore_ascii_case("Dark")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn system_tray_is_dark() -> bool {
+    use windows::Win32::System::Registry::*;
+
+    let mut hkey = HKEY::default();
+    let subkey = w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    if RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_READ, &mut hkey).is_ok() {
+        let mut data: u32 = 1;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let value_name = w!("SystemUsesLightTheme");
+        let is_dark = RegQueryValueExW(
+            hkey,
+            value_name,
+            None,
+            None,
+            Some(std::ptr::from_mut(&mut data).cast()),
+            Some(&mut size),
+        )
+        .is_ok()
+            && data == 0;
+        let _ = RegCloseKey(hkey);
+        return is_dark;
+    }
+
     true
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn system_tray_is_dark() -> bool {
+    true
+}
+
+/// Detect whether the system tray area uses a dark appearance.
+/// Uses the host OS appearance because the tray/menu bar itself is system-owned
+/// and does not follow the app's explicit light/dark override.
+pub fn is_menu_bar_dark() -> bool {
+    system_tray_is_dark()
 }
 
 /// Check if we have any utilization data to render bars with.

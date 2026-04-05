@@ -182,8 +182,8 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
         "'out':u.get('output_tokens',0),",
         "'c5':u.get('cache_creation_input_tokens',0),",
         "'cr':u.get('cache_read_input_tokens',0)}))\n",
-        "   except:pass\n",
-        " except:pass\n",
+        "   except Exception:pass\n",
+        " except Exception as e:import sys;print('PARSE_ERR:'+str(e),file=sys.stderr)\n",
     );
 
     // Codex python extraction — stateful: tracks model from turn_context,
@@ -233,8 +233,8 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
          {S6}elif lu:\n\
          {S7}i=lu.get('input_tokens',0);o=lu.get('output_tokens',0);c=lu.get('cached_input_tokens',0)\n\
          {S7}if not S or ts>S:print(json.dumps({{'ts':ts,'m':m,'in':max(0,i-c),'out':o,'c5':0,'cr':c}}))\n\
-         {S3}except:pass\n\
-         {S1}except:pass\n",
+         {S3}except Exception:pass\n\
+         {S1}except Exception as e:import sys;print('PARSE_ERR:'+str(e),file=sys.stderr)\n",
         since_iso_filter = since_iso_filter,
         S1 = " ",
         S2 = "  ",
@@ -257,21 +257,20 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
                  \"in\":.message.usage.input_tokens, \
                  out:.message.usage.output_tokens, \
                  c5:(.message.usage.cache_creation_input_tokens // 0), \
-                 cr:(.message.usage.cache_read_input_tokens // 0)}}' 2>/dev/null; \
+                 cr:(.message.usage.cache_read_input_tokens // 0)}}'; \
            elif command -v python3 >/dev/null 2>&1; then \
-             echo \"$CLAUDE_FILES\" | tr '\\n' '\\0' | xargs -0 python3 -c \"{claude_py}\" 2>/dev/null; \
+             echo \"$CLAUDE_FILES\" | tr '\\n' '\\0' | xargs -0 python3 -c \"{claude_py}\"; \
            else \
              echo \"$CLAUDE_FILES\" | xargs grep -lh '\"usage\"' 2>/dev/null | xargs grep -h '\"assistant\"' 2>/dev/null; \
            fi; \
          fi; \
          if [ -n \"$CODEX_FILES\" ]; then \
            if command -v python3 >/dev/null 2>&1; then \
-             echo \"$CODEX_FILES\" | tr '\\n' '\\0' | xargs -0 python3 -c \"{codex_py}\" 2>/dev/null; \
+             echo \"$CODEX_FILES\" | tr '\\n' '\\0' | xargs -0 python3 -c \"{codex_py}\"; \
            elif command -v python >/dev/null 2>&1; then \
-             echo \"$CODEX_FILES\" | tr '\\n' '\\0' | xargs -0 python -c \"{codex_py}\" 2>/dev/null; \
+             echo \"$CODEX_FILES\" | tr '\\n' '\\0' | xargs -0 python -c \"{codex_py}\"; \
            fi; \
-         fi; \
-         true"
+         fi"
     )
 }
 
@@ -395,6 +394,11 @@ async fn ssh_command(alias: &str, script: &str) -> Result<String, String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Log stderr diagnostics even on success (e.g. Python PARSE_ERR lines).
+    if !stderr.trim().is_empty() && output.status.success() {
+        tracing::debug!("SSH stderr for {alias} (exit 0): {}", stderr.trim());
+    }
 
     if output.status.success() {
         return Ok(stdout);

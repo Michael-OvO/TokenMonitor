@@ -704,7 +704,12 @@ pub type ClaudeParseResult = (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, usize, b
 pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
     let file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(_) => return (Vec::new(), Vec::new(), 0, false),
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("Failed to open session file {}: {e}", path.display());
+            }
+            return (Vec::new(), Vec::new(), 0, false);
+        }
     };
 
     let reader = BufReader::new(file);
@@ -713,6 +718,7 @@ pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
     let mut pending_tools: Vec<Option<PendingClaudeTool>> = Vec::new();
     let mut pending_tool_indices: HashMap<String, usize> = HashMap::new();
     let mut lines_read = 0;
+    let mut parse_failures = 0_usize;
 
     for line in reader.lines() {
         lines_read += 1;
@@ -728,7 +734,10 @@ pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
 
         let entry: ClaudeJsonlEntry = match serde_json::from_str(&line) {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(_) => {
+                parse_failures += 1;
+                continue;
+            }
         };
         let ts = match chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
             Ok(ts) => ts.with_timezone(&Local),
@@ -911,6 +920,16 @@ pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
             dedupe_key: pending.dedupe_key,
             agent_scope: pending.agent_scope,
         });
+    }
+
+    // Warn when a high proportion of candidate lines fail to parse,
+    // which may indicate a schema change in the JSONL format.
+    if parse_failures > 0 && entries.is_empty() && lines_read > 10 {
+        tracing::warn!(
+            "All {} candidate lines failed to parse in {}; JSONL schema may have changed",
+            parse_failures,
+            path.display()
+        );
     }
 
     (entries, change_events, lines_read, true)
@@ -1167,7 +1186,12 @@ type CodexParseResult = (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, usize, bool);
 fn parse_codex_session_file(path: &Path) -> CodexParseResult {
     let file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(_) => return (Vec::new(), Vec::new(), 0, false),
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("Failed to open session file {}: {e}", path.display());
+            }
+            return (Vec::new(), Vec::new(), 0, false);
+        }
     };
     let reader = BufReader::new(file);
     let mut entries = Vec::new();
@@ -1177,6 +1201,7 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
     let mut pending_entry_model_indices = Vec::new();
     let mut pending_change_model_indices = Vec::new();
     let mut lines_read = 0;
+    let mut parse_failures = 0_usize;
     let mut session_key = format!("codex-file:{}", path_to_string(path));
     let mut agent_scope = crate::stats::subagent::AgentScope::Main;
 
@@ -1189,7 +1214,10 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
 
         let entry: CodexJsonlEntry = match serde_json::from_str(&line) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(_) => {
+                parse_failures += 1;
+                continue;
+            }
         };
 
         if entry.entry_type == "session_meta" {
@@ -1407,6 +1435,15 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
     );
 
     entries.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    if parse_failures > 0 && entries.is_empty() && lines_read > 10 {
+        tracing::warn!(
+            "All {} lines failed to parse in {}; JSONL schema may have changed",
+            parse_failures,
+            path.display()
+        );
+    }
+
     (entries, change_events, lines_read, true)
 }
 

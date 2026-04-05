@@ -98,7 +98,8 @@ pub async fn fetch_and_cache(
 
     let path = cache_path(app_data_dir);
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create cache directory {}: {e}", parent.display()))?;
     }
     std::fs::write(&path, json).map_err(|e| format!("write cache: {e}"))?;
 

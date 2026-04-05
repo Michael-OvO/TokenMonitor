@@ -54,6 +54,7 @@ beforeEach(() => {
   activeProvider.set("claude");
   activePeriod.set("day");
   mockIsMacOS = true;
+  mockIsWindows = false;
   mockUsesFloatingStatusWidget = false;
 });
 
@@ -62,6 +63,7 @@ describe("initializeRuntimeFromSettings", () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyThemeFn = vi.fn();
     const applyGlassFn = vi.fn();
+    const syncNativeWindowThemeFn = vi.fn().mockResolvedValue(undefined);
     const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
     const saved = makeSettings({
       theme: "system",
@@ -74,12 +76,14 @@ describe("initializeRuntimeFromSettings", () => {
       invokeFn,
       applyThemeFn,
       applyGlassFn,
+      syncNativeWindowThemeFn,
       syncNativeWindowSurfaceFn,
     });
 
     expect(applyThemeFn).toHaveBeenCalledWith("system");
     expect(applyGlassFn).toHaveBeenCalledWith(true);
-    expect(invokeFn).toHaveBeenCalledWith("set_glass_effect", { enabled: true });
+    expect(syncNativeWindowThemeFn).toHaveBeenCalledWith("system");
+    // Native glass effect is applied via Tauri Window API (setEffects), not invokeFn.
     expect(invokeFn).toHaveBeenCalledWith("set_dock_icon_visible", { visible: false });
     expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, true);
     expect(invokeFn).toHaveBeenCalledWith("set_refresh_interval", { interval: 300 });
@@ -97,6 +101,7 @@ describe("initializeRuntimeFromSettings", () => {
     const invokeFn = vi.fn().mockRejectedValue(new Error("ipc not ready"));
     const applyThemeFn = vi.fn();
     const applyGlassFn = vi.fn();
+    const syncNativeWindowThemeFn = vi.fn().mockResolvedValue(undefined);
     const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
     const saved = makeSettings({
       defaultProvider: "codex",
@@ -109,6 +114,7 @@ describe("initializeRuntimeFromSettings", () => {
         invokeFn,
         applyThemeFn,
         applyGlassFn,
+        syncNativeWindowThemeFn,
         syncNativeWindowSurfaceFn,
       }),
     ).resolves.toEqual({
@@ -118,6 +124,7 @@ describe("initializeRuntimeFromSettings", () => {
 
     expect(applyThemeFn).toHaveBeenCalledWith("dark");
     expect(applyGlassFn).toHaveBeenCalledWith(true);
+    expect(syncNativeWindowThemeFn).toHaveBeenCalledWith("dark");
     expect(invokeFn).toHaveBeenCalledWith("set_dock_icon_visible", { visible: false });
     expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, true);
     expect(get(activeProvider)).toBe("codex");
@@ -128,6 +135,7 @@ describe("initializeRuntimeFromSettings", () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyGlassFn = vi.fn();
     const applyThemeFn = vi.fn();
+    const syncNativeWindowThemeFn = vi.fn().mockResolvedValue(undefined);
     const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
 
     const runtime = await initializeRuntimeFromSettings(
@@ -139,7 +147,7 @@ describe("initializeRuntimeFromSettings", () => {
           codex: { label: "Codex", enabled: false },
         },
       }),
-      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowSurfaceFn },
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowThemeFn, syncNativeWindowSurfaceFn },
     );
 
     expect(get(activeProvider)).toBe("all");
@@ -150,15 +158,17 @@ describe("initializeRuntimeFromSettings", () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyGlassFn = vi.fn();
     const applyThemeFn = vi.fn();
+    const syncNativeWindowThemeFn = vi.fn().mockResolvedValue(undefined);
     const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
 
     await initializeRuntimeFromSettings(
       makeSettings({ glassEffect: true }),
-      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowSurfaceFn },
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowThemeFn, syncNativeWindowSurfaceFn },
     );
 
     expect(applyGlassFn).toHaveBeenCalledWith(true);
-    expect(invokeFn).toHaveBeenCalledWith("set_glass_effect", { enabled: true });
+    expect(syncNativeWindowThemeFn).toHaveBeenCalledWith("dark");
+    // Native glass effect is applied via Tauri Window API (setEffects), not invokeFn.
     expect(invokeFn).toHaveBeenCalledWith("set_dock_icon_visible", { visible: false });
     expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, true);
   });
@@ -167,15 +177,17 @@ describe("initializeRuntimeFromSettings", () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyGlassFn = vi.fn();
     const applyThemeFn = vi.fn();
+    const syncNativeWindowThemeFn = vi.fn().mockResolvedValue(undefined);
     const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
 
     await initializeRuntimeFromSettings(
       makeSettings({ glassEffect: false }),
-      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowSurfaceFn },
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowThemeFn, syncNativeWindowSurfaceFn },
     );
 
     expect(applyGlassFn).toHaveBeenCalledWith(false);
-    expect(invokeFn).toHaveBeenCalledWith("set_glass_effect", { enabled: false });
+    expect(syncNativeWindowThemeFn).toHaveBeenCalledWith("dark");
+    // Native glass effect is applied via Tauri Window API (setEffects), not invokeFn.
     expect(invokeFn).toHaveBeenCalledWith("set_dock_icon_visible", { visible: false });
     expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, false);
   });
@@ -184,11 +196,12 @@ describe("initializeRuntimeFromSettings", () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyGlassFn = vi.fn();
     const applyThemeFn = vi.fn();
+    const syncNativeWindowThemeFn = vi.fn().mockResolvedValue(undefined);
     const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
 
     await initializeRuntimeFromSettings(
       makeSettings({ showDockIcon: true }),
-      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowSurfaceFn },
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowThemeFn, syncNativeWindowSurfaceFn },
     );
 
     expect(invokeFn).toHaveBeenCalledWith("set_dock_icon_visible", { visible: true });
@@ -200,11 +213,12 @@ describe("initializeRuntimeFromSettings", () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyGlassFn = vi.fn();
     const applyThemeFn = vi.fn();
+    const syncNativeWindowThemeFn = vi.fn().mockResolvedValue(undefined);
     const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
 
     await initializeRuntimeFromSettings(
       makeSettings({ floatBall: true }),
-      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowSurfaceFn },
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowThemeFn, syncNativeWindowSurfaceFn },
     );
 
     expect(invokeFn).toHaveBeenCalledWith("create_float_ball");
@@ -216,11 +230,12 @@ describe("initializeRuntimeFromSettings", () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyGlassFn = vi.fn();
     const applyThemeFn = vi.fn();
+    const syncNativeWindowThemeFn = vi.fn().mockResolvedValue(undefined);
     const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
 
     await initializeRuntimeFromSettings(
       makeSettings({ floatBall: false }),
-      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowSurfaceFn },
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowThemeFn, syncNativeWindowSurfaceFn },
     );
 
     expect(invokeFn).not.toHaveBeenCalledWith("create_float_ball");

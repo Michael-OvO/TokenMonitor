@@ -103,12 +103,7 @@ fn codex_window_to_rate_limit(id: &str, w: &CodexWindowData) -> RateLimitWindow 
     let resets_at =
         DateTime::<Utc>::from_timestamp(w.resets_at as i64, 0).map(|dt| dt.to_rfc3339());
 
-    RateLimitWindow {
-        window_id: id.to_string(),
-        label,
-        utilization: w.used_percent,
-        resets_at,
-    }
+    RateLimitWindow::new(id.to_string(), label, w.used_percent, resets_at)
 }
 
 fn find_newest_jsonl(
@@ -136,5 +131,26 @@ fn find_newest_jsonl(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_window_preserves_used_percent_scale() {
+        let window = codex_window_to_rate_limit(
+            "primary",
+            &CodexWindowData {
+                used_percent: 1.0,
+                window_minutes: 300,
+                resets_at: 1_763_128_800,
+            },
+        );
+
+        assert_eq!(window.label, "Session (5hr)");
+        assert_eq!(window.utilization, 1.0);
+        assert_eq!(window.window_id, "primary");
     }
 }

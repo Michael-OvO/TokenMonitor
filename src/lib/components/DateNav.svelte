@@ -43,7 +43,7 @@
     justify-content: center;
     gap: 12px;
     padding: 4px 12px 0;
-    animation: fadeUp .28s ease both .05s;
+    animation: fadeUp var(--t-slow) var(--ease-out) both .05s;
   }
   .arrow {
     background: none;
@@ -51,9 +51,9 @@
     font-size: 14px;
     color: var(--t2);
     cursor: pointer;
-    padding: 2px 6px;
+    padding: 4px 8px;
     border-radius: 4px;
-    transition: color .2s, opacity .2s;
+    transition: color var(--t-fast) ease, opacity var(--t-fast) ease, background var(--t-fast) ease;
     line-height: 1;
   }
   .arrow:hover:not(:disabled) {
@@ -72,9 +72,9 @@
     color: var(--t1);
     letter-spacing: 0.2px;
     cursor: default;
-    padding: 2px 4px;
+    padding: 4px 8px;
     border-radius: 4px;
-    transition: color .2s;
+    transition: color var(--t-fast) ease;
   }
   .label.clickable {
     cursor: pointer;

@@ -21,7 +21,6 @@ impl UsageIntegrationId {
         }
     }
 
-    #[allow(dead_code)]
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Claude => "Claude Code",
@@ -120,7 +119,10 @@ fn detect_claude_project_dirs() -> Vec<PathBuf> {
         }
     }
 
-    let home = dirs::home_dir().unwrap_or_default();
+    let home = dirs::home_dir().unwrap_or_else(|| {
+        tracing::warn!("Could not determine home directory for Claude projects");
+        PathBuf::new()
+    });
     let config_dir = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
 
     dedupe_paths(vec![
@@ -137,7 +139,10 @@ fn detect_codex_sessions_dir() -> PathBuf {
         }
     }
 
-    let home = dirs::home_dir().unwrap_or_default();
+    let home = dirs::home_dir().unwrap_or_else(|| {
+        tracing::warn!("Could not determine home directory for Codex sessions");
+        PathBuf::new()
+    });
     home.join(".codex").join("sessions")
 }
 

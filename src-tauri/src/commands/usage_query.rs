@@ -15,6 +15,35 @@ use chrono::{Datelike, Local, NaiveDate};
 use std::collections::{BTreeMap, HashMap};
 use tauri::State;
 
+/// Ensure every day in [start, end) has a chart bucket, inserting empty buckets
+/// for days with no data.  This prevents the chart from appearing "cut off" when
+/// the current month hasn't ended yet.
+fn pad_daily_buckets(payload: &mut UsagePayload, start: NaiveDate, end: NaiveDate) {
+    let existing: std::collections::HashSet<String> = payload
+        .chart_buckets
+        .iter()
+        .map(|b| b.sort_key.clone())
+        .collect();
+
+    let mut date = start;
+    while date < end {
+        let key = date.format("%Y-%m-%d").to_string();
+        if !existing.contains(&key) {
+            payload.chart_buckets.push(ChartBucket {
+                label: date.format("%b %-d").to_string(),
+                sort_key: key,
+                total: 0.0,
+                segments: Vec::new(),
+            });
+        }
+        date += chrono::Duration::days(1);
+    }
+
+    payload
+        .chart_buckets
+        .sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+}
+
 /// Filter a UsagePayload's chart_buckets to only include dates in [start, end).
 /// Recalculates total_cost, total_tokens, and model_breakdown from the retained buckets.
 fn filter_buckets_to_range(payload: &mut UsagePayload, start: NaiveDate, end: NaiveDate) {
@@ -96,6 +125,7 @@ fn parser_payload_for_period(
             let end_date = target_sunday + chrono::Duration::days(1);
             let mut payload = parser.get_daily(provider, &since_str);
             filter_buckets_to_range(&mut payload, target_monday, end_date);
+            pad_daily_buckets(&mut payload, target_monday, end_date);
             payload.period_label = format_week_label(target_monday, target_sunday);
             payload.has_earlier_data = parser.has_entries_before(provider, target_monday);
             Ok(payload)
@@ -109,6 +139,7 @@ fn parser_payload_for_period(
             let since_str = first_of_month.format("%Y%m%d").to_string();
             let mut payload = parser.get_daily(provider, &since_str);
             filter_buckets_to_range(&mut payload, first_of_month, end_of_month);
+            pad_daily_buckets(&mut payload, first_of_month, end_of_month);
             payload.period_label = format_month_label(first_of_month);
             payload.has_earlier_data = parser.has_entries_before(provider, first_of_month);
             Ok(payload)

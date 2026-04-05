@@ -7,6 +7,17 @@
   inherits: true;
 }
 
+/* ── Unified timing system ── */
+/* Three duration tiers + two easing curves = consistent "material feel".
+   Every interactive transition should use one of these. */
+:root {
+  --t-fast: 120ms;       /* hover, active, micro-feedback */
+  --t-normal: 200ms;     /* state changes, toggles, reveals */
+  --t-slow: 320ms;       /* entrance animations, layout shifts */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);          /* decelerate — for entrances */
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1); /* gentle overshoot — for playful motion */
+}
+
 /* ── Model colors — Warm (Claude) & Cool (Codex) families ── */
 :root {
   --opus: #D0724A;
@@ -29,6 +40,7 @@
 /* ── Dark theme (default) ── */
 :root,
 [data-theme="dark"] {
+  color-scheme: dark;
   --bg: #0C0C0E;
   --surface: #141416;
   --surface-2: rgba(255,255,255,0.028);
@@ -58,6 +70,7 @@
 
 /* ── Light theme ── */
 [data-theme="light"] {
+  color-scheme: light;
   --bg: #F5F5F7;
   --surface: #FFFFFF;
   --surface-2: rgba(0,0,0,0.04);
@@ -127,6 +140,7 @@
 /* ── System theme: follow OS preference ── */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
+    color-scheme: light;
     --bg: #F5F5F7;
     --surface: #FFFFFF;
     --surface-2: rgba(0,0,0,0.04);
@@ -168,27 +182,56 @@
 }
 
 /* ── Glass effect overrides ── */
-/* html/body are already transparent; #app gets a semi-transparent --surface
-   so the NSVisualEffectView blur shows through with a subtle dark tint. */
+/* With native window effects active (NSVisualEffectView on macOS, Mica on
+   Windows), the OS provides the blur/vibrancy layer.  The CSS surface only
+   needs a light tint so text remains readable against the frosted backdrop. */
 :root[data-glass="true"][data-theme="dark"],
 :root[data-glass="true"]:not([data-theme]) {
-  --surface: rgba(20, 20, 22, 0.65);
+  --surface: rgba(20, 20, 22, 0.22);
+  --surface-2: rgba(255,255,255,0.05);
+  --surface-hover: rgba(255,255,255,0.08);
   /* Boost text contrast to compensate for translucent surface */
-  --t1: rgba(255,255,255,0.92);
-  --t2: rgba(255,255,255,0.62);
-  --t3: rgba(255,255,255,0.42);
-  --t4: rgba(255,255,255,0.30);
+  --t1: rgba(255,255,255,0.95);
+  --t2: rgba(255,255,255,0.65);
+  --t3: rgba(255,255,255,0.45);
+  --t4: rgba(255,255,255,0.32);
   --ch-plus: #5cb87a;
   --ch-minus: #d06868;
   --scope-main: rgba(255,255,255,0.38);
   --scope-sub: rgba(255,255,255,0.20);
+  /* Liquid Glass: no hard borders — edges defined by transparency */
+  --border: rgba(255,255,255,0.06);
+  --border-subtle: transparent;
 }
 :root[data-glass="true"][data-theme="light"] {
-  --surface: rgba(255, 255, 255, 0.45);
+  --surface: rgba(255, 255, 255, 0.25);
+  --surface-2: rgba(0,0,0,0.03);
+  --surface-hover: rgba(0,0,0,0.05);
+  --border: rgba(0,0,0,0.06);
+  --border-subtle: transparent;
 }
 @media (prefers-color-scheme: light) {
   :root[data-glass="true"]:not([data-theme]) {
-    --surface: rgba(255, 255, 255, 0.45);
+    color-scheme: light;
+    --surface: rgba(255, 255, 255, 0.25);
+    --surface-2: rgba(0,0,0,0.03);
+    --surface-hover: rgba(0,0,0,0.05);
+    --t1: rgba(0,0,0,0.82);
+    --t2: rgba(0,0,0,0.55);
+    --t3: rgba(0,0,0,0.38);
+    --t4: rgba(0,0,0,0.28);
+    --ch-plus: #1a8a42;
+    --ch-minus: #c03030;
+    --scope-main: rgba(0,0,0,0.30);
+    --scope-sub: rgba(0,0,0,0.15);
+    --border: rgba(0,0,0,0.06);
+    --border-subtle: transparent;
+  }
+  :root[data-glass="true"]:not([data-theme])[data-provider="claude"] {
+    --accent: #C85E2A;
+  }
+  :root[data-glass="true"]:not([data-theme])[data-provider="codex"] {
+    --accent: #2E7EB5;
   }
 }
 
@@ -203,11 +246,11 @@
 }
 
 @keyframes popIn {
-  0% { opacity: 0; transform: scale(0.96); }
-  100% { opacity: 1; transform: scale(1); }
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
 }
 @keyframes fadeUp {
-  from { opacity: 0; transform: translateY(3px); }
+  from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
 @keyframes barGrow {
@@ -223,7 +266,7 @@
   to { transform: scaleX(1); }
 }
 @keyframes tipReveal {
-  from { opacity: 0; transform: translateX(-50%) translateY(3px); }
+  from { opacity: 0; transform: translateX(-50%) translateY(4px); }
   to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 @keyframes spin {

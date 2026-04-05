@@ -8,8 +8,13 @@
     updateSetting,
     type Settings as SettingsType,
   } from "../stores/settings.js";
-  import { syncNativeWindowSurface } from "../window/appearance.js";
-  import { isMacOS } from "../utils/platform.js";
+  import { syncTrayConfig } from "../tray/sync.js";
+  import {
+    setNativeGlassEffect,
+    syncNativeWindowSurface,
+    syncNativeWindowTheme,
+  } from "../window/appearance.js";
+  import { isMacOS, isWindows } from "../utils/platform.js";
   import { logger } from "../utils/logger.js";
   import SegmentedControl from "./SegmentedControl.svelte";
   import ToggleSwitch from "./ToggleSwitch.svelte";
@@ -28,7 +33,11 @@
     const theme = val as SettingsType["theme"];
     updateSetting("theme", theme);
     applyTheme(theme);
-    void syncNativeWindowSurface(invoke, current.glassEffect).catch(() => {});
+    void Promise.allSettled([
+      syncNativeWindowTheme(theme),
+      syncNativeWindowSurface(invoke, current.glassEffect),
+      syncTrayConfig(current.trayConfig, null),
+    ]);
   }
 
   async function handleGlassEffect(checked: boolean) {
@@ -36,7 +45,7 @@
     updateSetting("glassEffect", checked);
     applyGlass(checked);
     try {
-      await invoke("set_glass_effect", { enabled: checked });
+      await setNativeGlassEffect(checked);
       await syncNativeWindowSurface(invoke, checked);
     } catch (e) {
       console.error("Failed to toggle glass effect:", e);
@@ -119,7 +128,7 @@
         onChange={handleBrandTheming}
       />
     </div>
-    {#if isMacOS()}
+    {#if isMacOS() || isWindows()}
     <div class="row">
       <span class="label">Glass Effect</span>
       <ToggleSwitch

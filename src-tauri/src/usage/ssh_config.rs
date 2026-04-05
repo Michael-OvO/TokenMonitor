@@ -49,7 +49,10 @@ pub fn discover_ssh_hosts() -> Vec<SshHostEntry> {
 
     let content = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            tracing::warn!("Failed to read SSH config {}: {e}", config_path.display());
+            return Vec::new();
+        }
     };
 
     let mut hosts = Vec::new();
@@ -59,10 +62,13 @@ pub fn discover_ssh_hosts() -> Vec<SshHostEntry> {
 
 /// Returns the default SSH config path for the current platform.
 fn ssh_config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".ssh")
-        .join("config")
+    match dirs::home_dir() {
+        Some(home) => home.join(".ssh").join("config"),
+        None => {
+            tracing::warn!("Could not determine home directory for SSH config");
+            PathBuf::from(".ssh").join("config")
+        }
+    }
 }
 
 /// Recursively parse SSH config content, handling Include directives.
@@ -74,7 +80,10 @@ fn parse_ssh_config_content(
     hosts: &mut Vec<SshHostEntry>,
     depth: u8,
 ) {
-    let home = dirs::home_dir().unwrap_or_default();
+    let home = dirs::home_dir().unwrap_or_else(|| {
+        tracing::warn!("Could not determine home directory; ~ expansion may fail");
+        PathBuf::new()
+    });
     parse_ssh_config_inner(content, config_path, &home, hosts, depth);
 }
 

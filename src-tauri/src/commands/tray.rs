@@ -4,6 +4,8 @@ use crate::models::*;
 use crate::usage::integrations::all_usage_integrations;
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
+#[cfg(target_os = "macos")]
+use tauri::Runtime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -162,6 +164,73 @@ fn should_update_tray_icon(config: &TrayConfig, utilization: TrayUtilization) ->
     config.bar_display == BarDisplay::Off || utilization.has_any()
 }
 
+#[cfg(target_os = "macos")]
+fn tray_status_item_is_dark<R: Runtime>(tray: &tauri::tray::TrayIcon<R>) -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{
+        NSAppearanceCustomization, NSAppearanceNameAccessibilityHighContrastAqua,
+        NSAppearanceNameAccessibilityHighContrastDarkAqua,
+        NSAppearanceNameAccessibilityHighContrastVibrantDark,
+        NSAppearanceNameAccessibilityHighContrastVibrantLight, NSAppearanceNameAqua,
+        NSAppearanceNameDarkAqua, NSAppearanceNameVibrantDark, NSAppearanceNameVibrantLight,
+    };
+    use objc2_foundation::NSArray;
+
+    tray.with_inner_tray_icon(|inner| {
+        let mtm = MainThreadMarker::new()
+            .expect("tray icon appearance lookup must run on the main thread");
+        let status_item = inner.ns_status_item()?;
+        let button = status_item.button(mtm)?;
+
+        let (
+            aqua,
+            dark_aqua,
+            vibrant_dark,
+            vibrant_light,
+            high_contrast_aqua,
+            high_contrast_dark_aqua,
+            high_contrast_vibrant_light,
+            high_contrast_vibrant_dark,
+        ) = unsafe {
+            (
+                NSAppearanceNameAqua,
+                NSAppearanceNameDarkAqua,
+                NSAppearanceNameVibrantDark,
+                NSAppearanceNameVibrantLight,
+                NSAppearanceNameAccessibilityHighContrastAqua,
+                NSAppearanceNameAccessibilityHighContrastDarkAqua,
+                NSAppearanceNameAccessibilityHighContrastVibrantLight,
+                NSAppearanceNameAccessibilityHighContrastVibrantDark,
+            )
+        };
+
+        let appearance_names = NSArray::from_slice(&[
+            dark_aqua,
+            vibrant_dark,
+            high_contrast_dark_aqua,
+            high_contrast_vibrant_dark,
+            aqua,
+            vibrant_light,
+            high_contrast_aqua,
+            high_contrast_vibrant_light,
+        ]);
+
+        button
+            .effectiveAppearance()
+            .bestMatchFromAppearancesWithNames(&appearance_names)
+            .map(|matched| {
+                let matched = &*matched;
+                matched == dark_aqua
+                    || matched == vibrant_dark
+                    || matched == high_contrast_dark_aqua
+                    || matched == high_contrast_vibrant_dark
+            })
+    })
+    .ok()
+    .flatten()
+    .unwrap_or_else(crate::tray::render::is_menu_bar_dark)
+}
+
 fn apply_tray_presentation(
     app: &tauri::AppHandle,
     config: &TrayConfig,
@@ -178,6 +247,9 @@ fn apply_tray_presentation(
 
         if should_update_tray_icon(config, utilization) {
             let base_icon = include_bytes!("../../icons/tray-icon@2x.rgba");
+            #[cfg(target_os = "macos")]
+            let dark_bar = tray_status_item_is_dark(&tray);
+            #[cfg(not(target_os = "macos"))]
             let dark_bar = crate::tray::render::is_menu_bar_dark();
             let (icon_buf, w, h, use_template) = crate::tray::render::render_tray_icon(
                 base_icon,

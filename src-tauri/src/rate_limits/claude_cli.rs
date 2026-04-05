@@ -291,14 +291,14 @@ pub(crate) fn rate_limits_from_claude_cli_info(
         .unwrap_or_default();
 
     if let Some(utilization) = utilization {
-        let next_window = RateLimitWindow {
-            window_id: window_id.to_string(),
-            label: label.to_string(),
+        let next_window = RateLimitWindow::new(
+            window_id.to_string(),
+            label.to_string(),
             utilization,
-            resets_at: reset_at
+            reset_at
                 .clone()
                 .or_else(|| cached_window.and_then(|window| window.resets_at.clone())),
-        };
+        );
 
         if let Some(existing) = windows
             .iter_mut()

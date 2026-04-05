@@ -12,6 +12,8 @@
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:window:allow-set-position",
+    "core:window:allow-set-effects",
+    "core:window:allow-set-theme",
     "positioner:default",
     "store:default",
     "autostart:default"

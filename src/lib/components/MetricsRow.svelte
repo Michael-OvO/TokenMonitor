@@ -110,8 +110,8 @@
 
 <style>
   .met {
-    padding: 12px 12px 10px;
-    animation: fadeUp .28s ease both .07s;
+    padding: 12px 12px 8px;
+    animation: fadeUp var(--t-slow) var(--ease-out) both .07s;
   }
   .met-top {
     display: flex; gap: 4px; margin-bottom: 4px;
@@ -120,9 +120,9 @@
   .met-comp { width: 100%; }
 
   .m {
-    padding: 8px 9px;
-    background: var(--surface-2); border-radius: 7px;
-    transition: background .18s;
+    padding: 8px;
+    background: var(--surface-2); border-radius: 8px;
+    transition: background var(--t-fast) ease;
   }
   .m:hover { background: var(--surface-hover); }
   .m-v {
@@ -131,7 +131,7 @@
     letter-spacing: -.2px;
   }
   .m-l {
-    display: flex; align-items: center; gap: 3px;
+    display: flex; align-items: center; gap: 4px;
     font: 500 8px/1 'Inter', sans-serif;
     color: var(--t3); text-transform: uppercase;
     letter-spacing: .7px; margin-top: 4px;

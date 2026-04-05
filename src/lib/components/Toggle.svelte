@@ -64,7 +64,7 @@
 </div>
 
 <style>
-  .tog-wrap { padding: 10px 12px 0; animation: fadeUp .28s ease both .03s; }
+  .tog-wrap { padding: 10px 12px 0; animation: fadeUp var(--t-slow) var(--ease-out) both .03s; }
   .tog {
     display: flex;
     background: var(--surface-2);
@@ -77,13 +77,13 @@
     height: calc(100% - 5px);
     background: var(--accent-soft, rgba(255,255,255,0.07));
     border-radius: 5px;
-    transition: transform .28s cubic-bezier(.4,0,.2,1), width .28s cubic-bezier(.4,0,.2,1);
+    transition: transform var(--t-slow) var(--ease-out), width var(--t-slow) var(--ease-out);
   }
   button {
     flex: 1; min-width: 0; padding: 6px 8px; border: none; background: none;
     font: 500 10.5px/1 'Inter', sans-serif;
     color: var(--t3); cursor: pointer; position: relative; z-index: 1;
-    letter-spacing: .2px; transition: color .22s;
+    letter-spacing: .2px; transition: color var(--t-normal) ease;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

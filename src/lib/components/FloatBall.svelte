@@ -95,11 +95,14 @@
     return `$${Math.round(cost)}`;
   }
 
+  let refreshFailures = 0;
   async function refreshSummary() {
     try {
       summary = await invoke<StatusWidgetSummary>("get_status_widget_summary");
-    } catch {
-      // Keep the last good payload visible.
+      refreshFailures = 0;
+    } catch (e) {
+      refreshFailures++;
+      logger.warn("floatBall", `Refresh failed (${refreshFailures}x): ${e}`);
     }
   }
 
@@ -139,7 +142,7 @@
         expanded = true;
       } catch (e) {
         if (requestId !== expansionRequestId) return;
-        logger.error("floatBall", "Expansion failed", e);
+        logger.error("floatBall", `Expansion failed: ${e}`);
         expanded = false;
         nativeExpanded = false;
       }
@@ -163,7 +166,7 @@
     try {
       await invoke("set_float_ball_expanded", { expanded: false });
     } catch (e) {
-      logger.error("floatBall", "Collapse native OS call failed", e);
+      logger.error("floatBall", `Collapse native OS call failed: ${e}`);
     } finally {
       if (requestId === expansionRequestId) {
         nativeExpanded = false;
@@ -239,7 +242,9 @@
         screenY: event.screenY,
         screenToPhysicalScale: dragState.screenToPhysicalScale,
       });
-      invoke("move_float_ball_to", { x: newX, y: newY }).catch(() => {});
+      invoke("move_float_ball_to", { x: newX, y: newY }).catch((e) => {
+        logger.debug("floatBall", `move failed: ${e}`);
+      });
     }
   }
 
@@ -256,7 +261,9 @@
 
     if (wasDragging) {
       if (!expanded) {
-        invoke("snap_float_ball").catch(() => {});
+        invoke("snap_float_ball").catch((e) => {
+          logger.debug("floatBall", `snap failed: ${e}`);
+        });
       }
     } else {
       void setExpanded(!expanded);

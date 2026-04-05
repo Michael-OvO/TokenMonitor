@@ -686,9 +686,7 @@ pub struct FloatBallPosition {
 pub async fn get_float_ball_position(app: tauri::AppHandle) -> Result<FloatBallPosition, String> {
     let state = app.state::<AppState>();
     let float_state = state.float_ball_state.read().await;
-    let rect = float_state
-        .last_rect
-        .ok_or("Float ball not initialized")?;
+    let rect = float_state.last_rect.ok_or("Float ball not initialized")?;
     Ok(FloatBallPosition {
         x: rect.x,
         y: rect.y,

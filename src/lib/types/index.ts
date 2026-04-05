@@ -127,7 +127,6 @@ export interface SubagentStats {
 export type AccordionToggleDetail = {
   durationMs: number;
   expanding: boolean;
-  height: number;
   scope: "main" | "subagents" | "devices";
 };
 

@@ -48,6 +48,11 @@ export interface ResizeOrchestrator {
 export function createResizeOrchestrator(
   deps: ResizeOrchestratorDeps,
 ): ResizeOrchestrator {
+  type WindowHeightRequest = {
+    height: number;
+    source: string;
+  };
+
   // ── Internal state (local to this closure) ──
   let resizeRaf = 0;
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -55,17 +60,13 @@ export function createResizeOrchestrator(
   let windowAnimationRaf = 0;
   let windowAnimationToken = 0;
   let isWindowHeightAnimating = false;
+  let observerResizeRaf = 0;
+  let pendingObserverSource = "observer";
 
   // Resize throttle: max 3 operations per 500ms window
-  const RESIZE_THROTTLE_WINDOW_MS = 500;
-  const RESIZE_THROTTLE_MAX_OPS = 3;
-  /** Smooth animated shrink duration — prevents jarring bottom-anchor jump. */
-  const SHRINK_ANIMATE_MS = 150;
-  /** After animation ends, suppress observer shrinks for this period to prevent jitter. */
-  const POST_ANIMATION_COOLDOWN_MS = 250;
-  let shrinkCooldownUntil = 0;
-  let resizeThrottleTimestamps: number[] = [];
-  let resizeThrottleDeferTimer: ReturnType<typeof setTimeout> | null = null;
+  const ANIMATED_RESIZE_FRAME_INTERVAL_MS = 32;
+  let pendingWindowHeightRequest: WindowHeightRequest | null = null;
+  let isWindowHeightRequestInFlight = false;
 
   let maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
   let scrollThresholdH = DEFAULT_MAX_WINDOW_HEIGHT;
@@ -83,6 +84,7 @@ export function createResizeOrchestrator(
     deps.logDebug("resize:clear-pending", {
       hadTimer: Boolean(resizeTimer),
       hadRaf: resizeRaf !== 0,
+      hadObserverRaf: observerResizeRaf !== 0,
       ...captureDebugSnapshot("clear-pending"),
     });
     if (resizeTimer) {
@@ -91,6 +93,8 @@ export function createResizeOrchestrator(
     }
     cancelAnimationFrame(resizeRaf);
     resizeRaf = 0;
+    cancelAnimationFrame(observerResizeRaf);
+    observerResizeRaf = 0;
   }
 
   function clearWindowHeightAnimation(): void {
@@ -187,6 +191,62 @@ export function createResizeOrchestrator(
     };
   }
 
+  function flushWindowHeightRequest(): void {
+    if (isWindowHeightRequestInFlight || !pendingWindowHeightRequest) return;
+
+    const request = pendingWindowHeightRequest;
+    pendingWindowHeightRequest = null;
+    isWindowHeightRequestInFlight = true;
+
+    deps
+      .invoke("set_window_size_and_align", {
+        width: WINDOW_WIDTH,
+        height: request.height,
+      })
+      .then(() => {
+        deps.logDebug("resize:set-size-resolved", {
+          source: request.source,
+          nextHeight: request.height,
+          ...captureDebugSnapshot(`set-size-resolved-${request.source}`),
+        });
+      })
+      .catch((error) => {
+        deps.logDebug("resize:set-size-rejected", {
+          source: request.source,
+          nextHeight: request.height,
+          error: deps.formatDebugError(error),
+          ...captureDebugSnapshot(`set-size-rejected-${request.source}`),
+        });
+        if (!pendingWindowHeightRequest && typeof window !== "undefined") {
+          lastWindowH = window.innerHeight;
+        }
+      })
+      .finally(() => {
+        isWindowHeightRequestInFlight = false;
+        flushWindowHeightRequest();
+      });
+  }
+
+  function applyMeasuredHeight(
+    measurement: {
+      rawMeasuredHeight: number;
+      nextHeight: number;
+      scrollLocked: boolean;
+      effectiveMaxWindowH: number;
+    },
+    source: string,
+  ): void {
+    if (measurement.scrollLocked) {
+      deps.logDebug("resize:apply-scroll-locked", {
+        source,
+        rawMeasuredHeight: measurement.rawMeasuredHeight,
+        nextHeight: measurement.nextHeight,
+        effectiveMaxWindowH: measurement.effectiveMaxWindowH,
+      });
+    }
+    applyWindowHeight(measurement.nextHeight, source);
+  }
+
   function applyWindowHeight(targetHeight: number, source = "unknown"): void {
     const effectiveMaxWindowH = getEffectiveWindowMaxHeight();
     const nextHeight = clampWindowHeight(
@@ -213,29 +273,11 @@ export function createResizeOrchestrator(
     });
     if (disposition === "skip") return;
     lastWindowH = nextHeight;
-    deps
-      .invoke("set_window_size_and_align", {
-        width: WINDOW_WIDTH,
-        height: nextHeight,
-      })
-      .then(() => {
-        deps.logDebug("resize:set-size-resolved", {
-          source,
-          nextHeight,
-          ...captureDebugSnapshot(`set-size-resolved-${source}`),
-        });
-      })
-      .catch((error) => {
-        deps.logDebug("resize:set-size-rejected", {
-          source,
-          nextHeight,
-          error: deps.formatDebugError(error),
-          ...captureDebugSnapshot(`set-size-rejected-${source}`),
-        });
-        if (typeof window !== "undefined") {
-          lastWindowH = window.innerHeight;
-        }
-      });
+    pendingWindowHeightRequest = {
+      height: nextHeight,
+      source,
+    };
+    flushWindowHeightRequest();
   }
 
   function syncSize(
@@ -265,6 +307,15 @@ export function createResizeOrchestrator(
     const t = Math.max(0, Math.min(progress, 1));
     const inverse = 1 - t;
     return 1 - inverse * inverse * inverse;
+  }
+
+  function shouldApplyAnimatedResizeFrame(
+    now: number,
+    lastAppliedAt: number,
+    isFinalFrame: boolean,
+  ): boolean {
+    if (isFinalFrame) return true;
+    return now - lastAppliedAt >= ANIMATED_RESIZE_FRAME_INTERVAL_MS;
   }
 
   function scheduleSettledResize(
@@ -298,39 +349,7 @@ export function createResizeOrchestrator(
     deps.logDebug("resize:sync-and-verify", { source });
     const measurement = measureWindowHeight(`sync-${source}`);
     if (!measurement) return;
-
-    if (measurement.scrollLocked) {
-      deps.logDebug("resize:skipped-scroll-locked", {
-        source: `${source}:verify`,
-        reason: "skip-settled-remeasure-while-scroll-locked",
-        rawMeasuredHeight: measurement.rawMeasuredHeight,
-        nextHeight: measurement.nextHeight,
-        effectiveMaxWindowH: measurement.effectiveMaxWindowH,
-        ...captureDebugSnapshot(`scroll-locked-${source}`),
-      });
-      applyWindowHeight(measurement.nextHeight, `${source}:scroll-lock`);
-      return;
-    }
-
-    const disposition = classifyResize(
-      measurement.nextHeight,
-      lastWindowH,
-      MIN_WINDOW_HEIGHT,
-    );
-
-    if (disposition === "shrink") {
-      // Follow content rather than independent animation — prevents bottom gap
-      // on top-anchored windows (Linux) where window > content during JS animation.
-      followContentDuringTransition(
-        SHRINK_ANIMATE_MS,
-        `${source}:shrink`,
-      );
-      return;
-    }
-
-    // Grow / skip: immediate (prevents clipping)
-    applyWindowHeight(measurement.nextHeight, `${source}:initial`);
-    scheduleSettledResize(100, `${source}:verify`);
+    applyMeasuredHeight(measurement, `${source}:sync`);
   }
 
   function animateWindowHeight(
@@ -375,6 +394,7 @@ export function createResizeOrchestrator(
 
     const animationToken = windowAnimationToken;
     const startedAt = performance.now();
+    let lastFrameAppliedAt = Number.NEGATIVE_INFINITY;
     isWindowHeightAnimating = true;
     lastWindowH = startHeight;
 
@@ -386,12 +406,20 @@ export function createResizeOrchestrator(
       const interpolatedHeight = Math.round(
         startHeight + (nextHeight - startHeight) * eased,
       );
-      applyWindowHeight(interpolatedHeight, `${source}:frame`);
+      if (
+        shouldApplyAnimatedResizeFrame(
+          now,
+          lastFrameAppliedAt,
+          progress >= 1,
+        )
+      ) {
+        lastFrameAppliedAt = now;
+        applyWindowHeight(interpolatedHeight, `${source}:frame`);
+      }
 
       if (progress >= 1) {
         windowAnimationRaf = 0;
         isWindowHeightAnimating = false;
-        shrinkCooldownUntil = performance.now() + POST_ANIMATION_COOLDOWN_MS;
         // Final snap: measure and apply directly — no re-animation chain
         const finalMeasurement = measureWindowHeight(`${source}:complete`);
         if (finalMeasurement) {
@@ -419,23 +447,33 @@ export function createResizeOrchestrator(
     const token = ++windowAnimationToken;
     isWindowHeightAnimating = true;
     const startedAt = performance.now();
+    let lastFrameAppliedAt = Number.NEGATIVE_INFINITY;
     deps.logDebug("resize:follow-start", { source, durationMs });
 
-    const step = () => {
+    const step = (now: number) => {
       if (token !== windowAnimationToken) return;
 
-      const measurement = measureWindowHeight(`${source}:follow`);
-      if (measurement) {
-        applyWindowHeight(measurement.nextHeight, `${source}:follow`);
+      const elapsed = now - startedAt;
+      const isFinalFrame = elapsed >= durationMs + 50;
+      if (
+        shouldApplyAnimatedResizeFrame(
+          now,
+          lastFrameAppliedAt,
+          isFinalFrame,
+        )
+      ) {
+        lastFrameAppliedAt = now;
+        const measurement = measureWindowHeight(`${source}:follow`);
+        if (measurement) {
+          applyWindowHeight(measurement.nextHeight, `${source}:follow`);
+        }
       }
 
-      const elapsed = performance.now() - startedAt;
-      if (elapsed < durationMs + 50) {
+      if (!isFinalFrame) {
         windowAnimationRaf = requestAnimationFrame(step);
       } else {
         windowAnimationRaf = 0;
         isWindowHeightAnimating = false;
-        shrinkCooldownUntil = performance.now() + POST_ANIMATION_COOLDOWN_MS;
         deps.logDebug("resize:follow-end", {
           source,
           elapsed: Math.round(elapsed),
@@ -461,103 +499,36 @@ export function createResizeOrchestrator(
       });
       return;
     }
+    pendingObserverSource = source;
+    if (observerResizeRaf !== 0) return;
 
-    // Throttle: max N resize ops per window to break cascading loops
-    const now = performance.now();
-    resizeThrottleTimestamps = resizeThrottleTimestamps.filter(
-      (t) => now - t < RESIZE_THROTTLE_WINDOW_MS,
-    );
-    if (resizeThrottleTimestamps.length >= RESIZE_THROTTLE_MAX_OPS) {
-      deps.logDebug("resize:throttled", {
-        source,
-        opsInWindow: resizeThrottleTimestamps.length,
-      });
-      // Defer a single re-measure to the next throttle window
-      if (!resizeThrottleDeferTimer) {
-        resizeThrottleDeferTimer = setTimeout(() => {
-          resizeThrottleDeferTimer = null;
-          resizeToContent(`${source}:deferred`);
-        }, RESIZE_THROTTLE_WINDOW_MS);
-      }
-      return;
-    }
-    resizeThrottleTimestamps.push(now);
-
-    const measurement = measureWindowHeight(`resize-to-content-${source}`);
-    const rawMeasuredHeight = measurement?.rawMeasuredHeight ?? null;
-    const nextHeight = measurement?.nextHeight ?? null;
-    const deltaFromLast =
-      nextHeight == null ? null : nextHeight - lastWindowH;
-    deps.logDebug("resize:observer-measure", {
-      source,
-      rawMeasuredHeight,
-      measuredHeight: nextHeight,
-      effectiveMaxWindowH:
-        measurement?.effectiveMaxWindowH ?? getEffectiveWindowMaxHeight(),
-      scrollLocked: measurement?.scrollLocked ?? isScrollLocked,
-      nextHeight,
-      lastWindowH,
-      deltaFromLast,
-      deltaAbs: deltaFromLast == null ? null : Math.abs(deltaFromLast),
-      hysteresisPx: RESIZE_HYSTERESIS_PX,
-      ...captureDebugSnapshot(`resize-to-content-${source}`),
-    });
-    if (!measurement || nextHeight == null) return;
-    const disposition = classifyResize(
-      nextHeight,
-      lastWindowH,
-      MIN_WINDOW_HEIGHT,
-    );
-
-    if (measurement.scrollLocked) {
-      if (disposition === "skip") {
-        deps.logDebug("resize:skipped-scroll-locked", {
-          source,
-          reason: "observer-noop-while-scroll-locked",
-          rawMeasuredHeight,
-          nextHeight,
-          lastWindowH,
-          ...captureDebugSnapshot(`scroll-locked-${source}`),
-        });
-        return;
-      }
-
-      clearPendingResize();
-      applyWindowHeight(nextHeight, `${source}:scroll-lock`);
-      deps.logDebug("resize:skipped-scroll-locked", {
-        source,
-        reason: "skip-animation-and-settled-resize-while-scroll-locked",
+    observerResizeRaf = requestAnimationFrame(() => {
+      observerResizeRaf = 0;
+      const scheduledSource = pendingObserverSource;
+      const measurement = measureWindowHeight(
+        `resize-to-content-${scheduledSource}`,
+      );
+      const rawMeasuredHeight = measurement?.rawMeasuredHeight ?? null;
+      const nextHeight = measurement?.nextHeight ?? null;
+      const deltaFromLast =
+        nextHeight == null ? null : nextHeight - lastWindowH;
+      deps.logDebug("resize:observer-measure", {
+        source: scheduledSource,
         rawMeasuredHeight,
+        measuredHeight: nextHeight,
+        effectiveMaxWindowH:
+          measurement?.effectiveMaxWindowH ?? getEffectiveWindowMaxHeight(),
+        scrollLocked: measurement?.scrollLocked ?? isScrollLocked,
         nextHeight,
-        disposition,
         lastWindowH,
-        ...captureDebugSnapshot(`scroll-locked-${source}`),
+        deltaFromLast,
+        deltaAbs: deltaFromLast == null ? null : Math.abs(deltaFromLast),
+        hysteresisPx: RESIZE_HYSTERESIS_PX,
+        ...captureDebugSnapshot(`resize-to-content-${scheduledSource}`),
       });
-      return;
-    }
-
-    // Post-animation cooldown: suppress observer shrinks to prevent jitter
-    if (disposition === "shrink" && performance.now() < shrinkCooldownUntil) {
-      deps.logDebug("resize:shrink-cooldown-skip", {
-        source,
-        remainingMs: Math.round(shrinkCooldownUntil - performance.now()),
-      });
-      return;
-    }
-
-    switch (disposition) {
-      case "grow":
-        clearPendingResize();
-        applyWindowHeight(nextHeight, `${source}:grow`);
-        // Re-measure after setSize settles
-        scheduleSettledResize(100, `${source}:grow`);
-        return;
-      case "shrink":
-        scheduleSettledResize(RESIZE_SETTLE_DELAY_MS, `${source}:shrink`);
-        return;
-      default:
-        return;
-    }
+      if (!measurement) return;
+      applyMeasuredHeight(measurement, `${scheduledSource}:observer`);
+    });
   }
 
   function handleBreakdownAccordionToggle(
@@ -565,27 +536,22 @@ export function createResizeOrchestrator(
   ): void {
     const direction = detail.expanding ? "expand" : "collapse";
     const source = `breakdown-${detail.scope}-${direction}`;
-    if (detail.expanding) {
-      const currentHeight =
-        typeof window === "undefined" ? lastWindowH : window.innerHeight;
-      animateWindowHeight(
-        currentHeight + detail.height,
-        detail.durationMs,
-        source,
-      );
-    } else {
-      followContentDuringTransition(detail.durationMs, source);
-    }
+    const measurement = measureWindowHeight(`${source}:target`);
+    if (!measurement) return;
+
+    clearPendingResize();
+    clearWindowHeightAnimation();
+    applyWindowHeight(measurement.nextHeight, `${source}:target`);
   }
 
   function destroy(): void {
     if (resizeTimer) clearTimeout(resizeTimer);
-    if (resizeThrottleDeferTimer) clearTimeout(resizeThrottleDeferTimer);
     cancelAnimationFrame(resizeRaf);
+    cancelAnimationFrame(observerResizeRaf);
     clearWindowHeightAnimation();
     resizeTimer = null;
-    resizeThrottleDeferTimer = null;
     resizeRaf = 0;
+    observerResizeRaf = 0;
   }
 
   // Keep syncSize accessible internally for scheduleSettledResize;

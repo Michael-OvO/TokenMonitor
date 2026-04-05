@@ -378,12 +378,18 @@
         : {};
 
     const handleColorSchemeChange = () => {
-      if (!document.documentElement.hasAttribute("data-theme")) {
-        logResizeDebug("theme:system-change", {
-          matchesLight: colorScheme.matches,
-        });
-        void syncNativeWindowSurface(undefined, get(settings).glassEffect).catch(() => {});
+      const followsSystemTheme = !document.documentElement.hasAttribute("data-theme");
+      logResizeDebug("theme:system-change", {
+        matchesLight: colorScheme.matches,
+        followsSystemTheme,
+      });
+
+      const updates: Promise<unknown>[] = [syncTrayConfig(get(settings).trayConfig, null)];
+      if (followsSystemTheme) {
+        updates.push(syncNativeWindowSurface(undefined, get(settings).glassEffect));
       }
+
+      void Promise.allSettled(updates);
     };
     const handleBrowserResize = () => {
       logResizeDebug("browser:resize", captureSnapshot("browser-resize"));
@@ -541,8 +547,13 @@
   });
 </script>
 
-<div class="pop" bind:this={popEl}>
-  <div class="pop-content" style:max-height="{scrollThresholdH}px" style:overflow-y={scrollThresholdH < DEFAULT_MAX_WINDOW_HEIGHT ? 'auto' : 'visible'}>
+<div class="pop">
+  <div
+    class="pop-content"
+    bind:this={popEl}
+    style:max-height="{scrollThresholdH}px"
+    style:overflow-y={scrollThresholdH < DEFAULT_MAX_WINDOW_HEIGHT ? 'auto' : 'visible'}
+  >
     {#if showSplash}
       <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
     {:else if appReady && !data}
@@ -618,7 +629,7 @@
           onToggleDeviceStats={handleToggleDeviceStats}
         />
       {/if}
-      <Footer {data} {provider} {rateLimits} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} onDevices={() => { showDevices = true; }} />
+      <Footer {data} {provider} {period} {rateLimits} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} onDevices={() => { showDevices = true; }} />
     {:else}
       <div class="loading">
         <div class="spinner"></div>
@@ -633,12 +644,11 @@
     width: 340px;
     min-height: 200px;
     box-shadow: none;
-    animation: popIn .32s cubic-bezier(.25,.8,.25,1) both;
+    animation: popIn var(--t-slow) var(--ease-out) both;
   }
   .pop-content {
     position: relative;
     min-width: 0;
-    min-height: 100%;
     scrollbar-width: none;
     -ms-overflow-style: none;
   }

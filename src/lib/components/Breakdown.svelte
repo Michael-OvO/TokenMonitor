@@ -1,10 +1,11 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { modelColor, formatCost, formatTokens, deviceColor } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
   import { logger } from "../utils/logger.js";
   import type { AccordionToggleDetail, DeviceSummary, ModelSummary, SubagentStats } from "../types/index.js";
 
-  const ACCORDION_TRANSITION_MS = 300;
+  const ACCORDION_TRANSITION_MS = 120;
   const MAX_VISIBLE_DEVICES = 5;
 
   interface Props {
@@ -55,13 +56,6 @@
     devices: false,
   });
 
-  // Replace three separate innerEl states with one map
-  let innerEls = $state<Record<AccordionScope, HTMLDivElement | null>>({
-    main: null,
-    subagents: null,
-    devices: null,
-  });
-
   // Mutual exclusion table
   const MUTUAL_EXCLUSIONS: Record<AccordionScope, AccordionScope[]> = {
     main: ["devices"],
@@ -72,16 +66,6 @@
   function toggleAccordion(scope: AccordionScope) {
     const expanding = !accordionStates[scope];
     logger.info("navigation", `Accordion: ${scope} ${expanding ? "expand" : "collapse"}`);
-    const height = innerEls[scope]?.scrollHeight ?? 0;
-
-    if (height > 0) {
-      onAccordionToggle?.({
-        durationMs: ACCORDION_TRANSITION_MS,
-        expanding,
-        height: Math.ceil(height),
-        scope,
-      });
-    }
 
     // Update state immutably
     const next = { ...accordionStates, [scope]: expanding };
@@ -91,6 +75,13 @@
       }
     }
     accordionStates = next;
+    void tick().then(() => {
+      onAccordionToggle?.({
+        durationMs: ACCORDION_TRANSITION_MS,
+        expanding,
+        scope,
+      });
+    });
   }
 </script>
 
@@ -121,10 +112,11 @@
       <span class="agent-cost">{formatCost(subagentStats.main.cost)}</span>
       <span class="agent-pct">{subagentStats.main.pct_of_total_cost?.toFixed(0) ?? "—"}%</span>
     </button>
-    <div class="sub-group" class:open={accordionStates.main}>
-      <div class="sub-inner" bind:this={innerEls.main}>
-        {#each subagentStats.main.top_models as m, i}
-          <div class="sub-row" style="transition-delay:{(i + 1) * 50}ms">
+    {#if accordionStates.main}
+      <div class="sub-group">
+        <div class="sub-inner">
+          {#each subagentStats.main.top_models as m}
+          <div class="sub-row">
             <span class="sub-bar" style="background:{modelColor(m.model_key)}"></span>
             <div class="sub-info">
               <div class="sub-name-row">
@@ -134,9 +126,10 @@
               <div class="sub-tokens">{formatTokens(m.input_tokens)} in · {formatTokens(m.output_tokens)} out{#if m.cache_read_tokens > 0} · {formatTokens(m.cache_read_tokens)} cache{/if}</div>
             </div>
           </div>
-        {/each}
+          {/each}
+        </div>
       </div>
-    </div>
+    {/if}
 
     <!-- Subagents row -->
     <button
@@ -157,10 +150,11 @@
       <span class="agent-cost">{formatCost(subagentStats.subagents.cost)}</span>
       <span class="agent-pct">{subagentStats.subagents.pct_of_total_cost?.toFixed(0) ?? "—"}%</span>
     </button>
-    <div class="sub-group" class:open={accordionStates.subagents}>
-      <div class="sub-inner" bind:this={innerEls.subagents}>
-        {#each subagentStats.subagents.top_models as m, i}
-          <div class="sub-row" style="transition-delay:{(i + 1) * 50}ms">
+    {#if accordionStates.subagents}
+      <div class="sub-group">
+        <div class="sub-inner">
+          {#each subagentStats.subagents.top_models as m}
+          <div class="sub-row">
             <span class="sub-bar" style="background:{modelColor(m.model_key)}"></span>
             <div class="sub-info">
               <div class="sub-name-row">
@@ -170,9 +164,10 @@
               <div class="sub-tokens">{formatTokens(m.input_tokens)} in · {formatTokens(m.output_tokens)} out{#if m.cache_read_tokens > 0} · {formatTokens(m.cache_read_tokens)} cache{/if}</div>
             </div>
           </div>
-        {/each}
+          {/each}
+        </div>
       </div>
-    </div>
+    {/if}
 
     <!-- Per-scope change attribution -->
     {#if subagentStats.main.added_lines > 0 || subagentStats.main.removed_lines > 0 || subagentStats.subagents.added_lines > 0 || subagentStats.subagents.removed_lines > 0}
@@ -213,10 +208,11 @@
       <span class="agent-name">Devices <span class="agent-meta">· {sortedDevices.length}</span></span>
       <span class="agent-cost">{formatCost(devicesTotalCost)}</span>
     </button>
-    <div class="sub-group" class:open={accordionStates.devices}>
-      <div class="sub-inner" bind:this={innerEls.devices}>
-        {#each visibleDevices as device, i}
-          <div class="device-row" style="transition-delay:{(i + 1) * 50}ms">
+    {#if accordionStates.devices}
+      <div class="sub-group">
+        <div class="sub-inner">
+          {#each visibleDevices as device}
+          <div class="device-row">
             <span class="device-color-bar" style="background:{deviceColor(device.device)}"></span>
             <button class="device-info" type="button" onclick={() => onDeviceSelect?.(device.device)}>
               <span class="device-name-row">
@@ -253,19 +249,20 @@
               </button>
             {/if}
           </div>
-        {/each}
-        {#if hasMoreDevices}
-          <button class="device-more" onclick={() => onShowAllDevices?.()} type="button">
-            +{sortedDevices.length - MAX_VISIBLE_DEVICES} more →
-          </button>
-        {/if}
+          {/each}
+          {#if hasMoreDevices}
+            <button class="device-more" onclick={() => onShowAllDevices?.()} type="button">
+              +{sortedDevices.length - MAX_VISIBLE_DEVICES} more →
+            </button>
+          {/if}
+        </div>
       </div>
-    </div>
+    {/if}
   {/if}
 </div>
 
 <style>
-  .bd { padding: 8px 12px 10px; animation: fadeUp .28s ease both .12s; }
+  .bd { padding: 8px 12px 8px; animation: fadeUp var(--t-slow) var(--ease-out) both .12s; }
   .bd-head {
     display: flex; justify-content: space-between; margin-bottom: 6px; padding: 0 2px;
   }
@@ -286,7 +283,7 @@
     min-height: 26px; padding: 6px 7px; gap: 7px;
     border: none; background: none; border-radius: 6px; cursor: pointer;
     font: inherit; color: inherit; text-align: left;
-    transition: background 0.15s ease;
+    transition: background var(--t-fast) ease;
   }
   .agent-row:hover { background: var(--surface-2); }
   .agent-bar { width: 2.5px; height: 14px; border-radius: 1.5px; flex-shrink: 0; }
@@ -307,10 +304,10 @@
     width: 4px; height: 4px;
     background: var(--t4);
     border-radius: 2px;
-    transition: width 0.25s cubic-bezier(0.25, 0, 0.15, 1),
-                height 0.25s cubic-bezier(0.25, 0, 0.15, 1),
-                border-radius 0.25s cubic-bezier(0.25, 0, 0.15, 1),
-                background 0.15s ease;
+    transition: width var(--t-normal) var(--ease-out),
+                height var(--t-normal) var(--ease-out),
+                border-radius var(--t-normal) var(--ease-out),
+                background var(--t-fast) ease;
     opacity: 0.6;
   }
   .agent-row:hover .ind-shape { opacity: 1; }
@@ -337,23 +334,15 @@
   }
   .agent-row:hover .agent-dot { opacity: 1; }
 
-  /* ── Expandable sub-rows (grid-template-rows for smooth height) ── */
+  /* ── Expandable sections ── */
   .sub-group {
-    display: grid;
-    grid-template-rows: 0fr;
-    transition: grid-template-rows 0.3s cubic-bezier(0.25, 0, 0.15, 1);
+    overflow: hidden;
   }
-  .sub-group.open { grid-template-rows: 1fr; }
-  .sub-inner { overflow: hidden; min-height: 0; }
+  .sub-inner { min-height: 0; }
 
   .sub-row {
     display: flex; align-items: flex-start;
     min-height: 22px; padding: 4px 7px 4px 24px; gap: 7px;
-    opacity: 0; transform: translateY(-4px);
-    transition: opacity 0.25s ease, transform 0.25s ease;
-  }
-  .sub-group.open .sub-row {
-    opacity: 1; transform: translateY(0);
   }
   .sub-bar { width: 2px; height: 10px; border-radius: 1px; flex-shrink: 0; margin-top: 2px; }
   .sub-info { flex: 1; min-width: 0; }
@@ -381,11 +370,7 @@
     width: 100%; min-height: 28px; padding: 4px 7px 4px 24px; gap: 4px;
     border: none; background: none; border-radius: 6px; cursor: pointer;
     font: inherit; color: inherit; text-align: left;
-    opacity: 0; transform: translateY(-4px);
-    transition: opacity 0.25s ease, transform 0.25s ease, background 0.15s ease;
-  }
-  .sub-group.open .device-row {
-    opacity: 1; transform: translateY(0);
+    transition: background var(--t-fast) ease;
   }
   .device-row:hover { background: var(--surface-2); }
 
@@ -419,11 +404,9 @@
     border: none; background: none; cursor: pointer;
     font: 400 8px/1.2 'Inter', sans-serif; color: var(--t3);
     text-align: left;
-    opacity: 0; transform: translateY(-4px);
-    transition: opacity 0.25s ease, transform 0.25s ease, color 0.15s ease;
+    transition: color var(--t-fast) ease;
     -webkit-app-region: no-drag;
   }
-  .sub-group.open .device-more { opacity: 1; transform: translateY(0); }
   .device-more:hover { color: var(--t2); }
 
   .device-stats-toggle {

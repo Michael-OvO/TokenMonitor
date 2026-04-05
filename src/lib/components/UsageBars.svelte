@@ -219,7 +219,7 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
-    animation: fadeUp .28s ease both .09s;
+    animation: fadeUp var(--t-slow) var(--ease-out) both .09s;
   }
   .ub-provider {
     display: flex;
@@ -280,8 +280,8 @@
     border-radius: 3px;
     overflow: hidden;
     transform-origin: left center;
-    transition: width .5s cubic-bezier(.25,.8,.25,1), box-shadow .2s ease;
-    animation: hBarGrow .52s cubic-bezier(.22,1,.36,1) both;
+    transition: width var(--t-slow) var(--ease-out), box-shadow var(--t-fast) ease;
+    animation: hBarGrow var(--t-slow) var(--ease-out) both;
     animation-delay: var(--bar-delay, 0s);
   }
   @keyframes hBarGrow {

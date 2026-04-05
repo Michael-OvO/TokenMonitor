@@ -21,7 +21,7 @@ import type {
 } from "../types/index.js";
 import { setCurrency } from "../utils/format.js";
 import { logger } from "../utils/logger.js";
-import { isMacOS } from "../utils/platform.js";
+import { isMacOS, isLinux } from "../utils/platform.js";
 export interface Settings {
   theme: "light" | "dark" | "system";
   defaultProvider: UsageProvider;
@@ -350,10 +350,9 @@ export function applyTheme(theme: Settings["theme"]) {
 }
 
 export function applyGlass(enabled: boolean) {
-  // Glass effect requires native NSVisualEffectView blur — macOS only.
-  // On Windows/Linux, enabling glass makes the window semi-transparent
-  // with no blur backing, so force it off.
-  const effective = enabled && isMacOS();
+  // Glass effect uses native window effects: NSVisualEffectView on macOS,
+  // Mica/Acrylic on Windows. Linux has no native support — force off.
+  const effective = enabled && !isLinux();
   document.documentElement.setAttribute("data-glass", effective ? "true" : "false");
 }
 
