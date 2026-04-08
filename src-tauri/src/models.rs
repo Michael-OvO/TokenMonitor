@@ -143,33 +143,6 @@ impl RateLimitWindow {
             resets_at,
         }
     }
-
-    /// Create a window from a source that may report utilization as a 0–1 fraction.
-    pub fn from_maybe_fraction(
-        window_id: String,
-        label: String,
-        utilization: f64,
-        resets_at: Option<String>,
-    ) -> Self {
-        Self {
-            window_id,
-            label,
-            utilization: normalize_utilization(utilization),
-            resets_at,
-        }
-    }
-}
-
-/// Normalize a utilization value to the 0–100 percentage scale.
-///
-/// Values in (0, 1] are treated as fractions and scaled by 100.
-/// Values > 1 or == 0 are already in percentage form and returned as-is.
-pub fn normalize_utilization(value: f64) -> f64 {
-    if value > 0.0 && value <= 1.0 {
-        value * 100.0
-    } else {
-        value
-    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -423,49 +396,6 @@ pub fn known_model_from_raw(raw: &str) -> KnownModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ══════════════════════════════════════════════════════════════════════
-    // normalize_utilization
-    // ══════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn normalize_utilization_scales_fraction_to_percentage() {
-        assert_eq!(normalize_utilization(0.76), 76.0);
-        assert_eq!(normalize_utilization(0.77), 77.0);
-        assert_eq!(normalize_utilization(0.01), 1.0);
-        assert_eq!(normalize_utilization(1.0), 100.0);
-    }
-
-    #[test]
-    fn normalize_utilization_preserves_percentage_scale() {
-        assert_eq!(normalize_utilization(42.5), 42.5);
-        assert_eq!(normalize_utilization(100.0), 100.0);
-        assert_eq!(normalize_utilization(0.0), 0.0);
-    }
-
-    #[test]
-    fn rate_limit_window_new_preserves_raw_percentage_values() {
-        let window = RateLimitWindow::new(
-            String::from("primary"),
-            String::from("Session (5hr)"),
-            1.0,
-            Some(String::from("2026-03-17T12:00:00.000Z")),
-        );
-
-        assert_eq!(window.utilization, 1.0);
-    }
-
-    #[test]
-    fn rate_limit_window_from_maybe_fraction_scales_fractional_values() {
-        let window = RateLimitWindow::from_maybe_fraction(
-            String::from("five_hour"),
-            String::from("Session (5hr)"),
-            1.0,
-            Some(String::from("2026-03-17T12:00:00.000Z")),
-        );
-
-        assert_eq!(window.utilization, 100.0);
-    }
 
     // ══════════════════════════════════════════════════════════════════════
     // normalize_claude_model — every alias branch

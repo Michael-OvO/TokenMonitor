@@ -266,22 +266,20 @@ pub(crate) fn rate_limits_from_claude_cli_info(
         })
         .unwrap_or(false);
 
-    // Determine utilization for this window, if available.
-    // When the CLI returns "allowed" without a utilization value and there is
-    // no cached window to fall back on, we treat the window as unknown rather
-    // than fabricating a misleading 0%.
+    // Determine utilization for this window.
     let utilization = match info.utilization {
-        Some(utilization) => Some(utilization),
+        Some(utilization) => utilization,
         None => {
             if let Some(window) = cached_window {
                 used_cached_window_data = true;
-                Some(window.utilization)
+                window.utilization
             } else if info.status == "rejected" {
-                Some(100.0)
+                100.0
             } else {
-                // CLI no longer emits utilization when status is "allowed" —
-                // skip this window entirely so the UI shows N/A instead of 0%.
-                None
+                // CLI returned "allowed" without a utilization value and no
+                // cached window — the user simply has not consumed any quota
+                // in this window yet, so report 0%.
+                0.0
             }
         }
     };
@@ -290,24 +288,22 @@ pub(crate) fn rate_limits_from_claude_cli_info(
         .map(|payload| payload.windows.clone())
         .unwrap_or_default();
 
-    if let Some(utilization) = utilization {
-        let next_window = RateLimitWindow::new(
-            window_id.to_string(),
-            label.to_string(),
-            utilization,
-            reset_at
-                .clone()
-                .or_else(|| cached_window.and_then(|window| window.resets_at.clone())),
-        );
+    let next_window = RateLimitWindow::new(
+        window_id.to_string(),
+        label.to_string(),
+        utilization,
+        reset_at
+            .clone()
+            .or_else(|| cached_window.and_then(|window| window.resets_at.clone())),
+    );
 
-        if let Some(existing) = windows
-            .iter_mut()
-            .find(|window| window.window_id == window_id)
-        {
-            *existing = next_window;
-        } else {
-            windows.push(next_window);
-        }
+    if let Some(existing) = windows
+        .iter_mut()
+        .find(|window| window.window_id == window_id)
+    {
+        *existing = next_window;
+    } else {
+        windows.push(next_window);
     }
 
     let now = Utc::now();
@@ -504,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_fallback_skips_window_when_allowed_without_utilization_or_cache() {
+    fn cli_fallback_shows_zero_when_allowed_without_utilization_or_cache() {
         let rate_limits = rate_limits_from_claude_cli_info(
             ClaudeCliRateLimitInfo {
                 status: "allowed".to_string(),
@@ -518,9 +514,8 @@ mod tests {
 
         assert!(!rate_limits.stale);
         assert_eq!(rate_limits.error, None);
-        assert!(
-            rate_limits.windows.is_empty(),
-            "Should not create a window with fabricated 0% utilization"
-        );
+        assert_eq!(rate_limits.windows.len(), 1);
+        assert_eq!(rate_limits.windows[0].window_id, "five_hour");
+        assert_eq!(rate_limits.windows[0].utilization, 0.0);
     }
 }

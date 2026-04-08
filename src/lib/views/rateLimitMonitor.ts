@@ -165,6 +165,10 @@ function providerThrottleUntil(
   const minIntervalMs = RATE_LIMIT_PROVIDER_POLICIES[provider].minFetchIntervalMs;
   if (!rateLimits || minIntervalMs <= 0) return null;
 
+  // Never throttle when the cached data has no usable windows — allow an
+  // immediate retry so the UI doesn't sit on "No rate limit data".
+  if (rateLimits.windows.length === 0) return null;
+
   const fetchedAtMs = new Date(rateLimits.fetchedAt).getTime();
   if (!Number.isFinite(fetchedAtMs)) return null;
 

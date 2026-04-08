@@ -70,13 +70,13 @@ describe("footerFiveHourPct", () => {
     expect(footerFiveHourPct(payload, "codex", Date.UTC(2026, 2, 17, 13, 0, 0))).toBe(0);
   });
 
-  it("hides expired codex 5h usage after the refresh grace period", () => {
+  it("falls back to 0% for codex 5h after windows expire", () => {
     const payload = makePayload();
     if (!payload.codex) throw new Error("expected codex payload");
     payload.codex.fetchedAt = "2026-03-17T12:00:00.000Z";
 
     expect(
       footerFiveHourPct(payload, "codex", Date.UTC(2026, 2, 17, 14, 1, 30)),
-    ).toBeNull();
+    ).toBe(0);
   });
 });

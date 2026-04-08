@@ -37,7 +37,6 @@ function fallbackProviderWindow(
   if (!rateLimits || !isRateLimitProvider(rateLimits.provider)) return null;
   const fallbackWindow = getRateLimitFallbackWindow(rateLimits.provider);
   if (!fallbackWindow) return null;
-  if (rateLimits.windows.length > 0) return null;
   if (providerHasActiveCooldown(rateLimits, now)) return null;
   if (!isRateLimitMissingMetadataError(rateLimits.provider, rateLimits.error)) return null;
 
@@ -53,10 +52,17 @@ export function currentRateLimitWindows(
     (window) => !isExpiredProviderWindow(rateLimits, window.resetsAt, now),
   );
 
-  if (windows.length > 0) return windows;
-
   const fallbackWindow = fallbackProviderWindow(rateLimits, now);
-  return fallbackWindow ? [fallbackWindow] : [];
+  if (!fallbackWindow) return windows;
+
+  // Ensure the primary fallback window is always present — even when other
+  // windows (e.g. weekly) survive, the 5h window should show as 0% rather
+  // than disappearing when its reset time has passed.
+  if (!windows.some((w) => w.windowId === fallbackWindow.windowId)) {
+    return [fallbackWindow, ...windows];
+  }
+
+  return windows;
 }
 
 export function hasRateLimitWindows(

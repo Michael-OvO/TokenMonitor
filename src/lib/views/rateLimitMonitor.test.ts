@@ -114,6 +114,9 @@ describe("mergeProviderRateLimits", () => {
 describe("providerDeferredUntil", () => {
   it("chooses the later of cooldown and throttling windows", () => {
     const rateLimits = providerRateLimits("claude", {
+      windows: [
+        { windowId: "five_hour", label: "Session (5hr)", utilization: 10, resetsAt: "2026-03-17T17:00:00.000Z" },
+      ],
       cooldownUntil: "2026-03-17T12:01:00.000Z",
       fetchedAt: "2026-03-17T12:00:30.000Z",
     });
@@ -121,6 +124,17 @@ describe("providerDeferredUntil", () => {
     expect(
       providerDeferredUntil(rateLimits, "claude", Date.parse("2026-03-17T12:00:45.000Z")),
     ).toBe("2026-03-17T12:05:30.000Z");
+  });
+
+  it("does not throttle when cached data has no usable windows", () => {
+    const rateLimits = providerRateLimits("claude", {
+      windows: [],
+      fetchedAt: "2026-03-17T12:00:30.000Z",
+    });
+
+    expect(
+      providerDeferredUntil(rateLimits, "claude", Date.parse("2026-03-17T12:00:45.000Z")),
+    ).toBeNull();
   });
 });
 

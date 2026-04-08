@@ -94,7 +94,7 @@ describe("providerRateLimitViewState", () => {
     ).toBe("empty");
   });
 
-  it("returns idle when codex only has expired windows from a prior refresh cycle", () => {
+  it("returns ready when codex only has expired windows — fallback provides a zeroed window", () => {
     expect(
       providerRateLimitViewState(
         providerRateLimits({
@@ -103,7 +103,7 @@ describe("providerRateLimitViewState", () => {
         }),
         Date.UTC(2026, 2, 17, 12, 1, 30),
       ),
-    ).toBe("idle");
+    ).toBe("ready");
   });
 });
 
@@ -120,7 +120,7 @@ describe("currentRateLimitWindows", () => {
     ).toHaveLength(1);
   });
 
-  it("drops expired codex windows after the refresh grace period", () => {
+  it("falls back to zeroed 5h window after codex windows expire", () => {
     expect(
       currentRateLimitWindows(
         providerRateLimits({
@@ -129,7 +129,33 @@ describe("currentRateLimitWindows", () => {
         }),
         Date.UTC(2026, 2, 17, 12, 1, 30),
       ),
-    ).toHaveLength(0);
+    ).toEqual([
+      {
+        windowId: "primary",
+        label: "Session (5hr)",
+        utilization: 0,
+        resetsAt: null,
+      },
+    ]);
+  });
+
+  it("injects zeroed 5h fallback when only the codex primary window has expired", () => {
+    expect(
+      currentRateLimitWindows(
+        providerRateLimits({
+          provider: "codex",
+          planTier: "Pro",
+          windows: [
+            { windowId: "primary", label: "Session (5hr)", utilization: 5, resetsAt: "2026-03-17T08:00:00.000Z" },
+            { windowId: "secondary", label: "Weekly (7 day)", utilization: 36, resetsAt: "2026-03-20T18:00:00.000Z" },
+          ],
+        }),
+        Date.UTC(2026, 2, 17, 12, 1, 30),
+      ),
+    ).toEqual([
+      { windowId: "primary", label: "Session (5hr)", utilization: 0, resetsAt: null },
+      { windowId: "secondary", label: "Weekly (7 day)", utilization: 36, resetsAt: "2026-03-20T18:00:00.000Z" },
+    ]);
   });
 
   it("synthesizes a zeroed codex 5h window when metadata is missing", () => {

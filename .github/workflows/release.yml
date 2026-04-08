@@ -177,7 +177,7 @@ jobs:
         run: find artifacts/ -type f | sort
 
       - name: Publish release
-        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
