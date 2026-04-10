@@ -94,10 +94,8 @@ pub async fn fetch_and_cache(
     app_data_dir: &Path,
 ) -> Result<HashMap<String, DynamicModelRates>, String> {
     // Fetch both sources concurrently.
-    let (litellm_result, openrouter_result) = tokio::join!(
-        fetch_litellm(),
-        super::openrouter::fetch_openrouter(),
-    );
+    let (litellm_result, openrouter_result) =
+        tokio::join!(fetch_litellm(), super::openrouter::fetch_openrouter(),);
 
     // Start with OpenRouter as the base, then overlay LiteLLM on top
     // so that LiteLLM entries always take priority.

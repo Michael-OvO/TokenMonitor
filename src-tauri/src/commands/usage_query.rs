@@ -243,8 +243,7 @@ fn attach_local_stats(
                 entries.iter().map(|e| e.cache_creation_5m_tokens).sum();
             payload.cache_write_1h_tokens =
                 entries.iter().map(|e| e.cache_creation_1h_tokens).sum();
-            payload.web_search_requests =
-                entries.iter().map(|e| e.web_search_requests).sum();
+            payload.web_search_requests = entries.iter().map(|e| e.web_search_requests).sum();
         }
 
         payload.subagent_stats = crate::stats::subagent::aggregate_subagent_stats(

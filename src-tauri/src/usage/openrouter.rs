@@ -227,11 +227,7 @@ mod tests {
 
     #[test]
     fn strips_provider_prefix_from_id() {
-        let models = vec![make_model(
-            "deepseek/deepseek-chat",
-            "0.000001",
-            "0.000002",
-        )];
+        let models = vec![make_model("deepseek/deepseek-chat", "0.000001", "0.000002")];
 
         let rates = parse_openrouter_models(&models);
         assert!(rates.contains_key("deepseek-chat"));
