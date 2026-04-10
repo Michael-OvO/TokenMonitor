@@ -35,7 +35,7 @@ const LITELLM_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
 const CACHE_FILENAME: &str = "pricing-cache.json";
-const CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
+const CACHE_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 const PER_MTOK: f64 = 1_000_000.0;
 /// Sanity upper bound: reject per-million-token rates above $500.
 /// Current max is ~$75/Mtok (output) so this is 6x+ headroom.
@@ -52,7 +52,7 @@ fn now_epoch() -> u64 {
         .as_secs()
 }
 
-/// Check if the local cache needs refreshing (missing or older than 24h).
+/// Check if the local cache needs refreshing (missing or older than 7 days).
 pub fn should_refresh(app_data_dir: &Path) -> bool {
     let path = cache_path(app_data_dir);
     match std::fs::read_to_string(&path) {
@@ -74,27 +74,69 @@ pub fn load_cached(app_data_dir: &Path) -> Option<HashMap<String, DynamicModelRa
 /// Fetch pricing from LiteLLM GitHub, parse, normalize, and cache to disk.
 ///
 /// Returns the parsed rates HashMap, or an error string.
+async fn fetch_litellm() -> Result<HashMap<String, DynamicModelRates>, String> {
+    let body = reqwest::get(LITELLM_URL)
+        .await
+        .map_err(|e| format!("LiteLLM HTTP fetch failed: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("LiteLLM read body failed: {e}"))?;
+
+    let raw: HashMap<String, serde_json::Value> =
+        serde_json::from_str(&body).map_err(|e| format!("LiteLLM JSON parse failed: {e}"))?;
+
+    Ok(parse_litellm_json(&raw))
+}
+
+/// Fetch from both LiteLLM and OpenRouter, merge (LiteLLM takes priority),
+/// and persist the combined result to disk.
 pub async fn fetch_and_cache(
     app_data_dir: &Path,
 ) -> Result<HashMap<String, DynamicModelRates>, String> {
-    let body = reqwest::get(LITELLM_URL)
-        .await
-        .map_err(|e| format!("HTTP fetch failed: {e}"))?
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
+    // Fetch both sources concurrently.
+    let (litellm_result, openrouter_result) = tokio::join!(
+        fetch_litellm(),
+        super::openrouter::fetch_openrouter(),
+    );
 
-    let raw: HashMap<String, serde_json::Value> =
-        serde_json::from_str(&body).map_err(|e| format!("JSON parse failed: {e}"))?;
-
-    let rates = parse_litellm_json(&raw);
-
-    // Persist to disk.
-    let cache = PricingCache {
-        fetched_at: now_epoch(),
-        rates: rates.clone(),
+    // Start with OpenRouter as the base, then overlay LiteLLM on top
+    // so that LiteLLM entries always take priority.
+    let mut rates = match openrouter_result {
+        Ok(r) => {
+            tracing::info!(count = r.len(), "OpenRouter pricing fetched");
+            r
+        }
+        Err(e) => {
+            tracing::warn!("OpenRouter fetch failed: {e}");
+            HashMap::new()
+        }
     };
-    let json = serde_json::to_string(&cache).map_err(|e| format!("serialize: {e}"))?;
+
+    match litellm_result {
+        Ok(litellm_rates) => {
+            tracing::info!(count = litellm_rates.len(), "LiteLLM pricing fetched");
+            // LiteLLM overwrites OpenRouter entries for the same key.
+            rates.extend(litellm_rates);
+        }
+        Err(e) => {
+            tracing::warn!("LiteLLM fetch failed: {e}");
+            if rates.is_empty() {
+                return Err(format!("Both pricing sources failed. LiteLLM: {e}"));
+            }
+        }
+    }
+
+    // Persist merged result to disk (borrow to avoid cloning the entire HashMap).
+    #[derive(serde::Serialize)]
+    struct PricingCacheRef<'a> {
+        fetched_at: u64,
+        rates: &'a HashMap<String, DynamicModelRates>,
+    }
+    let cache_ref = PricingCacheRef {
+        fetched_at: now_epoch(),
+        rates: &rates,
+    };
+    let json = serde_json::to_string(&cache_ref).map_err(|e| format!("serialize: {e}"))?;
 
     let path = cache_path(app_data_dir);
     if let Some(parent) = path.parent() {
@@ -206,13 +248,13 @@ fn parse_litellm_json(
         // Normalize to the same key format used by pricing.rs.
         let key = normalized_model_key(model_name);
         if key == "unknown" {
-            // Also store under the raw lowercase name for OpenAI models
+            // Store under the raw lowercase name for OpenAI models
             // whose full name IS the key (e.g., "gpt-5.4", "o3-mini-2025-01-31").
             let raw_key = model_name.trim().to_ascii_lowercase();
-            rates.entry(raw_key).or_insert_with(|| model_rates.clone());
+            rates.entry(raw_key).or_insert(model_rates);
+        } else {
+            rates.insert(key, model_rates);
         }
-        // Always store under the normalized key (may overwrite, last wins is fine).
-        rates.insert(key, model_rates);
     }
 
     rates

@@ -840,12 +840,13 @@
     justify-content: flex-start;
   }
 
-  /* Non-Linux: only position ball when expanded (collapsed window = ball size) */
-  .shell.expanded:not(.linux)[data-direction="left"] {
+  /* Non-Linux: keep direction-based alignment active even during collapse
+     transition so the ball doesn't drift to center while the capsule shrinks. */
+  .shell:not(.linux)[data-direction="left"] {
     justify-content: flex-end;
   }
 
-  .shell.expanded:not(.linux)[data-direction="right"] {
+  .shell:not(.linux)[data-direction="right"] {
     justify-content: flex-start;
   }
 

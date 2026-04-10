@@ -275,17 +275,17 @@ pub fn run() {
                     usage::pricing::set_dynamic_pricing(rates);
                 }
 
-                // Spawn async refresh if cache is stale (>24h).
+                // Spawn async refresh if cache is stale (>7 days).
                 if usage::litellm::should_refresh(&app_data) {
                     let data_dir = app_data.clone();
                     tauri::async_runtime::spawn(async move {
                         match usage::litellm::fetch_and_cache(&data_dir).await {
                             Ok(rates) => {
                                 usage::pricing::set_dynamic_pricing(rates);
-                                tracing::info!("LiteLLM pricing refreshed");
+                                tracing::info!("Dynamic pricing refreshed (LiteLLM + OpenRouter)");
                             }
                             Err(e) => {
-                                tracing::warn!("LiteLLM fetch failed (using fallback): {e}");
+                                tracing::warn!("Pricing fetch failed (using fallback): {e}");
                             }
                         }
                     });
@@ -379,11 +379,16 @@ async fn background_loop(app: tauri::AppHandle) {
     let mut update_counter: u64 = 0;
     let mut ssh_sync_counter: u64 = 0;
     let mut rate_limit_counter: u64 = 0;
+    let mut pricing_counter: u64 = 0;
 
     // SSH sync interval: every 10 local refresh cycles (~5 min at 30s interval).
     const SSH_SYNC_EVERY_N_CYCLES: u64 = 10;
     // Rate limit refresh: every 5 cycles (~2.5 min at 30s interval).
     const RATE_LIMIT_REFRESH_EVERY_N_CYCLES: u64 = 5;
+    // Pricing refresh: every 120 cycles (~1h at 30s interval).
+    // The actual TTL check (7 days) is inside should_refresh(), so this just
+    // controls how often we check the TTL, not how often we actually fetch.
+    const PRICING_CHECK_EVERY_N_CYCLES: u64 = 120;
 
     loop {
         let interval_secs = {
@@ -400,6 +405,7 @@ async fn background_loop(app: tauri::AppHandle) {
         update_counter += 1;
         ssh_sync_counter += 1;
         rate_limit_counter += 1;
+        pricing_counter += 1;
 
         let changed = state.parser.invalidate_if_changed();
         if changed {
@@ -414,6 +420,25 @@ async fn background_loop(app: tauri::AppHandle) {
         if rate_limit_counter >= RATE_LIMIT_REFRESH_EVERY_N_CYCLES {
             rate_limit_counter = 0;
             refresh_rate_limits(&app, &state).await;
+        }
+
+        // Periodically check if pricing cache needs refresh (7-day TTL).
+        if pricing_counter >= PRICING_CHECK_EVERY_N_CYCLES {
+            pricing_counter = 0;
+            if let Ok(app_data) = app.path().app_data_dir() {
+                if usage::litellm::should_refresh(&app_data) {
+                    tracing::info!("Pricing cache stale, refreshing...");
+                    match usage::litellm::fetch_and_cache(&app_data).await {
+                        Ok(rates) => {
+                            usage::pricing::set_dynamic_pricing(rates);
+                            tracing::info!("Dynamic pricing refreshed (background)");
+                        }
+                        Err(e) => {
+                            tracing::warn!("Background pricing refresh failed: {e}");
+                        }
+                    }
+                }
+            }
         }
 
         sync_tray_title(&app, &state).await;

@@ -938,7 +938,40 @@ pub async fn set_float_ball_expanded(
     }
     #[cfg(not(target_os = "linux"))]
     {
+        // On Windows, briefly hide the window during collapse resize to prevent
+        // WebView2 flicker. When direction="left" the ball is at x=96; SetWindowPos
+        // must move+shrink simultaneously, and DWM clips stale content to the new
+        // width for 1-2 frames before WebView2 re-renders — showing empty space
+        // instead of the ball. Hiding makes the resize invisible.
+        #[cfg(target_os = "windows")]
+        let collapse_hwnd = if !expanded {
+            window.hwnd().ok().map(|raw| {
+                let hwnd = windows::Win32::Foundation::HWND(raw.0 as *mut _);
+                // SAFETY: hwnd is a valid window handle obtained from Tauri.
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(
+                        hwnd,
+                        windows::Win32::UI::WindowsAndMessaging::SW_HIDE,
+                    );
+                }
+                hwnd
+            })
+        } else {
+            None
+        };
+
         apply_and_store_rect(&window, target_rect, &mut float_state, true, direction)?;
+
+        #[cfg(target_os = "windows")]
+        if let Some(hwnd) = collapse_hwnd {
+            // SAFETY: hwnd is the same valid handle from above.
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(
+                    hwnd,
+                    windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE,
+                );
+            }
+        }
     }
 
     float_state.expand_direction = direction;
@@ -955,8 +988,8 @@ pub async fn set_float_ball_expanded(
 /// when the cursor leaves the 56×56 ball region.
 #[tauri::command]
 pub async fn set_float_ball_dragging(
-    app: tauri::AppHandle,
-    dragging: bool,
+    #[allow(unused_variables)] app: tauri::AppHandle,
+    #[allow(unused_variables)] dragging: bool,
     #[allow(unused_variables)] interaction_id: Option<String>,
 ) -> Result<(), String> {
     #[cfg(target_os = "linux")]
