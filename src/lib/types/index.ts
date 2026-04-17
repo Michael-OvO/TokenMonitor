@@ -19,6 +19,10 @@ export interface UsagePayload {
   session_count: number;
   input_tokens: number;
   output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_5m_tokens: number;
+  cache_write_1h_tokens: number;
+  web_search_requests: number;
   chart_buckets: ChartBucket[];
   model_breakdown: ModelSummary[];
   active_block: ActiveBlock | null;
@@ -103,6 +107,8 @@ export interface ScopeModelUsage {
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
+  cache_write_5m_tokens: number;
+  cache_write_1h_tokens: number;
 }
 
 export interface ScopeUsageSummary {
@@ -110,8 +116,9 @@ export interface ScopeUsageSummary {
   tokens: number;
   input_tokens: number;
   output_tokens: number;
+  cache_write_5m_tokens: number;
+  cache_write_1h_tokens: number;
   cache_read_tokens: number;
-  cache_write_tokens: number;
   session_count: number;
   pct_of_total_cost: number | null;
   top_models: ScopeModelUsage[];
@@ -221,7 +228,8 @@ export interface SshHostStatus {
   enabled: boolean;
   lastSync: string | null;
   lastError: string | null;
-  fileCount: number;
+  entryCount: number;
+  remoteTz: string | null;
 }
 
 export interface SshTestResult {
@@ -235,6 +243,7 @@ export interface SshSyncResult {
   testMessage: string;
   testDurationMs: number;
   recordsSynced: number;
+  diagnostic: string | null;
 }
 
 export interface DeviceModelSummary {
@@ -255,6 +264,7 @@ export interface DeviceSummary {
   error_message: string | null;
   cost_percentage: number;
   include_in_stats: boolean;
+  remote_tz: string | null;
 }
 
 export interface DeviceUsagePayload {

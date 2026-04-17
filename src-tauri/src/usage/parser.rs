@@ -28,6 +28,7 @@ pub struct ParsedEntry {
     pub cache_creation_5m_tokens: u64,
     pub cache_creation_1h_tokens: u64,
     pub cache_read_tokens: u64,
+    pub web_search_requests: u64,
     pub unique_hash: Option<String>,
     pub session_key: String,
     pub agent_scope: crate::stats::subagent::AgentScope,
@@ -250,6 +251,12 @@ struct ClaudeJsonlUsage {
     cache_creation_input_tokens: Option<u64>,
     cache_read_input_tokens: Option<u64>,
     cache_creation: Option<CacheCreationBreakdown>,
+    server_tool_use: Option<ServerToolUse>,
+}
+
+#[derive(Deserialize)]
+struct ServerToolUse {
+    web_search_requests: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -847,6 +854,12 @@ pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                         None => (0, total_cw),
                     };
 
+                    let web_search_requests = usage
+                        .server_tool_use
+                        .as_ref()
+                        .and_then(|s| s.web_search_requests)
+                        .unwrap_or(0);
+
                     entries.push(ParsedEntry {
                         timestamp: ts,
                         model,
@@ -855,6 +868,7 @@ pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                         cache_creation_5m_tokens: cw_5m,
                         cache_creation_1h_tokens: cw_1h,
                         cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
+                        web_search_requests,
                         unique_hash,
                         session_key: session_key.clone(),
                         agent_scope,
@@ -1417,6 +1431,7 @@ fn parse_codex_session_file(path: &Path) -> CodexParseResult {
             cache_creation_5m_tokens: 0,
             cache_creation_1h_tokens: 0,
             cache_read_tokens: raw_usage.cached_input_tokens,
+            web_search_requests: 0,
             unique_hash: None,
             session_key: session_key.clone(),
             agent_scope,
@@ -1533,6 +1548,7 @@ fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, (String, f64, 
             e.cache_creation_5m_tokens,
             e.cache_creation_1h_tokens,
             e.cache_read_tokens,
+            e.web_search_requests,
         );
         let entry = map.entry(key).or_insert((name, 0.0, 0));
         entry.1 += cost;
@@ -1586,6 +1602,7 @@ pub struct UsageParser {
     file_cache: Mutex<HashMap<String, CachedFileEntries>>,
     root_file_lists: Mutex<HashMap<String, CachedRootFileList>>,
     last_query_debug: Mutex<Option<UsageQueryDebugReport>>,
+    archive: Mutex<Option<super::archive::ArchiveManager>>,
 }
 
 fn prune_payload_cache(cache: &mut HashMap<String, PayloadCacheEntry>) {
@@ -1687,7 +1704,19 @@ impl UsageParser {
             file_cache: Mutex::new(HashMap::new()),
             root_file_lists: Mutex::new(HashMap::new()),
             last_query_debug: Mutex::new(None),
+            archive: Mutex::new(None),
         }
+    }
+
+    /// Set the archive manager for persistent hourly data storage.
+    /// Once set, `load_entries()` merges archived data with live source data.
+    pub fn set_archive(&self, archive: super::archive::ArchiveManager) {
+        *self.archive.lock().unwrap() = Some(archive);
+    }
+
+    /// Access the archive manager (if set).
+    pub fn archive(&self) -> Option<super::archive::ArchiveManager> {
+        self.archive.lock().unwrap().clone()
     }
 
     /// Create with default home-directory paths.
@@ -2126,19 +2155,48 @@ impl UsageParser {
         let mut change_events = Vec::new();
         let mut reports = Vec::new();
 
+        let archive_guard = self.archive.lock().unwrap();
+        let archive = archive_guard.as_ref();
+
         for integration_id in selection.integration_ids() {
+            let source_key = format!("local:{}", integration_id.as_str());
+            let frontier = archive.and_then(|a| a.frontier(&source_key));
+
+            // Load archived entries for completed hours (up to frontier).
+            if let (Some(a), Some(_frontier)) = (archive, frontier) {
+                let archived = a.load_archived(&source_key, since);
+                entries.extend(archived);
+            }
+
+            // Load live entries from source JSONL files.
             match integration_id {
                 UsageIntegrationId::Claude => {
                     let (next_entries, next_change_events, next_reports) =
                         self.load_claude_entries_with_debug(since);
-                    entries.extend(next_entries);
+
+                    // If archive covers some hours, filter live entries to
+                    // only include those AFTER the archive frontier.
+                    if let Some(ref f) = frontier {
+                        entries.extend(next_entries.into_iter().filter(|e| {
+                            !f.covers(e.timestamp.date_naive(), e.timestamp.hour() as u8)
+                        }));
+                    } else {
+                        entries.extend(next_entries);
+                    }
                     change_events.extend(next_change_events);
                     reports.extend(next_reports);
                 }
                 UsageIntegrationId::Codex => {
                     let (next_entries, next_change_events, next_report) =
                         self.load_codex_entries_with_debug(since);
-                    entries.extend(next_entries);
+
+                    if let Some(ref f) = frontier {
+                        entries.extend(next_entries.into_iter().filter(|e| {
+                            !f.covers(e.timestamp.date_naive(), e.timestamp.hour() as u8)
+                        }));
+                    } else {
+                        entries.extend(next_entries);
+                    }
                     change_events.extend(next_change_events);
                     reports.push(next_report);
                 }
@@ -2292,6 +2350,10 @@ impl UsageParser {
             session_count,
             input_tokens: total_input,
             output_tokens: total_output,
+            cache_read_tokens: 0,
+            cache_write_5m_tokens: 0,
+            cache_write_1h_tokens: 0,
+            web_search_requests: 0,
             chart_buckets,
             model_breakdown,
             active_block: None,
@@ -2383,6 +2445,10 @@ impl UsageParser {
             session_count,
             input_tokens: total_input,
             output_tokens: total_output,
+            cache_read_tokens: 0,
+            cache_write_5m_tokens: 0,
+            cache_write_1h_tokens: 0,
+            web_search_requests: 0,
             chart_buckets,
             model_breakdown,
             active_block: None,
@@ -2487,6 +2553,10 @@ impl UsageParser {
             session_count,
             input_tokens: total_input,
             output_tokens: total_output,
+            cache_read_tokens: 0,
+            cache_write_5m_tokens: 0,
+            cache_write_1h_tokens: 0,
+            web_search_requests: 0,
             chart_buckets,
             model_breakdown,
             active_block: None,
@@ -2632,6 +2702,10 @@ impl UsageParser {
             session_count,
             input_tokens: total_input,
             output_tokens: total_output,
+            cache_read_tokens: 0,
+            cache_write_5m_tokens: 0,
+            cache_write_1h_tokens: 0,
+            web_search_requests: 0,
             chart_buckets,
             model_breakdown,
             active_block,
@@ -3990,6 +4064,7 @@ mod debug_compare {
                 e.cache_creation_5m_tokens,
                 e.cache_creation_1h_tokens,
                 e.cache_read_tokens,
+                e.web_search_requests,
             );
             let m = model_totals.entry(key).or_default();
             m.0 += e.input_tokens;

@@ -40,6 +40,9 @@ fn lookup_dynamic(model_key: &str) -> Option<ModelRates> {
     })
 }
 
+/// Web search cost: $10 per 1,000 searches ($0.01 per search).
+const WEB_SEARCH_COST_PER_REQUEST: f64 = 0.01;
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn calculate_cost(
     model: &str,
@@ -48,6 +51,7 @@ pub fn calculate_cost(
     cache_creation_5m_tokens: u64,
     cache_creation_1h_tokens: u64,
     cache_read_tokens: u64,
+    web_search_requests: u64,
 ) -> f64 {
     let rates = get_rates(model);
     apply_rates(
@@ -57,7 +61,7 @@ pub fn calculate_cost(
         cache_creation_5m_tokens,
         cache_creation_1h_tokens,
         cache_read_tokens,
-    )
+    ) + web_search_requests as f64 * WEB_SEARCH_COST_PER_REQUEST
 }
 
 /// Like `calculate_cost`, but accepts a model key that is already lowercase.
@@ -70,6 +74,7 @@ pub fn calculate_cost_for_key(
     cache_creation_5m_tokens: u64,
     cache_creation_1h_tokens: u64,
     cache_read_tokens: u64,
+    web_search_requests: u64,
 ) -> f64 {
     let rates = get_rates_for_key(model_key);
     apply_rates(
@@ -79,7 +84,7 @@ pub fn calculate_cost_for_key(
         cache_creation_5m_tokens,
         cache_creation_1h_tokens,
         cache_read_tokens,
-    )
+    ) + web_search_requests as f64 * WEB_SEARCH_COST_PER_REQUEST
 }
 
 fn apply_rates(
@@ -99,13 +104,15 @@ fn apply_rates(
 }
 
 /// Build a ModelRates from base input price.  Cache multipliers follow
-/// Anthropic's standard: 5m = 1.25x, 1h = 2x, read = 0.1x.
+/// Claude Code's `/cost` convention: both 5m and 1h tiers use 1.25x,
+/// cache read = 0.1x.  (The Anthropic API charges 2x for 1h, but Claude
+/// Code bills everything at the 5m rate, so we match that for consistency.)
 const fn claude_rates(input: f64, output: f64) -> ModelRates {
     ModelRates {
         input,
         output,
         cache_write_5m: input * 1.25,
-        cache_write_1h: input * 2.0,
+        cache_write_1h: input * 1.25,
         cache_read: input * 0.1,
     }
 }
@@ -303,15 +310,15 @@ mod tests {
     const M: u64 = 1_000_000;
 
     fn cost(model: &str, input: u64, output: u64) -> f64 {
-        calculate_cost(model, input, output, 0, 0, 0)
+        calculate_cost(model, input, output, 0, 0, 0, 0)
     }
 
     fn cost_cache_5m(model: &str, cache_write: u64, cache_read: u64) -> f64 {
-        calculate_cost(model, 0, 0, cache_write, 0, cache_read)
+        calculate_cost(model, 0, 0, cache_write, 0, cache_read, 0)
     }
 
     fn cost_cache_1h(model: &str, cache_write: u64, cache_read: u64) -> f64 {
-        calculate_cost(model, 0, 0, 0, cache_write, cache_read)
+        calculate_cost(model, 0, 0, 0, cache_write, cache_read, 0)
     }
 
     fn approx_eq(a: f64, b: f64) -> bool {
@@ -344,17 +351,17 @@ mod tests {
 
     #[test]
     fn claude_1h_cache_tokens() {
-        // Sonnet 4.6: 1h cache_write $6.00 + cache_read $0.30 = $6.30
+        // Sonnet 4.6: 1h uses same 1.25x rate as 5m → $3.75 + cache_read $0.30 = $4.05
         assert!(approx_eq(
             cost_cache_1h("claude-sonnet-4-6-20260101", M, M),
-            6.30
+            4.05
         ));
     }
 
     #[test]
     fn opus_1h_cache_tokens() {
-        // Opus 4.6: 1h cache_write $10.00 + cache_read $0.50 = $10.50
-        assert!(approx_eq(cost_cache_1h("claude-opus-4-6", M, M), 10.50));
+        // Opus 4.6: 1h uses same 1.25x rate as 5m → $6.25 + cache_read $0.50 = $6.75
+        assert!(approx_eq(cost_cache_1h("claude-opus-4-6", M, M), 6.75));
     }
 
     #[test]
@@ -484,7 +491,7 @@ mod tests {
     #[test]
     fn zero_tokens_zero_cost() {
         assert!(approx_eq(
-            calculate_cost("claude-sonnet-4-6", 0, 0, 0, 0, 0),
+            calculate_cost("claude-sonnet-4-6", 0, 0, 0, 0, 0, 0),
             0.00
         ));
     }

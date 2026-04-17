@@ -13,6 +13,7 @@ type ReloadHandle = reload::Handle<EnvFilter, Registry>;
 pub struct LoggingState {
     reload_handle: ReloadHandle,
     frontend_writer: Mutex<RollingFileAppender>,
+    current_level: Mutex<String>,
     pub log_dir: PathBuf,
     _backend_guard: WorkerGuard,
 }
@@ -23,7 +24,13 @@ impl LoggingState {
             EnvFilter::try_new(level).map_err(|e| format!("Invalid log level '{level}': {e}"))?;
         self.reload_handle
             .reload(new_filter)
-            .map_err(|e| format!("Failed to reload log filter: {e}"))
+            .map_err(|e| format!("Failed to reload log filter: {e}"))?;
+
+        if let Ok(mut current_level) = self.current_level.lock() {
+            *current_level = normalize_log_level(level).to_string();
+        }
+
+        Ok(())
     }
 
     pub fn write_frontend_log(&self, level: &str, category: &str, message: &str) {
@@ -42,6 +49,13 @@ impl LoggingState {
             }
         }
     }
+
+    pub fn get_level(&self) -> String {
+        self.current_level
+            .lock()
+            .map(|level| level.clone())
+            .unwrap_or_else(|_| String::from("info"))
+    }
 }
 
 pub fn init_logging(app_data_dir: &Path) -> LoggingState {
@@ -56,8 +70,10 @@ pub fn init_logging(app_data_dir: &Path) -> LoggingState {
     let frontend_appender = RollingFileAppender::new(Rotation::DAILY, &log_dir, "frontend.log");
 
     // Reloadable EnvFilter for runtime level switching
+    let default_filter_spec =
+        std::env::var("TOKENMONITOR_LOG").unwrap_or_else(|_| String::from("info"));
     let default_filter =
-        EnvFilter::try_from_env("TOKENMONITOR_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+        EnvFilter::try_new(&default_filter_spec).unwrap_or_else(|_| EnvFilter::new("info"));
     let (filter_layer, reload_handle) = reload::Layer::new(default_filter);
 
     tracing_subscriber::registry()
@@ -78,8 +94,23 @@ pub fn init_logging(app_data_dir: &Path) -> LoggingState {
     LoggingState {
         reload_handle,
         frontend_writer: Mutex::new(frontend_appender),
+        current_level: Mutex::new(normalize_log_level(&default_filter_spec).to_string()),
         log_dir,
         _backend_guard: backend_guard,
+    }
+}
+
+fn normalize_log_level(level: &str) -> &'static str {
+    let level = level.trim().to_ascii_lowercase();
+
+    if level.contains("debug") || level.contains("trace") {
+        "debug"
+    } else if level.contains("warn") {
+        "warn"
+    } else if level.contains("error") {
+        "error"
+    } else {
+        "info"
     }
 }
 

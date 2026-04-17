@@ -20,6 +20,10 @@ pub struct UsagePayload {
     pub session_count: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_5m_tokens: u64,
+    pub cache_write_1h_tokens: u64,
+    pub web_search_requests: u64,
     pub chart_buckets: Vec<ChartBucket>,
     pub model_breakdown: Vec<ModelSummary>,
     pub active_block: Option<ActiveBlock>,
@@ -44,6 +48,10 @@ impl Default for UsagePayload {
             session_count: 0,
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_5m_tokens: 0,
+            cache_write_1h_tokens: 0,
+            web_search_requests: 0,
             chart_buckets: Vec::new(),
             model_breakdown: Vec::new(),
             active_block: None,
@@ -362,6 +370,8 @@ pub struct DeviceSummary {
     pub error_message: Option<String>,
     pub cost_percentage: f64,
     pub include_in_stats: bool,
+    /// Remote server UTC offset, e.g. `"+0800"`. `None` for local device.
+    pub remote_tz: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]

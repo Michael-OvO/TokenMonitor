@@ -35,6 +35,26 @@ fn validate_ssh_alias(alias: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Parse a remote timestamp into `DateTime<FixedOffset>` (for chart bucketing etc.).
+///
+/// Remote servers may be in a different timezone. Their JSONL timestamps carry
+/// the server's UTC offset (RFC 3339).
+fn parse_remote_ts(ts: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .or_else(|_| chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f%z"))
+        .ok()
+}
+
+/// Parse a remote compact-record timestamp and convert to a local-timezone NaiveDate.
+///
+/// We convert to local time first so that date-range filtering and chart
+/// bucketing use the *local* calendar date, not the server's.
+fn parse_remote_ts_to_local_date(ts: &str) -> chrono::NaiveDate {
+    parse_remote_ts(ts)
+        .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
+        .unwrap_or(chrono::NaiveDate::MIN)
+}
+
 /// Remote SSH usage may contain both Claude and Codex records.
 fn provider_includes_remote_ssh_usage(provider: &str) -> bool {
     matches!(provider, ALL_USAGE_INTEGRATIONS_ID | "claude" | "codex")
@@ -227,13 +247,24 @@ pub async fn get_device_usage(
     let mut devices = vec![local_summary];
     let mut total_cost = devices[0].total_cost;
 
-    // 2. Remote device usage from compact cached records.
+    // 2. Remote device usage from archive + compact cached records.
     let configs = state.ssh_hosts.read().await;
     let cache_mgr = state.ssh_cache.read().await;
+    let archive = parser.archive();
 
     if let Some(mgr) = cache_mgr.as_ref() {
         let statuses = mgr.host_statuses(&configs);
         for cfg in configs.iter().filter(|c| c.enabled) {
+            let source_key = format!("device:{}", cfg.alias);
+            let frontier = archive.as_ref().and_then(|a| a.frontier(&source_key));
+
+            // Load archived entries for this device (completed hours).
+            let archived_entries = archive
+                .as_ref()
+                .map(|a| a.load_archived(&source_key, Some(since)))
+                .unwrap_or_default();
+
+            // Load live compact records from remote-cache.
             let records = match mgr.load_cached_records(&cfg.alias) {
                 Ok(r) => r,
                 Err(e) => {
@@ -241,12 +272,37 @@ pub async fn get_device_usage(
                     Vec::new()
                 }
             };
-            let mut summary = build_device_summary_from_compact(&cfg.alias, &records, since, end);
+
+            // Filter live records: exclude hours covered by the archive frontier.
+            let live_records: Vec<&CompactUsageRecord> = if let Some(ref f) = frontier {
+                records
+                    .iter()
+                    .filter(|r| {
+                        let dt = parse_remote_ts(&r.ts).map(|d| d.with_timezone(&chrono::Local));
+                        match dt {
+                            Some(local) => !f.covers(local.date_naive(), local.hour() as u8),
+                            None => true, // Can't parse → include as live.
+                        }
+                    })
+                    .collect()
+            } else {
+                records.iter().collect()
+            };
+
+            // Build summary: archived entries + live compact records.
+            let mut summary = build_device_summary_merged(
+                &cfg.alias,
+                &archived_entries,
+                &live_records,
+                since,
+                end,
+            );
 
             // Enrich with status from cache manager.
             if let Some(host_status) = statuses.iter().find(|s| s.alias == cfg.alias) {
                 summary.last_synced = host_status.last_sync.clone();
                 summary.error_message = host_status.last_error.clone();
+                summary.remote_tz = host_status.remote_tz.clone();
                 summary.status = if host_status.last_error.is_some() {
                     String::from("error")
                 } else if host_status.last_sync.is_some() {
@@ -305,6 +361,7 @@ fn build_device_summary_from_parsed(
             entry.cache_creation_5m_tokens,
             entry.cache_creation_1h_tokens,
             entry.cache_read_tokens,
+            0,
         );
         let tokens = entry.input_tokens + entry.output_tokens;
 
@@ -337,11 +394,8 @@ fn build_device_summary_from_compact(
             continue;
         }
 
-        // Filter by date range [since, end).
-        let record_date = chrono::DateTime::parse_from_rfc3339(&record.ts)
-            .or_else(|_| chrono::DateTime::parse_from_str(&record.ts, "%Y-%m-%dT%H:%M:%S%.f%z"))
-            .map(|dt| dt.date_naive())
-            .unwrap_or(chrono::NaiveDate::MIN);
+        // Filter by date range [since, end) using the *local* calendar date.
+        let record_date = parse_remote_ts_to_local_date(&record.ts);
 
         if record_date < since || record_date >= end {
             continue;
@@ -355,9 +409,79 @@ fn build_device_summary_from_compact(
             record.cache_5m,
             record.cache_1h,
             record.cache_read,
+            0,
         );
         let tokens = record.input_tokens + record.output_tokens;
 
+        let agg = model_map
+            .entry(model_key)
+            .or_insert_with(|| (display_name, 0.0, 0));
+        agg.1 += cost;
+        agg.2 += tokens;
+    }
+
+    finish_device_summary(device_name, model_map)
+}
+
+/// Build a DeviceSummary from archived ParsedEntry + live compact records.
+/// Archived entries cover completed hours; live records cover the current hour.
+fn build_device_summary_merged(
+    device_name: &str,
+    archived_entries: &[crate::usage::parser::ParsedEntry],
+    live_records: &[&CompactUsageRecord],
+    since: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+) -> DeviceSummary {
+    use crate::models::normalize_model;
+    use crate::usage::pricing::calculate_cost_for_key;
+    use std::collections::HashMap;
+
+    let mut model_map: HashMap<String, (String, f64, u64)> = HashMap::new();
+
+    // Process archived entries.
+    for entry in archived_entries {
+        let entry_date = entry.timestamp.date_naive();
+        if entry_date < since || entry_date >= end {
+            continue;
+        }
+        let (display_name, model_key) = normalize_model(&entry.model);
+        let cost = calculate_cost_for_key(
+            &model_key,
+            entry.input_tokens,
+            entry.output_tokens,
+            entry.cache_creation_5m_tokens,
+            entry.cache_creation_1h_tokens,
+            entry.cache_read_tokens,
+            0,
+        );
+        let tokens = entry.input_tokens + entry.output_tokens;
+        let agg = model_map
+            .entry(model_key)
+            .or_insert_with(|| (display_name, 0.0, 0));
+        agg.1 += cost;
+        agg.2 += tokens;
+    }
+
+    // Process live compact records (hours after archive frontier).
+    for record in live_records {
+        if record.model.starts_with('<') {
+            continue;
+        }
+        let record_date = parse_remote_ts_to_local_date(&record.ts);
+        if record_date < since || record_date >= end {
+            continue;
+        }
+        let (display_name, model_key) = normalize_model(&record.model);
+        let cost = calculate_cost_for_key(
+            &model_key,
+            record.input_tokens,
+            record.output_tokens,
+            record.cache_5m,
+            record.cache_1h,
+            record.cache_read,
+            0,
+        );
+        let tokens = record.input_tokens + record.output_tokens;
         let agg = model_map
             .entry(model_key)
             .or_insert_with(|| (display_name, 0.0, 0));
@@ -404,6 +528,7 @@ fn finish_device_summary(
         error_message: None,
         cost_percentage: 0.0,
         include_in_stats: false,
+        remote_tz: None,
     }
 }
 
@@ -472,6 +597,7 @@ pub(crate) async fn build_device_breakdown_for_payload(
             if let Some(host_status) = statuses.iter().find(|s| s.alias == cfg.alias) {
                 summary.last_synced = host_status.last_sync.clone();
                 summary.error_message = host_status.last_error.clone();
+                summary.remote_tz = host_status.remote_tz.clone();
                 summary.status = if host_status.last_error.is_some() {
                     String::from("error")
                 } else if host_status.last_sync.is_some() {
@@ -546,13 +672,12 @@ pub(crate) async fn build_included_devices_payload(
                 continue;
             }
 
-            let parsed_ts = chrono::DateTime::parse_from_rfc3339(&record.ts).or_else(|_| {
-                chrono::DateTime::parse_from_str(&record.ts, "%Y-%m-%dT%H:%M:%S%.f%z")
-            });
-            let record_date = parsed_ts
-                .as_ref()
-                .map(|dt| dt.date_naive())
-                .unwrap_or(chrono::NaiveDate::MIN);
+            // Parse once, use for both date filtering and chart bucketing.
+            let parsed_ts = match parse_remote_ts(&record.ts) {
+                Some(ts) => ts,
+                None => continue,
+            };
+            let record_date = parsed_ts.with_timezone(&chrono::Local).date_naive();
 
             if record_date < since || record_date >= end {
                 continue;
@@ -566,6 +691,7 @@ pub(crate) async fn build_included_devices_payload(
                 record.cache_5m,
                 record.cache_1h,
                 record.cache_read,
+                0,
             );
             let tokens = record.input_tokens + record.output_tokens;
             input_tokens += record.input_tokens;
@@ -577,9 +703,7 @@ pub(crate) async fn build_included_devices_payload(
             agg.1 += cost;
             agg.2 += tokens;
 
-            if let Ok(ts) = parsed_ts {
-                chart_entries.push((ts, model_key, cost, tokens));
-            }
+            chart_entries.push((parsed_ts, model_key, cost, tokens));
         }
     }
 
@@ -705,6 +829,7 @@ pub(crate) async fn build_device_time_chart_buckets(
             entry.cache_creation_5m_tokens,
             entry.cache_creation_1h_tokens,
             entry.cache_read_tokens,
+            0,
         );
         *device_cost_by_bucket
             .entry(bucket_key)
@@ -729,24 +854,18 @@ pub(crate) async fn build_device_time_chart_buckets(
                     .iter()
                     .filter(|r| compact_record_matches_provider(r, provider))
                 {
-                    let parsed_ts =
-                        chrono::DateTime::parse_from_rfc3339(&record.ts).or_else(|_| {
-                            chrono::DateTime::parse_from_str(&record.ts, "%Y-%m-%dT%H:%M:%S%.f%z")
-                        });
-                    let record_date = parsed_ts
-                        .as_ref()
-                        .map(|dt| dt.date_naive())
-                        .unwrap_or(chrono::NaiveDate::MIN);
+                    // Parse once, use for both date filtering and chart bucketing.
+                    let parsed_ts = match parse_remote_ts(&record.ts) {
+                        Some(ts) => ts,
+                        None => continue,
+                    };
+                    let record_date = parsed_ts.with_timezone(&chrono::Local).date_naive();
 
                     if record_date < since || record_date >= end {
                         continue;
                     }
 
-                    let ts_ref = match &parsed_ts {
-                        Ok(ts) => ts,
-                        Err(_) => continue,
-                    };
-                    let bucket_key = bucket_key_for_timestamp(ts_ref, period);
+                    let bucket_key = bucket_key_for_timestamp(&parsed_ts, period);
                     let (_, model_key) = normalize_model(&record.model);
                     let cost = calculate_cost_for_key(
                         &model_key,
@@ -755,6 +874,7 @@ pub(crate) async fn build_device_time_chart_buckets(
                         record.cache_5m,
                         record.cache_1h,
                         record.cache_read,
+                        0,
                     );
                     *device_cost_by_bucket
                         .entry(bucket_key)
@@ -889,6 +1009,7 @@ pub async fn get_single_device_usage(
                 entry.cache_creation_5m_tokens,
                 entry.cache_creation_1h_tokens,
                 entry.cache_read_tokens,
+                0,
             );
             let tokens = entry.input_tokens + entry.output_tokens;
             let agg = model_map
@@ -908,12 +1029,8 @@ pub async fn get_single_device_usage(
                 }
             };
             for record in &records {
-                let record_date = chrono::DateTime::parse_from_rfc3339(&record.ts)
-                    .or_else(|_| {
-                        chrono::DateTime::parse_from_str(&record.ts, "%Y-%m-%dT%H:%M:%S%.f%z")
-                    })
-                    .map(|dt| dt.date_naive())
-                    .unwrap_or(chrono::NaiveDate::MIN);
+                // Filter by date range [since, end) using the *local* calendar date.
+                let record_date = parse_remote_ts_to_local_date(&record.ts);
 
                 if record_date < since || record_date >= end {
                     continue;
@@ -927,6 +1044,7 @@ pub async fn get_single_device_usage(
                     record.cache_5m,
                     record.cache_1h,
                     record.cache_read,
+                    0,
                 );
                 let tokens = record.input_tokens + record.output_tokens;
                 let agg = model_map
@@ -1243,6 +1361,123 @@ mod tests {
                 .iter()
                 .all(|m| !m.model_key.contains("claude")),
             "remote device in codex view should not contain Claude models"
+        );
+    }
+
+    // ── Timezone-aware date extraction tests ───────────────────────────────
+
+    #[test]
+    fn parse_remote_ts_to_local_date_converts_to_local() {
+        // A timestamp at 23:00 UTC should map to the *next* day in any timezone
+        // ahead of UTC (e.g. UTC+8 → 07:00 next day).
+        let ts_utc = "2024-01-01T23:00:00+00:00";
+        let result = parse_remote_ts_to_local_date(ts_utc);
+
+        // Compute the expected local date by parsing and converting ourselves.
+        let expected = chrono::DateTime::parse_from_rfc3339(ts_utc)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn parse_remote_ts_to_local_date_positive_offset() {
+        // Timestamp in UTC+9: 2024-03-15T02:00:00+09:00 → UTC 2024-03-14T17:00
+        let ts = "2024-03-15T02:00:00+09:00";
+        let result = parse_remote_ts_to_local_date(ts);
+        let expected = chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn parse_remote_ts_to_local_date_negative_offset() {
+        // Timestamp in UTC-5: 2024-06-30T23:30:00-05:00 → UTC 2024-07-01T04:30
+        let ts = "2024-06-30T23:30:00-05:00";
+        let result = parse_remote_ts_to_local_date(ts);
+        let expected = chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn parse_remote_ts_to_local_date_midday_no_edge() {
+        let ts = "2024-01-15T12:00:00+00:00";
+        let result = parse_remote_ts_to_local_date(ts);
+        let expected = chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn parse_remote_ts_to_local_date_invalid_returns_min() {
+        assert_eq!(
+            parse_remote_ts_to_local_date("not-a-timestamp"),
+            chrono::NaiveDate::MIN
+        );
+    }
+
+    #[test]
+    fn parse_remote_ts_to_local_date_fractional_seconds() {
+        let ts = "2024-01-01T23:59:59.999+00:00";
+        let result = parse_remote_ts_to_local_date(ts);
+        let expected = chrono::DateTime::parse_from_rfc3339(ts)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn parse_remote_ts_helper_returns_fixed_offset() {
+        let ts = "2024-06-15T10:30:00+05:30";
+        let parsed = parse_remote_ts(ts).unwrap();
+        assert_eq!(parsed.offset().local_minus_utc(), 5 * 3600 + 30 * 60);
+    }
+
+    #[test]
+    fn build_device_summary_filters_by_local_date() {
+        // Create a record at 23:00 UTC — in UTC+N (N>0) this is the next day.
+        let records = vec![CompactUsageRecord {
+            ts: "2024-01-01T23:00:00+00:00".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_5m: 0,
+            cache_1h: 0,
+            cache_read: 0,
+        }];
+
+        // The record's local date depends on the machine's timezone.
+        let local_date = parse_remote_ts_to_local_date(&records[0].ts);
+
+        // Filter for [local_date, local_date+1) — should include the record.
+        let summary = build_device_summary_from_compact(
+            "test-host",
+            &records,
+            local_date,
+            local_date + chrono::Duration::days(1),
+        );
+        assert_eq!(
+            summary.model_breakdown.len(),
+            1,
+            "record should be included when filtered by its local date"
+        );
+
+        // Filter for one day before — should exclude the record.
+        let day_before = local_date - chrono::Duration::days(1);
+        let summary_miss =
+            build_device_summary_from_compact("test-host", &records, day_before, local_date);
+        assert!(
+            summary_miss.total_cost == 0.0,
+            "record should be excluded when local date is outside the range"
         );
     }
 }

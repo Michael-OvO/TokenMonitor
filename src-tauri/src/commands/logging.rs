@@ -19,6 +19,11 @@ pub async fn set_log_level(state: State<'_, LoggingState>, level: String) -> Res
 }
 
 #[tauri::command]
+pub async fn get_log_level(state: State<'_, LoggingState>) -> Result<String, String> {
+    Ok(state.get_level())
+}
+
+#[tauri::command]
 pub async fn get_log_dir(state: State<'_, LoggingState>) -> Result<String, String> {
     Ok(state.log_dir.to_string_lossy().to_string())
 }

@@ -1,0 +1,525 @@
+ecl_version: "1.0"
+feature: "linux-floatball-geometry-fix"
+status: implemented
+created: 2026-04-04
+updated: 2026-04-04
+
+prompt_calibration:
+  raw_input: |
+    Fix Linux FloatBall architectural geometry instability: jumping, flickering,
+    clipping caused by 4-layer geometry system mismatch.
+  intent_decomposition:
+    total_intents: 1
+    total_tracks: 1
+    tracks:
+      - track_id: T1
+        name: "Linux FloatBall geometry stability"
+        priority: 1
+        intents:
+          - raw: "Fix jumping, flickering, clipping of FloatBall on Linux"
+            type: architectural-fix
+
+decisions:
+  - id: DEC-001
+    phase: 3
+    date: 2026-04-04
+    decision: "Fixed-size window + GDK input shape"
+    rationale: |
+      Eliminates resize (root cause of all 11 prior failures).
+      GDK input_shape_combine_region is a safe Rust API in existing deps.
+      Moderate engineering scope with full feature parity.
+  - id: DEC-002
+    phase: 5
+    date: 2026-04-04
+    decision: "Ordering protocol for input shape + CSS synchronization"
+    rationale: |
+      Atomic update impossible (different event loops). Instead:
+      Expand: set expanded input shape FIRST, then CSS.
+      Collapse: set CSS FIRST, then shrink input shape.
+      This ensures transient state always has EXTRA clickable area (harmless)
+      rather than MISSING clickable area (broken UX).
+  - id: DEC-003
+    phase: 5
+    date: 2026-04-04
+    decision: "Backend returns ball_offset_x in FloatBallPosition"
+    rationale: |
+      With fixed-size window, window.x ≠ ball screen x.
+      Frontend needs ball offset within window for correct drag anchor.
+  - id: DEC-004
+    phase: 5
+    date: 2026-04-04
+    decision: "Direction change uses opacity masking"
+    rationale: |
+      Window move + CSS flex flip on different loops → 1-frame glitch.
+      Panel opacity set to 0 during direction change, restored after both
+      window move and CSS flip are confirmed.
+
+requirements:
+  - id: REQ-001
+    text: "Linux FloatBall window created at fixed expanded size, never resized"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "Window size = expanded_width × expanded_height in LOGICAL pixels, scaled by monitor scale factor to physical"
+      - "No set_size / geometry_hints calls after creation on Linux"
+      - "set_position permitted; size changes prohibited"
+      - "Position-only retry on create retained (up to 5 attempts with backoff)"
+    decomposition:
+      features: [FEAT-001]
+    history:
+      - phase: 5
+        action: "Amended per FINDING-001 (HiDPI), FINDING-006 (move vs resize), FINDING-008 (create retry)"
+
+  - id: REQ-002
+    text: "Transparent regions click-through via GDK input shape"
+    status: verified
+    confidence: 0.90
+    acceptance_criteria:
+      - "Collapsed: 56×56 ball area accepts input; rest passes through"
+      - "Expanded: full window area accepts input"
+      - "Ordering: expand shape BEFORE CSS expand; collapse CSS BEFORE shrinking shape"
+      - "Bounded latency: shape updates within one GTK main loop iteration"
+      - "Failures logged; safety fallback on stuck expanded shape"
+      - "Pointer capture released before input shape reduction"
+    decomposition:
+      features: [FEAT-002]
+    history:
+      - phase: 5
+        action: "Amended per FINDING-002 (atomicity→ordering), FINDING-011 (pointer capture), FINDING-015 (logging)"
+
+  - id: REQ-003
+    text: "Expand/collapse triggers no native window resize"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "Linux expand/collapse = CSS state change + input shape update + optional window reposition"
+      - "Direction change sequenced: move window → wait IPC → flip CSS direction"
+      - "Panel opacity masked during direction change to prevent 1-frame glitch"
+      - "Evaluate re-enabling CSS width transition (ghost artifacts were from resize, may be safe now)"
+    decomposition:
+      features: [FEAT-003, FEAT-004]
+    history:
+      - phase: 5
+        action: "Amended per FINDING-004 (direction race), FINDING-009 (CSS transition)"
+
+  - id: REQ-004
+    text: "Drag works correctly with fixed-size window"
+    status: verified
+    confidence: 0.90
+    acceptance_criteria:
+      - "Drag moves full 152×56 window; ball follows mouse at correct offset"
+      - "Backend returns ball_offset_x in FloatBallPosition for frontend drag anchor"
+      - "Clamping ensures BALL stays within screen; transparent area may extend off-screen"
+      - "If WM clamps full window to screen, accept ball stopping ~96px from opposite edge"
+    decomposition:
+      features: [FEAT-005]
+    history:
+      - phase: 5
+        action: "Amended per FINDING-005 (offset ambiguity), FINDING-007 (WM clamping)"
+
+  - id: REQ-005
+    text: "Edge snap works on Linux with fixed-size window"
+    status: verified
+    confidence: 0.85
+    acceptance_criteria:
+      - "Ball snaps to nearest screen edge within snap threshold"
+      - "Window positioned so ball is at edge, panel space toward center"
+      - "Expand direction auto-chosen based on snap edge"
+      - "cfg gates on choose_float_ball_anchor and SNAP_THRESHOLD_PX removed for Linux"
+    decomposition:
+      features: [FEAT-006]
+    history:
+      - phase: 5
+        action: "Amended per FINDING-014 (cfg gates)"
+
+  - id: REQ-006
+    text: "Linux resize/probe/corrective code removed and simplified"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "spawn_linux_rect_probe removed (no resize to verify)"
+      - "set_gtk_float_ball_size removed (no resize path)"
+      - "Create position retry retained (position-only, no size correction)"
+      - "apply_float_ball_window_rect Linux path = position-only set_position()"
+    decomposition:
+      features: [FEAT-007]
+
+  - id: REQ-007
+    text: "macOS and Windows behavior identical; tests updated appropriately"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "No changes to macOS/Windows code paths"
+      - "macOS/Windows test assertions unchanged"
+      - "Linux test assertions updated to reflect fixed-size geometry"
+      - "All tests pass on all platforms"
+    decomposition:
+      features: [FEAT-008]
+    history:
+      - phase: 5
+        action: "Amended per FINDING-010 (test ambiguity)"
+
+  - id: REQ-008
+    text: "lockViewportScrolling handles initial WebKitGTK layout timing"
+    status: verified
+    confidence: 0.85
+    source: adversarial-phase-5
+    acceptance_criteria:
+      - "lockViewportScrolling guards against zero/implausible dimensions"
+      - "Defers first call by one RAF on Linux to ensure WebKitGTK has finished layout"
+    decomposition:
+      features: [FEAT-009]
+    history:
+      - phase: 5
+        action: "New requirement from FINDING-012 (viewport lock timing)"
+
+features:
+  - id: FEAT-001
+    name: "Fixed-size window creation on Linux"
+    parent: REQ-001
+    modules: [MOD-001, MOD-002]
+    dependencies: []
+    complexity: small
+
+  - id: FEAT-002
+    name: "GDK input shape management"
+    parent: REQ-002
+    modules: [MOD-003, MOD-004]
+    dependencies: [FEAT-001]
+    complexity: medium
+
+  - id: FEAT-003
+    name: "CSS-only expand/collapse (no native resize)"
+    parent: REQ-003
+    modules: [MOD-005, MOD-006, MOD-007]
+    dependencies: [FEAT-002]
+    complexity: medium
+
+  - id: FEAT-004
+    name: "Direction change as window reposition + opacity mask"
+    parent: REQ-003
+    modules: [MOD-008, MOD-009]
+    dependencies: [FEAT-002, FEAT-003]
+    complexity: small
+
+  - id: FEAT-005
+    name: "Fixed-size window drag handling"
+    parent: REQ-004
+    modules: [MOD-010, MOD-011]
+    dependencies: [FEAT-001]
+    complexity: small
+
+  - id: FEAT-006
+    name: "Linux edge snap with fixed-size window"
+    parent: REQ-005
+    modules: [MOD-012, MOD-013]
+    dependencies: [FEAT-004, FEAT-005]
+    complexity: medium
+
+  - id: FEAT-007
+    name: "Remove Linux resize/probe/corrective code"
+    parent: REQ-006
+    modules: [MOD-014, MOD-015, MOD-016, MOD-017]
+    dependencies: [FEAT-003]
+    complexity: small
+
+  - id: FEAT-008
+    name: "Platform isolation (macOS/Windows unchanged)"
+    parent: REQ-007
+    modules: [MOD-018]
+    dependencies: []
+    complexity: trivial
+
+  - id: FEAT-009
+    name: "Viewport lock timing fix"
+    parent: REQ-008
+    modules: [MOD-019]
+    dependencies: []
+    complexity: trivial
+
+modules:
+  - id: MOD-001
+    name: "create_float_ball: expanded dimensions on Linux"
+    parent: FEAT-001
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      On Linux, create window at expanded_width × expanded_height (logical × scale).
+      Initial position: ball at bottom-right of screen, window extends toward center.
+      Example: ball at screen right → expand_direction=Left → window.x = ball.x - 96.
+
+  - id: MOD-002
+    name: "Set initial GDK input shape (collapsed region)"
+    parent: FEAT-001
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      After window shown, call update_linux_input_shape with collapsed=true.
+      Input region = 56×56 at ball offset within window.
+
+  - id: MOD-003
+    name: "New: update_linux_input_shape function"
+    parent: FEAT-002
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      fn update_linux_input_shape(window, ball_offset_x, expanded, sizes)
+      Uses with_webview → gtk::Window → gdk::Window.
+      Creates cairo::Region::create_rectangle for active area.
+      Calls gdk_window.input_shape_combine_region(&region, 0, 0).
+      Collapsed: region = ball_size × ball_size at (ball_offset_x, 0).
+      Expanded: region = expanded_width × expanded_height at (0, 0).
+      Logs success/failure. All coordinates in LOGICAL pixels.
+
+  - id: MOD-004
+    name: "Call input shape on state transitions"
+    parent: FEAT-002
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      Hook into: create (after show), expand (before CSS notify), collapse
+      (after CSS notify), direction change (after window move), snap (after
+      position set). Each recalculates correct ball_offset_x.
+
+  - id: MOD-005
+    name: "Frontend setExpanded: no resize IPC on Linux"
+    parent: FEAT-003
+    file_path: "src/lib/components/FloatBall.svelte"
+    description: |
+      On Linux expand: call backend to update input shape + direction → set CSS expanded.
+      On Linux collapse: set CSS collapsed → wait tick → call backend to shrink input shape.
+      No blur guard needed (window doesn't resize). Remove nativeExpanded distinction.
+
+  - id: MOD-006
+    name: "Backend set_float_ball_expanded: Linux no-resize path"
+    parent: FEAT-003
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      Linux: compute expand direction, optionally reposition window (if direction
+      changed), update input shape. No resize calls. Update state.
+
+  - id: MOD-007
+    name: "CSS layout for fixed-size window"
+    parent: FEAT-003
+    file_path: "src/lib/components/FloatBall.svelte"
+    description: |
+      .shell on Linux always fills 152×56 window. Collapsed: ball renders at
+      one end via flex-direction. Expanded: full capsule fills window.
+      Evaluate re-enabling width transition (resize was the ghost cause).
+
+  - id: MOD-008
+    name: "Direction change: reposition window + opacity mask"
+    parent: FEAT-004
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      When direction flips: (1) set panel opacity=0 via frontend event,
+      (2) move window by ±(expanded_width - ball_size), (3) update input shape,
+      (4) notify frontend to flip CSS + restore opacity.
+
+  - id: MOD-009
+    name: "Frontend direction change: opacity mask + CSS flip"
+    parent: FEAT-004
+    file_path: "src/lib/components/FloatBall.svelte"
+    description: |
+      Listen for direction-change events. On pre-change: opacity=0.
+      On post-change: update data-direction, opacity=1.
+
+  - id: MOD-010
+    name: "move_float_ball_to: ball-centric clamping"
+    parent: FEAT-005
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      Clamping ensures BALL portion within screen. Window may extend off-screen
+      on the panel side (invisible + click-through). Compute window.x from
+      ball.x using expand_direction offset.
+
+  - id: MOD-011
+    name: "get_float_ball_position returns ball_offset_x"
+    parent: FEAT-005
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      Add ball_offset_x field to FloatBallPosition. Frontend uses this
+      to compute correct pointer-to-window drag anchor.
+
+  - id: MOD-012
+    name: "Enable snap on Linux + remove cfg gates"
+    parent: FEAT-006
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      Remove early return in snap_float_ball for Linux.
+      Remove #[cfg(not(target_os = "linux"))] on choose_float_ball_anchor
+      and SNAP_THRESHOLD_PX. Snap computes ball target, derives window pos.
+
+  - id: MOD-013
+    name: "Post-snap direction + input shape update"
+    parent: FEAT-006
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      After snap, recalculate expand_direction from new edge.
+      If changed, reposition window and update input shape.
+
+  - id: MOD-014
+    name: "Remove spawn_linux_rect_probe"
+    parent: FEAT-007
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: "Delete function and all call sites."
+
+  - id: MOD-015
+    name: "Remove set_gtk_float_ball_size"
+    parent: FEAT-007
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: "Delete GTK geometry hints, scrollbar logic, move_resize, idle reapply."
+
+  - id: MOD-016
+    name: "Simplify create retries to position-only"
+    parent: FEAT-007
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      Retain retry loop but only verify/correct position.
+      Remove any size-verification logic from retries.
+
+  - id: MOD-017
+    name: "Simplify apply_float_ball_window_rect for Linux"
+    parent: FEAT-007
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      Linux path = set_position() only. resize parameter ignored.
+      No GTK interop needed for positioning (Tauri API sufficient).
+
+  - id: MOD-018
+    name: "Platform gate all changes"
+    parent: FEAT-008
+    file_path: "src-tauri/src/commands/float_ball.rs"
+    description: |
+      Rust: #[cfg(target_os = "linux")] for new code paths.
+      Frontend: isLinux() checks for behavior differences.
+
+  - id: MOD-019
+    name: "lockViewportScrolling timing guard"
+    parent: FEAT-009
+    file_path: "src/float-ball.ts"
+    description: |
+      Guard against zero/implausible dimensions.
+      On Linux, defer first call by one RAF to ensure WebKitGTK layout pass.
+
+probes:
+  - target: FEAT-002
+    type: assumption
+    question: "Is gdk::Window::input_shape_combine_region accessible as safe Rust API in existing deps?"
+    method: dependency-check
+    result: "YES — gdk 0.18.2 exposes safe method; cairo-rs 0.18.5 has Region::create_rectangle"
+    verdict: feasible
+    evidence: "gdk::Window::input_shape_combine_region(&self, &Region, i32, i32) confirmed in docs.rs"
+
+  - target: FEAT-002
+    type: assumption
+    question: "Can with_webview callback access gdk::Window for input shape?"
+    method: code-inspection
+    result: "YES — existing code already uses gtk_win.window() → gdk::Window on lines 616, 628"
+    verdict: feasible
+    evidence: "Same access chain as move_resize; no new FFI needed"
+
+  - target: FEAT-002
+    type: spike
+    question: "Does input_shape_combine_region work on composited ARGB32 transparent windows?"
+    method: runtime-test
+    result: null
+    verdict: null
+    note: "Must be validated during implementation on Mutter (GNOME) and KWin (KDE)"
+
+confrontation:
+  red_team:
+    - id: ATK-001
+      scenario: "CSS shows expanded before input shape → user sees panel but can't click"
+      severity: high
+    - id: ATK-002
+      scenario: "Direction change: window moves but CSS hasn't flipped → 1-frame ball jump"
+      severity: high
+    - id: ATK-003
+      scenario: "WM clamps 152px window to screen → ball can't reach far edge"
+      severity: medium
+    - id: ATK-004
+      scenario: "Input shape stuck expanded after crash → invisible click interceptor"
+      severity: medium
+    - id: ATK-005
+      scenario: "Rapid expand/collapse cycles queue input shape updates"
+      severity: low
+  blue_team:
+    - attack: ATK-001
+      verdict: mitigated
+      mitigation: "Ordering protocol: expand shape FIRST, then CSS; collapse CSS FIRST, then shape"
+    - attack: ATK-002
+      verdict: mitigated
+      mitigation: "Opacity mask: panel opacity=0 during direction change"
+    - attack: ATK-003
+      verdict: mitigated
+      mitigation: "Accept 96px inset from opposite edge if WM clamps; ball reaches snap edge normally"
+    - attack: ATK-004
+      verdict: mitigated
+      mitigation: "Log failures; frontend detects unexpected pointer events, triggers re-collapse"
+    - attack: ATK-005
+      verdict: defended
+      mitigation: "Cairo region operations are µs-scale; GTK thread serializes them; no dedup needed"
+
+dependency_graph:
+  FEAT-001: []
+  FEAT-002: [FEAT-001]
+  FEAT-003: [FEAT-002]
+  FEAT-004: [FEAT-002, FEAT-003]
+  FEAT-005: [FEAT-001]
+  FEAT-006: [FEAT-004, FEAT-005]
+  FEAT-007: [FEAT-003]
+  FEAT-008: []
+  FEAT-009: []
+
+implementation_order:
+  parallel_track_A:
+    - FEAT-008  # platform gates (trivial, do first)
+    - FEAT-009  # viewport lock fix (independent)
+  parallel_track_B:
+    - FEAT-001  # fixed-size window creation
+    - FEAT-005  # drag handling (depends on FEAT-001)
+    - FEAT-002  # input shape management (depends on FEAT-001)
+    - FEAT-003  # CSS expand/collapse (depends on FEAT-002)
+    - FEAT-004  # direction change (depends on FEAT-002, FEAT-003)
+    - FEAT-007  # code cleanup (depends on FEAT-003)
+    - FEAT-006  # snap (depends on FEAT-004, FEAT-005) — LAST
+
+feature_guard:
+  generated: "2026-04-04"
+  guards:
+    - id: GUARD-001
+      feature: FEAT-001
+      description: "Linux FloatBall fixed-size window (never resized)"
+      key_files:
+        - "src-tauri/src/commands/float_ball.rs"
+      invariants:
+        - "Linux float ball window is created at expanded dimensions and never resized"
+        - "apply_float_ball_window_rect on Linux only calls set_position, never set_size"
+        - "No GTK geometry hints, move_resize, or probe/corrective code exists for Linux"
+      verification:
+        command: "cd src-tauri && cargo test float_ball && cargo clippy -- -D warnings"
+        expected: "all pass"
+      status: active
+    - id: GUARD-002
+      feature: FEAT-002
+      description: "GDK input shape for click-through transparent regions"
+      key_files:
+        - "src-tauri/src/commands/float_ball.rs"
+      invariants:
+        - "update_linux_input_shape is called on create, expand, collapse, and snap"
+        - "Collapsed: input shape = ball region only"
+        - "Expanded: input shape = full window"
+      verification:
+        command: "cd src-tauri && cargo check"
+        expected: "compiles"
+      status: active
+    - id: GUARD-003
+      feature: FEAT-006
+      description: "Edge snap enabled on Linux"
+      key_files:
+        - "src-tauri/src/commands/float_ball.rs"
+        - "src/lib/components/FloatBall.svelte"
+      invariants:
+        - "snap_float_ball has no early return or cfg exclusion on Linux"
+        - "Frontend calls snap after drag on all platforms"
+      verification:
+        command: "cd src-tauri && cargo test snap_threshold"
+        expected: "all pass"
+      status: active

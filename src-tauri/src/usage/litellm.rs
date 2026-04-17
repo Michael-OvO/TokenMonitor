@@ -15,8 +15,17 @@ pub struct DynamicModelRates {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct PricingCache {
     fetched_at: u64,
+    /// Cache format version. Bumped when pricing sources change (e.g. adding
+    /// OpenRouter) so that stale caches are automatically invalidated.
+    #[serde(default)]
+    version: u32,
     rates: HashMap<String, DynamicModelRates>,
 }
+
+/// Current cache version. Bump this whenever a new pricing data source is
+/// added or the cache format changes, to force re-fetch on next startup.
+/// v1 = LiteLLM only, v2 = LiteLLM + OpenRouter.
+const CACHE_VERSION: u32 = 2;
 
 /// Raw entry from the LiteLLM JSON (only the fields we need).
 #[derive(Debug, serde::Deserialize)]
@@ -35,7 +44,7 @@ const LITELLM_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
 const CACHE_FILENAME: &str = "pricing-cache.json";
-const CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
+const CACHE_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 const PER_MTOK: f64 = 1_000_000.0;
 /// Sanity upper bound: reject per-million-token rates above $500.
 /// Current max is ~$75/Mtok (output) so this is 6x+ headroom.
@@ -52,49 +61,104 @@ fn now_epoch() -> u64 {
         .as_secs()
 }
 
-/// Check if the local cache needs refreshing (missing or older than 24h).
+/// Check if the local cache needs refreshing (missing, corrupt, wrong version,
+/// or older than 7 days).
 pub fn should_refresh(app_data_dir: &Path) -> bool {
     let path = cache_path(app_data_dir);
     match std::fs::read_to_string(&path) {
         Ok(content) => match serde_json::from_str::<PricingCache>(&content) {
-            Ok(cache) => now_epoch().saturating_sub(cache.fetched_at) > CACHE_TTL_SECS,
+            Ok(cache) => {
+                cache.version != CACHE_VERSION
+                    || now_epoch().saturating_sub(cache.fetched_at) > CACHE_TTL_SECS
+            }
             Err(_) => true,
         },
         Err(_) => true,
     }
 }
 
-/// Load cached dynamic pricing from disk. Returns None if cache is missing or corrupt.
+/// Load cached dynamic pricing from disk. Returns None if cache is missing,
+/// corrupt, or from an older cache version (forces re-fetch).
 pub fn load_cached(app_data_dir: &Path) -> Option<HashMap<String, DynamicModelRates>> {
     let content = std::fs::read_to_string(cache_path(app_data_dir)).ok()?;
     let cache: PricingCache = serde_json::from_str(&content).ok()?;
+    if cache.version != CACHE_VERSION {
+        tracing::info!(
+            cached = cache.version,
+            current = CACHE_VERSION,
+            "Pricing cache version mismatch — will re-fetch"
+        );
+        return None;
+    }
     Some(cache.rates)
 }
 
 /// Fetch pricing from LiteLLM GitHub, parse, normalize, and cache to disk.
 ///
 /// Returns the parsed rates HashMap, or an error string.
+async fn fetch_litellm() -> Result<HashMap<String, DynamicModelRates>, String> {
+    let body = reqwest::get(LITELLM_URL)
+        .await
+        .map_err(|e| format!("LiteLLM HTTP fetch failed: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("LiteLLM read body failed: {e}"))?;
+
+    let raw: HashMap<String, serde_json::Value> =
+        serde_json::from_str(&body).map_err(|e| format!("LiteLLM JSON parse failed: {e}"))?;
+
+    Ok(parse_litellm_json(&raw))
+}
+
+/// Fetch from both LiteLLM and OpenRouter, merge (LiteLLM takes priority),
+/// and persist the combined result to disk.
 pub async fn fetch_and_cache(
     app_data_dir: &Path,
 ) -> Result<HashMap<String, DynamicModelRates>, String> {
-    let body = reqwest::get(LITELLM_URL)
-        .await
-        .map_err(|e| format!("HTTP fetch failed: {e}"))?
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
+    // Fetch both sources concurrently.
+    let (litellm_result, openrouter_result) =
+        tokio::join!(fetch_litellm(), super::openrouter::fetch_openrouter(),);
 
-    let raw: HashMap<String, serde_json::Value> =
-        serde_json::from_str(&body).map_err(|e| format!("JSON parse failed: {e}"))?;
-
-    let rates = parse_litellm_json(&raw);
-
-    // Persist to disk.
-    let cache = PricingCache {
-        fetched_at: now_epoch(),
-        rates: rates.clone(),
+    // Start with OpenRouter as the base, then overlay LiteLLM on top
+    // so that LiteLLM entries always take priority.
+    let mut rates = match openrouter_result {
+        Ok(r) => {
+            tracing::info!(count = r.len(), "OpenRouter pricing fetched");
+            r
+        }
+        Err(e) => {
+            tracing::warn!("OpenRouter fetch failed: {e}");
+            HashMap::new()
+        }
     };
-    let json = serde_json::to_string(&cache).map_err(|e| format!("serialize: {e}"))?;
+
+    match litellm_result {
+        Ok(litellm_rates) => {
+            tracing::info!(count = litellm_rates.len(), "LiteLLM pricing fetched");
+            // LiteLLM overwrites OpenRouter entries for the same key.
+            rates.extend(litellm_rates);
+        }
+        Err(e) => {
+            tracing::warn!("LiteLLM fetch failed: {e}");
+            if rates.is_empty() {
+                return Err(format!("Both pricing sources failed. LiteLLM: {e}"));
+            }
+        }
+    }
+
+    // Persist merged result to disk (borrow to avoid cloning the entire HashMap).
+    #[derive(serde::Serialize)]
+    struct PricingCacheRef<'a> {
+        fetched_at: u64,
+        version: u32,
+        rates: &'a HashMap<String, DynamicModelRates>,
+    }
+    let cache_ref = PricingCacheRef {
+        fetched_at: now_epoch(),
+        version: CACHE_VERSION,
+        rates: &rates,
+    };
+    let json = serde_json::to_string(&cache_ref).map_err(|e| format!("serialize: {e}"))?;
 
     let path = cache_path(app_data_dir);
     if let Some(parent) = path.parent() {
@@ -206,13 +270,13 @@ fn parse_litellm_json(
         // Normalize to the same key format used by pricing.rs.
         let key = normalized_model_key(model_name);
         if key == "unknown" {
-            // Also store under the raw lowercase name for OpenAI models
+            // Store under the raw lowercase name for OpenAI models
             // whose full name IS the key (e.g., "gpt-5.4", "o3-mini-2025-01-31").
             let raw_key = model_name.trim().to_ascii_lowercase();
-            rates.entry(raw_key).or_insert_with(|| model_rates.clone());
+            rates.entry(raw_key).or_insert(model_rates);
+        } else {
+            rates.insert(key, model_rates);
         }
-        // Always store under the normalized key (may overwrite, last wins is fine).
-        rates.insert(key, model_rates);
     }
 
     rates
@@ -323,21 +387,33 @@ mod tests {
         // No cache file → should refresh.
         assert!(should_refresh(dir.path()));
 
-        // Write a fresh cache.
+        // Write a fresh cache with current version.
         let cache = PricingCache {
             fetched_at: now_epoch(),
+            version: CACHE_VERSION,
             rates: HashMap::new(),
         };
         let json = serde_json::to_string(&cache).unwrap();
         std::fs::write(cache_path(dir.path()), json).unwrap();
         assert!(!should_refresh(dir.path()));
 
-        // Write a stale cache (>24h ago).
+        // Write a stale cache (>7 days ago).
         let old_cache = PricingCache {
             fetched_at: now_epoch() - CACHE_TTL_SECS - 1,
+            version: CACHE_VERSION,
             rates: HashMap::new(),
         };
         let json = serde_json::to_string(&old_cache).unwrap();
+        std::fs::write(cache_path(dir.path()), json).unwrap();
+        assert!(should_refresh(dir.path()));
+
+        // Write a fresh cache with OLD version → should still refresh.
+        let old_version_cache = PricingCache {
+            fetched_at: now_epoch(),
+            version: CACHE_VERSION - 1,
+            rates: HashMap::new(),
+        };
+        let json = serde_json::to_string(&old_version_cache).unwrap();
         std::fs::write(cache_path(dir.path()), json).unwrap();
         assert!(should_refresh(dir.path()));
     }

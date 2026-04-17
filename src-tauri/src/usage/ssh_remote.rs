@@ -15,6 +15,8 @@ pub struct SshHostStatus {
     pub last_sync: Option<String>,
     pub last_error: Option<String>,
     pub entry_count: u32,
+    /// Remote server UTC offset, e.g. `"+0800"`, detected via `date +%z`.
+    pub remote_tz: Option<String>,
 }
 
 /// Configuration for a user-managed SSH host (persisted in settings).
@@ -195,9 +197,11 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
     // is at or before the cutoff.  This avoids duplicating already-cached data.
     let since_iso_filter = codex_since
         .and_then(|ts| {
-            // Convert epoch to ISO-8601 string for Python comparison.
+            // Convert epoch to ISO-8601 string with UTC offset for Python comparison.
+            // Including the timezone offset (+0000) ensures correct lexicographic
+            // comparison even when remote timestamps carry a different offset.
             chrono::DateTime::from_timestamp(ts as i64, 0).map(|dt| {
-                let formatted = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
+                let formatted = dt.format("%Y-%m-%dT%H:%M:%S+0000").to_string();
                 format!("S='{formatted}'\n")
             })
         })
@@ -246,7 +250,8 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
     );
 
     format!(
-        "{touch_cmd}\
+        "echo \"TZ_OFFSET:$(date +%z)\" 2>/dev/null; \
+         {touch_cmd}\
          CLAUDE_FILES=$({claude_find}); \
          CODEX_FILES=$({codex_find}); \
          [ -z \"$CLAUDE_FILES\" ] && [ -z \"$CODEX_FILES\" ] && exit 0; \
@@ -274,26 +279,49 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
     )
 }
 
+/// Result of fetching remote usage: records + optional timezone offset.
+pub struct FetchRemoteResult {
+    pub records: Vec<CompactUsageRecord>,
+    /// The remote server's UTC offset, e.g. `"+0800"`, `"-0500"`, `"+0000"`.
+    /// Detected via `date +%z` on the remote host.
+    pub remote_tz: Option<String>,
+}
+
 /// Fetch compact usage records from a remote host.
 ///
 /// Runs the extraction script via SSH and parses the output.
-/// Returns compact records (jq/python path) or raw JSONL lines (grep fallback).
+/// Returns compact records (jq/python path) or raw JSONL lines (grep fallback),
+/// plus the detected remote timezone offset.
 pub async fn fetch_remote_usage(
     alias: &str,
     claude_since: Option<u64>,
     codex_since: Option<u64>,
-) -> Result<Vec<CompactUsageRecord>, String> {
+) -> Result<FetchRemoteResult, String> {
     let script = build_extraction_script(claude_since, codex_since);
     let output = ssh_command(alias, &script).await?;
 
     if output.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(FetchRemoteResult {
+            records: Vec::new(),
+            remote_tz: None,
+        });
     }
 
     let mut records = Vec::new();
+    let mut remote_tz: Option<String> = None;
+
     for line in output.lines() {
         let line = line.trim();
         if line.is_empty() {
+            continue;
+        }
+
+        // Parse the TZ_OFFSET marker emitted by `date +%z` at script start.
+        if let Some(tz) = line.strip_prefix("TZ_OFFSET:") {
+            let tz = tz.trim();
+            if !tz.is_empty() {
+                remote_tz = Some(tz.to_string());
+            }
             continue;
         }
 
@@ -312,7 +340,7 @@ pub async fn fetch_remote_usage(
         }
     }
 
-    Ok(records)
+    Ok(FetchRemoteResult { records, remote_tz })
 }
 
 /// Parse a full Claude JSONL line into a compact record.
@@ -504,6 +532,24 @@ impl SshCacheManager {
         Ok(())
     }
 
+    /// Read the persisted remote timezone offset for a host.
+    pub fn host_timezone(&self, alias: &str) -> Option<String> {
+        let dir = self.host_cache_dir(alias).ok()?;
+        let path = dir.join(".timezone");
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Persist the remote timezone offset for a host.
+    fn set_host_timezone(&self, alias: &str, tz: &str) -> Result<(), String> {
+        let dir = self.host_cache_dir(alias)?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+        let path = dir.join(".timezone");
+        std::fs::write(path, tz).map_err(|e| format!("write timezone: {e}"))
+    }
+
     /// Read the last-sync timestamp for a host and provider.
     pub fn last_sync_epoch(&self, alias: &str, provider: &str) -> Option<u64> {
         Self::validate_provider(provider).ok()?;
@@ -544,13 +590,15 @@ impl SshCacheManager {
                         .unwrap_or_default()
                 });
 
-                let entry_count = match self.load_cached_records(&cfg.alias) {
-                    Ok(records) => records.len() as u32,
+                let entry_count = match self.count_cached_records(&cfg.alias) {
+                    Ok(count) => count,
                     Err(e) => {
-                        tracing::warn!("Failed to load cached records for {}: {e}", cfg.alias);
+                        tracing::warn!("Failed to count cached records for {}: {e}", cfg.alias);
                         0
                     }
                 };
+
+                let remote_tz = self.host_timezone(&cfg.alias);
 
                 SshHostStatus {
                     alias: cfg.alias.clone(),
@@ -558,6 +606,7 @@ impl SshCacheManager {
                     last_sync,
                     last_error: None,
                     entry_count,
+                    remote_tz,
                 }
             })
             .collect()
@@ -573,7 +622,16 @@ impl SshCacheManager {
         let codex_since = self.last_sync_epoch(alias, "codex");
 
         // Fetch compact usage records from remote.
-        let records = fetch_remote_usage(alias, claude_since, codex_since).await?;
+        let result = fetch_remote_usage(alias, claude_since, codex_since).await?;
+
+        // Persist remote timezone regardless of whether records were found.
+        if let Some(tz) = &result.remote_tz {
+            if let Err(e) = self.set_host_timezone(alias, tz) {
+                tracing::warn!("Failed to persist timezone for {alias}: {e}");
+            }
+        }
+
+        let records = result.records;
 
         if records.is_empty() {
             // Don't update last-sync when no records found — the remote
@@ -625,6 +683,17 @@ impl SshCacheManager {
         }
 
         Ok(records.len() as u32)
+    }
+
+    /// Count cached records without parsing JSON (line count).
+    pub fn count_cached_records(&self, alias: &str) -> Result<u32, String> {
+        let cache_path = self.usage_cache_path(alias)?;
+        let content = match std::fs::read_to_string(&cache_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(format!("Failed to read cache for {alias}: {e}")),
+        };
+        Ok(content.lines().filter(|l| !l.trim().is_empty()).count() as u32)
     }
 
     /// Load all cached compact records for a host.

@@ -9,6 +9,10 @@ function makePayload(overrides: Partial<UsagePayload> = {}): UsagePayload {
     session_count: 1,
     input_tokens: 60,
     output_tokens: 40,
+    cache_read_tokens: 0,
+    cache_write_5m_tokens: 0,
+    cache_write_1h_tokens: 0,
+    web_search_requests: 0,
     chart_buckets: [],
     model_breakdown: [],
     active_block: null,
@@ -42,6 +46,7 @@ describe("setDeviceIncludeFlag", () => {
           error_message: null,
           cost_percentage: 50,
           include_in_stats: false,
+          remote_tz: null,
         },
         {
           device: "remote-a",
@@ -54,6 +59,7 @@ describe("setDeviceIncludeFlag", () => {
           error_message: null,
           cost_percentage: 50,
           include_in_stats: false,
+          remote_tz: null,
         },
       ],
     });

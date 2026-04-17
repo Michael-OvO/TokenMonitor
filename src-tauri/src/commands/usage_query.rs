@@ -89,9 +89,13 @@ fn filter_buckets_to_range(payload: &mut UsagePayload, start: NaiveDate, end: Na
         })
         .collect();
 
-    // Recalculate input/output tokens
+    // Recalculate input/output/cache tokens (populated later from raw entries)
     payload.input_tokens = 0;
     payload.output_tokens = 0;
+    payload.cache_read_tokens = 0;
+    payload.cache_write_5m_tokens = 0;
+    payload.cache_write_1h_tokens = 0;
+    payload.web_search_requests = 0;
 }
 
 fn parser_payload_for_period(
@@ -234,6 +238,12 @@ fn attach_local_stats(
         if period != "5h" && payload.usage_source == UsageSource::Parser {
             payload.input_tokens = entries.iter().map(|entry| entry.input_tokens).sum();
             payload.output_tokens = entries.iter().map(|entry| entry.output_tokens).sum();
+            payload.cache_read_tokens = entries.iter().map(|e| e.cache_read_tokens).sum();
+            payload.cache_write_5m_tokens =
+                entries.iter().map(|e| e.cache_creation_5m_tokens).sum();
+            payload.cache_write_1h_tokens =
+                entries.iter().map(|e| e.cache_creation_1h_tokens).sum();
+            payload.web_search_requests = entries.iter().map(|e| e.web_search_requests).sum();
         }
 
         payload.subagent_stats = crate::stats::subagent::aggregate_subagent_stats(
@@ -347,6 +357,10 @@ fn merge_payloads(mut c: UsagePayload, x: UsagePayload) -> UsagePayload {
     c.total_tokens += x.total_tokens;
     c.input_tokens += x.input_tokens;
     c.output_tokens += x.output_tokens;
+    c.cache_read_tokens += x.cache_read_tokens;
+    c.cache_write_5m_tokens += x.cache_write_5m_tokens;
+    c.cache_write_1h_tokens += x.cache_write_1h_tokens;
+    c.web_search_requests += x.web_search_requests;
 
     if let Some(ref mut c_stats) = c.subagent_stats {
         if let Some(x_stats) = x.subagent_stats {
@@ -354,10 +368,14 @@ fn merge_payloads(mut c: UsagePayload, x: UsagePayload) -> UsagePayload {
             c_stats.main.input_tokens += x_stats.main.input_tokens;
             c_stats.main.output_tokens += x_stats.main.output_tokens;
             c_stats.main.cache_read_tokens += x_stats.main.cache_read_tokens;
+            c_stats.main.cache_write_5m_tokens += x_stats.main.cache_write_5m_tokens;
+            c_stats.main.cache_write_1h_tokens += x_stats.main.cache_write_1h_tokens;
             c_stats.subagents.cost += x_stats.subagents.cost;
             c_stats.subagents.input_tokens += x_stats.subagents.input_tokens;
             c_stats.subagents.output_tokens += x_stats.subagents.output_tokens;
             c_stats.subagents.cache_read_tokens += x_stats.subagents.cache_read_tokens;
+            c_stats.subagents.cache_write_5m_tokens += x_stats.subagents.cache_write_5m_tokens;
+            c_stats.subagents.cache_write_1h_tokens += x_stats.subagents.cache_write_1h_tokens;
         } else if x.total_cost > 0.0 {
             c_stats.main.cost += x.total_cost;
             c_stats.main.input_tokens += x.input_tokens;

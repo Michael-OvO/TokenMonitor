@@ -1,0 +1,265 @@
+ecl_version: "1.0"
+feature: "usage-data-archive"
+status: completed
+created: 2026-04-11
+updated: 2026-04-11
+
+prompt_calibration:
+  raw_input: "为了防止因为数据清除导致的数据丢失，保存之前同步过的token数据，不重复统计"
+  clarification: "服务器上的.claude可能被移除或者服务器可能无法访问，但是用量产生就不会消失"
+  intent_decomposition:
+    total_intents: 1
+    total_tracks: 1
+    tracks:
+      - track_id: T1
+        name: "Usage data archive for data loss prevention"
+        priority: 1
+        intents:
+          - raw: "持久化已读取的 token 用量数据，防止源文件删除导致数据丢失"
+            type: feature
+  tracks:
+    T1:
+      calibrated_scenario: |
+        为本地和远程的 token 用量数据建立 append-only 本地归档层。
+        每次成功解析后，将已关闭小时的聚合数据写入本地归档文件。
+        当源 JSONL 文件被删除或不可访问时，从归档中恢复数据。
+        利用时间边界分区避免重复统计。
+      intent_dimensions:
+        task: { status: present, value: "Build hourly aggregate archive" }
+        input: { status: enriched, value: "ParsedEntry from JSONL + SSH remote-cache" }
+        output: { status: enriched, value: "Persistent hourly aggregates in app data dir" }
+        constraints: { status: validated, value: "No double counting; hourly granularity" }
+        context: { status: enriched, value: "Tauri v2 + Rust backend, existing 3-tier cache" }
+        success_criteria: { status: resolved, value: "Source JSONL deleted → historical data preserved" }
+
+decisions:
+  - id: DEC-001
+    decision: "Archive scope: local + SSH remote devices"
+    date: 2026-04-11
+  - id: DEC-002
+    decision: "Merge strategy: archive-primary, source files supplement current hour only"
+    date: 2026-04-11
+  - id: DEC-003
+    decision: "Storage granularity: hourly aggregates per model"
+    date: 2026-04-11
+  - id: DEC-004
+    decision: "Solution: Approach A — hourly aggregate archive with time-boundary dedup"
+    date: 2026-04-11
+
+requirements:
+  - id: REQ-001
+    text: "Background loop archives completed hours into persistent JSONL files"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "After background refresh, all completed hours are archived"
+      - "Archive stored in {app_data_dir}/usage-archive/"
+      - "Atomic writes (temp file + rename) prevent corruption"
+    decomposition:
+      features: [FEAT-001, FEAT-002]
+
+  - id: REQ-002
+    text: "Query pipeline reads from archive for historical data, live source for current hour"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "Historical hours load from archive even if source JSONL deleted"
+      - "Current (incomplete) hour loads from live source files"
+      - "No double counting between archive and live data"
+    decomposition:
+      features: [FEAT-003]
+
+  - id: REQ-003
+    text: "SSH device data is also archived with the same mechanism"
+    status: verified
+    confidence: 0.90
+    acceptance_criteria:
+      - "SSH remote-cache records archived into hourly aggregates"
+      - "Device queries use archive for historical + remote-cache for current hour"
+    decomposition:
+      features: [FEAT-004]
+
+  - id: REQ-004
+    text: "Cost is NOT stored in archive — recalculated at query time"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "Archive stores only token counts, not dollar amounts"
+      - "Pricing changes retroactively apply to archived data"
+
+features:
+  - id: FEAT-001
+    name: "Archive module (usage/archive.rs)"
+    parent: REQ-001
+    modules: [MOD-001, MOD-002, MOD-003]
+    dependencies: []
+    complexity: medium
+
+  - id: FEAT-002
+    name: "Background archive trigger"
+    parent: REQ-001
+    modules: [MOD-004]
+    dependencies: [FEAT-001]
+    complexity: small
+
+  - id: FEAT-003
+    name: "Query pipeline archive integration"
+    parent: REQ-002
+    modules: [MOD-005]
+    dependencies: [FEAT-001]
+    complexity: medium
+
+  - id: FEAT-004
+    name: "SSH device archive integration"
+    parent: REQ-003
+    modules: [MOD-006]
+    dependencies: [FEAT-001]
+    complexity: small
+
+modules:
+  - id: MOD-001
+    name: "ArchivedHourly struct + serde"
+    parent: FEAT-001
+    file_path: "src-tauri/src/usage/archive.rs"
+    description: |
+      Compact JSONL record: {d, h, mk, mn, in, out, c5, c1, cr, ws, p}
+      where p = provider ("claude"/"codex"), no cost stored.
+
+  - id: MOD-002
+    name: "ArchiveManager — write path"
+    parent: FEAT-001
+    file_path: "src-tauri/src/usage/archive.rs"
+    description: |
+      archive_completed_hours(entries, source_key) method:
+      1. Read archive state (.archive-state.json) for last archived hour
+      2. Filter entries to completed hours after last archived
+      3. Aggregate by (date, hour, model_key, provider)
+      4. Append to {source}/{YYYY-MM}.jsonl via temp+rename
+      5. Update archive state
+
+  - id: MOD-003
+    name: "ArchiveManager — read path"
+    parent: FEAT-001
+    file_path: "src-tauri/src/usage/archive.rs"
+    description: |
+      load_archived(source_key, since_date, provider) method:
+      Returns Vec<ParsedEntry> (synthetic entries from archived aggregates).
+      Each aggregate → one ParsedEntry with timestamp = date + hour:00:00.
+
+  - id: MOD-004
+    name: "Background loop integration"
+    parent: FEAT-002
+    file_path: "src-tauri/src/lib.rs"
+    description: |
+      In background_loop(), after parser.invalidate_if_changed():
+      1. Load entries for "all" provider
+      2. Call archive_manager.archive_completed_hours()
+      Archive runs every cycle (30s) but is fast (skip already-archived hours).
+
+  - id: MOD-005
+    name: "parser.rs load_entries() merge"
+    parent: FEAT-003
+    file_path: "src-tauri/src/usage/parser.rs"
+    description: |
+      Modify load_entries() to:
+      1. Load archived entries for [since_date..archive_frontier]
+      2. Load live entries for hours AFTER archive_frontier
+      3. Merge and return
+
+  - id: MOD-006
+    name: "SSH device archive"
+    parent: FEAT-004
+    file_path: "src-tauri/src/commands/ssh.rs"
+    description: |
+      After SSH sync, archive remote-cache records for each device.
+      Device usage queries merge archive + live remote-cache.
+
+archive_format:
+  storage_layout: |
+    {app_data_dir}/usage-archive/
+    ├── local/
+    │   ├── claude/2026-04.jsonl
+    │   └── codex/2026-04.jsonl
+    ├── devices/
+    │   ├── {alias}/2026-04.jsonl
+    │   └── ...
+    └── .archive-state.json
+  record_format: |
+    {"d":"2026-04-11","h":14,"mk":"sonnet-4-6","mn":"Claude Sonnet 4.6","in":5000,"out":1200,"c5":100,"c1":0,"cr":50,"ws":2,"p":"claude"}
+  state_format: |
+    {"version":1,"sources":{"local:claude":"2026-04-11T14","local:codex":"2026-04-11T14","device:my-server":"2026-04-11T13"}}
+
+dedup_strategy: |
+  Time-boundary partitioning (no hash-based dedup needed):
+  - Archive covers: all hours BEFORE archive_frontier
+  - Live source covers: archive_frontier hour and later
+  - Zero overlap → zero double counting
+  - archive_frontier = max archived hour per source
+
+dependency_graph:
+  FEAT-001: []
+  FEAT-002: [FEAT-001]
+  FEAT-003: [FEAT-001]
+  FEAT-004: [FEAT-001]
+
+confrontation:
+  red_team:
+    - id: ATK-001
+      scenario: "App crashes during archive write → partial JSONL file"
+      severity: high
+    - id: ATK-002
+      scenario: "Archive state says hour 14 archived, but JSONL file is missing/truncated"
+      severity: medium
+    - id: ATK-003
+      scenario: "Pricing rates change → archived cost values become stale"
+      severity: low
+    - id: ATK-004
+      scenario: "User changes timezone → archived hour boundaries shift"
+      severity: medium
+    - id: ATK-005
+      scenario: "Concurrent archive write and query read on same file"
+      severity: medium
+  blue_team:
+    - attack: ATK-001
+      verdict: mitigated
+      mitigation: "Temp file + atomic rename. Incomplete writes are discarded."
+    - attack: ATK-002
+      verdict: mitigated
+      mitigation: "On read, if expected data missing, re-archive from live source. Archive state is the frontier marker, not a guarantee."
+    - attack: ATK-003
+      verdict: defended
+      mitigation: "Cost is NOT stored in archive. Only token counts. Cost recalculated at query time."
+    - attack: ATK-004
+      verdict: mitigated
+      mitigation: "Archive uses local timezone at write time. TZ changes cause at most 1 hour of re-counting in edge cases. Acceptable."
+    - attack: ATK-005
+      verdict: mitigated
+      mitigation: "Append-only writes to new temp file then rename. Reads use snapshot of file at open time."
+
+risk_register:
+  - risk: "First run with large history takes time to archive"
+    severity: low
+    mitigation: "Archive in background, batched by month. UI unaffected."
+  - risk: "Archive grows indefinitely"
+    severity: low
+    mitigation: "~1KB/day/provider. Years of data = single-digit MB. Not a concern."
+
+implementation_order:
+  - step: 1
+    module: MOD-001
+    description: "ArchivedHourly struct + serde"
+  - step: 2
+    module: MOD-002
+    description: "ArchiveManager write path"
+  - step: 3
+    module: MOD-003
+    description: "ArchiveManager read path"
+  - step: 4
+    module: MOD-005
+    description: "parser.rs load_entries() merge"
+  - step: 5
+    module: MOD-004
+    description: "Background loop integration"
+  - step: 6
+    module: MOD-006
+    description: "SSH device archive integration"

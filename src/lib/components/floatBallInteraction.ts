@@ -31,7 +31,7 @@ function transitionError(
 }
 
 export function shouldHandleFloatBallPointerButton(button: number, isLinux: boolean): boolean {
-  return isLinux ? button === 0 : button === 0 || button === 2;
+  return button === 0 || button === 2;
 }
 
 export function detectScreenToPhysicalScale({

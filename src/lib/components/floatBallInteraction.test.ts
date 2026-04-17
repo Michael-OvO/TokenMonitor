@@ -6,9 +6,9 @@ import {
 } from "./floatBallInteraction.js";
 
 describe("shouldHandleFloatBallPointerButton", () => {
-  it("ignores right click on Linux", () => {
+  it("accepts left and right click on Linux", () => {
     expect(shouldHandleFloatBallPointerButton(0, true)).toBe(true);
-    expect(shouldHandleFloatBallPointerButton(2, true)).toBe(false);
+    expect(shouldHandleFloatBallPointerButton(2, true)).toBe(true);
   });
 
   it("keeps right click behavior unchanged on non-Linux platforms", () => {

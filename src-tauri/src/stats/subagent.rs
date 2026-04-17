@@ -20,6 +20,8 @@ pub struct ScopeModelUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    pub cache_write_5m_tokens: u64,
+    pub cache_write_1h_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,7 +30,8 @@ pub struct ScopeUsageSummary {
     pub tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub cache_write_tokens: u64,
+    pub cache_write_5m_tokens: u64,
+    pub cache_write_1h_tokens: u64,
     pub cache_read_tokens: u64,
     pub session_count: u32,
     pub pct_of_total_cost: f64,
@@ -49,6 +52,8 @@ struct ModelAccum {
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
+    cache_write_5m_tokens: u64,
+    cache_write_1h_tokens: u64,
 }
 
 // ── Internal builder ────────────────────────────────────────────────────────
@@ -57,7 +62,8 @@ struct ScopeSummaryBuilder {
     cost: f64,
     input_tokens: u64,
     output_tokens: u64,
-    cache_write_tokens: u64,
+    cache_write_5m_tokens: u64,
+    cache_write_1h_tokens: u64,
     cache_read_tokens: u64,
     sessions: HashSet<String>,
     model_stats: HashMap<String, ModelAccum>,
@@ -71,7 +77,8 @@ impl ScopeSummaryBuilder {
             cost: 0.0,
             input_tokens: 0,
             output_tokens: 0,
-            cache_write_tokens: 0,
+            cache_write_5m_tokens: 0,
+            cache_write_1h_tokens: 0,
             cache_read_tokens: 0,
             sessions: HashSet::new(),
             model_stats: HashMap::new(),
@@ -89,11 +96,13 @@ impl ScopeSummaryBuilder {
             entry.cache_creation_5m_tokens,
             entry.cache_creation_1h_tokens,
             entry.cache_read_tokens,
+            entry.web_search_requests,
         );
         self.cost += entry_cost;
         self.input_tokens += entry.input_tokens;
         self.output_tokens += entry.output_tokens;
-        self.cache_write_tokens += entry.cache_creation_5m_tokens + entry.cache_creation_1h_tokens;
+        self.cache_write_5m_tokens += entry.cache_creation_5m_tokens;
+        self.cache_write_1h_tokens += entry.cache_creation_1h_tokens;
         self.cache_read_tokens += entry.cache_read_tokens;
 
         if !entry.session_key.is_empty() {
@@ -105,6 +114,8 @@ impl ScopeSummaryBuilder {
         ma.input_tokens += entry.input_tokens;
         ma.output_tokens += entry.output_tokens;
         ma.cache_read_tokens += entry.cache_read_tokens;
+        ma.cache_write_5m_tokens += entry.cache_creation_5m_tokens;
+        ma.cache_write_1h_tokens += entry.cache_creation_1h_tokens;
     }
 
     fn add_change(&mut self, event: &crate::stats::change::ParsedChangeEvent) {
@@ -113,7 +124,11 @@ impl ScopeSummaryBuilder {
     }
 
     fn total_tokens(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_write_tokens + self.cache_read_tokens
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_write_5m_tokens
+            + self.cache_write_1h_tokens
+            + self.cache_read_tokens
     }
 
     fn build(self, total_cost: f64) -> ScopeUsageSummary {
@@ -143,6 +158,8 @@ impl ScopeSummaryBuilder {
                     input_tokens: accum.input_tokens,
                     output_tokens: accum.output_tokens,
                     cache_read_tokens: accum.cache_read_tokens,
+                    cache_write_5m_tokens: accum.cache_write_5m_tokens,
+                    cache_write_1h_tokens: accum.cache_write_1h_tokens,
                 }
             })
             .collect();
@@ -152,7 +169,8 @@ impl ScopeSummaryBuilder {
             tokens,
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
-            cache_write_tokens: self.cache_write_tokens,
+            cache_write_5m_tokens: self.cache_write_5m_tokens,
+            cache_write_1h_tokens: self.cache_write_1h_tokens,
             cache_read_tokens: self.cache_read_tokens,
             session_count: self.sessions.len() as u32,
             pct_of_total_cost,
@@ -220,6 +238,7 @@ mod tests {
             cache_creation_5m_tokens: 0,
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
+            web_search_requests: 0,
             unique_hash: None,
             session_key: session.to_string(),
             agent_scope: scope,

@@ -19,11 +19,23 @@
   let period = $derived($activePeriod);
   let offset = $derived($activeOffset);
 
-  const STATUS_COLORS: Record<DeviceSummary["status"], string> = {
+  /** Format a raw UTC offset like "+0800" or "-0500" into "UTC+8" or "UTC-5". */
+  function formatTzOffset(raw: string): string {
+    const match = raw.match(/^([+-])(\d{2})(\d{2})$/);
+    if (!match) return `UTC${raw}`;
+    const [, sign, hh, mm] = match;
+    const h = parseInt(hh, 10);
+    const m = parseInt(mm, 10);
+    const suffix = m > 0 ? `:${mm}` : "";
+    return `UTC${sign}${h}${suffix}`;
+  }
+
+  const STATUS_COLORS: Record<string, string> = {
     online: "#22c55e",
     offline: "#9ca3af",
     syncing: "#eab308",
     error: "#f97316",
+    unknown: "#6b7280",
   };
 
   async function fetchDeviceData() {
@@ -117,7 +129,7 @@
             <div class="device-name-row">
               <span
                 class="status-dot"
-                style:background={STATUS_COLORS[device.status]}
+                style:background={STATUS_COLORS[device.status] ?? "#6b7280"}
                 title={device.status}
               ></span>
               <span class="device-name">{device.device}</span>
@@ -140,7 +152,7 @@
           </div>
 
           {#if !device.is_local && device.last_synced}
-            <div class="last-synced">Synced {formatTimeAgo(device.last_synced)}</div>
+            <div class="last-synced">Synced {formatTimeAgo(device.last_synced)}{#if device.remote_tz} · {formatTzOffset(device.remote_tz)}{/if}</div>
           {/if}
 
           {#if device.error_message}
