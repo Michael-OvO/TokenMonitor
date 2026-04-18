@@ -22,6 +22,9 @@ dirs = "6"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
