@@ -5,6 +5,7 @@ mod platform;
 mod rate_limits;
 mod stats;
 mod tray;
+mod updater;
 mod usage;
 
 use chrono::Timelike;
@@ -117,6 +118,9 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState::new())
         .setup(|app| {
             // Initialize logging first — must happen before any tracing macros.
@@ -301,6 +305,17 @@ pub fn run() {
                 }
             }
 
+            // Load persisted updater state
+            {
+                let state = app.state::<commands::AppState>();
+                let loaded = updater::persistence::load(app.handle());
+                let mut guard = state.updater.blocking_write();
+                *guard = loaded;
+            }
+
+            // Spawn the updater scheduler
+            updater::scheduler::spawn(app.handle().clone());
+
             // Spawn background setup + polling
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -350,6 +365,12 @@ pub fn run() {
             commands::logging::set_log_level,
             commands::logging::get_log_level,
             commands::logging::get_log_dir,
+            commands::updater::updater_status,
+            commands::updater::updater_check_now,
+            commands::updater::updater_install,
+            commands::updater::updater_set_auto_check,
+            commands::updater::updater_skip_version,
+            commands::updater::updater_dismiss,
         ])
         .run(tauri::generate_context!())
         .expect("error running TokenMonitor");

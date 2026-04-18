@@ -72,6 +72,7 @@
   import DateNav from "./lib/components/DateNav.svelte";
   import DevicesView from "./lib/components/DevicesView.svelte";
   import SingleDeviceView from "./lib/components/SingleDeviceView.svelte";
+  import UpdateBanner from "./lib/components/UpdateBanner.svelte";
   import type { HeaderTabs, UsagePayload, UsagePeriod, UsageProvider, RateLimitsPayload } from "./lib/types/index.js";
 
   let showSplash = $state(true);
@@ -554,6 +555,7 @@
     style:max-height="{scrollThresholdH}px"
     style:overflow-y={scrollThresholdH < DEFAULT_MAX_WINDOW_HEIGHT ? 'auto' : 'visible'}
   >
+    <UpdateBanner />
     {#if showSplash}
       <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
     {:else if appReady && !data}

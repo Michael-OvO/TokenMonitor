@@ -6,6 +6,9 @@ export const PLATFORM_SPECS = Object.freeze({
     bundleDir: "dmg",
     artifactExtension: ".dmg",
     bundleTarget: "dmg",
+    updaterArtifacts: Object.freeze([
+      Object.freeze({ dir: "macos", extensions: [".app.tar.gz", ".app.tar.gz.sig"] }),
+    ]),
   }),
   windows: Object.freeze({
     id: "windows",
@@ -14,6 +17,9 @@ export const PLATFORM_SPECS = Object.freeze({
     bundleDir: "nsis",
     artifactExtension: ".exe",
     bundleTarget: "nsis",
+    updaterArtifacts: Object.freeze([
+      Object.freeze({ dir: "nsis", extensions: [".nsis.zip", ".nsis.zip.sig"] }),
+    ]),
   }),
   linux: Object.freeze({
     id: "linux",
@@ -22,6 +28,9 @@ export const PLATFORM_SPECS = Object.freeze({
     bundleDir: "deb",
     artifactExtension: ".deb",
     bundleTarget: "deb",
+    updaterArtifacts: Object.freeze([
+      Object.freeze({ dir: "appimage", extensions: [".AppImage", ".AppImage.sig"] }),
+    ]),
   }),
 });
 

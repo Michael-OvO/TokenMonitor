@@ -236,6 +236,7 @@ fn apply_tray_presentation(
     config: &TrayConfig,
     total_cost: f64,
     utilization: TrayUtilization,
+    update_available: bool,
 ) {
     let title = format_tray_title(config, total_cost, utilization.claude, utilization.codex);
 
@@ -257,6 +258,7 @@ fn apply_tray_presentation(
                 utilization.claude,
                 utilization.codex,
                 dark_bar,
+                update_available,
             );
             let expected_size = (w * h * 4) as usize;
             if icon_buf.len() == expected_size {
@@ -295,7 +297,11 @@ pub async fn sync_tray_title(app: &tauri::AppHandle, state: &AppState) {
     let config = state.tray_config.read().await.clone();
     let total_cost = current_daily_total_cost(state);
     let utilization = current_tray_utilization(state).await;
-    apply_tray_presentation(app, &config, total_cost, utilization);
+    let update_available = {
+        let guard = state.updater.read().await;
+        guard.should_show_banner()
+    };
+    apply_tray_presentation(app, &config, total_cost, utilization, update_available);
     emit_status_widget_updated(app);
 }
 
@@ -325,7 +331,17 @@ pub async fn set_tray_config(
         current_tray_utilization(&state).await
     };
 
-    apply_tray_presentation(&app, &config, current_daily_total_cost(&state), utilization);
+    let update_available = {
+        let guard = state.updater.read().await;
+        guard.should_show_banner()
+    };
+    apply_tray_presentation(
+        &app,
+        &config,
+        current_daily_total_cost(&state),
+        utilization,
+        update_available,
+    );
     emit_status_widget_updated(&app);
 
     Ok(())

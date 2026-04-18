@@ -9,6 +9,7 @@ import {
 } from "./window/appearance.js";
 import { isMacOS, isWindows } from "./utils/platform.js";
 import { logger } from "./utils/logger.js";
+import { hydrateUpdater, installUpdaterListeners } from "./stores/updater.js";
 
 type StartupDeps = {
   invokeFn?: typeof invoke;
@@ -76,6 +77,10 @@ export async function initializeRuntimeFromSettings(
   if (saved.debugLogging) {
     invokeFn("set_log_level", { level: "debug" }).catch(() => {});
   }
+
+  // Wire updater listeners + initial status pull.
+  await installUpdaterListeners();
+  await hydrateUpdater();
 
   logger.info("bootstrap", "Initialization complete");
 

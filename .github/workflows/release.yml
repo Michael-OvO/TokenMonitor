@@ -31,6 +31,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v4
@@ -176,6 +178,92 @@ jobs:
       - name: List artifacts
         run: find artifacts/ -type f | sort
 
+      - name: Generate latest.json
+        id: manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          PUB_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          find_one() {
+            local pat="$1"
+            find artifacts/ -type f -name "$pat" | head -n1
+          }
+
+          MAC_TARBALL="$(find_one 'TokenMonitor*.app.tar.gz')"
+          MAC_SIG="$(find_one 'TokenMonitor*.app.tar.gz.sig')"
+          WIN_BUNDLE="$(find_one 'TokenMonitor*-setup.nsis.zip')"
+          WIN_SIG="$(find_one 'TokenMonitor*-setup.nsis.zip.sig')"
+          LINUX_APPIMAGE="$(find_one 'TokenMonitor*.AppImage')"
+          LINUX_SIG="$(find_one 'TokenMonitor*.AppImage.sig')"
+
+          missing=0
+          for pair in "MAC_TARBALL:$MAC_TARBALL" "MAC_SIG:$MAC_SIG" \
+                      "WIN_BUNDLE:$WIN_BUNDLE" "WIN_SIG:$WIN_SIG" \
+                      "LINUX_APPIMAGE:$LINUX_APPIMAGE" "LINUX_SIG:$LINUX_SIG"; do
+            name="${pair%%:*}"
+            file="${pair#*:}"
+            if [ -z "$file" ] || [ ! -f "$file" ]; then
+              echo "::warning::Missing updater artifact for $name (this platform will not auto-update)"
+              missing=$((missing+1))
+            fi
+          done
+
+          if [ "$missing" -eq 6 ]; then
+            echo "::error::No updater artifacts found — updater signing may be disabled."
+            exit 1
+          fi
+
+          base="https://github.com/Michael-OvO/TokenMonitor/releases/download/${TAG}"
+
+          read_sig() {
+            if [ -n "$1" ] && [ -f "$1" ]; then cat "$1"; else echo ""; fi
+          }
+
+          MAC_SIG_VAL="$(read_sig "$MAC_SIG")"
+          WIN_SIG_VAL="$(read_sig "$WIN_SIG")"
+          LINUX_SIG_VAL="$(read_sig "$LINUX_SIG")"
+
+          MAC_URL=""; WIN_URL=""; LINUX_URL=""
+          [ -n "$MAC_TARBALL" ] && MAC_URL="${base}/$(basename "$MAC_TARBALL")"
+          [ -n "$WIN_BUNDLE" ] && WIN_URL="${base}/$(basename "$WIN_BUNDLE")"
+          [ -n "$LINUX_APPIMAGE" ] && LINUX_URL="${base}/$(basename "$LINUX_APPIMAGE")"
+
+          # Release notes: pull from GH release body if present; else fallback.
+          notes="Release ${VERSION}"
+          if body=$(gh release view "$TAG" --json body --jq .body 2>/dev/null); then
+            [ -n "$body" ] && notes="$body"
+          fi
+
+          # Build platforms object, including only platforms with both url + sig.
+          platforms_json="{}"
+          add_platform() {
+            local key="$1"
+            local url="$2"
+            local sig="$3"
+            if [ -n "$url" ] && [ -n "$sig" ]; then
+              platforms_json=$(echo "$platforms_json" | jq \
+                --arg k "$key" --arg u "$url" --arg s "$sig" \
+                '. + {($k): {signature: $s, url: $u}}')
+            fi
+          }
+          add_platform "darwin-aarch64" "$MAC_URL" "$MAC_SIG_VAL"
+          add_platform "windows-x86_64" "$WIN_URL" "$WIN_SIG_VAL"
+          add_platform "linux-x86_64"   "$LINUX_URL" "$LINUX_SIG_VAL"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$notes" \
+            --arg pub_date "$PUB_DATE" \
+            --argjson platforms "$platforms_json" \
+            '{version: $version, notes: $notes, pub_date: $pub_date, platforms: $platforms}' \
+            > latest.json
+
+          cat latest.json
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -184,3 +272,4 @@ jobs:
             artifacts/installers-macos/*
             artifacts/installers-windows/*
             artifacts/installers-linux/*
+            latest.json

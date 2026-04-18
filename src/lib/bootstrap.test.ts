@@ -15,6 +15,12 @@ vi.mock("./utils/platform.js", () => ({
   usesFloatingStatusWidget: () => mockUsesFloatingStatusWidget,
 }));
 
+// Mock updater store so bootstrap tests don't depend on Tauri event listeners.
+vi.mock("./stores/updater.js", () => ({
+  installUpdaterListeners: vi.fn().mockResolvedValue(undefined),
+  hydrateUpdater: vi.fn().mockResolvedValue(undefined),
+}));
+
 function makeSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     theme: "dark",

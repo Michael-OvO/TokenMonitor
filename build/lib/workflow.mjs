@@ -150,6 +150,41 @@ async function collectArtifacts(context) {
     copiedArtifacts.push(destination);
   }
 
+  // Updater artifacts are optional — a missing directory or missing files
+  // is a soft warning, not a failure, because updater signing may be disabled
+  // (e.g., a local dev build without TAURI_SIGNING_PRIVATE_KEY set).
+  for (const spec of context.platform.updaterArtifacts ?? []) {
+    const updaterDir = path.join(TAURI_BUNDLE_ROOT, spec.dir);
+    try {
+      const updaterEntries = await readdir(updaterDir, { withFileTypes: true });
+      const updaterMatches = updaterEntries
+        .filter((entry) =>
+          entry.isFile()
+          && spec.extensions.some((ext) => entry.name.endsWith(ext)),
+        )
+        .map((entry) => path.join(updaterDir, entry.name))
+        .sort();
+
+      if (updaterMatches.length === 0) {
+        console.warn(
+          `[build] No updater artifacts found in ${updaterDir} (looked for ${spec.extensions.join(", ")}). Continuing without them.`,
+        );
+        continue;
+      }
+
+      for (const artifactPath of updaterMatches) {
+        const destination = path.join(context.outputDir, path.basename(artifactPath));
+        await copyFile(artifactPath, destination);
+        copiedArtifacts.push(destination);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[build] Could not collect updater artifacts from ${updaterDir}: ${message}. Continuing without them.`,
+      );
+    }
+  }
+
   return copiedArtifacts;
 }
 

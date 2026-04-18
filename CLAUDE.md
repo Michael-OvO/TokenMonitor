@@ -193,3 +193,25 @@ If the signing identity is missing, re-import the intermediate cert:
 curl -s "https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer" -o /tmp/DeveloperIDG2CA.cer
 security import /tmp/DeveloperIDG2CA.cer -k ~/Library/Keychains/login.keychain-db
 ```
+
+### Updater signing secrets
+
+The auto-updater requires a separate Tauri signing keypair (distinct from Apple code-signing).
+
+| What | Where |
+|------|-------|
+| Public key | Embedded in `src-tauri/tauri.conf.json` as `plugins.updater.pubkey` |
+| Private key (local) | `signing/tauri-updater.key` (gitignored) |
+| Private key password (local) | `signing/tauri-updater-password.txt` (gitignored) |
+| Private key (CI) | GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY` |
+| Key password (CI) | GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
+
+To regenerate the keypair:
+
+```bash
+npx tauri signer generate --ci -p "$(cat signing/tauri-updater-password.txt)" -w signing/tauri-updater.key -f
+# Paste the .pub contents into tauri.conf.json plugins.updater.pubkey
+# Upload the .key contents + password to GitHub Actions secrets
+```
+
+Linux auto-update uses the `.AppImage` bundle (not `.deb` — apt owns `.deb` installations). The release workflow produces both formats: `.deb` for package-manager installs, `.AppImage` + `.AppImage.sig` for auto-update users.

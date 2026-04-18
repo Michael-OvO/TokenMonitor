@@ -5,6 +5,7 @@ pub mod logging;
 pub mod period;
 pub mod ssh;
 pub mod tray;
+pub mod updater;
 pub mod usage_query;
 
 pub use tray::sync_tray_title;
@@ -30,6 +31,7 @@ pub struct AppState {
     pub float_ball_state: Arc<RwLock<float_ball::FloatBallState>>,
     pub ssh_hosts: Arc<RwLock<Vec<SshHostConfig>>>,
     pub ssh_cache: Arc<RwLock<Option<SshCacheManager>>>,
+    pub updater: Arc<RwLock<crate::updater::UpdaterState>>,
     /// When true, the main window blur handler skips hiding once.
     /// Set by commands that cause transient focus loss (float ball, dock icon, etc.).
     pub suppress_auto_hide: Arc<AtomicBool>,
@@ -48,6 +50,7 @@ impl AppState {
             float_ball_state: Arc::new(RwLock::new(float_ball::FloatBallState::default())),
             ssh_hosts: Arc::new(RwLock::new(Vec::new())),
             ssh_cache: Arc::new(RwLock::new(None)),
+            updater: Arc::new(RwLock::new(crate::updater::UpdaterState::new())),
             suppress_auto_hide: Arc::new(AtomicBool::new(false)),
         }
     }
