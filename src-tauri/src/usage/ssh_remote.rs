@@ -72,6 +72,8 @@ pub struct CompactUsageRecord {
     /// cache_read_input_tokens
     #[serde(rename = "cr", default)]
     pub cache_read: u64,
+    #[serde(rename = "sp", default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
 }
 
 /// Test SSH connectivity to a host using `ssh <host> echo ok`.
@@ -178,12 +180,15 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
         "    d=json.loads(line)\n",
         "    if d.get('type')=='assistant':\n",
         "     u=d.get('message',{}).get('usage')\n",
-        "     if u:print(json.dumps({'ts':d.get('timestamp',''),",
+        "     if u:\n",
+        "      r={'ts':d.get('timestamp',''),",
         "'m':d.get('message',{}).get('model',''),",
         "'in':u.get('input_tokens',0),",
         "'out':u.get('output_tokens',0),",
         "'c5':u.get('cache_creation_input_tokens',0),",
-        "'cr':u.get('cache_read_input_tokens',0)}))\n",
+        "'cr':u.get('cache_read_input_tokens',0)}\n",
+        "      if u.get('speed')=='fast':r['sp']='fast'\n",
+        "      print(json.dumps(r))\n",
         "   except Exception:pass\n",
         " except Exception as e:import sys;print('PARSE_ERR:'+str(e),file=sys.stderr)\n",
     );
@@ -262,7 +267,8 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
                  \"in\":.message.usage.input_tokens, \
                  out:.message.usage.output_tokens, \
                  c5:(.message.usage.cache_creation_input_tokens // 0), \
-                 cr:(.message.usage.cache_read_input_tokens // 0)}}'; \
+                 cr:(.message.usage.cache_read_input_tokens // 0)}} + \
+                 (if .message.usage.speed == \"fast\" then {{sp:\"fast\"}} else {{}} end)'; \
            elif command -v python3 >/dev/null 2>&1; then \
              echo \"$CLAUDE_FILES\" | tr '\\n' '\\0' | xargs -0 python3 -c \"{claude_py}\"; \
            else \
@@ -361,6 +367,12 @@ fn parse_full_entry_to_compact(line: &str) -> Option<CompactUsageRecord> {
         return None;
     }
 
+    let speed = usage
+        .get("speed")
+        .and_then(|v| v.as_str())
+        .filter(|s| *s == "fast")
+        .map(String::from);
+
     Some(CompactUsageRecord {
         ts: value.get("timestamp")?.as_str()?.to_string(),
         model: model.to_string(),
@@ -375,6 +387,7 @@ fn parse_full_entry_to_compact(line: &str) -> Option<CompactUsageRecord> {
             .get("cache_read_input_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
+        speed,
     })
 }
 

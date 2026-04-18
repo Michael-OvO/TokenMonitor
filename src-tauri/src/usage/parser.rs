@@ -252,6 +252,7 @@ struct ClaudeJsonlUsage {
     cache_read_input_tokens: Option<u64>,
     cache_creation: Option<CacheCreationBreakdown>,
     server_tool_use: Option<ServerToolUse>,
+    speed: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -842,6 +843,14 @@ pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                 }
 
                 if let Some(usage) = msg.usage.as_ref() {
+                    // Append "-fast" to the raw model name when speed is "fast"
+                    // so it gets a distinct model key and pricing.
+                    let effective_model = if usage.speed.as_deref() == Some("fast") {
+                        format!("{model}-fast")
+                    } else {
+                        model
+                    };
+
                     // Split cache creation into 5m and 1h tiers.
                     // If the breakdown sub-object exists, use it directly.
                     // Otherwise default all cache creation to 1h (Claude Code's default).
@@ -862,7 +871,7 @@ pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
 
                     entries.push(ParsedEntry {
                         timestamp: ts,
-                        model,
+                        model: effective_model,
                         input_tokens: usage.input_tokens.unwrap_or(0),
                         output_tokens: usage.output_tokens.unwrap_or(0),
                         cache_creation_5m_tokens: cw_5m,

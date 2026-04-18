@@ -584,7 +584,11 @@ async fn archive_ssh_device_usage(state: &AppState) {
                 let local_dt = dt.with_timezone(&chrono::Local);
                 Some(usage::parser::ParsedEntry {
                     timestamp: local_dt,
-                    model: r.model.clone(),
+                    model: if r.speed.as_deref() == Some("fast") {
+                        format!("{}-fast", r.model)
+                    } else {
+                        r.model.clone()
+                    },
                     input_tokens: r.input_tokens,
                     output_tokens: r.output_tokens,
                     cache_creation_5m_tokens: r.cache_5m,

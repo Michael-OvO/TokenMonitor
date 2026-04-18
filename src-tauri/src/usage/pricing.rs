@@ -154,49 +154,10 @@ fn get_rates_for_key(model: &str) -> ModelRates {
     }
 
     // ── Hardcoded fallback (always available) ───────────────────────────────
-
-    // ── Claude models (most-specific first) ─────────────────────────────────
-
-    if model.contains("opus-4-6") {
-        return claude_rates(5.00, 25.00);
-    }
-    if model.contains("opus-4-5") {
-        return claude_rates(5.00, 25.00);
-    }
-    if model.contains("opus-4-1") {
-        return claude_rates(15.00, 75.00);
-    }
-    if model.contains("opus-4") {
-        return claude_rates(15.00, 75.00);
-    }
-    if model.contains("sonnet-4-6") {
-        return claude_rates(3.00, 15.00);
-    }
-    if model.contains("sonnet-4-5") {
-        return claude_rates(3.00, 15.00);
-    }
-    if model.contains("haiku-4-5") {
-        return claude_rates(1.00, 5.00);
-    }
-    if model.contains("haiku-3-5") {
-        return claude_rates(0.80, 4.00);
-    }
-
-    // Claude family catchalls (before OpenAI checks).
-    if model.contains("sonnet-4")
-        || model.contains("3-5-sonnet")
-        || model.contains("3-7-sonnet")
-        || model.contains("3-sonnet")
-        || model.contains("sonnet-3")
-    {
-        return claude_rates(3.00, 15.00);
-    }
-    if model.contains("sonnet") {
-        return claude_rates(3.00, 15.00);
-    }
-    if model.contains("haiku-3") || model.contains("3-haiku") {
-        return claude_rates(0.25, 1.25);
-    }
+    //
+    // Claude models: handled entirely by get_fallback_rates() using family-level
+    // detection (opus/sonnet/haiku). LiteLLM dynamic pricing above provides
+    // per-version accuracy; the family fallback uses latest known rates.
 
     // ── OpenAI / Codex models ────────────────────────────────────────────────
 
@@ -266,7 +227,11 @@ fn get_fallback_rates(model: &str) -> ModelRates {
     match detect_model_family(model) {
         ModelFamily::Anthropic => {
             if model.contains("opus") {
-                claude_rates(5.00, 25.00)
+                if model.contains("fast") {
+                    claude_rates(30.00, 150.00)
+                } else {
+                    claude_rates(5.00, 25.00)
+                }
             } else if model.contains("sonnet") {
                 claude_rates(3.00, 15.00)
             } else if model.contains("haiku") {
@@ -365,13 +330,21 @@ mod tests {
     }
 
     #[test]
-    fn opus_4_1_higher_pricing() {
-        assert!(approx_eq(cost("claude-opus-4-1-20250401", M, M), 90.00));
+    fn opus_4_1_falls_back_to_family() {
+        // Without LiteLLM, opus-4-1 uses the family fallback rate ($5/$25).
+        assert!(approx_eq(cost("claude-opus-4-1-20250401", M, M), 30.00));
     }
 
     #[test]
-    fn opus_4_no_minor_version() {
-        assert!(approx_eq(cost("claude-opus-4-20250401", M, M), 90.00));
+    fn opus_4_bare_falls_back_to_family() {
+        // "opus-4" without minor version → family fallback.
+        assert!(approx_eq(cost("claude-opus-4-20250401", M, M), 30.00));
+    }
+
+    #[test]
+    fn opus_4_6_fast_uses_6x_pricing() {
+        // Fast mode: $30/$150 → (30+150)/M = $180/M
+        assert!(approx_eq(cost("claude-opus-4-6-fast", M, M), 180.00));
     }
 
     #[test]

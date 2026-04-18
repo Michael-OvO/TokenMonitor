@@ -994,6 +994,7 @@ pub async fn get_single_device_usage(
     let parser = &state.parser;
 
     let mut model_map: HashMap<String, (String, f64, u64)> = HashMap::new();
+    let mut bucket_map: HashMap<String, HashMap<String, (String, f64, u64)>> = HashMap::new();
 
     if device == "Local" {
         let (entries, _, _) = parser.load_entries("all", Some(since));
@@ -1013,10 +1014,19 @@ pub async fn get_single_device_usage(
             );
             let tokens = entry.input_tokens + entry.output_tokens;
             let agg = model_map
-                .entry(model_key)
-                .or_insert_with(|| (display_name, 0.0, 0));
+                .entry(model_key.clone())
+                .or_insert_with(|| (display_name.clone(), 0.0, 0));
             agg.1 += cost;
             agg.2 += tokens;
+
+            let bk = bucket_key_for_timestamp(&entry.timestamp.fixed_offset(), &period);
+            let bucket_model = bucket_map
+                .entry(bk)
+                .or_default()
+                .entry(model_key)
+                .or_insert_with(|| (display_name, 0.0, 0));
+            bucket_model.1 += cost;
+            bucket_model.2 += tokens;
         }
     } else {
         let cache_mgr = state.ssh_cache.read().await;
@@ -1029,8 +1039,11 @@ pub async fn get_single_device_usage(
                 }
             };
             for record in &records {
-                // Filter by date range [since, end) using the *local* calendar date.
-                let record_date = parse_remote_ts_to_local_date(&record.ts);
+                let parsed_ts = match parse_remote_ts(&record.ts) {
+                    Some(ts) => ts,
+                    None => continue,
+                };
+                let record_date = parsed_ts.with_timezone(&chrono::Local).date_naive();
 
                 if record_date < since || record_date >= end {
                     continue;
@@ -1048,10 +1061,19 @@ pub async fn get_single_device_usage(
                 );
                 let tokens = record.input_tokens + record.output_tokens;
                 let agg = model_map
-                    .entry(model_key)
-                    .or_insert_with(|| (display_name, 0.0, 0));
+                    .entry(model_key.clone())
+                    .or_insert_with(|| (display_name.clone(), 0.0, 0));
                 agg.1 += cost;
                 agg.2 += tokens;
+
+                let bk = bucket_key_for_timestamp(&parsed_ts, &period);
+                let bucket_model = bucket_map
+                    .entry(bk)
+                    .or_default()
+                    .entry(model_key)
+                    .or_insert_with(|| (display_name, 0.0, 0));
+                bucket_model.1 += cost;
+                bucket_model.2 += tokens;
             }
         }
     }
@@ -1072,6 +1094,35 @@ pub async fn get_single_device_usage(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let mut chart_buckets: Vec<ChartBucket> = bucket_map
+        .into_iter()
+        .map(|(key, models)| {
+            let mut segments: Vec<ChartSegment> = models
+                .into_iter()
+                .map(|(model_key, (display, cost, tokens))| ChartSegment {
+                    model: display,
+                    model_key,
+                    cost,
+                    tokens,
+                })
+                .collect();
+            segments.sort_by(|a, b| {
+                b.cost
+                    .partial_cmp(&a.cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let total: f64 = segments.iter().map(|s| s.cost).sum();
+            let label = bucket_label_for_key(&key, &period);
+            ChartBucket {
+                label,
+                sort_key: key,
+                total,
+                segments,
+            }
+        })
+        .collect();
+    chart_buckets.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+
     let total_cost: f64 = model_breakdown.iter().map(|m| m.cost).sum();
     let total_tokens: u64 = model_breakdown.iter().map(|m| m.tokens).sum();
 
@@ -1079,6 +1130,7 @@ pub async fn get_single_device_usage(
         total_cost,
         total_tokens,
         model_breakdown,
+        chart_buckets,
         last_updated: chrono::Local::now().to_rfc3339(),
         usage_source: UsageSource::Parser,
         period_label,
@@ -1453,6 +1505,7 @@ mod tests {
             cache_5m: 0,
             cache_1h: 0,
             cache_read: 0,
+            speed: None,
         }];
 
         // The record's local date depends on the machine's timezone.
