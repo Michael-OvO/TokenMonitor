@@ -54,12 +54,12 @@ const CODEX_COLOR: Color = Color {
 }; // #7aafff
 
 const BADGE_COLOR: Color = Color {
-    r: 255,
-    g: 77,
-    b: 77,
+    r: 232,
+    g: 176,
+    b: 111,
     a: 255,
-}; // red dot for update available
-const BADGE_RADIUS_PX: i32 = 4; // @2x → 8px diameter
+}; // #E8B06F — warm amber, matches Claude/haiku palette
+const BADGE_RADIUS: f32 = 3.0; // @2x → 6px diameter; slightly softer than the old 4px radius
 
 /// Track and icon colors adapt to menu bar appearance
 const TRACK_COLOR_DARK: Color = Color {
@@ -362,28 +362,41 @@ fn in_rounded_rect(px: u32, py: u32, w: u32, h: u32, r: u32) -> bool {
 
 /// Overlay a filled red circle near the top-right of the icon area.
 fn draw_update_badge(buf: &mut [u8], canvas_w: u32) {
-    let cx = (ICON_W as i32) - 6;
-    let cy = 6;
-    let r = BADGE_RADIUS_PX;
-    let r_sq = r * r;
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if dx * dx + dy * dy > r_sq {
+    // Center positioned near the top-right of the icon area. Sub-pixel center
+    // lets us render a smooth circle at @2x even with a small radius.
+    let cx = (ICON_W as f32) - BADGE_RADIUS - 1.5;
+    let cy = BADGE_RADIUS + 1.5;
+    let r = BADGE_RADIUS;
+    let bbox = r.ceil() as i32 + 1;
+
+    for dy in -bbox..=bbox {
+        for dx in -bbox..=bbox {
+            let x = cx + dx as f32;
+            let y = cy + dy as f32;
+            if x < 0.0 || y < 0.0 || (x as u32) >= canvas_w {
                 continue;
             }
-            let x = cx + dx;
-            let y = cy + dy;
-            if x < 0 || y < 0 || (x as u32) >= canvas_w {
+            // Anti-aliased disc: full alpha inside `r - 0.5`, fades to 0 at `r + 0.5`.
+            let dist = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+            let coverage = (r + 0.5 - dist).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
                 continue;
             }
             let idx = ((y as u32 * canvas_w + x as u32) * 4) as usize;
             if idx + 3 >= buf.len() {
                 continue;
             }
-            buf[idx] = BADGE_COLOR.r;
-            buf[idx + 1] = BADGE_COLOR.g;
-            buf[idx + 2] = BADGE_COLOR.b;
-            buf[idx + 3] = BADGE_COLOR.a;
+            let alpha = (BADGE_COLOR.a as f32 * coverage) as u8;
+            // Over-blend onto whatever is underneath (usually the icon pixel).
+            let inv = (255 - alpha) as u16;
+            buf[idx] = ((BADGE_COLOR.r as u16 * alpha as u16 + buf[idx] as u16 * inv) / 255) as u8;
+            buf[idx + 1] =
+                ((BADGE_COLOR.g as u16 * alpha as u16 + buf[idx + 1] as u16 * inv) / 255) as u8;
+            buf[idx + 2] =
+                ((BADGE_COLOR.b as u16 * alpha as u16 + buf[idx + 2] as u16 * inv) / 255) as u8;
+            // Alpha channel: max of existing and incoming, so the badge extends
+            // past the icon's alpha mask into empty space without punching holes.
+            buf[idx + 3] = buf[idx + 3].max(alpha);
         }
     }
 }

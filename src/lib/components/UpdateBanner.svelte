@@ -44,103 +44,143 @@
     await skipVersion(available.version);
   }
 
-  async function onLater() {
+  async function onDismiss() {
     await dismissBanner();
-  }
-
-  function formatBytes(n: number): string {
-    if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / 1024 / 1024).toFixed(1)} MB`;
   }
 </script>
 
 {#if visible && available}
-  <div class="update-banner" role="status">
+  <div class="banner" role="status">
+    <span class="dot" aria-hidden="true"></span>
+
     {#if installError}
-      <div class="msg error">Update failed: {installError}</div>
-      <div class="actions">
-        <button class="primary" onclick={onUpdate}>Retry</button>
-        <button onclick={onLater}>Dismiss</button>
-      </div>
-    {:else if installing && progress}
-      <div class="msg">
-        Downloading v{available.version}… {progress.percent?.toFixed(0) ?? "?"}%
-        {#if progress.total}
-          ({formatBytes(progress.downloaded)} / {formatBytes(progress.total)})
-        {/if}
-      </div>
-      <div class="progress-track">
-        <div class="progress-fill" style="width: {progress.percent ?? 0}%"></div>
-      </div>
+      <span class="label">Update failed</span>
+      <span class="error-msg" title={installError}>{installError}</span>
+      <span class="spacer"></span>
+      <button class="action primary" onclick={onUpdate}>Retry</button>
+      <button class="icon" onclick={onDismiss} aria-label="Dismiss">×</button>
+    {:else if installing}
+      <span class="label">Installing v{available.version}</span>
+      {#if progress?.percent != null}
+        <span class="percent">{progress.percent.toFixed(0)}%</span>
+      {:else}
+        <span class="percent">…</span>
+      {/if}
     {:else}
-      <div class="msg">
-        <strong>Update available:</strong> v{available.version}
-        {#if available.notes}
-          <details><summary>Release notes</summary><pre>{available.notes}</pre></details>
-        {/if}
-      </div>
-      <div class="actions">
-        <button class="primary" onclick={onUpdate}>
-          {manualInstall ? "Download" : "Update Now"}
-        </button>
-        <button onclick={onLater}>Later</button>
-        <button onclick={onSkip}>Skip</button>
-      </div>
+      <span class="label">Update v{available.version} available</span>
+      <span class="spacer"></span>
+      <button class="action primary" onclick={onUpdate}>
+        {manualInstall ? "Download" : "Install"}
+      </button>
+      <button class="action" onclick={onSkip}>Skip</button>
+      <button class="icon" onclick={onDismiss} aria-label="Dismiss">×</button>
+    {/if}
+
+    {#if installing && progress?.percent != null}
+      <div class="progress" style="width: {progress.percent}%"></div>
     {/if}
   </div>
 {/if}
 
 <style>
-  .update-banner {
+  .banner {
+    position: relative;
     display: flex;
-    flex-direction: column;
+    align-items: center;
     gap: 8px;
-    padding: 10px 12px;
-    background: rgba(64, 128, 255, 0.12);
-    border-bottom: 1px solid rgba(64, 128, 255, 0.35);
-    font-size: 12px;
+    padding: 8px 12px;
+    font: 500 11px/1 'Inter', sans-serif;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--t1);
+    animation: slide-in var(--t-normal) var(--ease-out);
   }
-  .msg.error {
-    color: #c23;
+
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
-  .actions {
-    display: flex;
-    gap: 6px;
+
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #E8B06F;
+    flex-shrink: 0;
   }
-  button {
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 4px;
-    border: 1px solid rgba(0, 0, 0, 0.2);
-    background: transparent;
-    cursor: pointer;
+
+  .label {
+    color: var(--t1);
+    white-space: nowrap;
   }
-  button.primary {
-    background: rgba(64, 128, 255, 0.25);
-    border-color: rgba(64, 128, 255, 0.6);
+
+  .error-msg {
+    color: var(--t3);
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 140px;
+  }
+
+  .percent {
+    margin-left: auto;
+    color: var(--t2);
+    font-variant-numeric: tabular-nums;
     font-weight: 500;
   }
-  .progress-track {
-    height: 4px;
-    background: rgba(0, 0, 0, 0.1);
-    border-radius: 2px;
-    overflow: hidden;
+
+  .spacer {
+    flex: 1;
   }
-  .progress-fill {
-    height: 100%;
-    background: rgba(64, 128, 255, 0.8);
-    transition: width 0.2s linear;
+
+  .action {
+    background: none;
+    border: none;
+    padding: 2px 6px;
+    font: 500 11px/1 'Inter', sans-serif;
+    color: var(--t2);
+    cursor: pointer;
+    border-radius: 3px;
+    transition: color var(--t-fast) var(--ease-out),
+                background var(--t-fast) var(--ease-out);
   }
-  details {
-    margin-top: 6px;
-    font-size: 11px;
+  .action:hover { color: var(--t1); background: var(--surface-hover); }
+
+  .action.primary {
+    color: var(--accent);
+    font-weight: 600;
   }
-  pre {
-    white-space: pre-wrap;
-    max-height: 120px;
-    overflow: auto;
-    font-size: 11px;
-    margin: 4px 0;
+  .action.primary:hover {
+    background: var(--accent-soft);
+  }
+
+  .icon {
+    background: none;
+    border: none;
+    padding: 0;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--t3);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    border-radius: 3px;
+    transition: color var(--t-fast) var(--ease-out),
+                background var(--t-fast) var(--ease-out);
+  }
+  .icon:hover { color: var(--t1); background: var(--surface-hover); }
+
+  .progress {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 1.5px;
+    background: var(--accent);
+    transition: width var(--t-normal) var(--ease-out);
+    pointer-events: none;
   }
 </style>

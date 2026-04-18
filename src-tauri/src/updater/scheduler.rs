@@ -116,7 +116,16 @@ pub async fn run_check<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         }
         Err(e) => {
             let msg = e.to_string();
-            guard.last_check_error = Some(msg.clone());
+            // A missing `latest.json` (404) is the normal state before the first
+            // manifest has been published — don't surface it as an error. DNS
+            // and other network failures ARE real and worth reporting.
+            let is_missing_manifest = msg.contains("Could not fetch a valid release JSON");
+            if is_missing_manifest {
+                guard.available = None;
+                guard.last_check_error = None;
+            } else {
+                guard.last_check_error = Some(msg.clone());
+            }
             let _ = persistence::save(app, &guard);
             drop(guard);
             let _ = app.emit("updater://status-changed", ());

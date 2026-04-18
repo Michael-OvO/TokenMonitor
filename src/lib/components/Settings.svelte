@@ -24,7 +24,19 @@
   let current = $derived($settings as SettingsType);
   let appVersion = $state("");
   let checking = $state(false);
-  let checkError = $state<string | null>(null);
+
+  type UpdateStatus = {
+    label: string;
+    tone: "ok" | "warn" | "amber" | "neutral";
+  };
+  let updateStatus = $derived.by<UpdateStatus>(() => {
+    if (checking) return { label: "Checking…", tone: "neutral" };
+    const s = $updaterStore;
+    if (s.available) return { label: `v${s.available.version} available`, tone: "amber" };
+    if (s.lastCheckError) return { label: "Unable to check", tone: "warn" };
+    if (s.lastCheck) return { label: "Up to date", tone: "ok" };
+    return { label: "Not checked yet", tone: "neutral" };
+  });
 
   const currencies = [
     { value: "USD", label: "USD ($)" },
@@ -114,11 +126,10 @@
   async function onCheckUpdatesNow() {
     logger.info("settings", "Manual update check requested");
     checking = true;
-    checkError = null;
     try {
       await checkNow();
     } catch (e) {
-      checkError = e instanceof Error ? e.message : String(e);
+      logger.warn("settings", `Update check failed: ${e}`);
     } finally {
       checking = false;
     }
@@ -239,26 +250,31 @@
         </div>
         <div class="row border">
           <span class="label">Current Version</span>
-          <span class="value">v{$updaterStore.currentVersion}</span>
+          <div class="value-group">
+            <span class="value">v{$updaterStore.currentVersion}</span>
+            <span class="status status-{updateStatus.tone}">
+              <span class="status-dot"></span>{updateStatus.label}
+            </span>
+          </div>
         </div>
         <div class="row border">
           <span class="label">Last Checked</span>
-          <span class="value">{formatRelativeTime($updaterStore.lastCheck)}</span>
-        </div>
-        {#if $updaterStore.lastCheckError}
-          <div class="row border">
-            <span class="label error">{$updaterStore.lastCheckError}</span>
-          </div>
-        {/if}
-        {#if checkError}
-          <div class="row border">
-            <span class="label error">Check failed: {checkError}</span>
-          </div>
-        {/if}
-        <div class="row center">
-          <div class="actions">
-            <button class="reset-btn" disabled={checking} onclick={onCheckUpdatesNow}>
-              {checking ? "Checking…" : "Check for Updates"}
+          <div class="value-group">
+            <span class="value">{formatRelativeTime($updaterStore.lastCheck)}</span>
+            <button
+              type="button"
+              class="refresh-btn"
+              class:spinning={checking}
+              disabled={checking}
+              aria-label="Check for updates"
+              title="Check for updates"
+              onclick={onCheckUpdatesNow}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+              </svg>
             </button>
           </div>
         </div>
@@ -352,9 +368,60 @@
     font: 400 12px/1 'Inter', sans-serif;
     color: var(--t3);
   }
-  .label.error {
-    color: #c23;
-    font-size: 11px;
+  .value-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font: 500 11px/1 'Inter', sans-serif;
+    padding-left: 2px;
+    transition: color 180ms ease;
+  }
+  .status-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+    opacity: 0.9;
+  }
+  .status-ok      { color: var(--ch-plus); }
+  .status-amber   { color: #E8A060; }
+  .status-warn    { color: var(--ch-minus); }
+  .status-neutral { color: var(--t3); }
+
+  .refresh-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--t3);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: color 120ms ease, background 120ms ease;
+  }
+  .refresh-btn:hover:not(:disabled) {
+    color: var(--t1);
+    background: var(--surface-hover);
+  }
+  .refresh-btn:disabled {
+    cursor: default;
+  }
+  .refresh-btn.spinning svg {
+    animation: refresh-spin 900ms linear infinite;
+    transform-origin: center;
+  }
+  @keyframes refresh-spin {
+    to { transform: rotate(360deg); }
   }
 
   .currency-select {
