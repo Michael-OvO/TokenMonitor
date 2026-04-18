@@ -32,6 +32,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -69,6 +70,17 @@
           "libwebkit2gtk-4.1-0",
           "libappindicator3-1"
         ]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENFQzZFRTExQzM2NzRFRTMKUldUalRtZkRFZTdHenM0cW1DTVdJd2gyU253TkUxbGpOSEt6bDlENnhWUnN0cG5kbjJLaVpIcTEK",
+      "endpoints": [
+        "https://github.com/Michael-OvO/TokenMonitor/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }
