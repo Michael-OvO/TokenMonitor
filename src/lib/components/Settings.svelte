@@ -4,6 +4,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
   import { clearUsageCache } from "../stores/usage.js";
+  import { updaterStore, checkNow, setAutoCheck } from "../stores/updater.js";
   import { isMacOS, isWindows } from "../utils/platform.js";
   import { logger } from "../utils/logger.js";
   import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
@@ -22,6 +23,8 @@
   let { onBack }: Props = $props();
   let current = $derived($settings as SettingsType);
   let appVersion = $state("");
+  let checking = $state(false);
+  let checkError = $state<string | null>(null);
 
   const currencies = [
     { value: "USD", label: "USD ($)" },
@@ -106,6 +109,28 @@
     } catch (e) {
       console.error("Failed to toggle Dock icon visibility:", e);
     }
+  }
+
+  async function onCheckUpdatesNow() {
+    logger.info("settings", "Manual update check requested");
+    checking = true;
+    checkError = null;
+    try {
+      await checkNow();
+    } catch (e) {
+      checkError = e instanceof Error ? e.message : String(e);
+    } finally {
+      checking = false;
+    }
+  }
+
+  function formatRelativeTime(iso: string | null): string {
+    if (!iso) return "never";
+    const diff = Date.now() - new Date(iso).getTime();
+    if (diff < 60_000) return "just now";
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+    return `${Math.floor(diff / 86_400_000)}d ago`;
   }
 
   async function resetCache() {
@@ -200,6 +225,45 @@
         </div>
       </div>
     </div>
+
+    <!-- Updates -->
+    <div class="group">
+      <div class="group-label">Updates</div>
+      <div class="card">
+        <div class="row border">
+          <span class="label">Automatic Updates</span>
+          <ToggleSwitch
+            checked={$updaterStore.autoCheckEnabled}
+            onChange={(v) => setAutoCheck(v)}
+          />
+        </div>
+        <div class="row border">
+          <span class="label">Current Version</span>
+          <span class="value">v{$updaterStore.currentVersion}</span>
+        </div>
+        <div class="row border">
+          <span class="label">Last Checked</span>
+          <span class="value">{formatRelativeTime($updaterStore.lastCheck)}</span>
+        </div>
+        {#if $updaterStore.lastCheckError}
+          <div class="row border">
+            <span class="label error">{$updaterStore.lastCheckError}</span>
+          </div>
+        {/if}
+        {#if checkError}
+          <div class="row border">
+            <span class="label error">Check failed: {checkError}</span>
+          </div>
+        {/if}
+        <div class="row center">
+          <div class="actions">
+            <button class="reset-btn" disabled={checking} onclick={onCheckUpdatesNow}>
+              {checking ? "Checking…" : "Check for Updates"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -249,8 +313,7 @@
 
   .group-label {
     font: 500 8px/1 'Inter', sans-serif;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
+
     color: var(--t4);
     padding: 2px 4px 4px;
   }
@@ -283,6 +346,15 @@
   .label {
     font: 400 10px/1 'Inter', sans-serif;
     color: var(--t1);
+  }
+
+  .value {
+    font: 400 12px/1 'Inter', sans-serif;
+    color: var(--t3);
+  }
+  .label.error {
+    color: #c23;
+    font-size: 11px;
   }
 
   .currency-select {
