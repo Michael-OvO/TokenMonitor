@@ -158,10 +158,43 @@ Bump policy:
 - **Minor** (0.x.0): new features, new UI elements, new settings
 - **Major** (x.0.0): breaking changes, major redesigns, data format changes
 
-Tag push triggers `.github/workflows/release.yml` which builds for all platforms:
-- **macOS**: signed + notarized DMG
-- **Windows**: NSIS installer (.exe)
-- **Linux**: .deb package
+### Release triggers (important)
+
+**Merging a PR to `main` does NOT trigger a release.** It only fires `ci.yml` (tests/lint across three OSes).
+
+The release workflow (`.github/workflows/release.yml`) is **tag-triggered**:
+
+```yaml
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag: { required: true }
+```
+
+To cut a release, push a tag matching `v*.*.*`. The `scripts/release.sh` wrapper (invoked via `npm run release -- X.Y.Z`) does all of this in one shot:
+
+1. Verifies you're on `main` and up to date with `origin`
+2. Bumps the version in all three files
+3. Commits `"chore(release): bump version to X.Y.Z"`
+4. Creates and pushes the tag `vX.Y.Z`
+
+The tag push fires the release workflow, which builds for all platforms:
+- **macOS**: signed + notarized DMG + `.app.tar.gz` updater tarball + `.sig`
+- **Windows**: NSIS installer (.exe) + `.nsis.zip` updater bundle + `.sig`
+- **Linux**: `.deb` package + `.AppImage` updater bundle + `.sig`
+- **`latest.json`**: updater manifest generated in the `publish` job, attached to the release
+
+### Pre-flight before the first tag after a signing-key change
+
+The `publish` job fails hard if *zero* updater artifacts are found (a safety net for broken signing). Before tagging for the first time after generating/rotating the Tauri updater keypair, confirm these GitHub Actions repository secrets are set:
+
+- `TAURI_SIGNING_PRIVATE_KEY` — contents of `signing/tauri-updater.key`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — contents of `signing/tauri-updater-password.txt`
+
+If either is missing, every platform job silently skips updater artifact signing, and the `publish` job errors with `No updater artifacts found — updater signing may be disabled.` To fix: upload the secrets, delete the tag (`git push --delete origin vX.Y.Z && git tag -d vX.Y.Z`), and re-run the release.
 
 ## Building a Release DMG
 
