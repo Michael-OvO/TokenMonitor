@@ -195,8 +195,8 @@ jobs:
 
           MAC_TARBALL="$(find_one 'TokenMonitor*.app.tar.gz')"
           MAC_SIG="$(find_one 'TokenMonitor*.app.tar.gz.sig')"
-          WIN_BUNDLE="$(find_one 'TokenMonitor*-setup.nsis.zip')"
-          WIN_SIG="$(find_one 'TokenMonitor*-setup.nsis.zip.sig')"
+          WIN_BUNDLE="$(find_one 'TokenMonitor*-setup.exe')"
+          WIN_SIG="$(find_one 'TokenMonitor*-setup.exe.sig')"
           LINUX_APPIMAGE="$(find_one 'TokenMonitor*.AppImage')"
           LINUX_SIG="$(find_one 'TokenMonitor*.AppImage.sig')"
 

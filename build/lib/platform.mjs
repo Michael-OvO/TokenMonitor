@@ -17,8 +17,11 @@ export const PLATFORM_SPECS = Object.freeze({
     bundleDir: "nsis",
     artifactExtension: ".exe",
     bundleTarget: "nsis",
+    // Tauri 2 signs the `.exe` installer directly (no separate `.nsis.zip`).
+    // The `.exe` is already collected by `artifactExtension`; we only need
+    // to grab the `.exe.sig` as a secondary artifact.
     updaterArtifacts: Object.freeze([
-      Object.freeze({ dir: "nsis", extensions: [".nsis.zip", ".nsis.zip.sig"] }),
+      Object.freeze({ dir: "nsis", extensions: [".exe.sig"] }),
     ]),
   }),
   linux: Object.freeze({
