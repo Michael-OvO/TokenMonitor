@@ -32,8 +32,8 @@
   button {
     padding: 4px 8px; border: none; background: none;
     font: 500 9px/1 'Inter', sans-serif;
-    color: var(--t3); cursor: pointer; letter-spacing: .5px;
-    text-transform: uppercase; position: relative;
+    color: var(--t3); cursor: pointer;
+ position: relative;
     transition: color var(--t-fast) ease, background var(--t-fast) ease;
     border-radius: 4px;
   }

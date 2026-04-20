@@ -12,7 +12,7 @@ import { logger } from "../utils/logger.js";
 export const activeProvider = writable<UsageProvider>(DEFAULT_USAGE_PROVIDER);
 export const activePeriod = writable<UsagePeriod>("day");
 export const activeOffset = writable<number>(0);
-export const chartMode = writable<"bar" | "line">("bar");
+export const chartMode = writable<"bar" | "line" | "pie">("bar");
 export const chartSegmentMode = writable<"model" | "device">("model");
 export const usageData = writable<UsagePayload | null>(null);
 export const isLoading = writable(false);

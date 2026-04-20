@@ -165,6 +165,89 @@
   }
 
 
+  // Pie chart: aggregate visible buckets by model/device key.
+  let pieSlices = $derived(() => {
+    const merged = new Map<string, { key: string; name: string; cost: number; tokens: number }>();
+    for (const b of visibleBuckets) {
+      for (const s of b.segments) {
+        const existing = merged.get(s.model_key);
+        if (existing) {
+          existing.cost += s.cost;
+          existing.tokens += s.tokens;
+        } else {
+          merged.set(s.model_key, { key: s.model_key, name: s.model, cost: s.cost, tokens: s.tokens });
+        }
+      }
+    }
+    return Array.from(merged.values()).filter((s) => s.cost > 0).sort((a, b) => b.cost - a.cost);
+  });
+  let pieTotal = $derived(pieSlices().reduce((sum, s) => sum + s.cost, 0));
+  let hoveredSlice = $state(-1);
+
+  // Donut geometry: square viewBox, laid out as a fixed square on the left of
+  // a flex row with the breakdown panel filling the rest.
+  const PIE_VB = 100;
+  const PIE_CX = PIE_VB / 2;
+  const PIE_CY = PIE_VB / 2;
+  const PIE_R_OUTER = 44;
+  const PIE_R_INNER = 34;
+  const PIE_GAP_RAD = 0.018;
+
+  interface PieArc { key: string; name: string; cost: number; path: string; pct: number; }
+
+  let pieArcs = $derived((): PieArc[] => {
+    const slices = pieSlices();
+    const total = pieTotal;
+    if (total <= 0 || slices.length === 0) return [];
+    if (slices.length === 1) {
+      return [{
+        key: slices[0].key,
+        name: slices[0].name,
+        cost: slices[0].cost,
+        path: donutFullRing(),
+        pct: 1,
+      }];
+    }
+    let angle = -Math.PI / 2;
+    return slices.map((s) => {
+      const span = (s.cost / total) * Math.PI * 2;
+      const a0 = angle + PIE_GAP_RAD / 2;
+      const a1 = angle + span - PIE_GAP_RAD / 2;
+      const arc: PieArc = {
+        key: s.key,
+        name: s.name,
+        cost: s.cost,
+        path: donutArc(a0, a1),
+        pct: s.cost / total,
+      };
+      angle += span;
+      return arc;
+    });
+  });
+
+  function donutArc(a0: number, a1: number): string {
+    const large = a1 - a0 > Math.PI ? 1 : 0;
+    const x0o = PIE_CX + PIE_R_OUTER * Math.cos(a0);
+    const y0o = PIE_CY + PIE_R_OUTER * Math.sin(a0);
+    const x1o = PIE_CX + PIE_R_OUTER * Math.cos(a1);
+    const y1o = PIE_CY + PIE_R_OUTER * Math.sin(a1);
+    const x0i = PIE_CX + PIE_R_INNER * Math.cos(a1);
+    const y0i = PIE_CY + PIE_R_INNER * Math.sin(a1);
+    const x1i = PIE_CX + PIE_R_INNER * Math.cos(a0);
+    const y1i = PIE_CY + PIE_R_INNER * Math.sin(a0);
+    return `M ${x0o} ${y0o} A ${PIE_R_OUTER} ${PIE_R_OUTER} 0 ${large} 1 ${x1o} ${y1o} L ${x0i} ${y0i} A ${PIE_R_INNER} ${PIE_R_INNER} 0 ${large} 0 ${x1i} ${y1i} Z`;
+  }
+
+  function donutFullRing(): string {
+    const ro = PIE_R_OUTER;
+    const ri = PIE_R_INNER;
+    return `M ${PIE_CX - ro} ${PIE_CY} a ${ro} ${ro} 0 1 0 ${ro * 2} 0 a ${ro} ${ro} 0 1 0 ${-ro * 2} 0 M ${PIE_CX - ri} ${PIE_CY} a ${ri} ${ri} 0 1 1 ${ri * 2} 0 a ${ri} ${ri} 0 1 1 ${-ri * 2} 0`;
+  }
+
+  function sliceAriaLabel(arc: PieArc): string {
+    return `${arc.name}: ${formatCost(arc.cost)} (${(arc.pct * 100).toFixed(1)}%)`;
+  }
+
   // Bar chart geometry — fill full width, small gaps
   let barGap = $derived(
     visibleBuckets.length > 1
@@ -230,14 +313,16 @@
   <div class="ch-top">
     <span class="ch-t">Cost by {$chartSegmentMode === "device" ? "device" : "model"}</span>
     <div class="ch-right">
-      <div class="leg">
-        {#each legendModels() as lm}
-          <span class="leg-item">
-            <span class="leg-dot" style="background:{segmentColorFn(lm.key)}"></span>
-            {lm.name}
-          </span>
-        {/each}
-      </div>
+      {#if $chartMode !== "pie"}
+        <div class="leg">
+          {#each legendModels() as lm}
+            <span class="leg-item">
+              <span class="leg-dot" style="background:{segmentColorFn(lm.key)}"></span>
+              {lm.name}
+            </span>
+          {/each}
+        </div>
+      {/if}
       {#if deviceBuckets}
         <div class="mode-toggle seg-toggle">
           <button type="button" class:on={$chartSegmentMode === "model"} title="By model" onclick={() => { logger.info("chart", "Segment: model"); chartSegmentMode.set("model"); }}>M</button>
@@ -271,6 +356,19 @@
             <path d="M1,7 C3,3 5,5 9,2" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>
           </svg>
         </button>
+        <button
+          type="button"
+          class:on={$chartMode === "pie"}
+          aria-label="Show pie chart"
+          aria-pressed={$chartMode === "pie"}
+          title="Show pie chart"
+          onclick={() => { logger.info("chart", "Mode: pie"); chartMode.set("pie"); }}
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10">
+            <circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1"/>
+            <path d="M5,5 L5,1 A4,4 0 0 1 8.46,7 Z" fill="currentColor"/>
+          </svg>
+        </button>
       </div>
     </div>
   </div>
@@ -298,19 +396,74 @@
     {/if}
   </div>
 
-  <div class="chart-body">
-    <!-- Y-axis labels -->
-    <div class="y-axis">
-      {#each yTicks() as tick}
-        <span class="y-label" style="top: {tick.y}px">{yLabel(tick.val)}</span>
-      {/each}
-    </div>
+  <div class="chart-body" class:pie-mode={$chartMode === "pie"}>
+    <!-- Y-axis labels (hidden in pie mode) -->
+    {#if $chartMode !== "pie"}
+      <div class="y-axis">
+        {#each yTicks() as tick}
+          <span class="y-label" style="top: {tick.y}px">{yLabel(tick.val)}</span>
+        {/each}
+      </div>
+    {/if}
 
     <!-- Chart area -->
     <div class="chart-area">
       {#key `${dataKey}-${$chartMode}`}
       <div class="chart-fade">
-        {#if $chartMode === "bar"}
+        {#if $chartMode === "pie"}
+          <!-- PIE / DONUT CHART -->
+          {@const arcs = pieArcs()}
+          {@const total = pieTotal}
+          <div class="pie-wrap">
+            {#if arcs.length === 0}
+              <div class="pie-empty-state">No data</div>
+            {:else}
+              {@const focus = hoveredSlice >= 0 ? arcs[hoveredSlice] : null}
+              <svg viewBox="0 0 {PIE_VB} {PIE_VB}" preserveAspectRatio="xMidYMid meet" class="pie-donut">
+                <g class="pie-rings">
+                  {#each arcs as arc, i}
+                    <path
+                      d={arc.path}
+                      fill={segmentColorFn(arc.key)}
+                      class="pie-slice"
+                      class:dim={hoveredSlice !== -1 && hoveredSlice !== i}
+                      class:active={hoveredSlice === i}
+                      style="--delay: {i * 0.05}s"
+                      role="img"
+                      aria-label={sliceAriaLabel(arc)}
+                      onmouseenter={() => (hoveredSlice = i)}
+                      onmouseleave={() => (hoveredSlice = -1)}
+                    />
+                  {/each}
+                </g>
+                <text x={PIE_CX} y={PIE_CY - 5} text-anchor="middle" dominant-baseline="central" class="pie-center-label">
+                  {focus ? focus.name : "Total"}
+                </text>
+                <text x={PIE_CX} y={PIE_CY + 7} text-anchor="middle" dominant-baseline="central" class="pie-center-value">
+                  {focus ? `${(focus.pct * 100).toFixed(1)}%` : formatCost(total)}
+                </text>
+              </svg>
+
+              <ul class="pie-breakdown" role="list">
+                {#each arcs as arc, i}
+                  <li
+                    class="pie-row"
+                    class:active={hoveredSlice === i}
+                    style="--delay: {i * 0.04 + 0.08}s"
+                    onmouseenter={() => (hoveredSlice = i)}
+                    onmouseleave={() => (hoveredSlice = -1)}
+                  >
+                    <span class="pie-row-dot" style="background:{segmentColorFn(arc.key)}"></span>
+                    <span class="pie-row-name" title={arc.name}>{arc.name}</span>
+                    <span class="pie-row-pct">{(arc.pct * 100).toFixed(0)}%</span>
+                    <span class="pie-row-cost">{formatCost(arc.cost)}</span>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+
+        {:else if $chartMode === "bar"}
           <!-- BAR CHART -->
           <svg viewBox="0 0 {CHART_W} {CHART_H}" preserveAspectRatio="none" class="chart-svg">
             <!-- Grid lines -->
@@ -430,7 +583,7 @@
     </div>
   </div>
 
-  {#if xAxisLabels.length > 0}
+  {#if xAxisLabels.length > 0 && $chartMode !== "pie"}
     <div class="xa">
       {#each xAxisLabels as label}
         <span>{label}</span>
@@ -457,7 +610,7 @@
   .ch.detail-above .xa { order: 4; }
 
   .ch-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-  .ch-t { font: 500 8px/1 "Inter", sans-serif; color: var(--t3); text-transform: uppercase; letter-spacing: .8px; }
+  .ch-t { font: 500 8px/1 "Inter", sans-serif; color: var(--t3); }
   .ch-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .leg { display: flex; gap: 7px; overflow: hidden; min-width: 0; }
   .leg-item {
@@ -563,6 +716,115 @@
     to   { transform: scaleY(1); }
   }
   .bar-seg { transition: opacity var(--t-fast) ease; will-change: opacity; }
+
+  /* Pie / donut chart */
+  .chart-body.pie-mode { align-items: center; }
+  .chart-body.pie-mode .chart-area { height: auto; min-height: 108px; }
+  .pie-wrap {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 108px;
+    padding-left: 2px;
+  }
+  .pie-donut {
+    flex: 0 0 96px;
+    width: 96px;
+    height: 96px;
+    overflow: visible;
+  }
+  .pie-rings {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: pieRingsIn var(--t-slow) var(--ease-out) both;
+  }
+  @keyframes pieRingsIn {
+    from { opacity: 0; transform: rotate(-12deg) scale(0.94); }
+    to   { opacity: 1; transform: rotate(0) scale(1); }
+  }
+  .pie-slice {
+    cursor: pointer;
+    opacity: 0.92;
+    transition: opacity var(--t-fast) ease, filter var(--t-fast) ease;
+    will-change: opacity, filter;
+  }
+  .pie-slice.dim { opacity: 0.28; }
+  .pie-slice.active {
+    opacity: 1;
+    filter: brightness(1.08);
+  }
+  .pie-center-label {
+    font: 500 9px/1 "Inter", sans-serif;
+    fill: var(--t3);
+  }
+  .pie-center-value {
+    font: 600 11px/1 "Inter", sans-serif;
+    fill: var(--t1);
+    font-variant-numeric: tabular-nums;
+  }
+  .pie-breakdown {
+    flex: 1 1 auto;
+    min-width: 0;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 108px;
+    overflow-y: auto;
+  }
+  .pie-row {
+    display: grid;
+    grid-template-columns: 6px minmax(0, 1fr) auto auto;
+    align-items: center;
+    column-gap: 8px;
+    padding: 3px 6px;
+    border-radius: 5px;
+    cursor: default;
+    opacity: 0;
+    animation: pieRowIn var(--t-slow) var(--ease-out) forwards;
+    animation-delay: var(--delay, 0s);
+    transition: background var(--t-fast) ease;
+  }
+  .pie-row:hover, .pie-row.active {
+    background: var(--surface-2);
+  }
+  @keyframes pieRowIn {
+    from { opacity: 0; transform: translateY(2px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .pie-row-dot { width: 6px; height: 6px; border-radius: 2px; }
+  .pie-row-name {
+    font: 500 11px/1.2 "Inter", sans-serif;
+    color: var(--t1);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .pie-row-pct {
+    font: 600 10px/1 "Inter", sans-serif;
+    color: var(--t2);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    min-width: 28px;
+  }
+  .pie-row-cost {
+    font: 500 10px/1 "Inter", sans-serif;
+    color: var(--t3);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .pie-empty-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 108px;
+    font: 500 10px/1 "Inter", sans-serif;
+    color: var(--t3);
+  }
 
   /* Line chart */
   .line-path {

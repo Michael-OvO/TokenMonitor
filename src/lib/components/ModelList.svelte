@@ -61,9 +61,8 @@
   .mdl-title {
     font: 500 8px/1 'Inter', sans-serif;
     color: var(--t3);
-    text-transform: uppercase;
-    letter-spacing: .8px;
-  }
+
+      }
   .mdl-count {
     font: 500 8px/1 'Inter', sans-serif;
     color: var(--t4);

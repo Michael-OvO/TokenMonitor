@@ -98,8 +98,8 @@
   .sa { padding: 10px 12px; animation: fadeUp .28s ease both .07s; }
   .sa-head {
     font: 500 8px/1 'Inter', sans-serif;
-    color: var(--t3); text-transform: uppercase;
-    letter-spacing: .7px; margin-bottom: 8px;
+    color: var(--t3);
+    margin-bottom: 8px;
   }
   .sa-bar {
     display: flex; height: 6px; border-radius: 3px;
@@ -122,7 +122,7 @@
   .sa-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
   .sa-label {
     font: 500 8px/1 'Inter', sans-serif;
-    color: var(--t3); text-transform: uppercase; letter-spacing: .5px;
+    color: var(--t3);
   }
   .sa-val {
     font: 400 13px/1 'Inter', sans-serif;

@@ -133,8 +133,8 @@
   .m-l {
     display: flex; align-items: center; gap: 4px;
     font: 500 8px/1 'Inter', sans-serif;
-    color: var(--t3); text-transform: uppercase;
-    letter-spacing: .7px; margin-top: 4px;
+    color: var(--t3);
+    margin-top: 4px;
   }
   .m-s {
     font: 400 8px/1 'Inter', sans-serif;
@@ -171,9 +171,8 @@
   .comp-head {
     display: flex; justify-content: space-between; align-items: center;
     font: 500 8px/1 'Inter', sans-serif;
-    color: var(--t3); text-transform: uppercase;
-    letter-spacing: .7px;
-  }
+    color: var(--t3);
+      }
   .comp-eff {
     font-weight: 400; text-transform: none;
     letter-spacing: .1px; color: var(--t4);

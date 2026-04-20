@@ -268,12 +268,12 @@
   }
   .bd-title {
     font: 500 8px/1 'Inter', sans-serif;
-    color: var(--t3); text-transform: uppercase; letter-spacing: .8px;
+    color: var(--t3);
   }
   .bd-sep {
     padding: 6px 9px 2px;
     font: 500 7px/1 'Inter', sans-serif;
-    color: var(--t4); text-transform: uppercase; letter-spacing: .5px;
+    color: var(--t4);
     opacity: 0.7;
   }
 
@@ -387,7 +387,7 @@
     font: 500 6.5px/1 'Inter', sans-serif; color: var(--t4);
     background: var(--surface-hover, rgba(128,128,128,0.1));
     padding: 1px 4px; border-radius: 3px; flex-shrink: 0;
-    text-transform: uppercase; letter-spacing: 0.3px;
+
   }
   .device-cost { font: 500 9px/1.2 'Inter', sans-serif; color: var(--t1); flex-shrink: 0; }
   .device-bar-track {

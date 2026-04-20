@@ -382,7 +382,7 @@
     justify-content: center;
     gap: 6px;
     font: 500 10px/1 'Inter', sans-serif;
-    text-transform: uppercase;
+
     letter-spacing: 0.8px;
     color: var(--t4);
     margin-bottom: 6px;

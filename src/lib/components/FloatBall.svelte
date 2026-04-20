@@ -1028,8 +1028,7 @@
     font-size: 10px;
     line-height: 1;
     font-weight: 800;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    
     text-shadow: 0 0 6px currentColor; /* neon glow trick */
     opacity: 0.9;
   }

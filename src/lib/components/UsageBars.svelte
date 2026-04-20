@@ -229,9 +229,8 @@
   .ub-provider-name {
     font: 600 10px/1 'Inter', sans-serif;
     color: var(--t2);
-    text-transform: uppercase;
-    letter-spacing: .8px;
-  }
+
+      }
   .ub-plan {
     font: 400 9px/1 'Inter', sans-serif;
     color: var(--t3);

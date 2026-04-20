@@ -216,7 +216,7 @@
   }
   .group-label {
     font: 500 8px/1 'Inter', sans-serif;
-    text-transform: uppercase;
+
     letter-spacing: 0.8px;
     color: var(--t4);
     padding: 2px 4px 4px;
@@ -277,7 +277,7 @@
     font: 500 7px/1 'Inter', sans-serif;
     color: rgba(148,163,184,0.92);
     letter-spacing: 0.7px;
-    text-transform: uppercase;
+
     margin-bottom: 4px;
   }
   .widget-title {
