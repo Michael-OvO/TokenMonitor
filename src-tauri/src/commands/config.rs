@@ -49,6 +49,50 @@ pub async fn set_rate_limits_enabled(
     Ok(())
 }
 
+/// Outcome of the one-time interactive Keychain prompt. Surfaced to the
+/// frontend so it can show appropriate copy after the user responds.
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum KeychainAccessOutcome {
+    /// User granted access (or access was already silently available).
+    Granted,
+    /// User denied the prompt, the item is missing, or read failed.
+    Denied { reason: String },
+    /// Keychain isn't part of the credentials path on this platform.
+    /// Only constructed on Windows/Linux; suppressing dead-code on macOS.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    NotApplicable,
+}
+
+/// Request the one-time interactive Keychain prompt for the Claude OAuth
+/// token. This is the **only** code path that allows the macOS Keychain UI
+/// to appear — every other read is silent (`skip_authenticated_items`).
+///
+/// Whatever the user chooses, the frontend should persist
+/// `keychainAccessRequested = true` so this prompt never recurs on its own.
+#[tauri::command]
+pub async fn request_claude_keychain_access() -> Result<KeychainAccessOutcome, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Run the synchronous Keychain call on a blocking thread so we don't
+        // pin the Tauri async runtime while macOS shows the auth panel.
+        let outcome =
+            tokio::task::spawn_blocking(crate::rate_limits::request_claude_keychain_access)
+                .await
+                .map_err(|e| format!("Keychain access task failed: {e}"))?;
+
+        Ok(match outcome {
+            Ok(()) => KeychainAccessOutcome::Granted,
+            Err(reason) => KeychainAccessOutcome::Denied { reason },
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(KeychainAccessOutcome::NotApplicable)
+    }
+}
+
 /// Set Dock icon visibility (macOS only). Noop on other platforms.
 #[tauri::command]
 pub async fn set_dock_icon_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {

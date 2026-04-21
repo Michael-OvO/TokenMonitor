@@ -54,6 +54,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     debugLogging: false,
     rateLimitsEnabled: false,
     hasSeenWelcome: true,
+    keychainAccessRequested: true,
     ...overrides,
   };
 }

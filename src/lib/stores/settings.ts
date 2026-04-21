@@ -50,6 +50,15 @@ export interface Settings {
   rateLimitsEnabled: boolean;
   /** Set once the user has seen (and dismissed) the first-launch welcome. */
   hasSeenWelcome: boolean;
+  /**
+   * Set to `true` after the one-time Keychain access prompt has been shown.
+   * Once true the app never invokes the interactive Keychain prompt again,
+   * regardless of whether the user actually granted access — this is the
+   * "never show anything about it again" contract. Background reads stay
+   * silent (`skip_authenticated_items`); if access is gone the app falls
+   * back to the CLI probe transparently.
+   */
+  keychainAccessRequested: boolean;
 }
 
 export const HEADER_TAB_ORDER: UsageProvider[] = [...USAGE_PROVIDER_ORDER];
@@ -94,6 +103,7 @@ const DEFAULTS: Settings = {
   debugLogging: false,
   rateLimitsEnabled: false,
   hasSeenWelcome: false,
+  keychainAccessRequested: false,
 };
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
@@ -288,6 +298,10 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
     debugLogging: normalizeBoolean(saved?.debugLogging, DEFAULTS.debugLogging),
     rateLimitsEnabled: normalizeBoolean(saved?.rateLimitsEnabled, DEFAULTS.rateLimitsEnabled),
     hasSeenWelcome: normalizeBoolean(saved?.hasSeenWelcome, DEFAULTS.hasSeenWelcome),
+    keychainAccessRequested: normalizeBoolean(
+      saved?.keychainAccessRequested,
+      DEFAULTS.keychainAccessRequested,
+    ),
   };
 }
 
@@ -323,7 +337,16 @@ export async function loadSettings(): Promise<Settings> {
             hasSeenWelcome: true,
           }
         : legacyTrayConfig;
-    const merged = normalizeSettings(migrated);
+    // Separate migration step: anyone who already had `rateLimitsEnabled`
+    // saved was running the app before the one-time Keychain prompt was
+    // introduced — they've already lived with whatever Keychain UX existed,
+    // so don't surface the new tutorial to them. Brand-new installs (no
+    // saved settings) leave this `false` so the welcome card can drive it.
+    const migratedKeychain =
+      migrated && "rateLimitsEnabled" in migrated && !("keychainAccessRequested" in migrated)
+        ? { ...migrated, keychainAccessRequested: true }
+        : migrated;
+    const merged = normalizeSettings(migratedKeychain);
 
     settings.set(merged);
     setCurrency(merged.currency);

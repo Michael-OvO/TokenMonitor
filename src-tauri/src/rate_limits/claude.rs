@@ -87,6 +87,41 @@ fn read_token_from_keychain() -> Result<String, String> {
     extract_access_token(&raw)
 }
 
+/// Interactive Keychain read used by the one-time setup flow.
+///
+/// Unlike [`read_token_from_keychain`], this deliberately does **not** set
+/// `skip_authenticated_items(true)`, so macOS will show the user-auth prompt
+/// when needed. This is the only path in the app that allows that prompt to
+/// appear — it's invoked from the explicit "Allow Keychain access" button in
+/// the welcome flow, never from background refreshes. On success the token is
+/// stored in the in-process cache so the very next API call succeeds without
+/// re-reading the Keychain.
+#[cfg(target_os = "macos")]
+pub(super) fn prime_token_from_keychain_interactive() -> Result<(), String> {
+    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
+
+    let results = ItemSearchOptions::new()
+        .class(ItemClass::generic_password())
+        .service("Claude Code-credentials")
+        .load_data(true)
+        .limit(1)
+        .search()
+        .map_err(|e| format!("Keychain access denied or unavailable: {e}"))?;
+
+    let data = results
+        .into_iter()
+        .find_map(|r| match r {
+            SearchResult::Data(bytes) => Some(bytes),
+            _ => None,
+        })
+        .ok_or_else(|| "Claude Code credentials not found in Keychain".to_string())?;
+
+    let raw = String::from_utf8(data).map_err(|e| format!("Invalid UTF-8 from Keychain: {e}"))?;
+    let token = extract_access_token(&raw)?;
+    store_access_token(&token);
+    Ok(())
+}
+
 /// Read OAuth token from `~/.claude/.credentials.json` (Windows/Linux).
 #[cfg(not(target_os = "macos"))]
 fn read_token_from_credentials_file() -> Result<String, String> {

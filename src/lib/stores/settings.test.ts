@@ -99,9 +99,11 @@ describe("loadSettings", () => {
       sshHosts: [],
       debugLogging: false,
       // Existing installs (non-empty saved settings) migrate to rate-limits
-      // on and welcome-seen so we don't disrupt their workflow.
+      // on, welcome-seen, AND keychain-prompt-already-shown so we don't pop
+      // a tutorial on someone who's been using the app for months.
       rateLimitsEnabled: true,
       hasSeenWelcome: true,
+      keychainAccessRequested: true,
     });
     expect(get(settings)).toEqual(loaded);
     expect(mockSetCurrency).toHaveBeenCalledWith("EUR");
@@ -153,6 +155,7 @@ describe("loadSettings", () => {
       // opt-in flags stay off.
       rateLimitsEnabled: false,
       hasSeenWelcome: false,
+      keychainAccessRequested: false,
     });
     expect(get(settings)).toEqual(fallback);
     expect(mockSetCurrency).toHaveBeenCalledWith("USD");

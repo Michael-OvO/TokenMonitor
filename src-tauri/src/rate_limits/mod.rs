@@ -15,6 +15,14 @@ use http::{
     provider_rate_limit_error,
 };
 
+/// Trigger the one-time interactive Keychain prompt so the user can grant
+/// "Always Allow" access for TokenMonitor. Only the explicit setup flow
+/// should invoke this — every other Keychain read uses the silent path.
+#[cfg(target_os = "macos")]
+pub fn request_claude_keychain_access() -> Result<(), String> {
+    claude::prime_token_from_keychain_interactive()
+}
+
 /// Minimum seconds between Claude rate-limit probes.  Both the OAuth API and
 /// the CLI fallback count against the user's rate-limit budget, so we avoid
 /// re-fetching when the cached data is still recent.  The frontend enforces a

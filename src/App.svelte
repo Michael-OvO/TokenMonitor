@@ -597,7 +597,10 @@
         <div class="rate-limit-empty">
           <div class="rate-limit-empty-title">Live rate limits are off</div>
           <div class="rate-limit-empty-text">
-            Turn this on to see session &amp; weekly usage. macOS will ask once for Keychain access.
+            Turn this on to see session &amp; weekly usage.
+            {#if !$settings.keychainAccessRequested}
+              macOS will ask once for Keychain access — click <strong>Always Allow</strong> when it appears.
+            {/if}
           </div>
           <button
             type="button"
@@ -605,6 +608,14 @@
             onclick={async () => {
               await updateSetting("rateLimitsEnabled", true);
               await invoke("set_rate_limits_enabled", { enabled: true });
+              if (!$settings.keychainAccessRequested) {
+                try {
+                  await invoke("request_claude_keychain_access");
+                } catch (err) {
+                  logger.error("rate-limits", `Keychain access request failed: ${err}`);
+                }
+                await updateSetting("keychainAccessRequested", true);
+              }
               await fetchRateLimits();
             }}
           >

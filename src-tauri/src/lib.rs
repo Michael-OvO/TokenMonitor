@@ -335,6 +335,7 @@ pub fn run() {
             commands::config::set_dock_icon_visible,
             commands::config::set_refresh_interval,
             commands::config::set_rate_limits_enabled,
+            commands::config::request_claude_keychain_access,
             commands::tray::set_tray_config,
             commands::tray::get_status_widget_summary,
             commands::config::clear_cache,
