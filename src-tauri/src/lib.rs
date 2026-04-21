@@ -334,6 +334,7 @@ pub fn run() {
             commands::config::set_glass_effect,
             commands::config::set_dock_icon_visible,
             commands::config::set_refresh_interval,
+            commands::config::set_rate_limits_enabled,
             commands::tray::set_tray_config,
             commands::tray::get_status_widget_summary,
             commands::config::clear_cache,
@@ -447,10 +448,17 @@ async fn background_loop(app: tauri::AppHandle) {
         }
 
         // Periodically refresh rate limits so the tray icon and float ball
-        // stay up to date even when the main window is hidden.
+        // stay up to date even when the main window is hidden. Skipped when
+        // the user hasn't opted in — keeps Keychain access dormant until
+        // they turn rate-limit tracking on.
         if rate_limit_counter >= RATE_LIMIT_REFRESH_EVERY_N_CYCLES {
             rate_limit_counter = 0;
-            refresh_rate_limits(&app, &state).await;
+            if state
+                .rate_limits_enabled
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                refresh_rate_limits(&app, &state).await;
+            }
         }
 
         // Periodically check if pricing cache needs refresh (7-day TTL).

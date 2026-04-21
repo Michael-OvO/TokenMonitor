@@ -52,6 +52,8 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     taskbarPanel: false,
     sshHosts: [],
     debugLogging: false,
+    rateLimitsEnabled: false,
+    hasSeenWelcome: true,
     ...overrides,
   };
 }

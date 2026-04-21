@@ -67,6 +67,7 @@
   import Footer from "./lib/components/Footer.svelte";
   import SetupScreen from "./lib/components/SetupScreen.svelte";
   import SplashScreen from "./lib/components/SplashScreen.svelte";
+  import WelcomeCard from "./lib/components/WelcomeCard.svelte";
   import Settings from "./lib/components/Settings.svelte";
   import Calendar from "./lib/components/Calendar.svelte";
   import DateNav from "./lib/components/DateNav.svelte";
@@ -558,6 +559,8 @@
     <UpdateBanner />
     {#if showSplash}
       <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
+    {:else if !$settings.hasSeenWelcome}
+      <WelcomeCard onDismiss={() => { tick().then(() => syncSizeAndVerify("welcome-dismiss")); }} />
     {:else if appReady && !data}
       <SetupScreen />
     {:else if showSettings}
@@ -590,7 +593,25 @@
       <MetricsRow {data} />
       <div class="hr"></div>
 
-      {#if period === "5h" && visibleRateLimitProviders.length > 0}
+      {#if period === "5h" && !$settings.rateLimitsEnabled}
+        <div class="rate-limit-empty">
+          <div class="rate-limit-empty-title">Live rate limits are off</div>
+          <div class="rate-limit-empty-text">
+            Turn this on to see session &amp; weekly usage. macOS will ask once for Keychain access.
+          </div>
+          <button
+            type="button"
+            class="rate-limit-cta"
+            onclick={async () => {
+              await updateSetting("rateLimitsEnabled", true);
+              await invoke("set_rate_limits_enabled", { enabled: true });
+              await fetchRateLimits();
+            }}
+          >
+            Enable rate limits
+          </button>
+        </div>
+      {:else if period === "5h" && visibleRateLimitProviders.length > 0}
         {#each visibleRateLimitProviders as rateLimitProvider, index}
           <UsageBars
             providerLabel={provider === ALL_USAGE_PROVIDER_ID ? getUsageProviderLabel(rateLimitProvider) : undefined}
@@ -693,6 +714,19 @@
     font: 400 9px/1.4 'Inter', sans-serif;
     color: var(--t3);
   }
+  .rate-limit-cta {
+    margin-top: 10px;
+    align-self: flex-start;
+    padding: 6px 11px;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent, #6366f1);
+    color: white;
+    font: 500 10px/1 'Inter', sans-serif;
+    cursor: pointer;
+    transition: filter var(--t-fast) ease;
+  }
+  .rate-limit-cta:hover { filter: brightness(1.08); }
   .refresh-bar {
     position: absolute;
     top: 0;
