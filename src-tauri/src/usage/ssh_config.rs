@@ -62,13 +62,10 @@ pub fn discover_ssh_hosts() -> Vec<SshHostEntry> {
 
 /// Returns the default SSH config path for the current platform.
 fn ssh_config_path() -> PathBuf {
-    match dirs::home_dir() {
-        Some(home) => home.join(".ssh").join("config"),
-        None => {
-            tracing::warn!("Could not determine home directory for SSH config");
-            PathBuf::from(".ssh").join("config")
-        }
-    }
+    crate::paths::ssh_config().unwrap_or_else(|| {
+        tracing::warn!("Could not determine home directory for SSH config");
+        PathBuf::from(".ssh").join("config")
+    })
 }
 
 /// Recursively parse SSH config content, handling Include directives.

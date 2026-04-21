@@ -283,6 +283,12 @@ struct CodexJsonlEntry {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Recursively find all `.jsonl` files under `dir`.
+///
+/// Symlinks are not followed: traversing a symlink may cross onto a network
+/// volume, external disk, or other TCC-guarded location and cause macOS to
+/// prompt the user for access they never asked for. Regular files reached via
+/// symlink are still accepted (reading a symlinked JSONL doesn't recurse), but
+/// symlinked directories are skipped.
 pub fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
     let mut results = Vec::new();
     if !dir.exists() {
@@ -293,8 +299,14 @@ pub fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
         Err(_) => return results,
     };
     for entry in rd.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             let mut sub = glob_jsonl_files(&path);
             results.append(&mut sub);
         } else if path.extension().is_some_and(|e| e == "jsonl") {
@@ -325,10 +337,15 @@ fn scan_jsonl_tree_into(
     files: &mut Vec<PathBuf>,
     directories: &mut Vec<DirectoryStamp>,
 ) {
-    let metadata = match fs::metadata(dir) {
+    // symlink_metadata doesn't follow symlinks; we refuse to recurse through
+    // them so the walker stays on the volume the user originally opted into.
+    let metadata = match fs::symlink_metadata(dir) {
         Ok(metadata) => metadata,
         Err(_) => return,
     };
+    if metadata.file_type().is_symlink() {
+        return;
+    }
     let modified = match metadata.modified() {
         Ok(modified) => modified,
         Err(_) => return,
@@ -343,8 +360,14 @@ fn scan_jsonl_tree_into(
         Err(_) => return,
     };
     for entry in rd.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             scan_jsonl_tree_into(&path, files, directories);
         } else if path.extension().is_some_and(|e| e == "jsonl") {
             files.push(path);
@@ -2747,6 +2770,53 @@ mod tests {
 
     fn write_file(path: &Path, content: &str) {
         fs::write(path, content).unwrap();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Symlink-skip guards (macOS TCC safety — see glob_jsonl_files doc comment)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn glob_jsonl_files_skips_symlinked_subdirectories() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+
+        // Regular file inside the root — should be found.
+        write_file(&root.path().join("session.jsonl"), "{}");
+
+        // JSONL outside the root, reached only via a symlinked directory.
+        // Following the symlink would cross onto whatever volume `elsewhere`
+        // lives on — exactly the case that triggers macOS TCC prompts.
+        write_file(&elsewhere.path().join("offsite.jsonl"), "{}");
+        symlink(elsewhere.path(), root.path().join("link")).unwrap();
+
+        let found = glob_jsonl_files(root.path());
+        assert_eq!(found.len(), 1, "symlinked subdir must not be traversed");
+        assert!(found[0].ends_with("session.jsonl"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_jsonl_tree_skips_symlinked_subdirectories() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+
+        write_file(&root.path().join("session.jsonl"), "{}");
+        write_file(&elsewhere.path().join("offsite.jsonl"), "{}");
+        symlink(elsewhere.path(), root.path().join("link")).unwrap();
+
+        let mut files = Vec::new();
+        let mut dirs = Vec::new();
+        scan_jsonl_tree_into(root.path(), &mut files, &mut dirs);
+        assert_eq!(files.len(), 1, "symlinked subdir must not be traversed");
+        assert!(files[0].ends_with("session.jsonl"));
+        // The symlinked dir also must not appear in the directory-stamp list.
+        assert!(!dirs.iter().any(|d| d.path.ends_with("link")));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

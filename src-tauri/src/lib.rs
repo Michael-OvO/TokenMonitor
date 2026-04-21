@@ -1,6 +1,7 @@
 mod commands;
 mod logging;
 mod models;
+mod paths;
 mod platform;
 mod rate_limits;
 mod stats;

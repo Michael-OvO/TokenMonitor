@@ -119,8 +119,16 @@ fn find_newest_jsonl(
         Err(_) => return,
     };
     for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            // Don't follow symlinks — they may cross onto network/external
+            // volumes and trip macOS TCC prompts.
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             find_newest_jsonl(&path, newest, depth + 1);
         } else if path.extension().is_some_and(|e| e == "jsonl") {
             if let Ok(meta) = std::fs::metadata(&path) {
