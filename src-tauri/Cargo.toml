@@ -1,6 +1,6 @@
 [package]
 name = "token-monitor"
-version = "0.9.0"
+version = "0.9.1"
 description = "Cross-platform system tray token usage monitor for Claude Code and Codex"
 edition = "2021"
 
@@ -58,6 +58,11 @@ objc2-app-kit = { version = "0.3.2", features = [
     "NSStatusItem",
     "NSView",
 ] }
+# Native Keychain Services access. Calling the Security.framework APIs in-
+# process (rather than shelling out to /usr/bin/security) lets macOS attach
+# "Always Allow" decisions to the app's code signature so the Keychain prompt
+# stops recurring after the user approves it once.
+security-framework = "3"
 
 [dev-dependencies]
 filetime = "0.2"

@@ -18,28 +18,37 @@ fn extract_access_token(json_str: &str) -> Result<String, String> {
         .ok_or_else(|| "No claudeAiOauth.accessToken in credentials".to_string())
 }
 
-/// Read OAuth token from macOS Keychain.
+/// Read OAuth token from macOS Keychain via Security.framework.
+///
+/// Calling the Keychain Services API in-process (rather than shelling out to
+/// `/usr/bin/security`) lets macOS bind "Always Allow" decisions to this
+/// binary's code signature. The shell-out path never stops prompting because
+/// `/usr/bin/security` is a separate caller that TCC sees anew on every
+/// invocation, so the user's approval never attaches to TokenMonitor itself.
+///
+/// Searches by service only (equivalent to `security -s "…" -w`), so we don't
+/// need to guess what account name Claude Code used when writing the item.
 #[cfg(target_os = "macos")]
 fn read_token_from_keychain() -> Result<String, String> {
-    use std::process::Command as StdCommand;
+    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
 
-    let output = StdCommand::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "Claude Code-credentials",
-            "-w",
-        ])
-        .output()
-        .map_err(|e| format!("Failed to run security command: {e}"))?;
+    let results = ItemSearchOptions::new()
+        .class(ItemClass::generic_password())
+        .service("Claude Code-credentials")
+        .load_data(true)
+        .limit(1)
+        .search()
+        .map_err(|e| format!("Claude Code credentials not found in Keychain: {e}"))?;
 
-    if !output.status.success() {
-        return Err("Claude Code credentials not found in Keychain".to_string());
-    }
+    let data = results
+        .into_iter()
+        .find_map(|r| match r {
+            SearchResult::Data(bytes) => Some(bytes),
+            _ => None,
+        })
+        .ok_or_else(|| "Keychain returned no data for Claude Code-credentials".to_string())?;
 
-    let raw = String::from_utf8(output.stdout)
-        .map_err(|e| format!("Invalid UTF-8 from Keychain: {e}"))?;
-
+    let raw = String::from_utf8(data).map_err(|e| format!("Invalid UTF-8 from Keychain: {e}"))?;
     extract_access_token(&raw)
 }
 

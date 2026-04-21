@@ -60,6 +60,7 @@ export async function initializeRuntimeFromSettings(
 
   const calls: Promise<unknown>[] = [
     invokeFn("set_refresh_interval", { interval: saved.refreshInterval }),
+    invokeFn("set_rate_limits_enabled", { enabled: saved.rateLimitsEnabled }),
     syncTrayConfig(saved.trayConfig, null, invokeFn),
   ];
   if (saved.sshHosts.length > 0) {

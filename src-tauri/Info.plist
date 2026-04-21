@@ -2,7 +2,29 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- Menu-bar-only (agent) app: no Dock icon. -->
   <key>LSUIElement</key>
   <true/>
+
+  <!--
+    macOS TCC usage descriptions.
+
+    TokenMonitor reads Claude Code and Codex CLI session logs from the user's
+    home directory (~/.claude/projects, ~/.codex/sessions). It does not read
+    from Desktop/Documents/Downloads/external volumes by design. These strings
+    only surface if the user's home is itself on a network/removable volume, or
+    if a scanned directory contains a symlink leading elsewhere — in which case
+    macOS will prompt once per category. The text below explains the intent.
+  -->
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>TokenMonitor reads Claude Code and Codex CLI session logs from your home directory to calculate token usage and cost. Allow access only if your home directory or Claude/Codex config is hosted on a network volume.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>TokenMonitor reads Claude Code and Codex CLI session logs from your home directory. Allow access only if your home directory or Claude/Codex config is on an external drive.</string>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>TokenMonitor does not read from Desktop by design. Deny unless your Claude or Codex config is explicitly stored there.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>TokenMonitor does not read from Documents by design. Deny unless your Claude or Codex config is explicitly stored there.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>TokenMonitor does not read from Downloads by design. Deny unless your Claude or Codex config is explicitly stored there.</string>
 </dict>
 </plist>

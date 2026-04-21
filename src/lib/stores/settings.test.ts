@@ -98,6 +98,10 @@ describe("loadSettings", () => {
       taskbarPanel: false,
       sshHosts: [],
       debugLogging: false,
+      // Existing installs (non-empty saved settings) migrate to rate-limits
+      // on and welcome-seen so we don't disrupt their workflow.
+      rateLimitsEnabled: true,
+      hasSeenWelcome: true,
     });
     expect(get(settings)).toEqual(loaded);
     expect(mockSetCurrency).toHaveBeenCalledWith("EUR");
@@ -145,6 +149,10 @@ describe("loadSettings", () => {
       taskbarPanel: false,
       sshHosts: [],
       debugLogging: false,
+      // Failure path goes through pure defaults (no migration), so the
+      // opt-in flags stay off.
+      rateLimitsEnabled: false,
+      hasSeenWelcome: false,
     });
     expect(get(settings)).toEqual(fallback);
     expect(mockSetCurrency).toHaveBeenCalledWith("USD");

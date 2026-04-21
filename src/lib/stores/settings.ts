@@ -41,6 +41,15 @@ export interface Settings {
   taskbarPanel: boolean;
   sshHosts: SshHostConfig[];
   debugLogging: boolean;
+  /**
+   * Whether to fetch live rate-limit data. Requires Keychain access on macOS,
+   * so we leave it off for brand-new installs until the user opts in through
+   * the welcome card or the rate-limits CTA. Existing installs are migrated
+   * to `true` to preserve current behavior.
+   */
+  rateLimitsEnabled: boolean;
+  /** Set once the user has seen (and dismissed) the first-launch welcome. */
+  hasSeenWelcome: boolean;
 }
 
 export const HEADER_TAB_ORDER: UsageProvider[] = [...USAGE_PROVIDER_ORDER];
@@ -83,6 +92,8 @@ const DEFAULTS: Settings = {
   taskbarPanel: false,
   sshHosts: [],
   debugLogging: false,
+  rateLimitsEnabled: false,
+  hasSeenWelcome: false,
 };
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
@@ -275,6 +286,8 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
     taskbarPanel: normalizeBoolean(saved?.taskbarPanel, DEFAULTS.taskbarPanel),
     sshHosts: normalizeSshHosts(saved?.sshHosts),
     debugLogging: normalizeBoolean(saved?.debugLogging, DEFAULTS.debugLogging),
+    rateLimitsEnabled: normalizeBoolean(saved?.rateLimitsEnabled, DEFAULTS.rateLimitsEnabled),
+    hasSeenWelcome: normalizeBoolean(saved?.hasSeenWelcome, DEFAULTS.hasSeenWelcome),
   };
 }
 
@@ -288,7 +301,7 @@ export async function loadSettings(): Promise<Settings> {
     storeInstance = store;
 
     const saved = await store.get<Partial<Settings>>("settings");
-    const migrated =
+    const legacyTrayConfig =
       saved && "showTrayAmount" in (saved as Record<string, unknown>) && !("trayConfig" in saved)
         ? {
             ...saved,
@@ -299,6 +312,17 @@ export async function loadSettings(): Promise<Settings> {
             },
           }
         : saved;
+    // Preserve behavior for existing installs: any saved settings file means
+    // the user was already using the app, so silently opt them into the
+    // features that now gate on explicit consent.
+    const migrated =
+      legacyTrayConfig && !("rateLimitsEnabled" in legacyTrayConfig)
+        ? {
+            ...legacyTrayConfig,
+            rateLimitsEnabled: true,
+            hasSeenWelcome: true,
+          }
+        : legacyTrayConfig;
     const merged = normalizeSettings(migrated);
 
     settings.set(merged);

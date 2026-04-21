@@ -35,6 +35,11 @@ pub struct AppState {
     /// When true, the main window blur handler skips hiding once.
     /// Set by commands that cause transient focus loss (float ball, dock icon, etc.).
     pub suppress_auto_hide: Arc<AtomicBool>,
+    /// When false, the background loop skips rate-limit refresh so that we
+    /// don't poke macOS Keychain until the user has opted into live rate
+    /// limits. Starts off; the frontend flips it via `set_rate_limits_enabled`
+    /// during bootstrap and whenever the user toggles the setting.
+    pub rate_limits_enabled: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -52,6 +57,7 @@ impl AppState {
             ssh_cache: Arc::new(RwLock::new(None)),
             updater: Arc::new(RwLock::new(crate::updater::UpdaterState::new())),
             suppress_auto_hide: Arc::new(AtomicBool::new(false)),
+            rate_limits_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 }

@@ -119,16 +119,11 @@ fn detect_claude_project_dirs() -> Vec<PathBuf> {
         }
     }
 
-    let home = dirs::home_dir().unwrap_or_else(|| {
+    let roots = crate::paths::claude_project_roots_default();
+    if roots.is_empty() {
         tracing::warn!("Could not determine home directory for Claude projects");
-        PathBuf::new()
-    });
-    let config_dir = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
-
-    dedupe_paths(vec![
-        config_dir.join("claude").join("projects"),
-        home.join(".claude").join("projects"),
-    ])
+    }
+    dedupe_paths(roots)
 }
 
 fn detect_codex_sessions_dir() -> PathBuf {
@@ -139,11 +134,10 @@ fn detect_codex_sessions_dir() -> PathBuf {
         }
     }
 
-    let home = dirs::home_dir().unwrap_or_else(|| {
+    crate::paths::codex_sessions_default().unwrap_or_else(|| {
         tracing::warn!("Could not determine home directory for Codex sessions");
         PathBuf::new()
-    });
-    home.join(".codex").join("sessions")
+    })
 }
 
 #[cfg(test)]

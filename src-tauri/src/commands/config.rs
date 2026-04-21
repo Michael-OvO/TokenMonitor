@@ -32,6 +32,23 @@ pub async fn set_refresh_interval(interval: u64, state: State<'_, AppState>) -> 
     Ok(())
 }
 
+/// Enable or disable live rate-limit fetching.
+///
+/// When disabled, the background loop skips `refresh_rate_limits`, so the app
+/// never touches the Claude OAuth token in the macOS Keychain. This lets us
+/// open the app without firing any Keychain prompt until the user explicitly
+/// opts in (via the welcome card or the rate-limits CTA).
+#[tauri::command]
+pub async fn set_rate_limits_enabled(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .rate_limits_enabled
+        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
 /// Set Dock icon visibility (macOS only). Noop on other platforms.
 #[tauri::command]
 pub async fn set_dock_icon_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
