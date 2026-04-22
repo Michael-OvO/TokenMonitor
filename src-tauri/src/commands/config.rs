@@ -51,16 +51,21 @@ pub async fn set_rate_limits_enabled(
 
 /// Outcome of the one-time interactive Keychain prompt. Surfaced to the
 /// frontend so it can show appropriate copy after the user responds.
+///
+/// Each variant is constructed on a different OS path (Granted/Denied on
+/// macOS, NotApplicable everywhere else), so per-target dead-code analysis
+/// flags the ones not used on the current platform. Since the enum is the
+/// IPC contract — every variant is "live" from the frontend's perspective —
+/// suppress the lint at the enum level instead of per-variant.
 #[derive(serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "snake_case", tag = "status")]
+#[allow(dead_code)]
 pub enum KeychainAccessOutcome {
     /// User granted access (or access was already silently available).
     Granted,
     /// User denied the prompt, the item is missing, or read failed.
     Denied { reason: String },
     /// Keychain isn't part of the credentials path on this platform.
-    /// Only constructed on Windows/Linux; suppressing dead-code on macOS.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
     NotApplicable,
 }
 
