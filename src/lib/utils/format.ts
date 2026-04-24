@@ -1,34 +1,49 @@
-// Approximate exchange rates from USD (updated 2025-03)
-const CURRENCIES: Record<string, { symbol: string; rate: number }> = {
-  USD: { symbol: "$", rate: 1 },
-  EUR: { symbol: "€", rate: 0.92 },
-  GBP: { symbol: "£", rate: 0.79 },
-  JPY: { symbol: "¥", rate: 149.5 },
-  CNY: { symbol: "¥", rate: 7.24 },
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  JPY: "¥",
+  CNY: "¥",
 };
 
+const DEFAULT_RATES: Record<string, number> = {
+  EUR: 0.92,
+  GBP: 0.79,
+  JPY: 149.5,
+  CNY: 7.24,
+};
+
+let exchangeRates: Record<string, number> = { ...DEFAULT_RATES };
 let activeCurrency = "USD";
 
 export function setCurrency(currency: string) {
   activeCurrency = currency;
 }
 
+export function setRates(rates: Record<string, number>) {
+  exchangeRates = { ...DEFAULT_RATES, ...rates };
+}
+
 export function currencySymbol(): string {
-  return CURRENCIES[activeCurrency]?.symbol ?? "$";
+  return CURRENCY_SYMBOLS[activeCurrency] ?? "$";
+}
+
+function rateFor(currency: string): number {
+  if (currency === "USD") return 1;
+  return exchangeRates[currency] ?? 1;
 }
 
 export function convertCost(value: number): number {
-  const cur = CURRENCIES[activeCurrency] ?? CURRENCIES.USD;
-  return value * cur.rate;
+  return value * rateFor(activeCurrency);
 }
 
 export function formatCost(value: number): string {
-  const cur = CURRENCIES[activeCurrency] ?? CURRENCIES.USD;
-  const converted = value * cur.rate;
+  const symbol = CURRENCY_SYMBOLS[activeCurrency] ?? "$";
+  const converted = value * rateFor(activeCurrency);
   if (activeCurrency === "JPY") {
-    return `${cur.symbol}${Math.round(converted)}`;
+    return `${symbol}${Math.round(converted)}`;
   }
-  return `${cur.symbol}${converted.toFixed(2)}`;
+  return `${symbol}${converted.toFixed(2)}`;
 }
 
 export function formatTokens(count: number): string {

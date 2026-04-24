@@ -1,7 +1,8 @@
 #[allow(dead_code)]
 pub mod archive;
-#[allow(dead_code)]
-pub mod ccusage;
+pub mod claude_parser;
+pub mod device_aggregation;
+pub mod exchange_rates;
 pub mod integrations;
 pub mod litellm;
 pub mod openrouter;

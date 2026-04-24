@@ -258,3 +258,8 @@ pub async fn get_last_usage_debug(
 ) -> Result<Option<UsageDebugReport>, String> {
     Ok(state.last_usage_debug.read().await.clone())
 }
+
+#[tauri::command]
+pub async fn get_exchange_rates() -> Result<std::collections::HashMap<String, f64>, String> {
+    Ok(crate::usage::exchange_rates::get_all_rates())
+}

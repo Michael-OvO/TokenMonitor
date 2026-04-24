@@ -304,6 +304,27 @@ pub fn run() {
                         }
                     });
                 }
+
+                // Load cached exchange rates immediately.
+                if let Some(rates) = usage::exchange_rates::load_cached(&app_data) {
+                    usage::exchange_rates::set_exchange_rates(rates);
+                }
+
+                // Spawn async refresh if exchange rate cache is stale (>24h).
+                if usage::exchange_rates::should_refresh(&app_data) {
+                    let data_dir = app_data.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match usage::exchange_rates::fetch_and_cache(&data_dir).await {
+                            Ok(rates) => {
+                                usage::exchange_rates::set_exchange_rates(rates);
+                                tracing::info!("Exchange rates refreshed (frankfurter.dev)");
+                            }
+                            Err(e) => {
+                                tracing::warn!("Exchange rate fetch failed (using fallback): {e}");
+                            }
+                        }
+                    });
+                }
             }
 
             // Load persisted updater state
@@ -374,6 +395,7 @@ pub fn run() {
             commands::updater::updater_set_auto_check,
             commands::updater::updater_skip_version,
             commands::updater::updater_dismiss,
+            commands::config::get_exchange_rates,
         ])
         .run(tauri::generate_context!())
         .expect("error running TokenMonitor");
@@ -475,6 +497,19 @@ async fn background_loop(app: tauri::AppHandle) {
                         }
                         Err(e) => {
                             tracing::warn!("Background pricing refresh failed: {e}");
+                        }
+                    }
+                }
+
+                // Also check exchange rate cache (24h TTL).
+                if usage::exchange_rates::should_refresh(&app_data) {
+                    match usage::exchange_rates::fetch_and_cache(&app_data).await {
+                        Ok(rates) => {
+                            usage::exchange_rates::set_exchange_rates(rates);
+                            tracing::info!("Exchange rates refreshed (background)");
+                        }
+                        Err(e) => {
+                            tracing::warn!("Background exchange rate refresh failed: {e}");
                         }
                     }
                 }
@@ -598,15 +633,12 @@ async fn archive_ssh_device_usage(state: &AppState) {
         let entries: Vec<usage::parser::ParsedEntry> = records
             .iter()
             .filter_map(|r| {
-                let dt = chrono::DateTime::parse_from_rfc3339(&r.ts)
-                    .or_else(|_| chrono::DateTime::parse_from_str(&r.ts, "%Y-%m-%dT%H:%M:%S%.f%z"));
-                let dt = match dt {
-                    Ok(d) => d,
-                    Err(e) => {
+                let dt = match usage::device_aggregation::parse_remote_ts(&r.ts) {
+                    Some(d) => d,
+                    None => {
                         tracing::warn!(
                             device = alias.as_str(),
                             ts = %r.ts,
-                            error = %e,
                             "Skipping record with unparseable timestamp"
                         );
                         return None;

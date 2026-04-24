@@ -266,14 +266,20 @@ async fn finalize_usage_payload(
     mut payload: UsagePayload,
 ) -> UsagePayload {
     payload.device_breakdown =
-        crate::commands::ssh::build_device_breakdown_for_payload(state, provider, period, offset)
-            .await;
+        crate::usage::device_aggregation::build_device_breakdown_for_payload(
+            state, provider, period, offset,
+        )
+        .await;
     payload.device_chart_buckets =
-        crate::commands::ssh::build_device_time_chart_buckets(state, provider, period, offset)
-            .await;
+        crate::usage::device_aggregation::build_device_time_chart_buckets(
+            state, provider, period, offset,
+        )
+        .await;
 
-    if let Some(included) =
-        crate::commands::ssh::build_included_devices_payload(state, provider, period, offset).await
+    if let Some(included) = crate::usage::device_aggregation::build_included_devices_payload(
+        state, provider, period, offset,
+    )
+    .await
     {
         payload = merge_payloads(payload, included);
     }
@@ -794,7 +800,7 @@ mod tests {
     #[test]
     fn merge_payloads_marks_mixed_sources_and_combines_warnings() {
         let left = UsagePayload {
-            usage_source: UsageSource::Ccusage,
+            usage_source: UsageSource::Mixed,
             usage_warning: Some(String::from("Claude: fallback one")),
             ..UsagePayload::default()
         };

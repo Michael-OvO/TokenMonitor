@@ -17,16 +17,23 @@
     getPhysicalWindowPositionFromPointer,
     shouldHandleFloatBallPointerButton,
   } from "./floatBallInteraction.js";
+  import {
+    percent,
+    fillWidth,
+    formatBallCost,
+    formatPoint,
+    formatMonitor,
+    formatError,
+    formatInteraction,
+    resolveExpandDirection,
+    type FloatBallPositionPayload,
+  } from "./floatBallUtils.js";
 
   const appWindow = getCurrentWebviewWindow();
   const IS_LINUX = isLinux();
   const DRAG_THRESHOLD_PX = 5;
   const BLUR_GUARD_MS = 180;
   const COLLAPSE_TRANSITION_MS = 260;
-  const BALL_SIZE_CSS_PX = 56;
-  const EXPANDED_WIDTH_CSS_PX = 152;
-  const EXPAND_MARGIN_CSS_PX = 8;
-
   const EMPTY_CONFIG: TrayConfig = {
     barDisplay: "both",
     barProvider: "claude",
@@ -90,13 +97,6 @@
     color: string;
   };
 
-  type FloatBallPositionPayload = {
-    x: number;
-    y: number;
-    anchor?: "top" | "left" | "right" | "bottom" | null;
-    expanded?: boolean;
-    ballOffsetX?: number;
-  };
 
   // Float ball always shows both providers regardless of Settings.
   const FIXED_PROVIDERS: RateLimitProviderId[] = ["claude", "codex"];
@@ -111,90 +111,12 @@
     })),
   );
 
-  function percent(value: number | null): string {
-    return value == null ? "N/A" : `${Math.round(value)}%`;
-  }
-
-  function fillWidth(value: number | null): string {
-    const safe = value == null ? 0 : Math.max(0, Math.min(value, 100));
-    return `${safe}%`;
-  }
-
-  function formatBallCost(cost: number): string {
-    if (cost <= 0) return "$0";
-    if (cost < 1) return `$${cost.toFixed(2)}`;
-    if (cost < 10) return `$${cost.toFixed(1)}`;
-    return `$${Math.round(cost)}`;
-  }
-
-  function formatPoint(point: { x: number; y: number } | null): string {
-    return point ? `(${point.x}, ${point.y})` : "n/a";
-  }
-
-  function formatMonitor(
-    monitor: { position: { x: number; y: number }; size: { width: number; height: number } } | null,
-  ): string {
-    if (!monitor) return "none";
-    return `pos=${formatPoint(monitor.position)} size=${monitor.size.width}x${monitor.size.height}`;
-  }
-
-  function formatError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
 
   function nextInteractionId(kind: string): string {
     interactionCounter += 1;
     return `${kind}-${Date.now().toString(36)}-${interactionCounter}`;
   }
 
-  function formatInteraction(interactionId: string | null | undefined): string {
-    return `interaction=${interactionId ?? "n/a"}`;
-  }
-
-  function resolveExpandDirection(
-    position: FloatBallPositionPayload,
-    monitor:
-      | {
-          position: { x: number; y: number };
-          size: { width: number; height: number };
-          workArea?: {
-            position: { x: number; y: number };
-            size: { width: number; height: number };
-          };
-          scaleFactor?: number;
-        }
-      | null,
-    currentDirection: FloatBallExpandDirection,
-  ): FloatBallExpandDirection {
-    if (position.anchor === "left") return "right";
-    if (position.anchor === "right") return "left";
-    if (!monitor) return currentDirection;
-
-    const workArea = monitor.workArea ?? {
-      position: monitor.position,
-      size: monitor.size,
-    };
-    const scale = monitor.scaleFactor ?? 1;
-    const ballWidth = Math.round(BALL_SIZE_CSS_PX * scale);
-    const expandedWidth = Math.round(EXPANDED_WIDTH_CSS_PX * scale);
-    const expandMargin = Math.round(EXPAND_MARGIN_CSS_PX * scale);
-    const innerLeft = workArea.position.x + expandMargin;
-    const innerRight = workArea.position.x + workArea.size.width - expandMargin;
-    const roomRight = innerRight - (position.x + expandedWidth);
-    const roomLeft = position.x - (expandedWidth - ballWidth) - innerLeft;
-
-    if (currentDirection === "right") {
-      if (roomRight >= 0) return "right";
-      if (roomLeft >= 0) return "left";
-    } else {
-      if (roomLeft >= 0) return "left";
-      if (roomRight >= 0) return "right";
-    }
-
-    if (roomRight > roomLeft) return "right";
-    if (roomLeft > roomRight) return "left";
-    return currentDirection;
-  }
 
   async function getFloatBallPosition(
     interactionId: string | null | undefined,

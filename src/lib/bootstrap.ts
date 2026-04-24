@@ -10,6 +10,7 @@ import {
 import { isMacOS, isWindows } from "./utils/platform.js";
 import { logger } from "./utils/logger.js";
 import { hydrateUpdater, installUpdaterListeners } from "./stores/updater.js";
+import { setRates } from "./utils/format.js";
 
 type StartupDeps = {
   invokeFn?: typeof invoke;
@@ -38,6 +39,16 @@ export async function initializeRuntimeFromSettings(
     logger.setLevel("debug");
   }
   logger.info("bootstrap", `Initializing: provider=${provider}, period=${saved.defaultPeriod}, theme=${saved.theme}`);
+
+  // Load dynamic exchange rates from Rust backend (non-blocking).
+  invokeFn<Record<string, number>>("get_exchange_rates")
+    .then((rates) => {
+      if (rates && Object.keys(rates).length > 0) {
+        setRates(rates);
+        logger.info("bootstrap", `Exchange rates loaded: ${Object.keys(rates).length} currencies`);
+      }
+    })
+    .catch(() => {});
 
   applyThemeFn(saved.theme);
   applyGlassFn(saved.glassEffect);

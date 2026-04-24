@@ -8,7 +8,6 @@ use crate::stats::change::{ChangeStats, ModelChangeSummary};
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UsageSource {
-    Ccusage,
     Parser,
     Mixed,
 }
