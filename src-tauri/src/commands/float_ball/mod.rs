@@ -1,6 +1,7 @@
 mod layout;
 
 pub(crate) use layout::FloatBallState;
+#[allow(unused_imports)]
 pub use layout::{FloatBallAnchor, FloatBallExpandDirection, FloatBallLayout, FloatBallPosition};
 
 use layout::{
@@ -9,6 +10,9 @@ use layout::{
     float_ball_state_for_layout, inset_bounds, layout_float_ball_rect, FloatBallBounds,
     FloatBallRect, BALL_SIZE, EXPANDED_H, EXPANDED_W, SNAP_THRESHOLD_PX,
 };
+
+#[cfg(target_os = "linux")]
+use layout::FloatBallSizes;
 
 use super::AppState;
 use tauri::{Manager, WebviewWindow};
