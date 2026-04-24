@@ -301,13 +301,8 @@ pub(crate) async fn build_device_breakdown_for_payload(
                 continue;
             }
 
-            let mut summary = build_device_summary_merged(
-                &cfg.alias,
-                &archived_entries,
-                &filtered,
-                since,
-                end,
-            );
+            let mut summary =
+                build_device_summary_merged(&cfg.alias, &archived_entries, &filtered, since, end);
 
             if let Some(host_status) = statuses.iter().find(|s| s.alias == cfg.alias) {
                 summary.last_synced = host_status.last_sync.clone();

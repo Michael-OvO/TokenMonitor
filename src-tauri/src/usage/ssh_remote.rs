@@ -77,7 +77,10 @@ pub struct CompactUsageRecord {
 }
 
 fn compact_record_key(r: &CompactUsageRecord) -> String {
-    format!("{}:{}:{}:{}", r.ts, r.model, r.input_tokens, r.output_tokens)
+    format!(
+        "{}:{}:{}:{}",
+        r.ts, r.model, r.input_tokens, r.output_tokens
+    )
 }
 
 /// Test SSH connectivity to a host using `ssh <host> echo ok`.

@@ -40,7 +40,6 @@ fn usage_access_enabled(state: &AppState) -> bool {
     state.usage_access_enabled.load(Ordering::SeqCst)
 }
 
-
 /// Get all SSH hosts discovered from ~/.ssh/config.
 #[tauri::command]
 pub async fn get_ssh_hosts() -> Result<Vec<SshHostInfo>, String> {
