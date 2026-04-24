@@ -14,6 +14,7 @@
     fetchData,
     warmCache,
     warmAllPeriods,
+    clearUsageCache,
     clearUsageCacheForProviders,
     seedUsageCache,
   } from "./lib/stores/usage.js";
@@ -563,6 +564,7 @@
           period,
           offset,
         });
+        clearUsageCache();
         fetchData(provider, period, offset);
         if (period === "5h") fetchRateLimits(provider);
       });
