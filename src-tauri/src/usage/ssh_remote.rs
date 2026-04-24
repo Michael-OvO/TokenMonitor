@@ -143,8 +143,8 @@ pub async fn test_connection(alias: &str) -> SshTestResult {
 /// 1. All `~/.claude*/projects/` directories (covers `.claude`, `.claude-code`, etc.)
 /// 2. `$XDG_CONFIG_HOME/claude/projects/` (or `~/.config/claude/projects/`)
 /// 3. Any additional directories listed in the remote `$CLAUDE_CONFIG_DIR` env var
-/// for .jsonl files, extracts assistant entries with usage data, and outputs
-/// compact JSON records.
+///    for .jsonl files, extracts assistant entries with usage data, and outputs
+///    compact JSON records.
 fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) -> String {
     let newer_filter = claude_since
         .map(|ts| format!(" -newer /tmp/.tm-marker-{ts}"))
