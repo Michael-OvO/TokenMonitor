@@ -14,6 +14,7 @@
     fetchData,
     warmCache,
     warmAllPeriods,
+    clearUsageCache,
     clearUsageCacheForProviders,
     seedUsageCache,
   } from "./lib/stores/usage.js";
@@ -57,6 +58,11 @@
     isResizeDebugEnabled,
     logResizeDebug,
   } from "./lib/uiStability.js";
+  import { isMacOS } from "./lib/utils/platform.js";
+  import {
+    markClaudeKeychainAccessHandled,
+    requestClaudeKeychainAccessOnce,
+  } from "./lib/permissions/keychain.js";
 
   import Toggle from "./lib/components/Toggle.svelte";
   import TimeTabs from "./lib/components/TimeTabs.svelte";
@@ -95,6 +101,8 @@
     error: null as string | null,
     deferredUntil: null as string | null,
   });
+  let showKeychainPermissionPanel = $state(false);
+  let keychainPermissionBusy = $state(false);
   let brandTheming = $state(true);
   let headerTabs = $state<HeaderTabs>(DEFAULT_HEADER_TABS);
   let popEl: HTMLDivElement | null = null;
@@ -102,6 +110,7 @@
   let scrollThresholdH = $state(DEFAULT_MAX_WINDOW_HEIGHT);
   let isScrollLocked = $state(false);
   let deviceToggleGuard = 0;
+  let initialDataLoad: Promise<void> | null = null;
   const REMOTE_USAGE_CACHE_PROVIDERS: UsageProvider[] = [ALL_USAGE_PROVIDER_ID, "claude"];
 
   let headerToggleOptions = $derived.by(() =>
@@ -161,6 +170,85 @@
     }
     if (p === "day") return "A quiet day";
     return "No usage data for this period";
+  }
+
+  async function loadInitialData() {
+    if (initialDataLoad) return initialDataLoad;
+
+    initialDataLoad = (async () => {
+      await fetchData(provider, period, offset);
+      logResizeDebug("app:data-ready", { provider, period, offset });
+
+      if (period === "5h") {
+        await fetchRateLimits(provider);
+      } else {
+        await hydrateRateLimits();
+      }
+
+      await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch(() => {});
+      warmAllPeriods(provider, period);
+      for (const warmProvider of getAdjacentWarmProviders(provider)) {
+        warmAllPeriods(warmProvider);
+      }
+    })();
+
+    return initialDataLoad;
+  }
+
+  async function handleWelcomeDismiss() {
+    await invoke("set_usage_access_enabled", { enabled: true }).catch((err) => {
+      logger.error("permissions", `Failed to enable usage access: ${err}`);
+    });
+    await loadInitialData();
+    await tick();
+    syncSizeAndVerify("welcome-dismiss");
+  }
+
+  async function enableRateLimits() {
+    showKeychainPermissionPanel = false;
+    await updateSetting("rateLimitsEnabled", true);
+    await invoke("set_rate_limits_enabled", { enabled: true });
+    await fetchRateLimits(provider);
+    await tick();
+    syncSizeAndVerify("rate-limits-enabled");
+  }
+
+  async function handleEnableRateLimits() {
+    if (keychainPermissionBusy) return;
+    if (isMacOS() && !get(settings).keychainAccessRequested) {
+      showKeychainPermissionPanel = true;
+      await tick();
+      syncSizeAndVerify("keychain-permission-open");
+      return;
+    }
+    keychainPermissionBusy = true;
+    try {
+      await enableRateLimits();
+    } finally {
+      keychainPermissionBusy = false;
+    }
+  }
+
+  async function handleAllowKeychainForRateLimits() {
+    if (keychainPermissionBusy) return;
+    keychainPermissionBusy = true;
+    try {
+      await requestClaudeKeychainAccessOnce("rate-limits");
+      await enableRateLimits();
+    } finally {
+      keychainPermissionBusy = false;
+    }
+  }
+
+  async function handleSkipKeychainForRateLimits() {
+    if (keychainPermissionBusy) return;
+    keychainPermissionBusy = true;
+    try {
+      await markClaudeKeychainAccessHandled();
+      await enableRateLimits();
+    } finally {
+      keychainPermissionBusy = false;
+    }
   }
 
   async function handleProviderChange(p: UsageProvider) {
@@ -449,26 +537,9 @@
         logResizeDebug("app:settings-load-failed", {});
       }
 
-      await fetchData(provider, period, offset);
-      if (cancelled) return;
-      logResizeDebug("app:data-ready", {
-        provider,
-        period,
-        offset,
-        ...captureSnapshot("data-ready"),
-      });
-
-      if (period === "5h") {
-        await fetchRateLimits(provider);
-      } else {
-        await hydrateRateLimits();
-      }
-      if (cancelled) return;
-      await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch(() => {});
-      if (cancelled) return;
-      warmAllPeriods(provider, period);
-      for (const warmProvider of getAdjacentWarmProviders(provider)) {
-        warmAllPeriods(warmProvider);
+      if (get(settings).hasSeenWelcome) {
+        await loadInitialData();
+        if (cancelled) return;
       }
       appReady = true;
 
@@ -493,6 +564,7 @@
           period,
           offset,
         });
+        clearUsageCache();
         fetchData(provider, period, offset);
         if (period === "5h") fetchRateLimits(provider);
       });
@@ -560,7 +632,7 @@
     {#if showSplash}
       <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
     {:else if !$settings.hasSeenWelcome}
-      <WelcomeCard onDismiss={() => { tick().then(() => syncSizeAndVerify("welcome-dismiss")); }} />
+      <WelcomeCard onDismiss={handleWelcomeDismiss} />
     {:else if appReady && !data}
       <SetupScreen />
     {:else if showSettings}
@@ -594,34 +666,58 @@
       <div class="hr"></div>
 
       {#if period === "5h" && !$settings.rateLimitsEnabled}
-        <div class="rate-limit-empty">
-          <div class="rate-limit-empty-title">Live rate limits are off</div>
-          <div class="rate-limit-empty-text">
-            Turn this on to see session &amp; weekly usage.
-            {#if !$settings.keychainAccessRequested}
-              macOS will ask once for Keychain access — click <strong>Always Allow</strong> when it appears.
-            {/if}
+        {#if showKeychainPermissionPanel && isMacOS() && !$settings.keychainAccessRequested}
+          <div class="rate-limit-permission" role="dialog" aria-labelledby="rate-limit-permission-title">
+            <div class="rate-limit-empty-title" id="rate-limit-permission-title">
+              Keychain access for live limits
+            </div>
+            <div class="rate-limit-empty-text">
+              TokenMonitor can read your Claude Code OAuth token from the macOS
+              Keychain to fetch live session and weekly limits. The token stays
+              on this Mac and is used only for Claude's usage endpoint.
+            </div>
+            <div class="rate-limit-empty-text">
+              macOS may show a Keychain window after you continue. Choose
+              <strong>Always Allow</strong> if you want future checks to stay silent.
+            </div>
+            <div class="rate-limit-actions">
+              <button
+                type="button"
+                class="rate-limit-secondary"
+                onclick={handleSkipKeychainForRateLimits}
+                disabled={keychainPermissionBusy}
+              >
+                Use fallback
+              </button>
+              <button
+                type="button"
+                class="rate-limit-cta"
+                onclick={handleAllowKeychainForRateLimits}
+                disabled={keychainPermissionBusy}
+              >
+                Allow Keychain access
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            class="rate-limit-cta"
-            onclick={async () => {
-              await updateSetting("rateLimitsEnabled", true);
-              await invoke("set_rate_limits_enabled", { enabled: true });
-              if (!$settings.keychainAccessRequested) {
-                try {
-                  await invoke("request_claude_keychain_access");
-                } catch (err) {
-                  logger.error("rate-limits", `Keychain access request failed: ${err}`);
-                }
-                await updateSetting("keychainAccessRequested", true);
-              }
-              await fetchRateLimits();
-            }}
-          >
-            Enable rate limits
-          </button>
-        </div>
+        {:else}
+          <div class="rate-limit-empty">
+            <div class="rate-limit-empty-title">Live rate limits are off</div>
+            <div class="rate-limit-empty-text">
+              Turn this on to see session &amp; weekly usage.
+              {#if isMacOS() && !$settings.keychainAccessRequested}
+                TokenMonitor will explain the one-time Keychain request before macOS asks.
+              {/if}
+            </div>
+            <button
+              type="button"
+              class="rate-limit-cta"
+              onclick={handleEnableRateLimits}
+              disabled={keychainPermissionBusy}
+            >
+              Enable rate limits
+            </button>
+          </div>
+        {/if}
       {:else if period === "5h" && visibleRateLimitProviders.length > 0}
         {#each visibleRateLimitProviders as rateLimitProvider, index}
           <UsageBars
@@ -710,12 +806,16 @@
     display: flex; align-items: center; justify-content: center;
     padding: 24px 0;
   }
-  .rate-limit-empty {
+  .rate-limit-empty,
+  .rate-limit-permission {
     display: flex;
     flex-direction: column;
     gap: 4px;
     padding: 18px 14px 16px;
     animation: fadeUp .28s ease both .09s;
+  }
+  .rate-limit-permission {
+    gap: 7px;
   }
   .rate-limit-empty-title {
     font: 500 11px/1 'Inter', sans-serif;
@@ -737,7 +837,35 @@
     cursor: pointer;
     transition: filter var(--t-fast) ease;
   }
-  .rate-limit-cta:hover { filter: brightness(1.08); }
+  .rate-limit-cta:hover:not(:disabled) { filter: brightness(1.08); }
+  .rate-limit-cta:disabled,
+  .rate-limit-secondary:disabled {
+    cursor: default;
+    opacity: .55;
+  }
+  .rate-limit-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 7px;
+  }
+  .rate-limit-actions .rate-limit-cta {
+    margin-top: 0;
+  }
+  .rate-limit-secondary {
+    padding: 6px 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--t2);
+    font: 500 10px/1 'Inter', sans-serif;
+    cursor: pointer;
+    transition: background var(--t-fast) ease, color var(--t-fast) ease;
+  }
+  .rate-limit-secondary:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--t1);
+  }
   .refresh-bar {
     position: absolute;
     top: 0;

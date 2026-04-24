@@ -13,6 +13,7 @@ use crate::usage::integrations::{
 use crate::usage::parser::UsageParser;
 use chrono::{Datelike, Local, NaiveDate};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::Ordering;
 use tauri::State;
 
 /// Ensure every day in [start, end) has a chart bucket, inserting empty buckets
@@ -42,6 +43,10 @@ fn pad_daily_buckets(payload: &mut UsagePayload, start: NaiveDate, end: NaiveDat
     payload
         .chart_buckets
         .sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+}
+
+fn usage_access_enabled(state: &AppState) -> bool {
+    state.usage_access_enabled.load(Ordering::SeqCst)
 }
 
 /// Filter a UsagePayload's chart_buckets to only include dates in [start, end).
@@ -453,6 +458,9 @@ pub async fn get_known_models(
     state: State<'_, AppState>,
 ) -> Result<Vec<KnownModel>, String> {
     parse_usage_selection(&provider)?;
+    if !usage_access_enabled(&state) {
+        return Ok(Vec::new());
+    }
 
     let (entries, _, _) = state.parser.load_entries(&provider, None);
     let mut models = BTreeMap::<String, KnownModel>::new();
@@ -504,6 +512,13 @@ pub(crate) async fn get_usage_data_inner(
     period: &str,
     offset: i32,
 ) -> Result<UsagePayload, String> {
+    if !usage_access_enabled(state) {
+        return Ok(UsagePayload {
+            usage_warning: Some(String::from("Usage access has not been enabled yet.")),
+            ..UsagePayload::default()
+        });
+    }
+
     let parser = &state.parser;
     let selection = parse_usage_selection(provider)?;
     let final_cache_key = final_usage_cache_key(provider, period, offset);
@@ -726,6 +741,9 @@ mod tests {
         );
 
         let mut state = AppState::new();
+        state
+            .usage_access_enabled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         state.parser = Arc::new(UsageParser::with_dirs(
             claude_dir.path().to_path_buf(),
             codex_dir.path().to_path_buf(),
@@ -746,6 +764,36 @@ mod tests {
         );
 
         (state, claude_dir, codex_dir, app_data_dir)
+    }
+
+    #[tokio::test]
+    async fn get_usage_data_inner_returns_empty_until_usage_access_is_enabled() {
+        let claude_dir = TempDir::new().unwrap();
+        let codex_dir = TempDir::new().unwrap();
+        let now = Local::now();
+        let timestamp = now.to_rfc3339();
+
+        write_file(
+            &claude_dir.path().join("session.jsonl"),
+            &claude_assistant_entry(&timestamp, "claude-sonnet-4-6-20260301", 1_000, 500),
+        );
+
+        let mut state = AppState::new();
+        state.parser = Arc::new(UsageParser::with_dirs(
+            claude_dir.path().to_path_buf(),
+            codex_dir.path().to_path_buf(),
+        ));
+
+        let payload = get_usage_data_inner(&state, "all", "day", 0).await.unwrap();
+
+        assert_eq!(
+            payload.usage_warning.as_deref(),
+            Some("Usage access has not been enabled yet.")
+        );
+        assert_eq!(payload.total_cost, 0.0);
+        assert_eq!(payload.total_tokens, 0);
+        assert!(payload.chart_buckets.is_empty());
+        assert!(payload.model_breakdown.is_empty());
     }
 
     #[test]

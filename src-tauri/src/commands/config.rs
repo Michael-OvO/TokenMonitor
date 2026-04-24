@@ -1,7 +1,12 @@
 use super::tray::{patch_tray_utilization, sync_tray_title, tray_utilization_from_rate_limits};
 use super::{AppState, UsageDebugReport};
 use crate::models::*;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
+
+#[cfg(target_os = "macos")]
+static CLAUDE_KEYCHAIN_REQUESTED_THIS_RUN: AtomicBool = AtomicBool::new(false);
 
 /// Apply native window surface adjustments.
 /// On Windows: sets DWM rounded corners. On other platforms: noop.
@@ -49,6 +54,22 @@ pub async fn set_rate_limits_enabled(
     Ok(())
 }
 
+/// Enable or disable local Claude/Codex session-log reads.
+///
+/// Brand-new installs keep this off until the welcome disclosure has been
+/// dismissed, so any macOS TCC prompt caused by unusual log locations is
+/// preceded by app-owned context.
+#[tauri::command]
+pub async fn set_usage_access_enabled(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .usage_access_enabled
+        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
 /// Outcome of the one-time interactive Keychain prompt. Surfaced to the
 /// frontend so it can show appropriate copy after the user responds.
 ///
@@ -67,6 +88,8 @@ pub enum KeychainAccessOutcome {
     Denied { reason: String },
     /// Keychain isn't part of the credentials path on this platform.
     NotApplicable,
+    /// The interactive request has already been attempted in this app process.
+    AlreadyRequested,
 }
 
 /// Request the one-time interactive Keychain prompt for the Claude OAuth
@@ -79,6 +102,10 @@ pub enum KeychainAccessOutcome {
 pub async fn request_claude_keychain_access() -> Result<KeychainAccessOutcome, String> {
     #[cfg(target_os = "macos")]
     {
+        if CLAUDE_KEYCHAIN_REQUESTED_THIS_RUN.swap(true, Ordering::SeqCst) {
+            return Ok(KeychainAccessOutcome::AlreadyRequested);
+        }
+
         // Run the synchronous Keychain call on a blocking thread so we don't
         // pin the Tauri async runtime while macOS shows the auth panel.
         let outcome =
@@ -235,6 +262,21 @@ pub async fn get_rate_limits(
         Some("codex") => crate::rate_limits::RateLimitSelection::Codex,
         Some(other) => return Err(format!("Invalid provider for rate limits: {other}")),
     };
+
+    if !state
+        .usage_access_enabled
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Ok(state
+            .cached_rate_limits
+            .read()
+            .await
+            .clone()
+            .unwrap_or(RateLimitsPayload {
+                claude: None,
+                codex: None,
+            }));
+    }
 
     let codex_dir = state.parser.codex_dir().to_path_buf();
     let cached = state.cached_rate_limits.read().await.clone();

@@ -356,6 +356,7 @@ pub fn run() {
             commands::config::set_dock_icon_visible,
             commands::config::set_refresh_interval,
             commands::config::set_rate_limits_enabled,
+            commands::config::set_usage_access_enabled,
             commands::config::request_claude_keychain_access,
             commands::tray::set_tray_config,
             commands::tray::get_status_widget_summary,
@@ -462,12 +463,19 @@ async fn background_loop(app: tauri::AppHandle) {
         rate_limit_counter += 1;
         pricing_counter += 1;
 
-        let changed = state.parser.invalidate_if_changed();
-        if changed {
-            tracing::debug!(
-                cycle = update_counter,
-                "Parser cache invalidated, data changed"
-            );
+        let usage_access_enabled = state
+            .usage_access_enabled
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        let mut changed = false;
+        if usage_access_enabled {
+            changed = state.parser.invalidate_if_changed();
+            if changed {
+                tracing::debug!(
+                    cycle = update_counter,
+                    "Parser cache invalidated, data changed"
+                );
+            }
         }
 
         // Periodically refresh rate limits so the tray icon and float ball
@@ -476,9 +484,10 @@ async fn background_loop(app: tauri::AppHandle) {
         // they turn rate-limit tracking on.
         if rate_limit_counter >= RATE_LIMIT_REFRESH_EVERY_N_CYCLES {
             rate_limit_counter = 0;
-            if state
-                .rate_limits_enabled
-                .load(std::sync::atomic::Ordering::SeqCst)
+            if usage_access_enabled
+                && state
+                    .rate_limits_enabled
+                    .load(std::sync::atomic::Ordering::SeqCst)
             {
                 refresh_rate_limits(&app, &state).await;
             }
@@ -520,13 +529,15 @@ async fn background_loop(app: tauri::AppHandle) {
 
         // Archive completed hours for data loss prevention.
         // Runs every cycle (~30s) but is fast: only writes when new hours are complete.
-        archive_local_usage(&state);
+        if usage_access_enabled {
+            archive_local_usage(&state);
+        }
 
         // Periodically sync SSH hosts in background.
         if ssh_sync_counter >= SSH_SYNC_EVERY_N_CYCLES {
             ssh_sync_counter = 0;
             let ssh_changed = sync_ssh_hosts(&state).await;
-            if ssh_changed {
+            if usage_access_enabled && ssh_changed {
                 // Invalidate parser cache so device data reflects new remote files.
                 state.parser.invalidate_if_changed();
                 let _ = app.emit("data-updated", update_counter);

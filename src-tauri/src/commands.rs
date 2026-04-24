@@ -40,6 +40,10 @@ pub struct AppState {
     /// limits. Starts off; the frontend flips it via `set_rate_limits_enabled`
     /// during bootstrap and whenever the user toggles the setting.
     pub rate_limits_enabled: Arc<AtomicBool>,
+    /// Gates local Claude/Codex session-log reads until the frontend has shown
+    /// the first-run local access disclosure. Existing installs enable this at
+    /// bootstrap; new installs flip it after the welcome card is dismissed.
+    pub usage_access_enabled: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -58,6 +62,7 @@ impl AppState {
             updater: Arc::new(RwLock::new(crate::updater::UpdaterState::new())),
             suppress_auto_hide: Arc::new(AtomicBool::new(false)),
             rate_limits_enabled: Arc::new(AtomicBool::new(false)),
+            usage_access_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 }

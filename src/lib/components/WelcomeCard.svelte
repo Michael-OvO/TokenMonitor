@@ -3,6 +3,10 @@
   import { isMacOS } from "../utils/platform.js";
   import { settings, updateSetting } from "../stores/settings.js";
   import { logger } from "../utils/logger.js";
+  import {
+    markClaudeKeychainAccessHandled,
+    requestClaudeKeychainAccessOnce,
+  } from "../permissions/keychain.js";
 
   interface Props {
     onDismiss: () => void;
@@ -53,24 +57,7 @@
   async function handleAllowKeychain() {
     if (busy) return;
     busy = true;
-    try {
-      const outcome = await invoke<{ status: string; reason?: string }>(
-        "request_claude_keychain_access",
-      );
-      if (outcome.status !== "granted") {
-        // Denied / item missing / failure — log it but don't block the
-        // user. The CLI fallback path keeps rate limits working without
-        // prompts, and we still mark the request as done so this card
-        // never reappears.
-        logger.info(
-          "welcome",
-          `Keychain access not granted (${outcome.status})${outcome.reason ? ": " + outcome.reason : ""}`,
-        );
-      }
-    } catch (e) {
-      logger.error("welcome", `Keychain access request failed: ${e}`);
-    }
-    await updateSetting("keychainAccessRequested", true);
+    await requestClaudeKeychainAccessOnce("welcome");
     await persistChoicesAndDismiss();
     busy = false;
   }
@@ -80,7 +67,7 @@
     busy = true;
     // User chose not to grant access — still record the request so the
     // tutorial never reappears. Rate limits will run via the CLI probe.
-    await updateSetting("keychainAccessRequested", true);
+    await markClaudeKeychainAccessHandled();
     await persistChoicesAndDismiss();
     busy = false;
   }
@@ -94,6 +81,12 @@
         <p class="welcome-lede">
           Your Claude Code and Codex usage, tracked locally.
           Nothing leaves your machine.
+        </p>
+        <p class="welcome-access">
+          TokenMonitor reads Claude Code and Codex session logs from your home
+          folder to calculate usage and cost. It does not scan Desktop,
+          Documents, Downloads, network volumes, or external drives unless your
+          CLI config is stored there.
         </p>
       </div>
 
@@ -133,7 +126,7 @@
         <h1 id="welcome-title" class="welcome-title">One-time Keychain setup</h1>
         <p class="welcome-lede">
           Live rate limits read your Claude Code OAuth token from the macOS
-          Keychain. macOS will ask you once — after that, TokenMonitor never
+          Keychain. macOS will ask you once - after that, TokenMonitor never
           shows another prompt.
         </p>
       </div>
@@ -156,7 +149,7 @@
           <span class="tutorial-step">3</span>
           <div class="tutorial-text">
             Click <strong>Always Allow</strong> (the rightmost button).
-            That's it — you're done forever.
+            That's it - you're done forever.
           </div>
         </li>
       </ol>
@@ -214,6 +207,11 @@
     font: 400 11px/1.5 "Inter", sans-serif;
     color: var(--t2);
     margin: 0;
+  }
+  .welcome-access {
+    font: 400 10.5px/1.45 "Inter", sans-serif;
+    color: var(--t3);
+    margin: 4px 0 0;
   }
 
   .opt-group {

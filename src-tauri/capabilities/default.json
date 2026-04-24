@@ -18,7 +18,7 @@
     "store:default",
     "autostart:default",
     "updater:default",
-    "notification:default",
+    "notification:allow-is-permission-granted",
     {
       "identifier": "opener:allow-open-url",
       "allow": [{ "url": "https://github.com/Michael-OvO/TokenMonitor/releases/**" }]

@@ -1,4 +1,5 @@
 use chrono::Timelike;
+use std::sync::atomic::Ordering;
 use tauri::State;
 
 use crate::commands::AppState;
@@ -34,6 +35,11 @@ fn validate_ssh_alias(alias: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+fn usage_access_enabled(state: &AppState) -> bool {
+    state.usage_access_enabled.load(Ordering::SeqCst)
+}
+
 
 /// Get all SSH hosts discovered from ~/.ssh/config.
 #[tauri::command]
@@ -203,13 +209,17 @@ pub async fn get_device_usage(
     let parser = &state.parser;
 
     // 1. Local device usage (all providers combined).
-    let (local_entries, _, _) = parser.load_entries("all", Some(since));
-    let mut local_summary = build_device_summary_from_parsed("Local", &local_entries, since, end);
-    local_summary.is_local = true;
-    local_summary.status = String::from("online");
-
-    let mut devices = vec![local_summary];
-    let mut total_cost = devices[0].total_cost;
+    let mut devices = Vec::new();
+    let mut total_cost = 0.0;
+    if usage_access_enabled(&state) {
+        let (local_entries, _, _) = parser.load_entries("all", Some(since));
+        let mut local_summary =
+            build_device_summary_from_parsed("Local", &local_entries, since, end);
+        local_summary.is_local = true;
+        local_summary.status = String::from("online");
+        total_cost = local_summary.total_cost;
+        devices.push(local_summary);
+    }
 
     // 2. Remote device usage from archive + compact cached records.
     let configs = state.ssh_hosts.read().await;
@@ -328,6 +338,13 @@ pub async fn get_single_device_usage(
     let mut bucket_map: HashMap<String, HashMap<String, (String, f64, u64)>> = HashMap::new();
 
     if device == "Local" {
+        if !usage_access_enabled(&state) {
+            return Ok(UsagePayload {
+                period_label,
+                usage_warning: Some(String::from("Usage access has not been enabled yet.")),
+                ..UsagePayload::default()
+            });
+        }
         let (entries, _, _) = parser.load_entries("all", Some(since));
         for entry in &entries {
             if entry.timestamp.date_naive() >= end {

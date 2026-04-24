@@ -9,6 +9,7 @@ use crate::usage::integrations::{all_usage_integrations, UsageIntegrationSelecti
 use crate::usage::parser::UsageQueryDebugReport;
 use chrono::{Datelike, NaiveDate};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use tauri::State;
 
 fn merge_usage_source(left: UsageSource, right: UsageSource) -> UsageSource {
@@ -202,6 +203,17 @@ pub async fn get_monthly_usage(
     month: u32,
     state: State<'_, AppState>,
 ) -> Result<MonthlyUsagePayload, String> {
+    if !state.usage_access_enabled.load(Ordering::SeqCst) {
+        return Ok(MonthlyUsagePayload {
+            year,
+            month,
+            days: Vec::new(),
+            total_cost: 0.0,
+            usage_source: UsageSource::Parser,
+            usage_warning: Some(String::from("Usage access has not been enabled yet.")),
+        });
+    }
+
     let (payload, queries) = get_monthly_usage_with_debug(&state, &provider, year, month).await?;
     set_last_usage_debug(
         &state,

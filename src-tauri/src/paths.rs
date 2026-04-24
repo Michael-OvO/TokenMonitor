@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 /// Describes one path (or set of paths) the app may read at runtime, along
 /// with the reason and whether the user can override the location.
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AccessedPath {
     pub purpose: &'static str,

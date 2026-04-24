@@ -90,9 +90,16 @@ struct DirectoryStamp {
 }
 
 #[derive(Clone)]
+struct FileListStamp {
+    path: PathBuf,
+    stamp: FileStamp,
+}
+
+#[derive(Clone)]
 struct CachedRootFileList {
     files: Arc<[PathBuf]>,
     directories: Arc<[DirectoryStamp]>,
+    file_stamps: Arc<[FileListStamp]>,
     last_accessed_at: Instant,
 }
 
@@ -1279,13 +1286,24 @@ impl UsageParser {
     }
 
     fn root_listing_is_fresh(entry: &CachedRootFileList) -> bool {
-        !entry.directories.is_empty()
-            && entry.directories.iter().all(|directory| {
-                fs::metadata(&directory.path)
-                    .and_then(|metadata| metadata.modified())
-                    .map(|modified| modified == directory.modified)
-                    .unwrap_or(false)
-            })
+        if entry.directories.is_empty() {
+            return false;
+        }
+
+        let directories_unchanged = entry.directories.iter().all(|directory| {
+            fs::metadata(&directory.path)
+                .and_then(|metadata| metadata.modified())
+                .map(|modified| modified == directory.modified)
+                .unwrap_or(false)
+        });
+        if !directories_unchanged {
+            return false;
+        }
+
+        entry
+            .file_stamps
+            .iter()
+            .all(|file| file_stamp(&file.path).is_some_and(|stamp| stamp == file.stamp))
     }
 
     fn cached_jsonl_files(&self, dir: &Path) -> (Arc<[PathBuf]>, bool) {
@@ -1305,8 +1323,18 @@ impl UsageParser {
         }
 
         let (files, directories) = scan_jsonl_tree(dir);
+        let file_stamps: Vec<FileListStamp> = files
+            .iter()
+            .filter_map(|path| {
+                file_stamp(path).map(|stamp| FileListStamp {
+                    path: path.clone(),
+                    stamp,
+                })
+            })
+            .collect();
         let files: Arc<[PathBuf]> = files.into();
         let directories: Arc<[DirectoryStamp]> = directories.into();
+        let file_stamps: Arc<[FileListStamp]> = file_stamps.into();
 
         if !directories.is_empty() {
             if let Ok(mut cache) = self.root_file_lists.lock() {
@@ -1316,6 +1344,7 @@ impl UsageParser {
                     CachedRootFileList {
                         files: files.clone(),
                         directories,
+                        file_stamps,
                         last_accessed_at: now,
                     },
                 );
@@ -2713,6 +2742,43 @@ mod tests {
         let second_debug = parser.last_query_debug().unwrap();
         assert_eq!(second_debug.sources[0].discovered_paths, 2);
         assert!(!second_debug.sources[0].listing_cache_hit);
+    }
+
+    #[test]
+    fn invalidate_if_changed_detects_append_to_existing_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let session_path = dir.path().join("session.jsonl");
+        write_file(
+            &session_path,
+            r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#,
+        );
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        parser.get_daily("claude", "20260101");
+        parser.store_cache("sentinel", UsagePayload::default());
+
+        assert!(
+            !parser.invalidate_if_changed(),
+            "unchanged existing file should keep payload cache"
+        );
+        assert!(
+            parser.check_cache("sentinel").is_some(),
+            "baseline cache entry should still exist"
+        );
+
+        write_file(
+            &session_path,
+            r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2026-03-15T12:05:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":75}}}"#,
+        );
+
+        assert!(
+            parser.invalidate_if_changed(),
+            "appending to an existing session log should invalidate payload cache"
+        );
+        assert!(
+            parser.check_cache("sentinel").is_none(),
+            "payload cache should be cleared after source file content changes"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

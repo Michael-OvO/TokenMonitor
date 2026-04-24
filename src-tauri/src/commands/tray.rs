@@ -160,6 +160,20 @@ fn current_daily_total_cost(state: &AppState) -> f64 {
         .sum()
 }
 
+fn usage_access_enabled(state: &AppState) -> bool {
+    state
+        .usage_access_enabled
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn current_daily_total_cost_if_allowed(state: &AppState) -> f64 {
+    if usage_access_enabled(state) {
+        current_daily_total_cost(state)
+    } else {
+        0.0
+    }
+}
+
 fn should_update_tray_icon(config: &TrayConfig, utilization: TrayUtilization) -> bool {
     config.bar_display == BarDisplay::Off || utilization.has_any()
 }
@@ -295,7 +309,7 @@ async fn current_tray_utilization(state: &AppState) -> TrayUtilization {
 
 pub async fn sync_tray_title(app: &tauri::AppHandle, state: &AppState) {
     let config = state.tray_config.read().await.clone();
-    let total_cost = current_daily_total_cost(state);
+    let total_cost = current_daily_total_cost_if_allowed(state);
     let utilization = current_tray_utilization(state).await;
     let update_available = {
         let guard = state.updater.read().await;
@@ -338,7 +352,7 @@ pub async fn set_tray_config(
     apply_tray_presentation(
         &app,
         &config,
-        current_daily_total_cost(&state),
+        current_daily_total_cost_if_allowed(&state),
         utilization,
         update_available,
     );
@@ -353,7 +367,7 @@ pub async fn get_status_widget_summary(
 ) -> Result<StatusWidgetSummary, String> {
     let config = state.tray_config.read().await.clone();
     let utilization = current_tray_utilization(&state).await;
-    let total_cost = current_daily_total_cost(&state);
+    let total_cost = current_daily_total_cost_if_allowed(&state);
 
     Ok(StatusWidgetSummary {
         title: format_tray_title(&config, total_cost, utilization.claude, utilization.codex),

@@ -96,6 +96,7 @@ describe("initializeRuntimeFromSettings", () => {
     expect(invokeFn).toHaveBeenCalledWith("set_dock_icon_visible", { visible: false });
     expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, true);
     expect(invokeFn).toHaveBeenCalledWith("set_refresh_interval", { interval: 300 });
+    expect(invokeFn).toHaveBeenCalledWith("set_usage_access_enabled", { enabled: true });
     expect(invokeFn).toHaveBeenCalledWith("set_tray_config", {
       config: expect.objectContaining({ showCost: true }),
       claudeUtil: null,
@@ -138,6 +139,21 @@ describe("initializeRuntimeFromSettings", () => {
     expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, true);
     expect(get(activeProvider)).toBe("codex");
     expect(get(activePeriod)).toBe("5h");
+  });
+
+  it("keeps usage access disabled until the first-run disclosure is dismissed", async () => {
+    const invokeFn = vi.fn().mockResolvedValue(undefined);
+    const applyGlassFn = vi.fn();
+    const applyThemeFn = vi.fn();
+    const syncNativeWindowThemeFn = vi.fn().mockResolvedValue(undefined);
+    const syncNativeWindowSurfaceFn = vi.fn().mockResolvedValue(undefined);
+
+    await initializeRuntimeFromSettings(
+      makeSettings({ hasSeenWelcome: false }),
+      { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowThemeFn, syncNativeWindowSurfaceFn },
+    );
+
+    expect(invokeFn).toHaveBeenCalledWith("set_usage_access_enabled", { enabled: false });
   });
 
   it("falls back to a visible provider when the saved default tab is hidden", async () => {

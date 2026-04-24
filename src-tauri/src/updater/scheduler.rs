@@ -1,6 +1,5 @@
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 
 use super::persistence;
@@ -85,21 +84,13 @@ pub async fn run_check<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                 notes: update.body.clone(),
                 pub_date,
             };
-            let version = info.version.clone();
-            let should_notify = guard.should_notify(&version);
             guard.available = Some(info);
             guard.last_check_error = None;
 
-            if should_notify {
-                guard.last_notified_version = Some(version.clone());
-                // Fire OS notification (best-effort; ignore errors).
-                let _ = app
-                    .notification()
-                    .builder()
-                    .title("TokenMonitor update available")
-                    .body(format!("Version {version} is ready to install."))
-                    .show();
-            }
+            // Do not fire an OS notification here. On macOS, a background
+            // notification can surface a system permission prompt while the app
+            // is hidden and before our own disclosure UI. The in-app update
+            // banner emitted below is permission-free.
 
             let _ = persistence::save(app, &guard);
             drop(guard);
