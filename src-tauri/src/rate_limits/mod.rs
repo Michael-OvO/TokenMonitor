@@ -4,7 +4,7 @@ mod codex;
 mod http;
 
 use crate::models::{ProviderRateLimits, RateLimitsPayload};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::path::Path;
 
 use claude::fetch_claude_rate_limits;
@@ -43,6 +43,19 @@ impl RateLimitFetchError {
             retry_after_seconds: None,
             cooldown_until: None,
         }
+    }
+
+    fn cooldown(message: impl Into<String>, retry_after_seconds: u64) -> Self {
+        let cooldown_until = Utc::now() + Duration::seconds(retry_after_seconds as i64);
+        Self {
+            message: message.into(),
+            retry_after_seconds: Some(retry_after_seconds),
+            cooldown_until: Some(cooldown_until.to_rfc3339()),
+        }
+    }
+
+    fn is_claude_auth_unavailable(&self) -> bool {
+        self.message.contains("Claude Code is not logged in")
     }
 }
 
@@ -136,7 +149,12 @@ pub async fn fetch_selected_rate_limits(
                             cli_error = %cli_error.message,
                             "Claude rate-limit: both API and CLI fallback failed"
                         );
-                        Some(provider_rate_limit_error("claude", error))
+                        let surfaced_error = if cli_error.is_claude_auth_unavailable() {
+                            cli_error
+                        } else {
+                            error
+                        };
+                        Some(provider_rate_limit_error("claude", surfaced_error))
                     }
                 }
             }

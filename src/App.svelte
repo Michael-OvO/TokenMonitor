@@ -35,6 +35,7 @@
     fetchRateLimits,
   } from "./lib/stores/rateLimits.js";
   import { providerPayload } from "./lib/views/rateLimitMonitor.js";
+  import { hasRateLimitWindows } from "./lib/views/rateLimits.js";
   import { setDeviceIncludeFlag, setSshHostIncludeFlag } from "./lib/views/deviceStats.js";
   import {
     DEFAULT_HEADER_TABS,
@@ -80,6 +81,7 @@
   import DevicesView from "./lib/components/DevicesView.svelte";
   import SingleDeviceView from "./lib/components/SingleDeviceView.svelte";
   import UpdateBanner from "./lib/components/UpdateBanner.svelte";
+  import PermissionDisclosure from "./lib/components/PermissionDisclosure.svelte";
   import type { HeaderTabs, UsagePayload, UsagePeriod, UsageProvider, RateLimitsPayload } from "./lib/types/index.js";
 
   let showSplash = $state(true);
@@ -119,8 +121,21 @@
       label: headerTabs[value].label,
     })),
   );
-  let visibleRateLimitProviders = $derived.by(() =>
-    rateLimitProvidersForScope(provider).filter((candidate) => Boolean(providerPayload(rateLimits, candidate))),
+  let visibleUsableRateLimitProviders = $derived.by(() =>
+    rateLimitProvidersForScope(provider).filter((candidate) =>
+      hasRateLimitWindows(providerPayload(rateLimits, candidate)),
+    ),
+  );
+  let hasFiveHourUsageData = $derived.by(() =>
+    Boolean(data && (
+      data.total_tokens > 0
+      || data.total_cost > 0
+      || data.five_hour_cost > 0
+      || data.chart_buckets.length > 0
+    )),
+  );
+  let shouldShowFiveHourUsageFallback = $derived.by(() =>
+    period === "5h" && hasFiveHourUsageData,
   );
 
   // Subscribe to stores
@@ -215,18 +230,19 @@
 
   async function handleEnableRateLimits() {
     if (keychainPermissionBusy) return;
-    if (isMacOS() && !get(settings).keychainAccessRequested) {
-      showKeychainPermissionPanel = true;
-      await tick();
-      syncSizeAndVerify("keychain-permission-open");
-      return;
-    }
     keychainPermissionBusy = true;
     try {
       await enableRateLimits();
     } finally {
       keychainPermissionBusy = false;
     }
+  }
+
+  async function handleShowKeychainFallback() {
+    if (keychainPermissionBusy) return;
+    showKeychainPermissionPanel = true;
+    await tick();
+    syncSizeAndVerify("keychain-permission-open");
   }
 
   async function handleAllowKeychainForRateLimits() {
@@ -665,69 +681,77 @@
       <MetricsRow {data} />
       <div class="hr"></div>
 
-      {#if period === "5h" && !$settings.rateLimitsEnabled}
-        {#if showKeychainPermissionPanel && isMacOS() && !$settings.keychainAccessRequested}
-          <div class="rate-limit-permission" role="dialog" aria-labelledby="rate-limit-permission-title">
-            <div class="rate-limit-empty-title" id="rate-limit-permission-title">
-              Keychain access for live limits
-            </div>
-            <div class="rate-limit-empty-text">
-              TokenMonitor can read your Claude Code OAuth token from the macOS
-              Keychain to fetch live session and weekly limits. The token stays
-              on this Mac and is used only for Claude's usage endpoint.
-            </div>
-            <div class="rate-limit-empty-text">
-              macOS may show a Keychain window after you continue. Choose
-              <strong>Always Allow</strong> if you want future checks to stay silent.
-            </div>
-            <div class="rate-limit-actions">
-              <button
-                type="button"
-                class="rate-limit-secondary"
-                onclick={handleSkipKeychainForRateLimits}
-                disabled={keychainPermissionBusy}
-              >
-                Use fallback
-              </button>
-              <button
-                type="button"
-                class="rate-limit-cta"
-                onclick={handleAllowKeychainForRateLimits}
-                disabled={keychainPermissionBusy}
-              >
-                Allow Keychain access
-              </button>
-            </div>
+      {#if period === "5h" && showKeychainPermissionPanel && isMacOS() && !$settings.keychainAccessRequested}
+        <div class="rate-limit-permission" role="dialog" aria-labelledby="rate-limit-permission-title">
+          <div class="rate-limit-empty-title" id="rate-limit-permission-title">
+            Keychain fallback for live limits
           </div>
-        {:else}
-          <div class="rate-limit-empty">
-            <div class="rate-limit-empty-title">Live rate limits are off</div>
-            <div class="rate-limit-empty-text">
-              Turn this on to see session &amp; weekly usage.
-              {#if isMacOS() && !$settings.keychainAccessRequested}
-                TokenMonitor will explain the one-time Keychain request before macOS asks.
-              {/if}
-            </div>
+          <div class="rate-limit-empty-text">
+            TokenMonitor normally reads Claude live limits from your Claude
+            credentials file without any macOS prompt. If that file is missing
+            or unreadable, you can allow a one-time Keychain fallback.
+          </div>
+          <PermissionDisclosure mode="rate-limit" />
+          <div class="rate-limit-empty-text">
+            macOS may show a Keychain window after you continue. Choose
+            <strong>Always Allow</strong> if you want future fallback checks to stay silent.
+          </div>
+          <div class="rate-limit-actions">
+            <button
+              type="button"
+              class="rate-limit-secondary"
+              onclick={handleSkipKeychainForRateLimits}
+              disabled={keychainPermissionBusy}
+            >
+              Do not use Keychain
+            </button>
             <button
               type="button"
               class="rate-limit-cta"
-              onclick={handleEnableRateLimits}
+              onclick={handleAllowKeychainForRateLimits}
               disabled={keychainPermissionBusy}
             >
-              Enable rate limits
+              Allow Keychain access
             </button>
           </div>
-        {/if}
-      {:else if period === "5h" && visibleRateLimitProviders.length > 0}
-        {#each visibleRateLimitProviders as rateLimitProvider, index}
+        </div>
+      {:else if period === "5h" && $settings.rateLimitsEnabled && visibleUsableRateLimitProviders.length > 0}
+        {#each visibleUsableRateLimitProviders as rateLimitProvider, index}
           <UsageBars
             providerLabel={provider === ALL_USAGE_PROVIDER_ID ? getUsageProviderLabel(rateLimitProvider) : undefined}
             rateLimits={providerPayload(rateLimits, rateLimitProvider)!}
           />
-          {#if index < visibleRateLimitProviders.length - 1}
+          {#if index < visibleUsableRateLimitProviders.length - 1}
             <div class="hr"></div>
           {/if}
         {/each}
+      {:else if period === "5h" && shouldShowFiveHourUsageFallback}
+        {#if !$settings.rateLimitsEnabled}
+          <div class="rate-limit-note">
+            Live rate-limit percentages are off. Showing local 5h usage.
+          </div>
+        {:else if rateLimitsRequest.error}
+          <div class="rate-limit-note">
+            Live rate-limit percentages unavailable: {rateLimitsRequest.error} Showing local 5h usage.
+          </div>
+        {/if}
+        <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} />
+      {:else if period === "5h" && !$settings.rateLimitsEnabled}
+        <div class="rate-limit-empty">
+          <div class="rate-limit-empty-title">Live rate limits are off</div>
+          <div class="rate-limit-empty-text">
+            Turn this on to see live 5h and weekly rate-limit percentages.
+            TokenMonitor uses your Claude credentials file first and does not open Keychain from this button.
+          </div>
+          <button
+            type="button"
+            class="rate-limit-cta"
+            onclick={handleEnableRateLimits}
+            disabled={keychainPermissionBusy}
+          >
+            Enable rate limits
+          </button>
+        </div>
       {:else if period === "5h" && rateLimitsRequest.loading}
         <div class="loading-bars"><div class="spinner"></div></div>
       {:else if period === "5h"}
@@ -740,6 +764,16 @@
               {rateLimitsRequest.error ?? "Unable to load rate limit data right now."}
             {/if}
           </div>
+          {#if isMacOS() && !$settings.keychainAccessRequested}
+            <button
+              type="button"
+              class="rate-limit-secondary"
+              onclick={handleShowKeychainFallback}
+              disabled={keychainPermissionBusy}
+            >
+              Review Keychain fallback
+            </button>
+          {/if}
         </div>
       {:else if data.total_cost === 0 && data.total_tokens === 0}
         <div class="empty-period">{emptyPeriodLabel(period, offset)}</div>
@@ -823,6 +857,11 @@
   }
   .rate-limit-empty-text {
     font: 400 9px/1.4 'Inter', sans-serif;
+    color: var(--t3);
+  }
+  .rate-limit-note {
+    margin: 6px 14px 0;
+    font: 400 9px/1.35 'Inter', sans-serif;
     color: var(--t3);
   }
   .rate-limit-cta {

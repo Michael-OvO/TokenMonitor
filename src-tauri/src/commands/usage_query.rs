@@ -1483,4 +1483,35 @@ mod tests {
         assert!(calendar_warm.total_cost >= 0.0);
         assert!(tray_warm_total >= 0.0);
     }
+
+    #[test]
+    #[ignore = "requires local Claude logs and TokenMonitor app data"]
+    fn live_claude_usage_reads_5h_and_week_with_archive() {
+        let parser = UsageParser::new();
+        if let Some(app_data_dir) = dirs::data_dir().map(|dir| dir.join("com.tokenmonitor.app")) {
+            parser.set_archive(crate::usage::archive::ArchiveManager::new(&app_data_dir));
+        }
+
+        let five_hour = get_provider_data(&parser, "claude", "5h", 0).unwrap();
+        let week = get_provider_data(&parser, "claude", "week", 0).unwrap();
+
+        println!(
+            "Claude live usage: 5h tokens={} cost=${:.4} buckets={} | week tokens={} cost=${:.4} buckets={}",
+            five_hour.total_tokens,
+            five_hour.total_cost,
+            five_hour.chart_buckets.len(),
+            week.total_tokens,
+            week.total_cost,
+            week.chart_buckets.len(),
+        );
+
+        assert!(
+            five_hour.total_tokens > 0,
+            "expected local Claude 5h usage to be readable"
+        );
+        assert!(
+            week.total_tokens > 0,
+            "expected local Claude weekly usage to be readable"
+        );
+    }
 }

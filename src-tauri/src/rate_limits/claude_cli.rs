@@ -19,6 +19,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CLAUDE_CLI_PROBE_TIMEOUT_SECONDS: u64 = 20;
 const CLAUDE_CLI_PROBE_PROMPT: &str = "Respond with OK only.";
 const CLAUDE_CLI_PATH_ENV: &str = "CLAUDE_CLI_PATH";
+const CLAUDE_AUTH_RETRY_SECONDS: u64 = 30 * 60;
 #[cfg(not(target_os = "windows"))]
 const CLAUDE_CLI_RESOLVE_COMMAND: &str = "command -v claude";
 
@@ -326,6 +327,17 @@ pub(crate) fn rate_limits_from_claude_cli_info(
     })
 }
 
+fn claude_cli_output_is_auth_failure(output: &str) -> bool {
+    output.contains("\"authentication_failed\"") || output.contains("Not logged in")
+}
+
+fn claude_cli_auth_unavailable_error() -> RateLimitFetchError {
+    RateLimitFetchError::cooldown(
+        "Claude Code is not logged in. Run /login in Claude Code to restore live 5h and weekly rate-limit windows.",
+        CLAUDE_AUTH_RETRY_SECONDS,
+    )
+}
+
 pub(super) async fn fetch_claude_rate_limits_via_cli(
     cached: Option<&ProviderRateLimits>,
 ) -> Result<ProviderRateLimits, RateLimitFetchError> {
@@ -363,9 +375,16 @@ pub(super) async fn fetch_claude_rate_limits_via_cli(
     .map_err(|_| RateLimitFetchError::message("Claude CLI fallback timed out"))?
     .map_err(|error| RateLimitFetchError::message(format!("Failed to run Claude CLI: {error}")))?;
 
+    let stdout_lossy = String::from_utf8_lossy(&output.stdout);
+    let stderr_lossy = String::from_utf8_lossy(&output.stderr);
+    if claude_cli_output_is_auth_failure(&stdout_lossy)
+        || claude_cli_output_is_auth_failure(&stderr_lossy)
+    {
+        return Err(claude_cli_auth_unavailable_error());
+    }
+
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
+        let detail = stderr_lossy.trim();
         let message = if detail.is_empty() {
             format!("Claude CLI fallback failed with status {}", output.status)
         } else {
@@ -517,5 +536,25 @@ mod tests {
         assert_eq!(rate_limits.windows.len(), 1);
         assert_eq!(rate_limits.windows[0].window_id, "five_hour");
         assert_eq!(rate_limits.windows[0].utilization, 0.0);
+    }
+
+    #[test]
+    fn detects_claude_cli_auth_failure_from_stream_json() {
+        let output = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"assistant\",\"error\":\"authentication_failed\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Not logged in · Please run /login\"}]}}\n",
+            "{\"type\":\"result\",\"is_error\":true,\"result\":\"Not logged in · Please run /login\"}\n",
+        );
+
+        assert!(claude_cli_output_is_auth_failure(output));
+    }
+
+    #[test]
+    fn claude_cli_auth_error_defers_retries() {
+        let error = claude_cli_auth_unavailable_error();
+
+        assert!(error.is_claude_auth_unavailable());
+        assert_eq!(error.retry_after_seconds, Some(CLAUDE_AUTH_RETRY_SECONDS));
+        assert!(error.cooldown_until.is_some());
     }
 }

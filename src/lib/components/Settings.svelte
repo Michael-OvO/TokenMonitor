@@ -16,6 +16,7 @@
   import HiddenModelsSettings from "./HiddenModelsSettings.svelte";
   import SshHostsSettings from "./SshHostsSettings.svelte";
   import UpdateBanner from "./UpdateBanner.svelte";
+  import PermissionDisclosure from "./PermissionDisclosure.svelte";
 
   interface Props {
     onBack: () => void;
@@ -181,6 +182,11 @@
     <TrayConfigSettings />
     <HiddenModelsSettings />
     <SshHostsSettings />
+
+    <div class="group">
+      <div class="group-label">Privacy & Permissions</div>
+      <PermissionDisclosure mode="settings" />
+    </div>
 
     <!-- System -->
     <div class="group">

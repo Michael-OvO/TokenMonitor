@@ -33,4 +33,18 @@ describe("native permission surface", () => {
     expect(scheduler).not.toContain(".notification()");
     expect(scheduler).toContain("permission-free");
   });
+
+  it("keeps Keychain access fallback-only instead of part of first-run setup", () => {
+    const welcome = readRepoFile("src/lib/components/WelcomeCard.svelte");
+    const app = readRepoFile("src/App.svelte");
+    const enableStart = app.indexOf("async function handleEnableRateLimits()");
+    const enableEnd = app.indexOf("async function handleShowKeychainFallback()");
+    const enableHandler = app.slice(enableStart, enableEnd);
+
+    expect(welcome).not.toContain("requestClaudeKeychainAccessOnce");
+    expect(welcome).not.toContain("markClaudeKeychainAccessHandled");
+    expect(welcome).toContain("PermissionDisclosure");
+    expect(enableHandler).not.toContain("showKeychainPermissionPanel = true");
+    expect(enableHandler).toContain("await enableRateLimits()");
+  });
 });
