@@ -1,6 +1,7 @@
 use crate::models::{ExtraUsageInfo, ProviderRateLimits, RateLimitWindow};
 use chrono::Local;
 use serde::Deserialize;
+use std::path::Path;
 use std::sync::Mutex;
 
 use super::http::rate_limit_error_from_response;
@@ -141,21 +142,37 @@ pub(super) fn prime_token_from_keychain_interactive() -> Result<(), String> {
     Ok(())
 }
 
-/// Read OAuth token from `~/.claude/.credentials.json` (Windows/Linux).
-#[cfg(not(target_os = "macos"))]
-fn read_token_from_credentials_file() -> Result<String, String> {
-    let config_dir = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .ok()
-        .filter(|p| p.is_dir())
-        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
-        .ok_or_else(|| "Cannot determine Claude config directory".to_string())?;
-
-    let cred_path = config_dir.join(".credentials.json");
-    let raw = std::fs::read_to_string(&cred_path)
+fn read_token_from_credentials_path(cred_path: &Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(cred_path)
         .map_err(|e| format!("Failed to read {}: {e}", cred_path.display()))?;
 
     extract_access_token(&raw)
+}
+
+/// Read OAuth token from `~/.claude/.credentials.json`.
+///
+/// Newer Claude Code builds keep this file current on macOS as well as on
+/// Windows/Linux. Prefer it over Keychain because it is a normal file read
+/// from the same Claude config directory the app already discloses, so it
+/// cannot trigger a macOS Keychain prompt during background refresh.
+fn read_token_from_credentials_file() -> Result<String, String> {
+    let cred_path = crate::paths::claude_credentials_file()
+        .ok_or_else(|| "Cannot determine Claude credentials file path".to_string())?;
+    read_token_from_credentials_path(&cred_path)
+}
+
+#[cfg(target_os = "macos")]
+fn read_token_from_silent_platform_source(credentials_error: String) -> Result<String, String> {
+    read_token_from_keychain().map_err(|keychain_error| {
+        format!(
+            "Claude credentials file unavailable ({credentials_error}); Keychain unavailable ({keychain_error})"
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_token_from_silent_platform_source(credentials_error: String) -> Result<String, String> {
+    Err(credentials_error)
 }
 
 /// Get Claude Code OAuth access token (cross-platform).
@@ -163,7 +180,8 @@ fn read_token_from_credentials_file() -> Result<String, String> {
 /// Resolution order:
 /// 1. `CLAUDE_CODE_OAUTH_TOKEN` environment variable (JSON string) — never cached
 /// 2. In-process cache (set on previous successful read)
-/// 3. macOS: Keychain; Windows/Linux: `~/.claude/.credentials.json`
+/// 3. `~/.claude/.credentials.json`
+/// 4. macOS only: silent Keychain read
 ///
 /// The result of (3) is stored in the cache. Callers that observe a 401 from
 /// the API should call [`invalidate_access_token_cache`] before retrying so
@@ -181,11 +199,8 @@ pub(crate) fn get_claude_oauth_token() -> Result<String, String> {
         return Ok(cached);
     }
 
-    #[cfg(target_os = "macos")]
-    let token = read_token_from_keychain()?;
-
-    #[cfg(not(target_os = "macos"))]
-    let token = read_token_from_credentials_file()?;
+    let token =
+        read_token_from_credentials_file().or_else(read_token_from_silent_platform_source)?;
 
     store_access_token(&token);
     Ok(token)
@@ -410,6 +425,83 @@ fn format_claude_plan_tier(tier: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    #[cfg(target_os = "macos")]
+    use std::sync::Mutex as StdMutex;
+    use tempfile::TempDir;
+
+    #[cfg(target_os = "macos")]
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
+    fn credentials_json(token: &str) -> String {
+        format!(
+            r#"{{
+  "claudeAiOauth": {{
+    "accessToken": "{token}",
+    "refreshToken": "refresh-token",
+    "expiresAt": 1777084603000,
+    "scopes": ["org:create_api_key"],
+    "subscriptionType": "max",
+    "rateLimitTier": "claude_max"
+  }}
+}}"#
+        )
+    }
+
+    #[test]
+    fn reads_access_token_from_credentials_file_payload() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".credentials.json");
+        fs::write(&path, credentials_json("file-access-token")).unwrap();
+
+        let token = read_token_from_credentials_path(&path).unwrap();
+
+        assert_eq!(token, "file-access-token");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn oauth_token_prefers_credentials_file_on_macos() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        invalidate_access_token_cache();
+        let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
+
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join(".credentials.json"),
+            credentials_json("macos-file-access-token"),
+        )
+        .unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+
+        let token = get_claude_oauth_token().unwrap();
+
+        assert_eq!(token, "macos-file-access-token");
+
+        if let Some(value) = previous {
+            std::env::set_var("CLAUDE_CONFIG_DIR", value);
+        } else {
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+        invalidate_access_token_cache();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local Claude credentials and network access"]
+    async fn live_fetches_full_claude_rate_limit_windows_from_credentials_file() {
+        invalidate_access_token_cache();
+
+        let rate_limits = fetch_claude_rate_limits().await.unwrap();
+        let window_ids = rate_limits
+            .windows
+            .iter()
+            .map(|window| window.window_id.as_str())
+            .collect::<Vec<_>>();
+        println!("Claude rate-limit windows: {window_ids:?}");
+
+        assert!(window_ids.contains(&"five_hour"));
+        assert!(window_ids.contains(&"seven_day"));
+    }
 
     #[test]
     fn normalizes_claude_extra_usage_from_cents_to_usd() {

@@ -92,7 +92,7 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
     }
     if let Some(p) = claude_credentials_file() {
         out.push(AccessedPath {
-            purpose: "Claude OAuth credentials (non-macOS only; macOS uses Keychain)",
+            purpose: "Claude OAuth credentials for silent rate-limit reads",
             path: p,
             env_override: Some("CLAUDE_CONFIG_DIR"),
         });
