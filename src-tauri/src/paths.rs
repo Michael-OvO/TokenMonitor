@@ -58,9 +58,13 @@ pub fn ssh_config() -> Option<PathBuf> {
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn claude_credentials_file() -> Option<PathBuf> {
     env::var("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
         .ok()
-        .filter(|p| p.is_dir())
+        .and_then(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .find(|entry| !entry.is_empty())
+                .map(PathBuf::from)
+        })
         .or_else(|| home().map(|h| h.join(".claude")))
         .map(|p| p.join(".credentials.json"))
 }
