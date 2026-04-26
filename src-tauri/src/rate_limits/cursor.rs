@@ -109,7 +109,7 @@ fn build_cursor_rate_limits(resp: CursorPeriodUsageResponse) -> ProviderRateLimi
 }
 
 pub(super) async fn fetch_cursor_rate_limits() -> Result<ProviderRateLimits, RateLimitFetchError> {
-    let token = crate::usage::parser::read_cursor_ide_access_token().ok_or_else(|| {
+    let token = crate::usage::cursor_parser::read_cursor_ide_access_token().ok_or_else(|| {
         RateLimitFetchError::message(
             "Cursor IDE is not signed in on this machine (no access token found in state.vscdb)",
         )

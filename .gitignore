@@ -31,6 +31,12 @@ build/cache/
 signing/
 CLAUDE.md
 
+# Development artifacts
+tmp/
+
+# Legacy / archived code (kept locally for reference)
+archive/
+
 # Pre-built binaries (build from source via CI instead)
 scripts/*.exe
 

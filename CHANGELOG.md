@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## v0.11.1 — Cursor Rate Limits & Updater Signing Fixes
+
+- 新增 Cursor IDE 速率限制支持（`rate_limits/cursor.rs`），通过 Cursor API 获取计划用量和支出限额
+- 新增 `secrets/cursor.rs` 管理 Cursor access token（OS keyring 优先，文件回退）
+- 修复 Windows/Linux 上 updater 签名密钥缺失时跳过签名的问题
+- 修复 workflow 条件表达式中无效的 secrets 引用
+- 修复通过 `GITHUB_ENV` 设置 updater 签名密钥
+
+## v0.11.0 — Major Module Refactor & Dynamic Exchange Rates
+
+- 大模块拆分重构（`float_ball` → `float_ball/mod.rs` + `layout.rs`）
+- 新增动态汇率（`usage/exchange_rates.rs`，Frankfurter API，24h TTL 缓存）
+- 新增 `usage/device_aggregation.rs` 远程设备数据聚合
+- 新增 `usage/claude_parser.rs` Claude Code 专用深度解析器（含 change-event 分类和 subagent scope 检测）
+- 新增 `usage/archive.rs` 持久化每小时聚合存储，防止日志删除导致数据丢失
+- 新增 `usage/openrouter.rs` OpenRouter 动态定价
+
+## v0.10.x — Permissions, Keychain Hardening, SSH Fixes
+
+- 新增权限系统（`permissions/surfaces.ts`、`permissions/keychain.ts`、`PermissionDisclosure.svelte`）
+- 新增首次启动欢迎卡片（`WelcomeCard.svelte`），含速率限制和自启动的 opt-in 开关
+- macOS Keychain 读取切换到 Security.framework，避免旧版 Keychain 弹窗
+- 一次性交互式 Keychain 提示（`feat(macos): one-time interactive Keychain prompt`）
+- 硬化权限披露和 TCC 作用域修复
+- SSH 远程设备去重修复、jq 依赖移除
+- Claude 会话刷新和速率限制窗口修复
+
+## v0.9.0 — Pie Chart & Capitalization Cleanup
+
+- 新增饼图模式（`feat: add pie chart mode with model-share breakdown`）
+- 标准化 section label 大小写
+
+## v0.8.0 — Auto-Updater
+
+- 完整的应用内自动更新系统
+- 新增 `updater/` Rust 模块（state、persistence、scheduler）
+- 新增 `stores/updater.ts` 前端 store
+- 新增 `UpdateBanner.svelte` 应用内更新横幅
+- 托盘图标红色 badge dot（更新可用时显示）
+- OS 通知（每版本去重，6h 检查间隔，指数退避）
+- Skip / Later / Update Now 操作
+- CI/CD 更新：生成 `latest.json` manifest，构建 AppImage、NSIS updater 产物
+- 新增 `docs/testing/auto-update.md` 手动测试矩阵
+
+## v0.7.x — Cache Tiers, Fast Mode, SSH Archive
+
+- Claude fast mode 作为独立模型支持（单独定价）
+- 缓存层级数据管道暴露，统一缓存定价
+- Web search 追踪
+- SSH archive 更新
+- 速率限制百分比系统统一
+
 ## v0.6.0 — Cross-Platform Architecture Overhaul
 
 > 基准对比：[Michael-OvO/TokenMonitor](https://github.com/Michael-OvO/TokenMonitor) main 分支 (v0.5.0)

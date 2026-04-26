@@ -1,15 +1,15 @@
 # Repo Audit Report
 
 **Project:** TokenMonitor
-**Date:** 2026-04-22
+**Date:** 2026-04-26
 **Audited by:** repo-audit skill
-**Scope:** 125/125 source files analyzed (100%)
+**Scope:** 142/142 source files analyzed (100%)
 
 ---
 
 ## Executive Summary
 
-TokenMonitor is a well-architected cross-platform Tauri v2 desktop app with strong test coverage (162+ frontend tests, 100+ Rust tests) and production-ready CI/CD. The primary concerns are: (1) a **critical dedup bug** causing 2.34x fee overestimation, (2) a monolithic parser file (4,198 lines), and (3) 32 `#[allow(dead_code)]` annotations suggesting incomplete cleanup. Overall health grade: **B+** -- solid fundamentals with targeted issues to address.
+TokenMonitor is a well-architected cross-platform Tauri v2 + Svelte 5 + Rust system tray app with clear module separation and good test coverage for business logic. The primary structural concern is the monolithic `usage/parser.rs` (5,578 lines) which handles three provider parsers in a single file. Configuration health has two urgent issues: a stale `package-lock.json` (version 0.10.6 vs 0.11.1) and `tmp/` development artifacts tracked in git. Code quality is generally high with no TODO/FIXME debt, but 328 `unwrap()` calls in Rust and 15 silent `.catch(() => {})` blocks in the frontend represent latent error-handling risk.
 
 ---
 
@@ -17,176 +17,200 @@ TokenMonitor is a well-architected cross-platform Tauri v2 desktop app with stro
 
 ### Overview
 
-A local-first system tray app that monitors Claude Code and Codex CLI token usage by reading JSONL session logs from disk, applying pricing rules in Rust, and presenting spend/rate-limit data through a native popover. Supported on macOS, Windows, and Linux. No API keys or cloud sync required.
+TokenMonitor is a local-first system tray application that monitors Claude Code, Codex, and Cursor CLI token usage. It reads JSONL session logs from disk, applies pricing rules in Rust, and presents spend/rate-limit data through a native system tray popover. No API keys required for core usage tracking, no cloud sync. Supports macOS, Windows, and Linux with platform-specific features (menu bar cost display on macOS, taskbar panel on Windows, system tray on Linux).
 
 ### File Index
 
 ```
 TokenMonitor/
-├── src/                          — Svelte 5 frontend (WebView)
-│   ├── App.svelte                — Root shell: layout orchestration + event routing
-│   ├── main.ts                   — Svelte mount point
-│   ├── float-ball.ts             — Separate entry for FloatBall overlay
-│   └── lib/
-│       ├── bootstrap.ts          — Runtime init: settings → stores → IPC wiring
-│       ├── providerMetadata.ts   — Provider registry (labels, colors, plan tiers)
-│       ├── resizeOrchestrator.ts — Window resize animation + scroll locking
-│       ├── windowSizing.ts       — Height calc, monitor constraints
-│       ├── uiStability.ts        — Debug stubs for resize tracing
-│       ├── types/index.ts        — Shared TS interfaces (mirrors Rust structs)
-│       ├── stores/
-│       │   ├── usage.ts          — Usage data store + stale-while-revalidate cache
-│       │   ├── settings.ts       — Settings persistence + migration
-│       │   ├── rateLimits.ts     — Per-provider rate limit cache + retry
-│       │   └── updater.ts        — Auto-updater state management
-│       ├── components/           — 26 Svelte UI components
-│       │   ├── Settings.svelte   — Settings panel (delegates to sub-components)
-│       │   ├── Chart.svelte      — Stacked bar/line/pie chart (893 lines)
-│       │   ├── FloatBall.svelte  — Always-on-top overlay (1,063 lines)
-│       │   └── ...
-│       ├── views/                — View-layer logic (no rendering)
-│       │   ├── rateLimitMonitor.ts — Rate limit merge + peak stabilization
-│       │   ├── rateLimits.ts     — Per-provider window filtering
-│       │   ├── footer.ts         — Footer utilization extraction
-│       │   └── deviceStats.ts    — Device inclusion flag mutations
-│       ├── tray/
-│       │   ├── sync.ts           — Tray config IPC sync
-│       │   └── title.ts          — Tray title formatting
-│       ├── window/
-│       │   └── appearance.ts     — Native surface/theme/glass effects
-│       └── utils/
-│           ├── format.ts         — Cost/token/time formatting + model colors
-│           ├── calendar.ts       — Heatmap intensity + colors
-│           ├── plans.ts          — Plan tier cost lookup
-│           ├── platform.ts       — OS detection (cached)
-│           └── logger.ts         — Level-filtered logger → Rust IPC
+├── src/                          — Svelte 5 frontend (TypeScript)
+│   ├── App.svelte                — Main window entry: routing, data loading, resize orchestration
+│   ├── main.ts                   — Svelte mount point for main window
+│   ├── float-ball.ts             — Svelte mount point for always-on-top overlay
+│   ├── lib/
+│   │   ├── bootstrap.ts          — Startup wiring: settings → stores → native IPC
+│   │   ├── providerMetadata.ts   — Single source of truth for provider UI metadata
+│   │   ├── resizeOrchestrator.ts — Window resize state machine
+│   │   ├── uiStability.ts        — UI stability debug tooling
+│   │   ├── windowSizing.ts       — Window height calculation
+│   │   ├── components/           — 28 Svelte components (UI layer)
+│   │   │   ├── FloatBall.svelte  — Always-on-top draggable overlay (985 lines)
+│   │   │   ├── Chart.svelte      — Usage chart with buckets (880 lines)
+│   │   │   ├── Settings.svelte   — Settings panel (665 lines)
+│   │   │   ├── Calendar.svelte   — Heatmap calendar view
+│   │   │   ├── DevicesView.svelte — SSH device list
+│   │   │   └── ... (23 more)
+│   │   ├── stores/               — Svelte stores (state management)
+│   │   │   ├── usage.ts          — Usage data fetching & caching
+│   │   │   ├── settings.ts       — Persisted settings (tauri-plugin-store)
+│   │   │   ├── rateLimits.ts     — Rate limit polling & caching
+│   │   │   └── updater.ts        — Auto-update state machine
+│   │   ├── views/                — Business logic (non-UI)
+│   │   │   ├── rateLimits.ts     — Rate limit window computation
+│   │   │   ├── rateLimitMonitor.ts — Rate limit display logic
+│   │   │   ├── footer.ts         — Footer cost/time formatting
+│   │   │   └── deviceStats.ts    — Device statistics helpers
+│   │   ├── tray/                 — Tray sync logic
+│   │   │   ├── sync.ts           — IPC to update tray config
+│   │   │   └── title.ts          — Tray title formatting
+│   │   ├── window/               — Native window management
+│   │   │   └── appearance.ts     — Theme, glass effect, surface sync
+│   │   ├── permissions/          — Permission disclosure UI logic
+│   │   │   ├── keychain.ts       — macOS Keychain access
+│   │   │   └── surfaces.ts       — Permission surface definitions
+│   │   ├── types/index.ts        — Shared TypeScript interfaces
+│   │   └── utils/                — Pure utility functions
+│   │       ├── format.ts         — Number/cost/time formatting
+│   │       ├── calendar.ts       — Calendar date math
+│   │       ├── plans.ts          — Plan tier cost logic
+│   │       ├── platform.ts       — macOS/Windows/Linux detection
+│   │       └── logger.ts         — Frontend → Rust log bridge
+│   └── *.css                     — Global styles
 ├── src-tauri/                    — Rust backend
 │   ├── src/
-│   │   ├── main.rs              — Entry point (delegates to lib.rs)
-│   │   ├── lib.rs               — App setup, tray, background loop (701 lines)
-│   │   ├── models.rs            — Model family detection/normalization (1,003 lines)
-│   │   ├── paths.rs             — Filesystem path registry
-│   │   ├── logging.rs           — tracing + rolling file appender
-│   │   ├── commands/            — IPC dispatch hub
-│   │   │   ├── commands.rs      — AppState definition (12 Arc<RwLock<>> fields)
-│   │   │   ├── usage_query.rs   — Usage data fetching + caching (1,407 lines)
-│   │   │   ├── calendar.rs      — Heatmap queries (490 lines)
-│   │   │   ├── config.rs        — Settings sync + window mgmt
-│   │   │   ├── tray.rs          — Title/utilization rendering (528 lines)
-│   │   │   ├── ssh.rs           — Remote device management (1,536 lines)
-│   │   │   ├── float_ball.rs    — Overlay ball state (1,818 lines)
-│   │   │   ├── updater.rs       — Update commands
-│   │   │   └── logging.rs       — Log-level control
-│   │   ├── usage/               — Core parsing + pricing
-│   │   │   ├── parser.rs        — JSONL parser + file cache (4,198 lines)
-│   │   │   ├── pricing.rs       — Static + dynamic pricing tables
-│   │   │   ├── litellm.rs       — LiteLLM GitHub pricing fetch
-│   │   │   ├── openrouter.rs    — OpenRouter API pricing fetch
-│   │   │   ├── integrations.rs  — Provider registration
-│   │   │   ├── archive.rs       — Hourly aggregate archival (data loss prevention)
-│   │   │   ├── ccusage.rs       — Legacy parser fallback (994 lines)
-│   │   │   ├── ssh_remote.rs    — SSH host sync + cache (726 lines)
-│   │   │   └── ssh_config.rs    — ~/.ssh/config parser (491 lines)
-│   │   ├── rate_limits/         — Provider rate limit fetching
-│   │   │   ├── mod.rs           — Orchestration + merge strategy
-│   │   │   ├── claude.rs        — OAuth Keychain + API (macOS)
-│   │   │   ├── claude_cli.rs    — CLI probe fallback (all platforms)
-│   │   │   ├── codex.rs         — Session file parsing
-│   │   │   └── http.rs          — Shared HTTP client
-│   │   ├── tray/render.rs       — RGBA pixel buffer rendering
-│   │   ├── stats/               — Usage analytics
-│   │   │   ├── subagent.rs      — Main/subagent breakdown
-│   │   │   └── change.rs        — Code change tracking
-│   │   ├── platform/            — OS-specific code
-│   │   │   ├── mod.rs           — Cross-platform helpers
-│   │   │   ├── macos/mod.rs     — Dock icon toggle
-│   │   │   ├── windows/window.rs — Window positioning (Win32)
-│   │   │   ├── windows/taskbar.rs — Taskbar panel embed (GDI)
-│   │   │   └── linux/mod.rs     — X11/Wayland positioning
-│   │   └── updater/             — Auto-update system
-│   │       ├── state.rs         — State machine
-│   │       ├── scheduler.rs     — Background check with backoff
-│   │       └── persistence.rs   — Store save/load
-│   └── tauri.conf.json          — Window, bundle, updater config
-├── scripts/release.sh           — Version bump + tag push
-├── build/                       — Installer build scripts
-├── docs/                        — Design docs, ECL specs, debug logs
-└── archive/                     — Past code (ccusage CLI, MCP modules)
+│   │   ├── lib.rs                — App setup, tray icon, background refresh loop
+│   │   ├── main.rs               — Tauri entry point (6 lines)
+│   │   ├── commands.rs           — IPC dispatch hub + AppState definition
+│   │   ├── commands/             — Domain-specific IPC handlers
+│   │   │   ├── usage_query.rs    — Usage data fetching (1,517 lines)
+│   │   │   ├── calendar.rs       — Calendar heatmap queries
+│   │   │   ├── config.rs         — Settings sync IPC
+│   │   │   ├── tray.rs           — Tray title/utilization rendering
+│   │   │   ├── ssh.rs            — Remote device management
+│   │   │   ├── float_ball/       — Float ball state + layout (1,786 lines)
+│   │   │   ├── updater.rs        — Update check/install commands
+│   │   │   ├── period.rs         — Time range selection
+│   │   │   └── logging.rs        — Log level control
+│   │   ├── models.rs             — Shared serde payload types (1,003 lines)
+│   │   ├── logging.rs            — tracing + rolling file appender
+│   │   ├── paths.rs              — Platform app data path discovery
+│   │   ├── usage/                — Core usage processing
+│   │   │   ├── parser.rs         — Main parser engine (5,578 lines, hub file)
+│   │   │   ├── claude_parser.rs  — Claude JSONL-specific parsing
+│   │   │   ├── pricing.rs        — Model pricing rules
+│   │   │   ├── integrations.rs   — Provider integration registry
+│   │   │   ├── device_aggregation.rs — Multi-device aggregation (1,071 lines)
+│   │   │   ├── ssh_remote.rs     — SSH sync + cache management
+│   │   │   ├── ssh_config.rs     — ~/.ssh/config parser
+│   │   │   ├── archive.rs        — Hourly aggregate archival
+│   │   │   ├── litellm.rs        — Dynamic pricing from LiteLLM
+│   │   │   ├── openrouter.rs     — OpenRouter pricing fallback
+│   │   │   └── exchange_rates.rs — USD → foreign currency rates
+│   │   ├── rate_limits/          — Rate limit fetching per provider
+│   │   │   ├── mod.rs            — Orchestrator + merge logic
+│   │   │   ├── claude.rs         — OAuth API (macOS) + CLI fallback
+│   │   │   ├── claude_cli.rs     — CLI probe (all platforms)
+│   │   │   ├── codex.rs          — Codex session file parsing
+│   │   │   ├── cursor.rs         — Cursor API rate limits
+│   │   │   └── http.rs           — Shared HTTP error utilities
+│   │   ├── tray/render.rs        — RGBA pixel buffer generation
+│   │   ├── stats/                — Usage statistics
+│   │   │   ├── change.rs         — Period-over-period change calc
+│   │   │   └── subagent.rs       — Subagent scope detection
+│   │   ├── platform/             — OS-specific code
+│   │   │   ├── mod.rs            — Cross-platform window helpers
+│   │   │   ├── macos/mod.rs      — macOS dock icon
+│   │   │   ├── windows/          — Taskbar panel + window positioning
+│   │   │   └── linux/mod.rs      — X11 window positioning
+│   │   ├── secrets/              — Credential storage
+│   │   │   ├── mod.rs            — Keyring abstraction
+│   │   │   └── cursor.rs         — Cursor API key storage
+│   │   └── updater/              — Auto-update system
+│   │       ├── state.rs          — Update state machine
+│   │       ├── scheduler.rs      — Background check scheduler
+│   │       └── persistence.rs    — State persistence to disk
+│   ├── Cargo.toml                — Rust dependencies
+│   └── tauri.conf.json           — Tauri app configuration
+├── build/                        — Custom multi-platform build orchestration
+├── scripts/release.sh            — Version bump + tag + push
+├── docs/                         — Documentation, debug notes, ECL configs
+├── archive/                      — Legacy code (ccusage.rs)
+├── tmp/                          — Dev artifacts (should not be tracked)
+├── .github/workflows/            — CI (3-OS matrix) + Release (signed builds)
+├── package.json                  — v0.11.1, Tauri v2 + Svelte 5
+└── vite.config.ts                — Multi-entry Vite (main + float-ball)
 ```
 
-**Navigation hints:**
+**Speed Reference — "I want to... → look at":**
 
-| I want to... | Look at |
-|--------------|---------|
-| Understand the project | README.md, CLAUDE.md |
-| Modify usage parsing/pricing | src-tauri/src/usage/parser.rs, pricing.rs |
-| Add a new CLI provider | src-tauri/src/usage/integrations.rs + parser.rs |
-| Change the UI layout/components | src/lib/components/, App.svelte |
-| Modify rate limit behavior | src-tauri/src/rate_limits/, src/lib/stores/rateLimits.ts |
-| Add a new setting | src/lib/stores/settings.ts + Settings.svelte + commands/config.rs |
-| Run tests | `npm test` (frontend), `cd src-tauri && cargo test` (Rust) |
-| Debug tray icon rendering | src-tauri/src/tray/render.rs |
-| Fix platform-specific behavior | src-tauri/src/platform/{macos,windows,linux}/ |
-| Release a new version | `npm run release -- X.Y.Z` |
+| I want to... | Go to |
+|--------------|-------|
+| Understand the project | CLAUDE.md, README.md |
+| Modify core usage parsing | src-tauri/src/usage/parser.rs, claude_parser.rs |
+| Add a new CLI provider | src-tauri/src/usage/integrations.rs, then parser.rs |
+| Change pricing rules | src-tauri/src/usage/pricing.rs (bump PRICING_VERSION) |
+| Add a new rate limit source | src-tauri/src/rate_limits/ + providerMetadata.ts |
+| Modify the main UI | src/App.svelte + relevant component in src/lib/components/ |
+| Change settings | src/lib/stores/settings.ts + Settings.svelte |
+| Modify tray icon rendering | src-tauri/src/tray/render.rs |
+| Add platform-specific behavior | src-tauri/src/platform/{macos,windows,linux}/ |
+| Run tests | `npm test` (frontend), `npm run test:rust` (backend) |
+| Cut a release | `npm run release -- X.Y.Z` |
+| Debug window sizing | src/lib/resizeOrchestrator.ts, uiStability.ts |
 
 ### Tech Stack
 
-| Layer | Technology | Version |
-|-------|-----------|---------|
-| Frontend | Svelte 5 + TypeScript 5.7 | ^5.0, ^5.7 |
-| Backend | Rust (2021 edition) + Tauri v2 | v2.0 |
-| Build | Vite 6, rollup multi-entry | ^6.0 |
-| Testing | vitest 4.1 (frontend), cargo test (Rust) | ^4.1 |
-| CI/CD | GitHub Actions (3-OS matrix) | ci.yml + release.yml |
-| Packaging | DMG (macOS), NSIS (Windows), deb/AppImage (Linux) | tag-triggered |
+- **Frontend:** Svelte 5 (runes mode) + TypeScript 5.7 + Vite 6
+- **Backend:** Rust 2021 edition + Tauri 2.x
+- **State:** Svelte stores (frontend) + Arc<RwLock<>> (Rust), tauri-plugin-store for persistence
+- **Testing:** Vitest 4.1 (frontend, 24 test files), cargo test (Rust, inline #[cfg(test)] modules)
+- **CI/CD:** GitHub Actions (3-OS CI matrix, tag-triggered signed releases)
+- **Platform deps:** objc2 + security-framework (macOS), windows crate (Windows), gtk/webkit2gtk (Linux)
 
 ### Architecture
 
-**Data flow:** Local JSONL files -> Rust `usage/parser` + `usage/pricing` -> in-memory cache (`Arc<RwLock<>>`, 2-min TTL) -> Tauri IPC -> Svelte stores -> UI components. Background loop refreshes tray every 30s and emits `data-updated` events. Frontend also maintains a payload cache (5-min TTL) with stale-while-revalidate for tab switches.
+**Data flow:** Local JSONL files → Rust `usage/parser` (file-change detection + 2-min TTL cache) → `usage/pricing` (cost calculation) → Tauri IPC → Svelte stores → UI components. Background loop (30s cycle) refreshes tray and emits `data-updated` events.
+
+**Rate limits:** Split by provider: `claude.rs` (OAuth + CLI), `codex.rs` (session files), `cursor.rs` (API). Orchestrated by `rate_limits/mod.rs` with merge logic. Cached in `AppState.cached_rate_limits`.
 
 **Key design patterns:**
-- **Provider abstraction:** `providerMetadata.ts` (frontend) + `integrations.rs` (backend) define provider-agnostic interfaces. Adding a provider means registering metadata + parser, not modifying existing code.
-- **Stale-while-revalidate:** Frontend `usage.ts` serves cached data immediately while fetching fresh data in background.
-- **Platform dispatch:** `#[cfg(target_os)]` in Rust, `utils/platform.ts` in frontend. Platform-specific UX (glass blur, dock icon) hidden on non-supporting OSes.
-- **IPC boundary:** Rust handles all file I/O, parsing, and pricing. Frontend is purely display logic + store management.
+- Provider registry (usage/integrations.rs) for extensibility
+- Stale-while-revalidate caching in frontend stores
+- Optimistic UI updates with rollback (device stats toggle)
+- Platform abstraction via `#[cfg(target_os)]` and frontend `platform.ts`
 
 ### Implementation Rationale
 
-- **Native Rust parsing** (not shelling out to ccusage) for performance and no runtime dependency.
-- **File-level caching with hash invalidation** in parser.rs avoids reparsing unchanged JSONL files.
-- **Archive system** (usage/archive.rs) provides data loss prevention by persisting hourly aggregates.
-- **Dynamic pricing** (litellm.rs + openrouter.rs) supplements static tables with auto-refreshing rates from public APIs (7-day TTL).
-- **Separate Vite entry** for FloatBall enables independent lifecycle from main window.
-- [Speculative] **X11 forced on Wayland** because Wayland compositors ignore client-side positioning, breaking the popover UX.
+- **Local-first / no API keys:** Reads existing JSONL logs that Claude/Codex/Cursor already write. Zero setup friction.
+- **Rust pricing engine:** Keeps cost calculation deterministic and fast; avoids floating-point inconsistencies across JS runtimes.
+- **Tray popover (not a regular window):** Mimics native macOS menu bar apps. Always-on-top + hide-on-blur for quick glance.
+- **Multi-entry Vite:** Separate entry for FloatBall so it can be an independent always-on-top window.
+- **Dynamic pricing (LiteLLM + OpenRouter):** Fetches model pricing from external sources with 7-day cache TTL, so new models get correct pricing without app updates.
 
 ### Usage Guide
 
-```bash
-npm install                    # Install frontend deps
-npm run tauri dev              # Full app (hot-reload frontend + debug Rust)
-npm run dev                    # Frontend only at http://localhost:1420
-npm test                       # Frontend tests (vitest)
-cd src-tauri && cargo test     # Rust tests
-npx svelte-check               # Type checking
-npm run release -- X.Y.Z       # Bump version, tag, push (triggers release)
-```
+**Install:** Download DMG (macOS), NSIS installer (Windows), or .deb (Linux) from GitHub Releases.
+
+**Run:** App lives in the system tray. Left-click to toggle the popover. Right-click for Show/Quit menu.
+
+**Configure:** Click gear icon in footer → Settings panel. Key settings:
+- Provider tabs (All/Claude/Codex/Cursor)
+- Time period (5h/Day/Week/Month)
+- Rate limits toggle
+- SSH remote devices
+- Float ball overlay
+- Theme (system/light/dark)
+
+**CLI release:** `npm run release -- X.Y.Z` bumps version across 3 files, commits, tags, and pushes.
 
 ### Key Files
 
-| File | Function | Why important | Dependencies |
+| File | Function | Why Important | Dependencies |
 |------|----------|---------------|-------------|
-| src-tauri/src/usage/parser.rs | JSONL parsing + file cache | Core data pipeline | pricing.rs, integrations.rs |
-| src-tauri/src/lib.rs | App setup, tray, background loop | Orchestrates everything | commands/, usage/, rate_limits/ |
-| src-tauri/src/models.rs | Model normalization + family detection | All data goes through this | stats/ |
-| src-tauri/src/commands.rs | AppState definition | Shared mutable state hub | All command modules |
-| src/lib/stores/usage.ts | Frontend usage data store | Primary data flow to UI | providerMetadata.ts, types/ |
-| src/lib/stores/settings.ts | Settings persistence + migration | All user preferences | format.ts, platform.ts |
-| src/lib/providerMetadata.ts | Provider registry | Single source of truth for provider UI | types/index.ts |
-| src/lib/bootstrap.ts | Runtime initialization | Wires settings -> stores -> IPC | All stores, tray/sync |
-| src-tauri/src/usage/pricing.rs | Static + dynamic pricing | Cost calculation accuracy | models.rs, litellm.rs |
-| src-tauri/src/rate_limits/claude.rs | OAuth Keychain + API rate limits | macOS rate limit display | http.rs, paths.rs |
-| src-tauri/tauri.conf.json | Window, bundle, updater config | Build + runtime behavior | - |
-| .github/workflows/release.yml | Multi-platform release pipeline | Builds + signs + publishes | signing secrets |
+| src-tauri/src/usage/parser.rs | Main parser engine | All usage data flows through here | imports: pricing, integrations, claude_parser; imported by: usage_query, calendar, device_aggregation, ssh, archive |
+| src-tauri/src/lib.rs | App setup + background loop | Entry point for Rust; wires tray, plugins, background refresh | imports: commands, logging, rate_limits, usage, platform, updater |
+| src-tauri/src/commands.rs | IPC dispatch hub + AppState | Central state container; all IPC handlers branch from here | imports: models, usage::parser; imported by: all command submodules |
+| src-tauri/src/models.rs | Shared payload types | Defines all IPC data shapes (UsagePayload, RateLimitsPayload, etc.) | imported by: nearly all Rust modules |
+| src-tauri/src/usage/pricing.rs | Model cost calculation | Translates token counts → dollar costs | imports: models, litellm; imported by: parser, device_aggregation |
+| src-tauri/src/rate_limits/mod.rs | Rate limit orchestrator | Dispatches to per-provider fetchers, merges results | imports: claude, claude_cli, codex, cursor, http |
+| src/App.svelte | Main window UI | Routing, data loading, resize orchestration, all user interactions | imports: 30+ modules (stores, components, views, utils) |
+| src/lib/stores/usage.ts | Usage data store | Caching, stale-while-revalidate, IPC bridge for usage data | imported by: App, Chart, Settings |
+| src/lib/stores/settings.ts | Settings persistence | All app settings, persisted via tauri-plugin-store | imported by: 12+ components |
+| src/lib/providerMetadata.ts | Provider definitions | Single source for provider labels, colors, rate limit config, plan tiers | imported by: 6+ files |
+| src/lib/bootstrap.ts | Startup orchestration | Wires settings → stores → native IPC on app launch | imported by: App.svelte |
+| src/lib/resizeOrchestrator.ts | Window resize state machine | Handles popover height adjustment with throttling and scroll lock | imported by: App.svelte |
+| .github/workflows/release.yml | Release pipeline | Signed builds for 3 platforms, updater artifact signing | triggered by: git tags |
+| scripts/release.sh | Version bump script | Ensures version sync across 3 manifest files | invoked by: npm run release |
 
 ---
 
@@ -196,109 +220,127 @@ npm run release -- X.Y.Z       # Bump version, tag, push (triggers release)
 
 | # | Severity | Location | Finding | Suggestion | Confidence |
 |---|----------|----------|---------|------------|------------|
-| F-001 | high | src-tauri/src/usage/parser.rs | **4,198 lines** in a single file. Contains Claude parsing, Codex parsing, file caching, change tracking, archive integration, and debug reporting. | Split into claude_parser.rs, codex_parser.rs, and cache.rs (target <1,500 lines each). | 0.90 |
-| F-002 | medium | src-tauri/src/commands/float_ball.rs | **1,818 lines** for float ball commands, including complex platform-specific window management. | Extract platform-specific positioning into platform/ modules. | 0.80 |
-| F-003 | medium | src-tauri/src/commands/ssh.rs | **1,536 lines** mixing IPC commands with data aggregation logic. | Extract data aggregation into usage/ssh_aggregation.rs. | 0.80 |
-| F-004 | low | src/lib/components/FloatBall.svelte | **1,063 lines** — largest Svelte component. | Extract drag interaction and platform logic into separate modules. | 0.75 |
-| F-005 | info | src-tauri/src/usage/ccusage.rs | **994 lines** of legacy fallback parser, `#[allow(dead_code)]`. No runtime code path reaches it. | Move to archive/. | 0.90 |
+| F-001 | high | src-tauri/src/usage/parser.rs | Monolithic parser: 5,578 lines handling Claude + Codex + Cursor parsing in a single file. This is the largest file in the codebase by 3.7x. | Split into provider-specific parser files (cursor_parser.rs, codex_parser.rs) similar to the existing claude_parser.rs pattern. | 0.90 |
+| F-002 | medium | src-tauri/src/commands/float_ball/ | Float ball module totals 1,786 lines across mod.rs (891) + layout.rs (895). Layout calculations are tightly coupled with IPC commands. | Consider extracting pure geometry/layout math into a standalone module testable without Tauri. | 0.80 |
+| F-003 | medium | src/lib/components/FloatBall.svelte | Largest Svelte component at 985 lines, mixing drag interaction, layout, animation, and IPC. | Decompose into sub-components (FloatBallDrag, FloatBallExpanded, FloatBallLayout). | 0.75 |
+| F-004 | low | src/App.svelte | 963 lines with significant business logic (device toggle, keychain flow) mixed with view routing. | Extract handler functions into a dedicated module (e.g., lib/appHandlers.ts). | 0.70 |
+| F-005 | medium | tmp/ | 4 development artifacts (bedrock_usage.py, compare_usage.py, etc.) tracked in git. These are not part of the build. | Add `tmp/` to .gitignore, remove from tracking with `git rm --cached tmp/`. | 0.95 |
+| F-006 | low | archive/ccusage.rs | 32KB legacy file tracked in git. Not referenced by any build or source file. | Document purpose or move to a separate branch; add `archive/` to .gitignore if purely historical. | 0.80 |
 
-### P2: Logic Issues
-
-| # | Severity | Location | Finding | Suggestion | Confidence |
-|---|----------|----------|---------|------------|------------|
-| F-006 | ~~critical~~ **fixed** | src-tauri/src/usage/parser.rs:404-408 | ~~Dedup hash included `isSidechain` + `agentId`~~ **Already fixed:** hash now uses only `message_id:request_id`. Test: `claude_dedupe_collapses_root_and_sidechain_and_prefers_subagent_scope`. | No action needed. | 0.95 |
-| F-007 | ~~critical~~ **fixed** | src-tauri/src/usage/parser.rs:990-1013 | ~~Dedup preserved first entry~~ **Already fixed:** `upsert_claude_entry()` + `should_prefer_claude_entry()` keeps entry with highest `output_tokens`. Test: `parse_claude_dedupe_keeps_latest_output_tokens`. | No action needed. | 0.95 |
-| F-008 | medium | src/lib/resizeOrchestrator.ts:48-573 | **525-line factory closure** with 19 internal state variables and 11 methods. High cognitive complexity. | Break into smaller composable functions or a class. | 0.80 |
-| F-009 | low | src-tauri/src/lib.rs:77-85 | `catch_unwind()` for window positioning fallback. Defensive but masks panics. | Log the panic cause before falling back. | 0.75 |
-| F-010 | info | 6 locations (frontend) | 6 empty catch blocks. All intentionally documented with comments. | Acceptable — no action needed. | 0.90 |
-
-### P3: Code Duplication
+### P2: Logic
 
 | # | Severity | Location | Finding | Suggestion | Confidence |
 |---|----------|----------|---------|------------|------------|
-| F-011 | medium | src-tauri/src/lib.rs:158-227 + 186-228 | **Tray icon click handler and menu "Show" handler** contain nearly identical platform-dispatch positioning code (3 duplicated blocks for macOS/Windows/Linux). | Extract `show_and_position_window(window, tray_rect?)` helper. | 0.85 |
-| F-012 | low | src-tauri/src/commands/ssh.rs + usage_query.rs | Similar timestamp parsing with multiple fallback formats duplicated across both files. | Centralize timestamp parsing into a shared util. | 0.70 |
+| F-007 | medium | src-tauri/src/ (328 calls) | 328 `unwrap()` calls across the Rust codebase. While many are safe in context, several are in I/O paths (file reads, SSH operations, JSON parsing) where panics would crash the app. | Audit unwrap() calls in I/O-facing code; replace with `?` or `.unwrap_or_default()` where a panic would crash the tray app. | 0.75 |
+| F-008 | medium | src-tauri/src/updater/ | 7 `#[allow(dead_code)]` annotations in scheduler.rs + 4 in state.rs suggest incomplete updater implementation. | Audit dead code: remove if truly unused, or document if planned for future use. | 0.70 |
+| F-009 | low | src/ (15 instances) | 15 silent `.catch(() => {})` blocks swallow errors without logging. While intentional for non-blocking UI, they can hide bugs during development. | Replace with `.catch((e) => logger.debug("context", e))` to preserve non-blocking behavior while enabling debug visibility. | 0.80 |
+| F-010 | low | src-tauri/src/usage/parser.rs | 8 `#[allow(dead_code)]` annotations in parser.rs, mostly on test helper structs and cache fields. | Clean up: remove annotations if items are used in tests; delete truly dead items. | 0.75 |
+| F-011 | info | src-tauri/src/lib.rs:439 | `background_loop()` at 126 lines orchestrates 5 concerns: rate limits, pricing, exchange rates, SSH sync, and archival. | Consider splitting into focused async tasks (one per concern) coordinated by the main loop. | 0.70 |
 
-### P4: Configuration Management
+### P3: Duplication
 
 | # | Severity | Location | Finding | Suggestion | Confidence |
 |---|----------|----------|---------|------------|------------|
-| F-013 | medium | src/lib/utils/format.ts:1-8 | **Hardcoded exchange rates** (EUR 0.92, GBP 0.79, JPY 149.5, CNY 7.24). Comment says "updated 2025-03" — over a year stale. | Fetch rates from a public API or bump manually more often. | 0.90 |
-| F-014 | low | src-tauri/src/updater/scheduler.rs | Hardcoded update check intervals (10s initial, 6h check, 12-24h backoff) without configuration. | Consider making configurable via settings. | 0.70 |
-| F-015 | low | src-tauri/src/rate_limits/mod.rs:30 | `CLAUDE_MIN_REFETCH_SECS = 300` (5 min) hardcoded. Should be configurable. | Expose as a setting (backend config or frontend settings). | 0.90 |
+| F-012 | medium | src-tauri/src/rate_limits/ | claude.rs, cursor.rs, and codex.rs each independently implement HTTP fetch → parse → convert-to-RateLimitWindow patterns with similar error handling. | Extract a shared trait or helper for rate-limit-provider fetch/parse, keeping only provider-specific logic in each file. | 0.75 |
+| F-013 | low | src-tauri/src/usage/litellm.rs + openrouter.rs | Both fetch external pricing data, parse model entries, and cache with TTL checks. Similar caching pattern also in exchange_rates.rs. | Consolidate the fetch-parse-cache pattern into a generic cached-remote-resource helper. | 0.70 |
+| F-014 | low | src/lib/components/Settings.svelte | 8+ similar toggle handler functions following try/invoke/updateSetting/catch pattern. | Extract a generic `handleSettingsToggle(command, settingKey, value)` helper. | 0.75 |
+| F-015 | low | src-tauri/src/usage/parser.rs:5320-5492 | 4 nearly identical Cursor API POST requests to different endpoints (cursor.com, api.cursor.com, api2.cursor.sh, api3.cursor.sh). | Refactor into an endpoint-list iteration with a shared request builder. | 0.80 |
+
+### P4: Configuration
+
+| # | Severity | Location | Finding | Suggestion | Confidence |
+|---|----------|----------|---------|------------|------------|
+| F-016 | high | package-lock.json | Lockfile version is 0.10.6 but package.json is 0.11.1. `npm ci` in CI will install stale dependencies. | Run `npm install` to regenerate package-lock.json, commit the updated file. | 0.95 |
+| F-017 | low | tsconfig.json | `noUnusedLocals: false` and `noUnusedParameters: false` — permissive settings that allow dead code to accumulate in TypeScript. | Set both to `true` and clean up any resulting errors. | 0.80 |
 
 ### P5: Dead Code
 
 | # | Severity | Location | Finding | Suggestion | Confidence |
 |---|----------|----------|---------|------------|------------|
-| F-016 | medium | 32 locations (Rust) | **32 `#[allow(dead_code)]` annotations** across 12 files. Most in parser.rs (8), updater/ (7), scheduler.rs (6). | Audit each: remove truly dead code, remove annotation for test-only code. | 0.75 |
-| F-017 | low | src-tauri/src/usage/ccusage.rs | Legacy parser module (994 lines) marked `#[allow(dead_code)]`. No runtime path reaches it. | Archive to archive/ccusage.rs. | 0.90 |
-| F-018 | low | src/lib/uiStability.ts:53 | `captureResizeDebugSnapshot()` returns empty object — stub from removed debug overlay. Debug overlay will not return. | Remove the stub function. | 0.90 |
+| F-018 | medium | src-tauri/src/ (33 annotations) | 33 `#[allow(dead_code)]` annotations across the Rust codebase. Heaviest in updater/scheduler.rs (7), usage/parser.rs (8), and updater/state.rs (4). | Audit each annotation: remove the annotation if the item is actually used (e.g., in tests); delete the item if truly dead. | 0.80 |
+| F-019 | low | src-tauri/src/usage/mod.rs:1 | Module-level `#[allow(dead_code)]` blanket-suppresses all warnings for the entire usage module tree. | Remove the blanket annotation; add targeted `#[allow(dead_code)]` only where truly needed. | 0.85 |
 
 ### P6: Hardcoded Values
 
 | # | Severity | Location | Finding | Suggestion | Confidence |
 |---|----------|----------|---------|------------|------------|
-| F-019 | medium | src-tauri/src/usage/litellm.rs:44 | Hardcoded URL: `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json` | Add fallback URL or make configurable. Currently no retry on failure. | 0.80 |
-| F-020 | medium | src-tauri/src/usage/openrouter.rs:5 | Hardcoded URL: `https://openrouter.ai/api/v1/models` | Same as above — add fallback or cache-on-failure behavior. | 0.80 |
-| F-021 | medium | src-tauri/src/rate_limits/claude.rs:265,271 | Hardcoded Anthropic API URLs for OAuth rate limit fetching. | These are stable API endpoints; acceptable but document in one central place. | 0.70 |
-| F-022 | low | src-tauri/src/lib.rs:145 | Tray icon hardcoded at 44x44 pixels (appropriate for @2x retina). | Acceptable for current use. | 0.85 |
-| F-023 | low | src/lib/providerMetadata.ts:52-98 | Plan tier costs hardcoded (Pro: $20, Max 5x: $100, etc.). | These are Anthropic/OpenAI public pricing — acceptable to hardcode. | 0.85 |
+| F-020 | medium | src-tauri/src/ (13+ URLs) | 13+ hardcoded API URLs scattered across 7 files (anthropic.com, cursor.com, openrouter.ai, frankfurter.dev, github.com/BerriAI). | Centralize external URLs into a `config.rs` or constants module for easier updates when APIs change. | 0.80 |
+| F-021 | low | src-tauri/src/lib.rs | Background loop cycle constants (SSH_SYNC_EVERY_N_CYCLES=10, RATE_LIMIT_REFRESH_EVERY_N_CYCLES=5, PRICING_CHECK_EVERY_N_CYCLES=120) are local `const` in the function body. | Move to a central configuration module or make configurable via settings. | 0.70 |
+| F-022 | low | src/lib/components/SplashScreen.svelte | Splash screen minimum display time hardcoded to 2900ms. | Consider making this configurable or at least extracting to a named constant. | 0.60 |
 
 ### P7: Dependency Health
 
 | # | Severity | Location | Finding | Suggestion | Confidence |
 |---|----------|----------|---------|------------|------------|
-| F-024 | low | package.json | All 7 runtime deps are `@tauri-apps/*` plugins, caret-pinned to ^2.x. Clean and focused. | No action needed. | 0.90 |
-| F-025 | low | src-tauri/Cargo.toml | 3 platform-conditional dependency blocks (macOS: objc2/security-framework, Windows: windows 0.58, Linux: gtk/webkit2gtk/cairo). Appropriate for cross-platform. | No action needed. | 0.85 |
-| F-026 | info | src-tauri/src/usage/ssh_remote.rs | No explicit SSH connection timeout. `ssh2` crate connections can hang indefinitely on network issues. | Add `session.set_timeout(30_000)` or equivalent. | 0.75 |
-| F-027 | info | src-tauri/src/rate_limits/http.rs | reqwest client created without explicit timeout. | Add `.timeout(Duration::from_secs(15))` to client builder. | 0.70 |
+| F-023 | info | package.json | All dependencies use caret ranges (^2, ^5, ^6) which is appropriate for a Tauri app. No obviously outdated or deprecated packages. | No action needed. Dependencies are healthy. | 0.90 |
+| F-024 | info | src-tauri/Cargo.toml | Rust dependencies are current. Platform-specific deps (keyring, objc2, windows) use appropriate feature flags. | No action needed. Well-maintained. | 0.90 |
 
 ---
 
 ## Dependency Map
 
-### Hub Files (imported by >30% of other files)
+### Hub Files (imported by >30% of source files)
 
-| File | Imported by |
-|------|-------------|
-| src/lib/types/index.ts | 22+ files (stores, views, components, utils, tray) |
-| src/lib/providerMetadata.ts | 12+ files (stores, views, utils, tray) |
-| src/lib/utils/format.ts | 10+ files (components, stores) |
-| src/lib/stores/settings.ts | 8+ files (components, bootstrap) |
-| src-tauri/src/models.rs | All command/usage/stats modules |
-| src-tauri/src/usage/integrations.rs | commands/, usage/ |
+| File | Role | Imported By |
+|------|------|-------------|
+| src-tauri/src/usage/parser.rs | Central parser engine | usage_query, calendar, device_aggregation, ssh, archive, lib.rs |
+| src-tauri/src/models.rs | Shared payload types | Nearly all Rust modules |
+| src-tauri/src/commands.rs | AppState + IPC hub | All command submodules, lib.rs |
+| src/lib/types/index.ts | Shared TS interfaces | 12+ frontend files |
+| src/lib/stores/settings.ts | Settings store | 12+ components |
+| src/lib/providerMetadata.ts | Provider definitions | 6+ files |
+| src/lib/utils/format.ts | Formatting utils | 8+ files |
 
 ### Orphan Files
 
-| File | Notes |
-|------|-------|
-| src/lib/uiStability.ts | Only imported by usage.ts (1 consumer, debug stubs) |
-| src-tauri/src/usage/ccusage.rs | `#[allow(dead_code)]`, legacy fallback — verify if still reachable |
+| File | Last Modified | Notes |
+|------|--------------|-------|
+| tmp/bedrock_usage.py | tracked | Dev artifact, not imported anywhere |
+| tmp/bedrock_usage_report.json | tracked | Dev artifact, not imported anywhere |
+| tmp/compare_usage.py | tracked | Dev artifact, not imported anywhere |
+| tmp/usage_comparison.json | tracked | Dev artifact, not imported anywhere |
+| archive/ccusage.rs | tracked | Legacy code, not part of build |
 
 ### Circular Dependencies
 
-None detected.
+None detected in either frontend or backend. Import graphs are strictly acyclic.
 
 ---
 
 ## Unresolved Questions
 
-All questions resolved by user confirmation (2026-04-22):
+All findings have confidence >= 0.7. No questions require user confirmation.
 
-- **Q1/F-005:** ccusage.rs is dead code -> archive it
-- **Q2/F-015:** 5-min refetch should be configurable -> expose as setting
-- **Q3/F-017:** No runtime path reaches ccusage.rs -> archive it
-- **Q4/F-018:** Debug overlay will not return -> remove stub
+Note: F-022 (splash screen timing) has confidence 0.60 but is severity "low" and purely cosmetic — classified as informational rather than generating a blocking question.
+
+---
+
+## Test Coverage
+
+### Frontend
+
+| Category | Files With Tests | Files Without Tests | Coverage |
+|----------|-----------------|--------------------|---------| 
+| Stores (4) | 4/4 | 0 | 100% |
+| Views (4) | 4/4 | 0 | 100% |
+| Utils (5) | 3/5 | logger.ts, platform.ts | 60% |
+| Components (28) | 1/28 | 27 (including FloatBall, Chart, Settings) | 3.6% |
+| Core modules (6) | 5/6 | providerMetadata.ts | 83% |
+| Tray (2) | 2/2 | 0 | 100% |
+| Permissions (2) | 2/2 | 0 | 100% |
+| Window (1) | 1/1 | 0 | 100% |
+
+### Backend (Rust)
+
+Rust tests live in `#[cfg(test)]` modules within source files. Coverage not measured by line count but tests exist in parser.rs, pricing.rs, claude_parser.rs, archive.rs, device_aggregation.rs, and other core modules.
 
 ---
 
 ## Statistics
 
-- **Total findings:** 27
-- **By severity:** 0 critical (2 fixed), 5 high, 10 medium, 8 low, 2 info
-- **By priority:** P1: 5, P2: 5, P3: 2, P4: 3, P5: 3, P6: 5, P7: 4
-- **Coverage:** 125/125 source files (100%)
-- **Codebase size:** ~62,200 lines Rust, ~27,900 lines TS/Svelte/CSS
-- **Actionable by repo-tidy:** 3 (F-005, F-017, F-018)
-- **Actionable by optimize:** 8 (F-001, F-002, F-003, F-004, F-008, F-011, F-012, F-013)
+- **Total findings:** 24
+- **By severity:** 2 high, 8 medium, 10 low, 4 info
+- **By priority:** P1: 6, P2: 5, P3: 4, P4: 2, P5: 2, P6: 3, P7: 2
+- **Coverage:** 142/142 files (100%)
+- **Actionable by repo-tidy:** 3 (F-005, F-006, F-019)
+- **Actionable by optimize:** 10 (F-001, F-003, F-004, F-007, F-009, F-012, F-013, F-014, F-015, F-021)

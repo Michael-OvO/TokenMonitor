@@ -59,7 +59,7 @@
   ];
 
   onMount(() => {
-    getVersion().then((v) => { appVersion = v; }).catch(() => {});
+    getVersion().then((v) => { appVersion = v; }).catch((e) => logger.debug("settings", `getVersion failed: ${e}`));
     refreshCursorAuthStatus();
     isEnabled()
       .then((enabled) => {
@@ -67,7 +67,7 @@
           updateSetting("launchAtLogin", enabled);
         }
       })
-      .catch(() => {});
+      .catch((e) => logger.debug("settings", `isEnabled check failed: ${e}`));
   });
 
   function handleCurrency(val: string) {
@@ -99,7 +99,7 @@
       apiKey,
     });
     clearUsageCache();
-    await invoke("clear_payload_cache").catch(() => {});
+    await invoke("clear_payload_cache").catch((e) => logger.debug("settings", `clear_payload_cache failed: ${e}`));
   }
 
   async function handleCursorApiKeyInput(value: string) {

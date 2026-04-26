@@ -68,7 +68,7 @@
     const interval = parseInt(val, 10) || 0;
     logger.info("settings", `Refresh interval IPC: ${interval}s`);
     updateSetting("refreshInterval", interval);
-    invoke("set_refresh_interval", { interval }).catch(() => {});
+    invoke("set_refresh_interval", { interval }).catch((e) => logger.debug("settings", `set_refresh_interval failed: ${e}`));
   }
 </script>
 

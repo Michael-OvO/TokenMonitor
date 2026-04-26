@@ -7,6 +7,9 @@ use std::sync::Mutex;
 use super::http::rate_limit_error_from_response;
 use super::RateLimitFetchError;
 
+const ANTHROPIC_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const ANTHROPIC_ACCOUNT_URL: &str = "https://api.anthropic.com/api/oauth/account";
+
 /// In-process cache of the Claude OAuth access token.
 ///
 /// Claude Code rewrites the `Claude Code-credentials` Keychain item each time
@@ -297,13 +300,13 @@ async fn try_fetch_claude_rate_limits() -> FetchAttempt {
 
     // Fetch usage + account in parallel
     let usage_fut = client
-        .get("https://api.anthropic.com/api/oauth/usage")
+        .get(ANTHROPIC_USAGE_URL)
         .bearer_auth(&token)
         .header("anthropic-beta", "oauth-2025-04-20")
         .send();
 
     let account_fut = client
-        .get("https://api.anthropic.com/api/oauth/account")
+        .get(ANTHROPIC_ACCOUNT_URL)
         .bearer_auth(&token)
         .header("anthropic-beta", "oauth-2025-04-20")
         .send();

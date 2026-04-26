@@ -2,7 +2,6 @@
   import { modelColor, formatCost, currencySymbol, convertCost, deviceColor } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
   import { activeOffset, activePeriod, chartMode, chartSegmentMode } from "../stores/usage.js";
-  import { isMacOS } from "../utils/platform.js";
   import { logger } from "../utils/logger.js";
   import type { ChartBucket } from "../types/index.js";
   import { filterVisibleChartBuckets, getXAxisLabels } from "./chartBuckets.js";

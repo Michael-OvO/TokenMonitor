@@ -554,9 +554,8 @@ export function createResizeOrchestrator(
     observerResizeRaf = 0;
   }
 
-  // Keep syncSize accessible internally for scheduleSettledResize;
-  // it's not exposed publicly because syncSizeAndVerify is the intended API.
   void syncSize;
+  void scheduleSettledResize;
 
   return {
     syncSizeAndVerify,

@@ -21,7 +21,7 @@ import type {
 } from "../types/index.js";
 import { setCurrency } from "../utils/format.js";
 import { logger } from "../utils/logger.js";
-import { isMacOS, isLinux } from "../utils/platform.js";
+import { isLinux } from "../utils/platform.js";
 export interface Settings {
   theme: "light" | "dark" | "system";
   defaultProvider: UsageProvider;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
+  import { logger } from "../utils/logger.js";
   import { rateLimitsData } from "../stores/rateLimits.js";
   import { syncTrayConfig } from "../tray/sync.js";
   import { formatTrayTitle } from "../tray/title.js";
@@ -73,7 +74,7 @@
   function handleTrayConfig<K extends keyof TrayConfig>(key: K, value: TrayConfig[K]) {
     const next = { ...current.trayConfig, [key]: value };
     updateSetting("trayConfig", next);
-    void syncTrayConfig(next, $rateLimitsData).catch(() => {});
+    void syncTrayConfig(next, $rateLimitsData).catch((e) => logger.debug("tray", `syncTrayConfig failed: ${e}`));
   }
 </script>
 

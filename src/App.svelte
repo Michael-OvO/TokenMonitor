@@ -60,6 +60,7 @@
     isResizeDebugEnabled,
     logResizeDebug,
   } from "./lib/uiStability.js";
+  import { setupAppEventListeners } from "./lib/appEventListeners.js";
   import { isMacOS } from "./lib/utils/platform.js";
   import {
     markClaudeKeychainAccessHandled,
@@ -112,6 +113,8 @@
   let popEl: HTMLDivElement | null = null;
   let resizeOrch: ResizeOrchestrator | null = null;
   let scrollThresholdH = $state(DEFAULT_MAX_WINDOW_HEIGHT);
+  // Written by orchestrator callback; read by future scroll-lock UI indicator.
+  // @ts-expect-error Assigned via callback, read access planned
   let isScrollLocked = $state(false);
   let deviceToggleGuard = 0;
   let initialDataLoad: Promise<void> | null = null;
@@ -203,7 +206,7 @@
         await hydrateRateLimits();
       }
 
-      await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch(() => {});
+      await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch((e) => logger.debug("tray", `syncTrayConfig failed: ${e}`));
       warmAllPeriods(provider, period);
       for (const warmProvider of getAdjacentWarmProviders(provider)) {
         warmAllPeriods(warmProvider);
@@ -455,7 +458,6 @@
     let observer: ResizeObserver | undefined;
     let unlisten: (() => void) | undefined;
     let unlistenWindowResize: (() => void) | undefined;
-    const colorScheme = window.matchMedia("(prefers-color-scheme: light)");
 
     // Create the resize orchestrator (all resize state lives in its closure)
     resizeOrch = createResizeOrchestrator({
@@ -486,53 +488,56 @@
           })
         : {};
 
-    const handleColorSchemeChange = () => {
-      const followsSystemTheme = !document.documentElement.hasAttribute("data-theme");
-      logResizeDebug("theme:system-change", {
-        matchesLight: colorScheme.matches,
-        followsSystemTheme,
-      });
-
-      const updates: Promise<unknown>[] = [syncTrayConfig(get(settings).trayConfig, null)];
-      if (followsSystemTheme) {
-        updates.push(syncNativeWindowSurface(undefined, get(settings).glassEffect));
-      }
-
-      void Promise.allSettled(updates);
-    };
-    const handleBrowserResize = () => {
-      logResizeDebug("browser:resize", captureSnapshot("browser-resize"));
-    };
-    const handleWindowFocus = () => {
-      logResizeDebug("window:focus", captureSnapshot("window-focus"));
-      void syncNativeWindowSurface(undefined, get(settings).glassEffect).catch(() => {});
-      syncSizeAndVerify("window-focus");
-    };
-    const handleWindowBlur = () => {
-      logResizeDebug("window:blur", captureSnapshot("window-blur"));
-    };
-    const handleVisibilityChange = () => {
-      logResizeDebug("document:visibility-change", {
-        hidden: document.hidden,
-        visibilityState: document.visibilityState,
-        ...captureSnapshot("document-visibility-change"),
-      });
-    };
-    const handleWindowError = (event: ErrorEvent) => {
-      logResizeDebug("window:error", {
-        message: event.message,
-        filename: event.filename || null,
-        lineno: event.lineno || null,
-        colno: event.colno || null,
-        error: formatDebugError(event.error),
-      });
-    };
-    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
-      logResizeDebug("window:unhandledrejection", {
-        reason: formatDebugError(event.reason),
-      });
-    };
     initResizeDebug();
+
+    const cleanupListeners = setupAppEventListeners({
+      onResize: () => {
+        logResizeDebug("browser:resize", captureSnapshot("browser-resize"));
+      },
+      onFocus: () => {
+        logResizeDebug("window:focus", captureSnapshot("window-focus"));
+        void syncNativeWindowSurface(undefined, get(settings).glassEffect).catch((e) => logger.debug("appearance", `syncNativeWindowSurface failed: ${e}`));
+        syncSizeAndVerify("window-focus");
+      },
+      onBlur: () => {
+        logResizeDebug("window:blur", captureSnapshot("window-blur"));
+      },
+      onError: (event) => {
+        logResizeDebug("window:error", {
+          message: event.message,
+          filename: event.filename || null,
+          lineno: event.lineno || null,
+          colno: event.colno || null,
+          error: formatDebugError(event.error),
+        });
+      },
+      onUnhandledRejection: (event) => {
+        logResizeDebug("window:unhandledrejection", {
+          reason: formatDebugError(event.reason),
+        });
+      },
+      onVisibilityChange: () => {
+        logResizeDebug("document:visibility-change", {
+          hidden: document.hidden,
+          visibilityState: document.visibilityState,
+          ...captureSnapshot("document-visibility-change"),
+        });
+      },
+      onColorSchemeChange: (matchesLight) => {
+        const followsSystemTheme = !document.documentElement.hasAttribute("data-theme");
+        logResizeDebug("theme:system-change", {
+          matchesLight,
+          followsSystemTheme,
+        });
+
+        const updates: Promise<unknown>[] = [syncTrayConfig(get(settings).trayConfig, null)];
+        if (followsSystemTheme) {
+          updates.push(syncNativeWindowSurface(undefined, get(settings).glassEffect));
+        }
+
+        void Promise.allSettled(updates);
+      },
+    });
     logResizeDebug("app:mount", captureSnapshot("mount"));
 
     const init = async () => {
@@ -605,18 +610,6 @@
     };
 
     init();
-    window.addEventListener("resize", handleBrowserResize);
-    window.addEventListener("focus", handleWindowFocus);
-    window.addEventListener("blur", handleWindowBlur);
-    window.addEventListener("error", handleWindowError);
-    window.addEventListener("unhandledrejection", handleUnhandledRejection);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
-    if (typeof colorScheme.addEventListener === "function") {
-      colorScheme.addEventListener("change", handleColorSchemeChange);
-    } else {
-      colorScheme.addListener(handleColorSchemeChange);
-    }
 
     return () => {
       cancelled = true;
@@ -625,17 +618,7 @@
       observer?.disconnect();
       resizeOrch?.destroy();
       resizeOrch = null;
-      window.removeEventListener("resize", handleBrowserResize);
-      window.removeEventListener("focus", handleWindowFocus);
-      window.removeEventListener("blur", handleWindowBlur);
-      window.removeEventListener("error", handleWindowError);
-      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      if (typeof colorScheme.removeEventListener === "function") {
-        colorScheme.removeEventListener("change", handleColorSchemeChange);
-      } else {
-        colorScheme.removeListener(handleColorSchemeChange);
-      }
+      cleanupListeners();
     };
   });
 </script>

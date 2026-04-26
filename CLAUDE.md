@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is TokenMonitor
 
-A local-first **cross-platform** system tray app (Tauri v2 + Svelte 5 + Rust) that monitors Claude Code and Codex CLI token usage. It reads JSONL session logs from disk, applies pricing rules in Rust, and presents spend/rate-limit data through a native system tray popover. No API keys, no cloud sync.
+A local-first **cross-platform** system tray app (Tauri v2 + Svelte 5 + Rust) that monitors Claude Code, Codex CLI, and Cursor IDE token usage. It reads JSONL session logs from disk, applies pricing rules in Rust, and presents spend/rate-limit data through a native system tray popover. No cloud sync.
 
-Supported platforms: **macOS**, **Windows**, **Linux**.
+Supported platforms: **macOS**, **Windows**, **Linux**. Current version: **0.11.1**.
 
 ### Platform differences
 
@@ -16,10 +16,12 @@ Supported platforms: **macOS**, **Windows**, **Linux**.
 | Cost display | `set_title()` text beside icon | Tooltip on hover | Tooltip on hover |
 | Rate limits (Claude) | OAuth via Keychain + API, CLI probe fallback | CLI probe only | CLI probe only |
 | Rate limits (Codex) | JSONL session files | JSONL session files | JSONL session files |
+| Rate limits (Cursor) | API (auto-detected or manual token) | API (auto-detected or manual token) | API (manual token) |
 | Glass blur effect | Supported (toggle in Settings) | Not available (opaque) | Not available (opaque) |
 | Dock icon toggle | Supported | Not applicable | Not applicable |
 | Autostart | LaunchAgent | Registry | XDG autostart |
-| Installer | DMG (signed + notarized) | NSIS .exe | .deb package |
+| Auto-update | DMG in-place replace | NSIS passive install | AppImage replace (.deb: download link) |
+| Installer | DMG (signed + notarized) | NSIS .exe | .deb / .AppImage |
 
 ## Common Commands
 
@@ -95,33 +97,40 @@ Frontend (Svelte 5 + TS)           Backend (Rust)
 App.svelte                         lib.rs (app setup, tray, background refresh)
  ├─ bootstrap.ts              ←→   commands/ (IPC handlers, split by domain)
  ├─ stores/usage.ts          ←IPC→   usage_query, calendar, period, config,
- ├─ stores/rateLimits.ts     ←IPC→   tray, ssh, float_ball, logging
+ ├─ stores/rateLimits.ts     ←IPC→   tray, ssh, float_ball/, updater, logging
  ├─ stores/settings.ts             logging.rs (tracing + rolling file appender)
- ├─ providerMetadata.ts            models.rs (shared serde payload types)
- ├─ types/index.ts                 usage/ (parser, pricing, integrations)
- ├─ components/*.svelte              ssh_remote.rs, ssh_config.rs
- ├─ tray/sync.ts, title.ts        rate_limits/ (claude, claude_cli, codex, http)
- ├─ window/appearance.ts,sizing.ts tray/render.rs (native tray icon/bars)
- ├─ views/footer.ts, rateLimits.ts stats/ (change.rs, subagent.rs)
- └─ utils/platform.ts, calendar.ts platform/ (macos/, windows/, linux/)
-     format.ts, logger.ts
+ ├─ stores/updater.ts              models.rs (shared serde payload types)
+ ├─ providerMetadata.ts            paths.rs (filesystem path registry)
+ ├─ types/index.ts                 usage/ (parser, claude_parser, pricing,
+ ├─ permissions/                     integrations, archive, device_aggregation,
+ │   keychain.ts, surfaces.ts       exchange_rates, litellm, openrouter,
+ ├─ components/*.svelte              ssh_remote.rs, ssh_config.rs)
+ ├─ tray/sync.ts, title.ts        rate_limits/ (claude, claude_cli, codex,
+ ├─ window/appearance.ts             cursor, http)
+ ├─ windowSizing.ts                secrets/ (cursor token management)
+ ├─ views/footer.ts, rateLimits.ts updater/ (state, persistence, scheduler)
+ └─ utils/platform.ts, plans.ts,  tray/render.rs (native tray icon/bars)
+     calendar.ts, format.ts,       stats/ (change.rs, subagent.rs)
+     logger.ts                     platform/ (macos/, windows/, linux/)
 
 FloatBall (separate Vite entry)
 ──────────────────────────
 float-ball.html → float-ball.ts → FloatBall.svelte (always-on-top overlay)
 ```
 
-**Data flow:** Local JSONL files → Rust `usage/parser` + `usage/pricing` → in-memory cache (Arc<RwLock<>>, 2-min TTL) → Tauri IPC → Svelte stores → UI components. Background loop refreshes tray and emits `data-updated` events every 120s. Frontend also maintains a payload cache to eliminate IPC round-trips on tab switches. SSH remote logs are synced via `usage/ssh_remote.rs` and merged into the same pipeline.
+**Data flow:** Local JSONL files → Rust `usage/parser` + `usage/claude_parser` + `usage/pricing` → in-memory cache (Arc<RwLock<>>, 2-min TTL) → Tauri IPC → Svelte stores → UI components. Background loop refreshes tray and emits `data-updated` events every 120s. Frontend also maintains a payload cache to eliminate IPC round-trips on tab switches. SSH remote logs are synced via `usage/ssh_remote.rs` and merged into the same pipeline. Completed hours are archived to `usage/archive.rs` persistent storage to survive log deletion.
 
-**Rate limits:** Split into `rate_limits/claude.rs` (OAuth Keychain + API, macOS only), `rate_limits/claude_cli.rs` (CLI probe fallback, all platforms), `rate_limits/codex.rs` (session file parsing), and `rate_limits/http.rs` (shared HTTP client). On Windows/Linux, the CLI probe is the primary method for Claude. Codex rate limits are read from local session files on all platforms. Both are cached and refreshed on configurable intervals per provider (see `rateLimits` in `providerMetadata.ts`).
+**Rate limits:** Split into `rate_limits/claude.rs` (OAuth Keychain + API, macOS only), `rate_limits/claude_cli.rs` (CLI probe fallback, all platforms), `rate_limits/codex.rs` (session file parsing), `rate_limits/cursor.rs` (Cursor API plan usage + spend limits), and `rate_limits/http.rs` (shared HTTP client). On Windows/Linux, the CLI probe is the primary method for Claude. Codex rate limits are read from local session files on all platforms. Cursor rate limits use an access token auto-detected from Cursor IDE's `state.vscdb` or manually stored via the `secrets/cursor.rs` keyring layer. All are cached and refreshed on configurable intervals per provider (see `rateLimits` in `providerMetadata.ts`).
 
-**Pricing:** Model pricing lives in `usage/pricing.rs` with a `PRICING_VERSION` constant. When Anthropic/OpenAI update pricing, update the rates in `get_rates()` and bump `PRICING_VERSION`. Cache-write tiers follow Anthropic's standard multipliers (5m = 1.25x, 1h = 2x, read = 0.1x).
+**Pricing:** Model pricing lives in `usage/pricing.rs` with a `PRICING_VERSION` constant. When Anthropic/OpenAI update pricing, update the rates in `get_rates()` and bump `PRICING_VERSION`. Cache-write tiers follow Anthropic's standard multipliers (5m = 1.25x, 1h = 2x, read = 0.1x). Dynamic pricing from LiteLLM (`usage/litellm.rs`) and OpenRouter (`usage/openrouter.rs`) APIs is fetched with 24h TTL caching for models not in the static table.
+
+**Exchange rates:** `usage/exchange_rates.rs` fetches live USD→EUR/GBP/JPY/CNY rates from Frankfurter API with 24h TTL disk cache. Used for currency display conversion in the frontend.
 
 **Frontend tests** live alongside source files as `*.test.ts` (vitest, node environment). Tests mock `@tauri-apps/api` IPC calls.
 
 **Rust tests** live in `#[cfg(test)]` modules within each `.rs` file. Use `tempfile` crate for fixtures.
 
-**Usage integrations** are registered in `usage/integrations.rs`. Adding a new CLI provider means adding an integration ID, its log root discovery, and a parser normalization path — without modifying existing provider branches.
+**Usage integrations** are registered in `usage/integrations.rs`. Current integrations: Claude, Codex, and Cursor. Adding a new CLI provider means adding an integration ID, its log root discovery, and a parser normalization path — without modifying existing provider branches.
 
 **Provider metadata** for the UI (tab order, labels, logos, rate-limit support, brand colors, plan tiers) is centralized in `providerMetadata.ts`. This is the single source of truth for provider-specific UI behavior.
 
@@ -129,7 +138,7 @@ float-ball.html → float-ball.ts → FloatBall.svelte (always-on-top overlay)
 
 **Native window:** On macOS, the popover previously used `NSVisualEffectView` for glass blur effects; this has been replaced with cross-platform opaque backgrounds. Glass effect toggle and Dock icon settings are hidden on non-macOS platforms via `src/lib/utils/platform.ts` detection. The `set_glass_effect`, `set_window_surface`, and `set_dock_icon_visible` IPC commands are retained as noops for frontend compatibility.
 
-**Commands module (Rust):** `commands.rs` is the IPC dispatch hub, split into domain-specific submodules: `usage_query` (data fetching), `calendar` (heatmap queries), `period` (time range selection), `config` (settings sync), `tray` (title/utilization rendering), `ssh` (remote device management), `float_ball` (overlay state), and `logging` (log-level control). `AppState` (defined in `commands.rs`) holds all shared state as `Arc<RwLock<>>` fields.
+**Commands module (Rust):** `commands.rs` is the IPC dispatch hub, split into domain-specific submodules: `usage_query` (data fetching), `calendar` (heatmap queries), `period` (time range selection), `config` (settings sync), `tray` (title/utilization rendering), `ssh` (remote device management), `float_ball/` (overlay state + layout engine, further split into `mod.rs` and `layout.rs`), `updater` (auto-update IPC commands), and `logging` (log-level control). `AppState` (defined in `commands.rs`) holds all shared state as `Arc<RwLock<>>` fields.
 
 **Logging:** `logging.rs` initializes `tracing` with a rolling file appender for backend logs and a separate appender for frontend logs forwarded via IPC (`log_frontend_message` command). Frontend uses `utils/logger.ts` which routes through the same Rust file writer. Log files live in the platform app-data directory. Log level is runtime-configurable via a reload handle.
 
@@ -143,7 +152,21 @@ float-ball.html → float-ball.ts → FloatBall.svelte (always-on-top overlay)
 
 **FloatBall:** A separate Vite entry point (`float-ball.html` → `float-ball.ts` → `FloatBall.svelte`) that renders an always-on-top draggable overlay ball. It has its own HTML file and mount target (`#float-ball`) independent of the main `App.svelte` window. Multi-entry is configured in `vite.config.ts` via `rollupOptions.input`.
 
-**Shared types:** `lib/types/index.ts` defines shared TypeScript interfaces (`UsagePayload`, `UsagePeriod`, `HeaderTabs`, etc.) used across stores, views, and components.
+**Shared types:** `lib/types/index.ts` defines shared TypeScript interfaces (`UsagePayload`, `UsagePeriod`, `HeaderTabs`, `SubagentStats`, etc.) used across stores, views, and components.
+
+**Auto-updater:** The `updater/` Rust module implements the full update lifecycle: `state.rs` defines `UpdaterState` with banner/notify predicates, `persistence.rs` persists state via `tauri-plugin-store`, and `scheduler.rs` checks for updates with exponential backoff (initial 10s, then 6h intervals). The frontend `stores/updater.ts` wires IPC commands + event listeners, `UpdateBanner.svelte` shows the in-app banner, and `tray/render.rs` composites a red badge dot on the tray icon when an update is available.
+
+**Secrets management:** `secrets/` provides a "keyring-first, encrypted file second" persistence strategy for user-supplied credentials. Currently the Cursor integration (`secrets/cursor.rs`) is the only consumer — it can auto-detect Cursor's access token from the IDE's `state.vscdb` or accept manual input stored in the OS keyring. The `StorageBackend` enum surfaces where each secret lives (Keyring / File / Auto-detected) for the Settings UI.
+
+**Permissions system:** `permissions/surfaces.ts` defines all filesystem and credential access surfaces with privacy-aware disclosures. `permissions/keychain.ts` implements the macOS Keychain one-time prompt flow. `PermissionDisclosure.svelte` renders surfaces in welcome, settings, and rate-limit contexts. `WelcomeCard.svelte` gates first-launch onboarding with opt-in toggles for rate limits and autostart.
+
+**Paths registry:** `paths.rs` is a central lookup layer for every filesystem path the app may read (Claude logs, Codex sessions, Cursor workspace storage, SSH config, etc.). Helps reason about macOS TCC prompts and privacy documentation.
+
+**Usage archive:** `usage/archive.rs` persists completed hourly aggregates into per-month JSONL files under `{app_data_dir}/usage-archive/`. Uses time-boundary partitioning for zero-overlap dedup: archive covers `[0..frontier]`, live source covers `(frontier..now]`.
+
+**Claude-specific parser:** `usage/claude_parser.rs` provides deep Claude Code JSONL parsing with change-event classification, subagent scope detection, and dedup logic separate from the generic parser.
+
+**Device aggregation:** `usage/device_aggregation.rs` builds device summaries and chart data from remote SSH parsed entries, handling provider filtering and timezone conversion.
 
 **MCP integration (archived):** The MCP modules (`detect.rs`, `mcp_process.rs`, `mcp_client.rs`, `mcp_adapter.rs`) have been moved to `archive/mcp/` as they were not yet wired into the active codebase. They can be restored when MCP integration is ready.
 

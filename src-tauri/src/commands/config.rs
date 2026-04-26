@@ -2,7 +2,7 @@ use super::tray::{patch_tray_utilization, sync_tray_title, tray_utilization_from
 use super::{AppState, UsageDebugReport};
 use crate::models::*;
 use crate::secrets;
-use crate::usage::parser::CursorAuthStatus;
+use crate::usage::cursor_parser::CursorAuthStatus;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, State};
@@ -100,12 +100,12 @@ pub async fn set_cursor_auth_config(
 
     if let Some(value) = trimmed {
         let backend = secrets::cursor::store(&app, Some(&value))?;
-        Ok(crate::usage::parser::set_cursor_auth_config(
+        Ok(crate::usage::cursor_parser::set_cursor_auth_config(
             Some(value),
             backend,
         ))
     } else if let Some((existing, backend)) = secrets::cursor::load(&app) {
-        Ok(crate::usage::parser::set_cursor_auth_config(
+        Ok(crate::usage::cursor_parser::set_cursor_auth_config(
             Some(existing),
             backend,
         ))
@@ -114,13 +114,13 @@ pub async fn set_cursor_auth_config(
         // cache; if the IDE provides one, the active credential becomes
         // an `IdeBearer` with `StorageBackend::IdeAuto`. Otherwise the
         // user is genuinely not connected.
-        let ide_present = crate::usage::parser::prime_ide_access_token();
+        let ide_present = crate::usage::cursor_parser::prime_ide_access_token();
         let backend = if ide_present {
             secrets::StorageBackend::IdeAuto
         } else {
             secrets::StorageBackend::None
         };
-        Ok(crate::usage::parser::set_cursor_auth_config(None, backend))
+        Ok(crate::usage::cursor_parser::set_cursor_auth_config(None, backend))
     }
 }
 
@@ -136,18 +136,18 @@ pub async fn set_cursor_auth_config(
 #[tauri::command]
 pub async fn clear_cursor_auth_config(app: AppHandle) -> Result<CursorAuthStatus, String> {
     secrets::cursor::store(&app, None)?;
-    let ide_present = crate::usage::parser::prime_ide_access_token();
+    let ide_present = crate::usage::cursor_parser::prime_ide_access_token();
     let backend = if ide_present {
         secrets::StorageBackend::IdeAuto
     } else {
         secrets::StorageBackend::None
     };
-    Ok(crate::usage::parser::set_cursor_auth_config(None, backend))
+    Ok(crate::usage::cursor_parser::set_cursor_auth_config(None, backend))
 }
 
 #[tauri::command]
 pub async fn get_cursor_auth_status() -> Result<CursorAuthStatus, String> {
-    Ok(crate::usage::parser::cursor_auth_status())
+    Ok(crate::usage::cursor_parser::cursor_auth_status())
 }
 
 /// Hydrate the in-memory Cursor secret state from disk so the very first
@@ -173,7 +173,7 @@ pub async fn get_cursor_auth_status() -> Result<CursorAuthStatus, String> {
 pub fn prime_cursor_auth_from_disk(app: &AppHandle) {
     let user_secret_loaded = match secrets::cursor::load(app) {
         Some((value, backend)) => {
-            let _ = crate::usage::parser::set_cursor_auth_config(Some(value), backend);
+            let _ = crate::usage::cursor_parser::set_cursor_auth_config(Some(value), backend);
             true
         }
         None => false,
@@ -183,14 +183,14 @@ pub fn prime_cursor_auth_from_disk(app: &AppHandle) {
     // the user might later clear their pasted token via the Disconnect
     // button, at which point we want to silently fall through to IDE auth
     // without a restart.
-    let ide_token_present = crate::usage::parser::prime_ide_access_token();
+    let ide_token_present = crate::usage::cursor_parser::prime_ide_access_token();
 
     if !user_secret_loaded && ide_token_present {
         // No user-pasted secret, but the IDE has a token — surface the
         // "auto-detected" backend so the Settings UI can render a
         // "Connected via Cursor IDE" badge without persisting anything.
         let _ =
-            crate::usage::parser::set_cursor_auth_config(None, secrets::StorageBackend::IdeAuto);
+            crate::usage::cursor_parser::set_cursor_auth_config(None, secrets::StorageBackend::IdeAuto);
     }
 }
 

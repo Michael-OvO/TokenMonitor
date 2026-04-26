@@ -1,6 +1,6 @@
 # TokenMonitor Tutorial
 
-A step-by-step guide to installing, configuring, and using TokenMonitor — a local-first cross-platform system tray app that monitors your Claude Code and Codex CLI token spending.
+A step-by-step guide to installing, configuring, and using TokenMonitor — a local-first cross-platform system tray app that monitors your Claude Code, Codex CLI, and Cursor IDE token spending.
 
 ---
 
@@ -19,15 +19,16 @@ A step-by-step guide to installing, configuring, and using TokenMonitor — a lo
 11. [Tray Display](#11-tray-display)
 12. [FloatBall Overlay](#12-floatball-overlay)
 13. [SSH Remote Devices](#13-ssh-remote-devices)
-14. [Settings](#14-settings)
-15. [Troubleshooting](#15-troubleshooting)
+14. [Auto-Updater](#14-auto-updater)
+15. [Settings](#15-settings)
+16. [Troubleshooting](#16-troubleshooting)
 
 ---
 
 ## 1. Prerequisites
 
 - **macOS 13+**, **Windows 10/11**, or **Linux** (with WebKitGTK support)
-- **Claude Code** and/or **Codex CLI** installed and used at least once (TokenMonitor reads the session logs these tools generate on disk)
+- **Claude Code**, **Codex CLI**, and/or **Cursor IDE** installed and used at least once (TokenMonitor reads the session logs these tools generate on disk)
 
 No API keys, accounts, or cloud services are required. TokenMonitor is fully local.
 
@@ -85,6 +86,7 @@ If you have existing Claude Code or Codex session logs on your machine, TokenMon
 |----------|-------------|
 | Claude Code | `~/.claude/projects/**/*.jsonl` |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` |
+| Cursor IDE | Cursor workspace storage `state.vscdb` |
 
 TokenMonitor reads these files directly — it never modifies or deletes them.
 
@@ -94,7 +96,7 @@ The popover window has several layers, from top to bottom:
 
 ```
 +----------------------------------+
-|  [All] [Claude] [Codex]         |  <- Provider tabs
+|  [All] [Claude] [Codex] [Cursor]|  <- Provider tabs
 +----------------------------------+
 |  $12.45 total   42,391 tokens   |  <- Metrics row
 +----------------------------------+
@@ -119,6 +121,7 @@ The top row shows your data sources:
 - **All** — Combined view across all providers
 - **Claude** — Claude Code usage only
 - **Codex** — Codex CLI usage only
+- **Cursor** — Cursor IDE usage only
 
 Click a tab to switch. The chart, breakdown, and metrics all update to reflect the selected provider.
 
@@ -146,6 +149,7 @@ The chart shows cost distribution over the selected period. Each bar is color-co
 
 - **Bar mode**: Stacked bars per time bucket (default)
 - **Line mode**: Cost trend over time
+- **Pie mode**: Model-share breakdown as a donut chart
 
 Toggle between modes by clicking the chart mode icon.
 
@@ -179,13 +183,15 @@ When rate limit data is available, TokenMonitor shows utilization bars for each 
   - **macOS**: Reads the OAuth authentication state already on your machine via the Anthropic API
   - **Windows / Linux**: Uses CLI probe to query rate limit status
 - **Codex**: Reads rate limit metadata from local Codex session files (all platforms)
+- **Cursor**: Fetches plan usage and spend limit data from the Cursor API. The access token is auto-detected from Cursor IDE's local storage (zero-config on macOS/Windows) or can be manually provided in Settings.
 
 Rate limit panels show:
 - Current utilization percentage
 - Time until the rate limit window resets
 - Cooldown state if you've been throttled
+- Cursor plan usage (auto-mode %) and spend limit tracking
 
-> Rate limits are optional — if the data isn't available, the panels simply don't appear.
+> Rate limits are optional — if the data isn't available, the panels simply don't appear. You can opt in/out of rate limit tracking from the first-launch welcome card or from Settings.
 
 ## 10. Calendar View
 
@@ -247,7 +253,40 @@ TokenMonitor can fetch usage logs from **remote machines via SSH**, giving you a
 
 > You need SSH key-based authentication configured for the remote hosts. Password-based auth is not supported in the background sync flow.
 
-## 14. Settings
+## 14. Auto-Updater
+
+TokenMonitor includes a built-in auto-updater that checks for new versions and offers in-app updates.
+
+### How it works
+
+- After launch, the app checks for updates (initial check after ~10 seconds, then every 6 hours)
+- When a new version is available, an **update banner** appears at the top of the popover
+- The **tray icon** shows a small **red badge dot** in the top-right corner
+- An **OS notification** fires once per new version (deduped across checks)
+
+### Update actions
+
+| Action | Behavior |
+|--------|----------|
+| **Update Now** | Downloads and installs the update. On macOS/Linux AppImage, the app relaunches automatically. On Windows, the NSIS installer runs in passive mode. |
+| **Skip** | Hides the banner for this specific version. The next release will re-trigger. |
+| **Later** | Dismisses the banner for the current session only. |
+
+### Platform behavior
+
+- **macOS**: `.app.tar.gz` bundle is downloaded, verified against the signing key, and replaced in-place
+- **Windows**: `.nsis.zip` bundle triggers the NSIS installer in passive mode
+- **Linux (AppImage)**: `.AppImage` is downloaded, verified, and replaced
+- **Linux (.deb)**: The banner shows a "Download" link that opens the GitHub release page in your browser (apt owns `.deb` installations)
+
+### Settings
+
+You can manage auto-update behavior in **Settings > Updates**:
+- Enable/disable automatic checks
+- View last check time and any errors
+- Manage skipped versions
+
+## 15. Settings
 
 Click the **gear icon** in the popover to open the settings panel:
 
@@ -257,11 +296,12 @@ Click the **gear icon** in the popover to open the settings panel:
 - **Brand theming** — Color the header and accents based on the selected provider
 
 ### Behavior
-- **Default provider** — Which tab opens first (Claude, Codex, or All)
+- **Default provider** — Which tab opens first (Claude, Codex, Cursor, or All)
 - **Default period** — Starting time period (5h, day, week, month)
 - **Refresh interval** — How often data auto-refreshes: 30s, 60s, 5min, or off
 - **Launch at login** — Automatically start TokenMonitor when you log in
 - **Show Dock icon** — Show/hide the Dock icon (macOS only, hidden by default)
+- **Rate limits** — Enable/disable rate limit tracking (opt-in from welcome card or here)
 
 ### Data
 - **Currency** — Display costs in USD, EUR, GBP, JPY, or CNY
@@ -274,17 +314,27 @@ Click the **gear icon** in the popover to open the settings panel:
 ### SSH Hosts
 - Manage remote SSH device connections (see [SSH Remote Devices](#13-ssh-remote-devices))
 
-## 15. Troubleshooting
+### Updates
+- Enable/disable automatic update checks
+- View current version and last check time
+- Manage skipped versions (see [Auto-Updater](#14-auto-updater))
+
+### Privacy & Permissions
+- View all filesystem paths and credential surfaces the app accesses
+- Each surface shows what data is read, why, and the access policy
+
+## 16. Troubleshooting
 
 ### "No data" after installing
 
-TokenMonitor reads session logs that Claude Code and Codex write to disk. If you see no data:
+TokenMonitor reads session logs that Claude Code, Codex, and Cursor IDE write to disk. If you see no data:
 
 1. **Verify logs exist**:
    - Claude Code: Check that `~/.claude/projects/` contains `.jsonl` files
    - Codex: Check `~/.codex/sessions/`
+   - Cursor: Check that Cursor IDE has been used (workspace storage is auto-detected)
    - On Windows, `~` maps to `C:\Users\<username>`
-2. **Run a session**: Open Claude Code or Codex and have at least one conversation. Logs are written during usage.
+2. **Run a session**: Open Claude Code, Codex, or Cursor and have at least one conversation. Logs are written during usage.
 3. **Check the date**: Make sure you're looking at the correct period. Use the < arrow to browse previous days.
 
 ### Popover doesn't appear
@@ -313,8 +363,9 @@ Rate limit data requires:
 - **Claude on macOS**: An active Claude authentication on your machine (the same one Claude Code uses)
 - **Claude on Windows/Linux**: Claude CLI must be available for probe-based rate limit checking
 - **Codex (all platforms)**: Recent Codex session files with rate limit metadata
+- **Cursor (all platforms)**: An access token — auto-detected from Cursor IDE on macOS/Windows, or manually entered in Settings
 
-If neither is available, the rate limit panels are simply hidden.
+If none are available, the rate limit panels are simply hidden. Rate limits must be enabled (opt-in from the first-launch welcome card or Settings).
 
 ### Windows-specific issues
 
@@ -336,3 +387,6 @@ If neither is available, the rate limit panels are simply hidden.
 - **5h window**: The 5-hour view maps to Claude's billing windows. Use it to pace yourself within rate limit cycles
 - **FloatBall**: Enable FloatBall when you want persistent cost visibility while coding in other windows
 - **Remote devices**: If you use Claude Code on multiple machines, SSH sync lets you see total spend in one place
+- **Cursor spend limits**: If you use Cursor with a spend limit, TokenMonitor shows both plan usage and spend limit utilization
+- **Auto-update**: Keep auto-update enabled to get the latest pricing tables and bug fixes automatically
+- **Pie chart**: Use pie chart mode for a quick visual breakdown of model share within a period

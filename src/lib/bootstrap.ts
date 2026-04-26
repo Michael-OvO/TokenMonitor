@@ -48,7 +48,7 @@ export async function initializeRuntimeFromSettings(
         logger.info("bootstrap", `Exchange rates loaded: ${Object.keys(rates).length} currencies`);
       }
     })
-    .catch(() => {});
+    .catch((e) => logger.debug("bootstrap", `Exchange rates fetch failed: ${e}`));
 
   applyThemeFn(saved.theme);
   applyGlassFn(saved.glassEffect);
@@ -91,7 +91,7 @@ export async function initializeRuntimeFromSettings(
 
   // Sync debug log level to Rust backend
   if (saved.debugLogging) {
-    invokeFn("set_log_level", { level: "debug" }).catch(() => {});
+    invokeFn("set_log_level", { level: "debug" }).catch((e) => logger.debug("bootstrap", `set_log_level failed: ${e}`));
   }
 
   // Wire updater listeners + initial status pull.

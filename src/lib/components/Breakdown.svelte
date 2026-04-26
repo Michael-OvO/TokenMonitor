@@ -236,7 +236,7 @@
                 class:active={device.include_in_stats}
                 type="button"
                 title={device.include_in_stats ? "Included in stats — click to exclude" : "Excluded from stats — click to include"}
-                onclick={(e: MouseEvent) => onToggleDeviceStats?.(device.device, !device.include_in_stats)}
+                onclick={() => onToggleDeviceStats?.(device.device, !device.include_in_stats)}
               >
                 <svg width="14" height="14" viewBox="0 0 14 14">
                   {#if device.include_in_stats}

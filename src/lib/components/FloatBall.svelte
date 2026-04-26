@@ -17,6 +17,8 @@
     getPhysicalWindowPositionFromPointer,
     shouldHandleFloatBallPointerButton,
   } from "./floatBallInteraction.js";
+  import { DragMachine, type DragState } from "./floatBallDragMachine.js";
+  import { MoveQueue } from "./floatBallMoveQueue.js";
   import {
     percent,
     fillWidth,
@@ -31,7 +33,6 @@
 
   const appWindow = getCurrentWebviewWindow();
   const IS_LINUX = isLinux();
-  const DRAG_THRESHOLD_PX = 5;
   const BLUR_GUARD_MS = 180;
   const COLLAPSE_TRANSITION_MS = 260;
   const EMPTY_CONFIG: TrayConfig = {
@@ -55,21 +56,37 @@
   let expandDirection = $state<FloatBallExpandDirection>("right");
 
   let dragging = $state(false);
+  const dragMachine = new DragMachine();
+
   let ignoreBlurUntil = 0;
   let suppressShellClick = false;
   let expansionRequestId = 0;
-  let interactionCounter = 0;
-  let moveSequence = 0;
   let collapsedAnchor = $state<"top" | "left" | "right" | "bottom" | null>(null);
-  let queuedMove:
-    | {
-        x: number;
-        y: number;
-        interactionId: string | null | undefined;
-      }
-    | null = null;
-  let moveFlushRaf = 0;
-  let moveInFlight = false;
+
+  function moveFloatBallTo(
+    x: number,
+    y: number,
+    interactionId: string | null | undefined,
+  ): Promise<void> {
+    const sequence = moveQueue.nextSequence();
+    logger.debug(
+      "floatBall",
+      `Move invoke: ${formatInteraction(interactionId)} sequence=${sequence} target=${formatPoint({ x, y })}`,
+    );
+    return invoke<void>("move_float_ball_to", { x, y, sequence, interactionId }).catch((error) => {
+      logger.warn(
+        "floatBall",
+        `Move invoke failed: ${formatInteraction(interactionId)} sequence=${sequence} target=${formatPoint({ x, y })} error=${formatError(error)}`,
+      );
+      throw error;
+    });
+  }
+
+  const moveQueue = new MoveQueue({
+    requestAnimationFrame: (cb) => requestAnimationFrame(cb),
+    cancelAnimationFrame: (id) => cancelAnimationFrame(id),
+    sendMove: moveFloatBallTo,
+  });
 
   let activePointer: {
     pointerId: number;
@@ -77,17 +94,7 @@
     interactionId: string;
   } | null = null;
   let dragGeneration = 0;
-  let dragState: {
-    pointerId: number;
-    button: number;
-    interactionId: string;
-    startScreenX: number;
-    startScreenY: number;
-    startWindowX: number;
-    startWindowY: number;
-    screenToPhysicalScale: number;
-    initiated: boolean;
-  } | null = null;
+  let dragState: DragState | null = null;
 
   type WidgetBar = {
     provider: RateLimitProviderId;
@@ -113,8 +120,7 @@
 
 
   function nextInteractionId(kind: string): string {
-    interactionCounter += 1;
-    return `${kind}-${Date.now().toString(36)}-${interactionCounter}`;
+    return dragMachine.nextInteractionId(kind);
   }
 
 
@@ -289,70 +295,7 @@
     }
   }
 
-  function moveFloatBallTo(
-    x: number,
-    y: number,
-    interactionId: string | null | undefined,
-  ): Promise<void> {
-    const sequence = ++moveSequence;
-    logger.debug(
-      "floatBall",
-      `Move invoke: ${formatInteraction(interactionId)} sequence=${sequence} target=${formatPoint({ x, y })}`,
-    );
-    return invoke<void>("move_float_ball_to", { x, y, sequence, interactionId }).catch((error) => {
-      logger.warn(
-        "floatBall",
-        `Move invoke failed: ${formatInteraction(interactionId)} sequence=${sequence} target=${formatPoint({ x, y })} error=${formatError(error)}`,
-      );
-      throw error;
-    });
-  }
-
-  function cancelQueuedMove() {
-    queuedMove = null;
-    if (moveFlushRaf !== 0) {
-      cancelAnimationFrame(moveFlushRaf);
-      moveFlushRaf = 0;
-    }
-  }
-
-  function requestMoveFlush() {
-    if (moveFlushRaf !== 0) return;
-    moveFlushRaf = requestAnimationFrame(() => {
-      moveFlushRaf = 0;
-      void flushQueuedMove();
-    });
-  }
-
-  async function flushQueuedMove() {
-    if (moveInFlight || !queuedMove) return;
-    const nextMove = queuedMove;
-    queuedMove = null;
-    moveInFlight = true;
-
-    try {
-      await moveFloatBallTo(nextMove.x, nextMove.y, nextMove.interactionId);
-    } catch {
-      // moveFloatBallTo already logs failures.
-    } finally {
-      moveInFlight = false;
-      if (queuedMove) {
-        requestMoveFlush();
-      }
-    }
-  }
-
-  function queueMoveFloatBallTo(
-    x: number,
-    y: number,
-    interactionId: string | null | undefined,
-  ) {
-    queuedMove = { x, y, interactionId };
-    if (!moveInFlight) {
-      requestMoveFlush();
-    }
-  }
-
+  // @ts-expect-error Reserved for future snap-on-release behavior
   function snapFloatBall(interactionId: string | null | undefined): Promise<void> {
     logger.info("floatBall", `Snap invoke: ${formatInteraction(interactionId)}`);
     return invoke<void>("snap_float_ball", { interactionId })
@@ -370,13 +313,13 @@
 
   function resetPointerInteraction(target: HTMLElement, pointerId: number) {
     releasePointerCapture(target, pointerId);
-    cancelQueuedMove();
+    moveQueue.cancel();
     // Linux: restore input shape if drag was active
     if (IS_LINUX && dragState?.initiated) {
       void invoke("set_float_ball_dragging", {
         dragging: false,
         interactionId: dragState.interactionId,
-      }).catch(() => {});
+      }).catch((e) => logger.debug("floatBall", `set_float_ball_dragging(false) failed: ${e}`));
     }
     dragGeneration += 1;
     activePointer = null;
@@ -425,17 +368,10 @@
           screenX,
           screenY,
         });
-        dragState = {
-          pointerId: event.pointerId,
-          button: event.button,
-          interactionId,
-          startScreenX: screenX,
-          startScreenY: screenY,
-          startWindowX: pos.x,
-          startWindowY: pos.y,
-          screenToPhysicalScale,
-          initiated: false,
-        };
+        dragState = dragMachine.createDragState(
+          event.pointerId, event.button, interactionId,
+          screenX, screenY, pos.x, pos.y, screenToPhysicalScale,
+        );
         logger.debug(
           "floatBall",
           `Pointer init ready: ${formatInteraction(interactionId)} pointerId=${event.pointerId} button=${event.button} startWindow=${formatPoint(pos)} scale=${scale} detectedScale=${screenToPhysicalScale}`,
@@ -456,10 +392,10 @@
     if (!dragState || event.pointerId !== dragState.pointerId) return;
     if (dragState.button !== 0) return; // Only allow drag with left click
 
-    const dx = event.screenX - dragState.startScreenX;
-    const dy = event.screenY - dragState.startScreenY;
+    const result = dragMachine.computeMove(dragState, event.screenX, event.screenY);
+    if (!result) return;
 
-    if (!dragState.initiated && Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) {
+    if (result.shouldInitiate) {
       dragState.initiated = true;
       dragging = true;
       collapsedAnchor = null;
@@ -469,30 +405,21 @@
         void invoke("set_float_ball_dragging", {
           dragging: true,
           interactionId: dragState.interactionId,
-        }).catch(() => {});
+        }).catch((e) => logger.debug("floatBall", `set_float_ball_dragging(true) failed: ${e}`));
       }
+      const dx = event.screenX - dragState.startScreenX;
+      const dy = event.screenY - dragState.startScreenY;
       logger.info(
         "floatBall",
         `Drag started: ${formatInteraction(dragState.interactionId)} pointerId=${event.pointerId} startWindow=${formatPoint({ x: dragState.startWindowX, y: dragState.startWindowY })} delta=${formatPoint({ x: dx, y: dy })} scale=${dragState.screenToPhysicalScale}`,
       );
     }
 
-    if (dragState.initiated) {
-      const { x: newX, y: newY } = getPhysicalWindowPositionFromPointer({
-        startScreenX: dragState.startScreenX,
-        startScreenY: dragState.startScreenY,
-        startWindowX: dragState.startWindowX,
-        startWindowY: dragState.startWindowY,
-        screenX: event.screenX,
-        screenY: event.screenY,
-        screenToPhysicalScale: dragState.screenToPhysicalScale,
-      });
-      logger.debug(
-        "floatBall",
-        `Drag move: ${formatInteraction(dragState.interactionId)} pointerId=${event.pointerId} target=${formatPoint({ x: newX, y: newY })} screen=${formatPoint({ x: event.screenX, y: event.screenY })}`,
-      );
-      queueMoveFloatBallTo(newX, newY, dragState.interactionId);
-    }
+    logger.debug(
+      "floatBall",
+      `Drag move: ${formatInteraction(dragState.interactionId)} pointerId=${event.pointerId} target=${formatPoint({ x: result.physicalX, y: result.physicalY })} screen=${formatPoint({ x: event.screenX, y: event.screenY })}`,
+    );
+    moveQueue.queue(result.physicalX, result.physicalY, dragState.interactionId);
   }
 
   function onPointerUp(event: PointerEvent) {
@@ -538,7 +465,7 @@
           "floatBall",
           `Drag ended: ${formatInteraction(interactionId)} requesting final move at ${formatPoint(finalPosition)}`,
         );
-        cancelQueuedMove();
+        moveQueue.cancel();
         void moveFloatBallTo(finalPosition.x, finalPosition.y, interactionId)
           .then(() => {
             // Linux: restore input shape to ball-only after drag
@@ -546,10 +473,10 @@
               return invoke("set_float_ball_dragging", {
                 dragging: false,
                 interactionId,
-              }).catch(() => {});
+              }).catch((e) => logger.debug("floatBall", `set_float_ball_dragging(false) after snap failed: ${e}`));
             }
           })
-          .catch(() => {});
+          .catch((e) => logger.debug("floatBall", `moveFloatBallTo failed: ${e}`));
       } else if (!wasDragging) {
         logger.debug(
           "floatBall",
@@ -606,7 +533,7 @@
     void refreshSummary();
     void getFloatBallPosition(nextInteractionId("mount"), "mount")
       .then((position) => syncCollapsedAnchor(position))
-      .catch(() => {});
+      .catch((e) => logger.debug("floatBall", `getFloatBallPosition failed: ${e}`));
 
     let destroyed = false;
     const cleanups: (() => void)[] = [];
@@ -642,7 +569,7 @@
 
     return () => {
       destroyed = true;
-      cancelQueuedMove();
+      moveQueue.destroy();
       for (const fn of cleanups) fn();
     };
   });

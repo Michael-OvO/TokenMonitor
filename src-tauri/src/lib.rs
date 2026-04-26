@@ -436,6 +436,13 @@ async fn refresh_rate_limits(app: &tauri::AppHandle, state: &AppState) {
     let _ = app.emit("status-widget-updated", ());
 }
 
+/// SSH sync interval: every 10 local refresh cycles (~5 min at 30s interval).
+const SSH_SYNC_EVERY_N_CYCLES: u64 = 10;
+/// Rate limit refresh: every 5 cycles (~2.5 min at 30s interval).
+const RATE_LIMIT_REFRESH_EVERY_N_CYCLES: u64 = 5;
+/// Pricing/exchange-rate TTL check: every 120 cycles (~1h at 30s interval).
+const PRICING_CHECK_EVERY_N_CYCLES: u64 = 120;
+
 async fn background_loop(app: tauri::AppHandle) {
     tokio::time::sleep(Duration::from_secs(1)).await;
     tracing::info!("Background refresh loop started");
@@ -448,15 +455,6 @@ async fn background_loop(app: tauri::AppHandle) {
     let mut ssh_sync_counter: u64 = 0;
     let mut rate_limit_counter: u64 = 0;
     let mut pricing_counter: u64 = 0;
-
-    // SSH sync interval: every 10 local refresh cycles (~5 min at 30s interval).
-    const SSH_SYNC_EVERY_N_CYCLES: u64 = 10;
-    // Rate limit refresh: every 5 cycles (~2.5 min at 30s interval).
-    const RATE_LIMIT_REFRESH_EVERY_N_CYCLES: u64 = 5;
-    // Pricing refresh: every 120 cycles (~1h at 30s interval).
-    // The actual TTL check (7 days) is inside should_refresh(), so this just
-    // controls how often we check the TTL, not how often we actually fetch.
-    const PRICING_CHECK_EVERY_N_CYCLES: u64 = 120;
 
     loop {
         let interval_secs = {

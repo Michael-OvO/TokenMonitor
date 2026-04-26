@@ -8,8 +8,8 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use super::parser::{
-    glob_jsonl_files, modified_since, path_to_string, push_sample_path, ParsedEntry,
-    ProviderReadDebug,
+    count_diff_lines, glob_jsonl_files, modified_since, path_to_string, push_sample_path,
+    ParsedEntry, ProviderReadDebug,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -255,21 +255,6 @@ fn count_claude_structured_patch_lines(
     Some((added, removed))
 }
 
-/// Count added and removed lines in a unified diff.
-/// Lines starting with `+` (but not `+++`) are additions.
-/// Lines starting with `-` (but not `---`) are removals.
-fn count_diff_lines(patch: &str) -> (u64, u64) {
-    let mut added: u64 = 0;
-    let mut removed: u64 = 0;
-    for line in patch.lines() {
-        if line.starts_with('+') && !line.starts_with("+++") {
-            added += 1;
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            removed += 1;
-        }
-    }
-    (added, removed)
-}
 
 fn extract_claude_tool_result_counts(
     tool_result: &ClaudeToolUseResult,
