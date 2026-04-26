@@ -1,3 +1,4 @@
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use tokio::process::Command;
@@ -700,9 +701,13 @@ impl SshCacheManager {
 
         // Build a set of existing record keys for dedup.
         let mut existing_keys = std::collections::HashSet::new();
-        if let Ok(content) = std::fs::read_to_string(&cache_path) {
-            for line in content.lines() {
-                if let Ok(r) = serde_json::from_str::<CompactUsageRecord>(line) {
+        if let Ok(file) = std::fs::File::open(&cache_path) {
+            for line in std::io::BufReader::new(file).lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                if let Ok(r) = serde_json::from_str::<CompactUsageRecord>(&line) {
                     existing_keys.insert(compact_record_key(&r));
                 }
             }
@@ -757,26 +762,30 @@ impl SshCacheManager {
     /// Count cached records without parsing JSON (line count).
     pub fn count_cached_records(&self, alias: &str) -> Result<u32, String> {
         let cache_path = self.usage_cache_path(alias)?;
-        let content = match std::fs::read_to_string(&cache_path) {
-            Ok(c) => c,
+        let file = match std::fs::File::open(&cache_path) {
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(format!("Failed to read cache for {alias}: {e}")),
         };
-        Ok(content.lines().filter(|l| !l.trim().is_empty()).count() as u32)
+        let count = std::io::BufReader::new(file)
+            .lines()
+            .filter(|l| l.as_ref().is_ok_and(|s| !s.trim().is_empty()))
+            .count() as u32;
+        Ok(count)
     }
 
     /// Load all cached compact records for a host.
     pub fn load_cached_records(&self, alias: &str) -> Result<Vec<CompactUsageRecord>, String> {
         let cache_path = self.usage_cache_path(alias)?;
-        let content = match std::fs::read_to_string(&cache_path) {
-            Ok(c) => c,
+        let file = match std::fs::File::open(&cache_path) {
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(format!("Failed to read cache for {alias}: {e}")),
         };
-
-        Ok(content
+        Ok(std::io::BufReader::new(file)
             .lines()
-            .filter_map(|line| serde_json::from_str::<CompactUsageRecord>(line).ok())
+            .map_while(Result::ok)
+            .filter_map(|line| serde_json::from_str::<CompactUsageRecord>(&line).ok())
             .collect())
     }
 }

@@ -116,6 +116,7 @@
   // Written by orchestrator callback; read by future scroll-lock UI indicator.
   // @ts-expect-error Assigned via callback, read access planned
   let isScrollLocked = $state(false);
+  let dismissedWarningText = $state<string | null>(null);
   let deviceToggleGuard = 0;
   let initialDataLoad: Promise<void> | null = null;
   const REMOTE_USAGE_CACHE_PROVIDERS: UsageProvider[] = [ALL_USAGE_PROVIDER_ID, "claude"];
@@ -671,9 +672,16 @@
         </div>
       {:else}
         <MetricsRow {data} />
-        {#if data.usage_warning}
+        {#if data.usage_warning && data.usage_warning !== dismissedWarningText}
           <div class="usage-warning">
-            <div class="usage-warning-title">Usage warning</div>
+            <div class="usage-warning-header">
+              <div class="usage-warning-title">Usage warning</div>
+              <button
+                class="usage-warning-dismiss"
+                onclick={() => { dismissedWarningText = data?.usage_warning ?? null; }}
+                aria-label="Dismiss warning"
+              >&times;</button>
+            </div>
             <div class="usage-warning-text">{data.usage_warning}</div>
           </div>
         {/if}
@@ -870,10 +878,38 @@
     background: color-mix(in srgb, #d88d31 12%, transparent);
     border: 1px solid color-mix(in srgb, #d88d31 30%, transparent);
   }
+  .usage-warning-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 3px;
+  }
+  .usage-warning-header .usage-warning-title {
+    margin-bottom: 0;
+  }
   .usage-warning-title {
     font: 600 9px/1.2 'Inter', sans-serif;
     color: var(--t1);
-    margin-bottom: 3px;
+  }
+  .usage-warning-dismiss {
+    background: none;
+    border: none;
+    padding: 0;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--t3);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .usage-warning-dismiss:hover {
+    color: var(--t1);
+    background: var(--surface-hover);
   }
   .usage-warning-text {
     font: 400 8.5px/1.35 'Inter', sans-serif;
