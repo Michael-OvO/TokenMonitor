@@ -31,8 +31,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v6
@@ -125,19 +123,26 @@ jobs:
           echo "$APPLE_API_KEY_CONTENT" > "$P8_PATH"
           echo "APPLE_API_KEY_PATH=$P8_PATH" >> "$GITHUB_ENV"
 
-      # ── Normalize updater signing key ────────────────────────────────────
-      - name: Normalize updater signing key
-        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+      # ── Set up updater signing key ──────────────────────────────────────
+      - name: Set up updater signing key
+        if: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         shell: bash
+        env:
+          RAW_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          RAW_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          if [[ "$TAURI_SIGNING_PRIVATE_KEY" != untrusted\ comment:* ]]; then
-            {
-              echo "TAURI_SIGNING_PRIVATE_KEY<<SIGNING_KEY_EOF"
-              printf 'untrusted comment: minisign secret key\n%s\n' "$TAURI_SIGNING_PRIVATE_KEY"
-              echo "SIGNING_KEY_EOF"
-            } >> "$GITHUB_ENV"
+          if [[ "$RAW_KEY" == untrusted\ comment:* ]]; then
+            FINAL_KEY="$RAW_KEY"
+          else
+            FINAL_KEY="$(printf 'untrusted comment: minisign secret key\n%s' "$RAW_KEY")"
             echo "::notice::Prepended missing comment line to TAURI_SIGNING_PRIVATE_KEY"
           fi
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<SIGNING_KEY_EOF"
+            echo "$FINAL_KEY"
+            echo "SIGNING_KEY_EOF"
+          } >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$RAW_PASSWORD" >> "$GITHUB_ENV"
 
       # ── Build installers ───────────────────────────────────────────────────
       - name: Build installers (macOS — signed)
