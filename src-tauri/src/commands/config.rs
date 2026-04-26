@@ -120,7 +120,9 @@ pub async fn set_cursor_auth_config(
         } else {
             secrets::StorageBackend::None
         };
-        Ok(crate::usage::cursor_parser::set_cursor_auth_config(None, backend))
+        Ok(crate::usage::cursor_parser::set_cursor_auth_config(
+            None, backend,
+        ))
     }
 }
 
@@ -142,7 +144,9 @@ pub async fn clear_cursor_auth_config(app: AppHandle) -> Result<CursorAuthStatus
     } else {
         secrets::StorageBackend::None
     };
-    Ok(crate::usage::cursor_parser::set_cursor_auth_config(None, backend))
+    Ok(crate::usage::cursor_parser::set_cursor_auth_config(
+        None, backend,
+    ))
 }
 
 #[tauri::command]
@@ -189,8 +193,10 @@ pub fn prime_cursor_auth_from_disk(app: &AppHandle) {
         // No user-pasted secret, but the IDE has a token — surface the
         // "auto-detected" backend so the Settings UI can render a
         // "Connected via Cursor IDE" badge without persisting anything.
-        let _ =
-            crate::usage::cursor_parser::set_cursor_auth_config(None, secrets::StorageBackend::IdeAuto);
+        let _ = crate::usage::cursor_parser::set_cursor_auth_config(
+            None,
+            secrets::StorageBackend::IdeAuto,
+        );
     }
 }
 

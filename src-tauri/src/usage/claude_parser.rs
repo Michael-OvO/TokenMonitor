@@ -255,7 +255,6 @@ fn count_claude_structured_patch_lines(
     Some((added, removed))
 }
 
-
 fn extract_claude_tool_result_counts(
     tool_result: &ClaudeToolUseResult,
     pending: &PendingClaudeTool,

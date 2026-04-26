@@ -127,8 +127,19 @@ pub async fn init_ssh_hosts(
     hosts: Vec<SshHostConfig>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let valid: Vec<SshHostConfig> = hosts
+        .into_iter()
+        .filter(|h| {
+            if let Err(e) = validate_ssh_alias(&h.alias) {
+                tracing::warn!("Skipping SSH host with invalid alias {:?}: {e}", h.alias);
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
     let mut configs = state.ssh_hosts.write().await;
-    *configs = hosts;
+    *configs = valid;
     Ok(())
 }
 
@@ -171,6 +182,10 @@ pub async fn sync_ssh_host(
             .clone()
     };
     let count = mgr.sync_host(&alias).await?;
+
+    if count > 0 {
+        state.parser.clear_payload_cache();
+    }
 
     let diagnostic = if count == 0 {
         Some(

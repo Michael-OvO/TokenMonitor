@@ -69,10 +69,12 @@ export function shallowPayloadEqual(a: UsagePayload, b: UsagePayload): boolean {
     a.has_earlier_data === b.has_earlier_data &&
     a.usage_warning === b.usage_warning &&
     (a.device_breakdown?.length ?? 0) === (b.device_breakdown?.length ?? 0) &&
-    (a.device_breakdown?.[0]?.total_cost ?? 0) === (b.device_breakdown?.[0]?.total_cost ?? 0) &&
-    (a.device_breakdown ?? []).every((d, i) =>
-      d.include_in_stats === b.device_breakdown?.[i]?.include_in_stats,
-    )
+    (a.device_breakdown ?? []).every(
+      (d, i) =>
+        d.total_cost === b.device_breakdown?.[i]?.total_cost &&
+        d.include_in_stats === b.device_breakdown?.[i]?.include_in_stats,
+    ) &&
+    (a.device_chart_buckets?.length ?? 0) === (b.device_chart_buckets?.length ?? 0)
   );
 }
 

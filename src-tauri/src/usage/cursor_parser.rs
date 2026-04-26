@@ -1,11 +1,11 @@
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use serde::Serialize;
 use serde_json::Value;
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
-use std::{fs};
 
 use super::parser::{
     modified_since, path_to_string, push_sample_path, ParsedEntry, ProviderReadDebug,
@@ -933,8 +933,7 @@ pub(crate) fn load_cursor_local_entries(
             }
         }
 
-        let (parsed_entries, _change_events, lines_read, opened) =
-            parse_cursor_session_file(&path);
+        let (parsed_entries, _change_events, lines_read, opened) = parse_cursor_session_file(&path);
         report.lines_read += lines_read;
         if opened {
             report.opened_paths += 1;

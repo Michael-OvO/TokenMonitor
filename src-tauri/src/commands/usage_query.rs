@@ -154,9 +154,17 @@ fn parser_payload_for_period(
             Ok(payload)
         }
         "year" => {
-            let target_year = now.year() + offset;
-            let first_of_year = NaiveDate::from_ymd_opt(target_year, 1, 1).unwrap();
-            let end_of_year = NaiveDate::from_ymd_opt(target_year + 1, 1, 1).unwrap();
+            let target_year = now
+                .year()
+                .checked_add(offset)
+                .ok_or_else(|| format!("Year offset overflow: {offset}"))?;
+            let first_of_year = NaiveDate::from_ymd_opt(target_year, 1, 1)
+                .ok_or_else(|| format!("Invalid year: {target_year}"))?;
+            let next_year = target_year
+                .checked_add(1)
+                .ok_or_else(|| format!("Year+1 overflow: {target_year}"))?;
+            let end_of_year = NaiveDate::from_ymd_opt(next_year, 1, 1)
+                .ok_or_else(|| format!("Invalid next year: {next_year}"))?;
             let since_str = first_of_year.format("%Y%m%d").to_string();
             let mut payload = parser.get_monthly(provider, &since_str);
             filter_buckets_to_range(&mut payload, first_of_year, end_of_year);
@@ -198,13 +206,18 @@ fn apply_period_context(
         }
         "month" => {
             let (year, month) = resolve_month_offset(now.year(), now.month(), offset);
-            let first_of_month = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+            let first_of_month = NaiveDate::from_ymd_opt(year, month, 1)
+                .ok_or_else(|| format!("Invalid month offset: year={year}, month={month}"))?;
             payload.period_label = format_month_label(first_of_month);
             payload.has_earlier_data = parser.has_entries_before(provider, first_of_month);
         }
         "year" => {
-            let target_year = now.year() + offset;
-            let first_of_year = NaiveDate::from_ymd_opt(target_year, 1, 1).unwrap();
+            let target_year = now
+                .year()
+                .checked_add(offset)
+                .ok_or_else(|| format!("Year offset overflow: {offset}"))?;
+            let first_of_year = NaiveDate::from_ymd_opt(target_year, 1, 1)
+                .ok_or_else(|| format!("Invalid year: {target_year}"))?;
             payload.period_label = format_year_label(target_year);
             payload.has_earlier_data = parser.has_entries_before(provider, first_of_year);
         }
