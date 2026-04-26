@@ -116,15 +116,15 @@ async function runTauriBuild(context) {
 }
 
 function shouldDisableSigning(platformId) {
-  if (platformId !== "macos") {
-    return false;
+  if (platformId === "macos") {
+    return !(
+      process.env.APPLE_SIGNING_IDENTITY
+      || process.env.APPLE_API_KEY
+      || process.env.APPLE_API_KEY_PATH
+    );
   }
 
-  return !(
-    process.env.APPLE_SIGNING_IDENTITY
-    || process.env.APPLE_API_KEY
-    || process.env.APPLE_API_KEY_PATH
-  );
+  return !process.env.TAURI_SIGNING_PRIVATE_KEY;
 }
 
 async function collectArtifacts(context) {
