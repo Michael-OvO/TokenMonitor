@@ -158,7 +158,7 @@ fn update_windows_hit_region(
     is_expanded: bool,
     _sizes: &FloatBallSizes,
 ) {
-    use windows::Win32::UI::WindowsAndMessaging::SetWindowRgn;
+    use windows::Win32::Graphics::Gdi::SetWindowRgn;
 
     let Ok(hwnd_raw) = window.hwnd() else {
         return;

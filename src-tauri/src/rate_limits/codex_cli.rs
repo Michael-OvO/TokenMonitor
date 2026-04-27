@@ -278,10 +278,7 @@ pub(super) async fn fetch_codex_rate_limits_via_cli(
     command.stderr(std::process::Stdio::null());
 
     #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
 
     let mut child = command.spawn().map_err(|e| {
         RateLimitFetchError::message(format!("Failed to start Codex app-server: {e}"))
