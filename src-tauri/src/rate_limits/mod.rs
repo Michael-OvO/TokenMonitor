@@ -2,6 +2,10 @@ mod claude;
 mod claude_cli;
 mod codex;
 mod http;
+// Refresh-grant flow uses the owned-mirror keychain item, which is
+// macOS-only. Gating the module avoids dead-code warnings on
+// Linux/Windows where nothing imports it.
+#[cfg(target_os = "macos")]
 mod oauth_refresh;
 
 use crate::models::{ProviderRateLimits, RateLimitsPayload};

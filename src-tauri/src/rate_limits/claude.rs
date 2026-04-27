@@ -48,7 +48,9 @@ fn extract_access_token(json_str: &str) -> Result<String, String> {
 
 /// Extract `claudeAiOauth.refreshToken` from a JSON string. Used by the
 /// OAuth refresh-grant flow to mint a fresh access token without prompting
-/// the user.
+/// the user. macOS-only because the owned-mirror refresh path is too —
+/// Linux/Windows currently rely on `~/.claude/.credentials.json` instead.
+#[cfg(target_os = "macos")]
 fn extract_refresh_token(json_str: &str) -> Result<String, String> {
     let parsed: serde_json::Value =
         serde_json::from_str(json_str.trim()).map_err(|e| format!("Invalid JSON: {e}"))?;
@@ -64,7 +66,9 @@ fn extract_refresh_token(json_str: &str) -> Result<String, String> {
 /// Patch the credentials JSON with a refreshed access token, optionally
 /// rotating the refresh token + expiresAt as well. Preserves every other
 /// field so the mirror keeps its `subscriptionType`, `rateLimitTier`, MCP
-/// OAuth state, etc.
+/// OAuth state, etc. macOS-only — the only caller is
+/// [`try_refresh_via_owned_mirror`].
+#[cfg(target_os = "macos")]
 fn update_credentials_with_refresh(
     original_json: &str,
     new_access_token: &str,
@@ -416,9 +420,12 @@ pub(crate) fn get_claude_oauth_token() -> Result<String, String> {
 /// holds the same expired token as the cache. Without that delete the next
 /// read just resurrects the stale token from our own Keychain item and we
 /// loop on 401 forever.
+///
+/// macOS-only — the non-mac retry path calls
+/// [`invalidate_access_token_cache`] inline.
+#[cfg(target_os = "macos")]
 fn invalidate_oauth_credentials_after_unauthorized() {
     invalidate_access_token_cache();
-    #[cfg(target_os = "macos")]
     delete_owned_keychain_item();
 }
 
@@ -489,12 +496,14 @@ pub(super) async fn fetch_claude_rate_limits() -> Result<ProviderRateLimits, Rat
         FetchAttempt::Ok(rate_limits) => Ok(rate_limits),
         FetchAttempt::Other(err) => Err(err),
         FetchAttempt::Unauthorized(unauthorized_err) => {
-            // Access token is stale. First, try the OAuth refresh-grant
-            // flow with the refresh token already stored in our owned
-            // mirror — that survives Anthropic-side rotations without the
-            // user re-granting Keychain access. Only on a *confirmed*
-            // refresh-token revocation do we delete the mirror and fall
-            // back to the interactive prompt path.
+            // Access token is stale. On macOS, first try the OAuth
+            // refresh-grant flow with the refresh token already stored in
+            // our owned mirror — that survives Anthropic-side rotations
+            // without the user re-granting Keychain access. Only on a
+            // *confirmed* refresh-token revocation do we delete the mirror
+            // and fall back to the interactive prompt path. On
+            // Linux/Windows we don't have an owned-mirror flow yet, so we
+            // just drop the in-mem cache and retry against the source.
             #[cfg(target_os = "macos")]
             {
                 match try_refresh_via_owned_mirror().await {
@@ -528,6 +537,7 @@ pub(super) async fn fetch_claude_rate_limits() -> Result<ProviderRateLimits, Rat
             }
             #[cfg(not(target_os = "macos"))]
             {
+                let _ = unauthorized_err;
                 invalidate_access_token_cache();
             }
 
