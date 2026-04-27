@@ -105,6 +105,8 @@ describe("formatTokens", () => {
     [1_000_000, "1.0M"],
     [1_500_000, "1.5M"],
     [10_000_000, "10.0M"],
+    [1_000_000_000, "1.0B"],
+    [6_225_500_000, "6.2B"],
   ])("formats %d as %s", (input, expected) => {
     expect(formatTokens(input)).toBe(expected);
   });

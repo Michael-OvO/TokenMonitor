@@ -45,7 +45,6 @@
   let visibleDevices = $derived(sortedDevices.slice(0, MAX_VISIBLE_DEVICES));
   let hasMoreDevices = $derived(sortedDevices.length > MAX_VISIBLE_DEVICES);
   let devicesTotalCost = $derived(sortedDevices.reduce((sum, d) => sum + d.total_cost, 0));
-  let maxDeviceCost = $derived(Math.max(...sortedDevices.map((d) => d.total_cost), 0.01));
 
   type AccordionScope = "main" | "subagents" | "devices";
 
@@ -222,13 +221,6 @@
                 {/if}
                 <span class="device-cost">{formatCost(device.total_cost)}</span>
               </span>
-              <span class="device-bar-track">
-                <span
-                  class="device-bar-fill"
-                  style:width="{Math.max((device.total_cost / maxDeviceCost) * 100, 2)}%"
-                  style:background={deviceColor(device.device)}
-                ></span>
-              </span>
             </button>
             {#if !device.is_local}
               <button
@@ -347,7 +339,7 @@
   .sub-bar { width: 2px; height: 10px; border-radius: 1px; flex-shrink: 0; margin-top: 2px; }
   .sub-info { flex: 1; min-width: 0; }
   .sub-name-row { display: flex; align-items: center; gap: 4px; }
-  .sub-name { font: 400 9px/1.2 'Inter', sans-serif; color: var(--t3); flex: 1; }
+  .sub-name { font: 400 9px/1.2 'Inter', sans-serif; color: var(--t3); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sub-cost { font: 400 9px/1.2 'Inter', sans-serif; color: var(--t2); }
   .sub-tokens {
     font: 400 7.5px/1 'Inter', sans-serif; color: var(--t4);
@@ -374,7 +366,7 @@
   }
   .device-row:hover { background: var(--surface-2); }
 
-  .device-color-bar { width: 2px; height: 14px; border-radius: 1px; flex-shrink: 0; margin-top: 4px; }
+  .device-color-bar { width: 2px; height: 14px; border-radius: 1px; flex-shrink: 0; }
   .device-info {
     flex: 1; min-width: 0;
     border: none; background: none; cursor: pointer;
@@ -390,15 +382,6 @@
 
   }
   .device-cost { font: 500 9px/1.2 'Inter', sans-serif; color: var(--t1); flex-shrink: 0; }
-  .device-bar-track {
-    height: 2px; background: var(--surface-hover, rgba(128,128,128,0.1));
-    border-radius: 1px; margin-top: 3px; overflow: hidden;
-  }
-  .device-bar-fill {
-    height: 100%; border-radius: 1px;
-    transition: width 0.3s ease;
-    opacity: 0.7;
-  }
   .device-more {
     display: block; width: 100%; padding: 4px 7px 4px 24px;
     border: none; background: none; cursor: pointer;

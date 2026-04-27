@@ -313,16 +313,6 @@
   <div class="ch-top">
     <span class="ch-t">Cost by {$chartSegmentMode === "device" ? "device" : "model"}</span>
     <div class="ch-right">
-      {#if $chartMode !== "pie"}
-        <div class="leg">
-          {#each legendModels() as lm}
-            <span class="leg-item">
-              <span class="leg-dot" style="background:{segmentColorFn(lm.key)}"></span>
-              {lm.name}
-            </span>
-          {/each}
-        </div>
-      {/if}
       {#if deviceBuckets}
         <div class="mode-toggle seg-toggle">
           <button type="button" class:on={$chartSegmentMode === "model"} title="By model" onclick={() => { logger.info("chart", "Segment: model"); chartSegmentMode.set("model"); }}>M</button>
@@ -372,6 +362,17 @@
       </div>
     </div>
   </div>
+
+  {#if $chartMode !== "pie" && legendModels().length > 0}
+    <div class="leg" role="list" aria-label="Chart legend">
+      {#each legendModels() as lm}
+        <span class="leg-item" role="listitem" title={lm.name}>
+          <span class="leg-dot" style="background:{segmentColorFn(lm.key)}"></span>
+          <span class="leg-name">{lm.name}</span>
+        </span>
+      {/each}
+    </div>
+  {/if}
 
   <div class="detail" class:visible={displayed != null}>
     {#if displayed}
@@ -602,23 +603,53 @@
     position: relative;
   }
   .ch-top { order: 1; }
-  .chart-body { order: 2; }
-  .xa { order: 3; }
-  .detail { order: 4; }
+  .leg { order: 2; }
+  .chart-body { order: 3; }
+  .xa { order: 4; }
+  .detail { order: 5; }
   .ch.detail-above .detail { order: 2; }
-  .ch.detail-above .chart-body { order: 3; }
-  .ch.detail-above .xa { order: 4; }
+  .ch.detail-above .leg { order: 3; }
+  .ch.detail-above .chart-body { order: 4; }
+  .ch.detail-above .xa { order: 5; }
 
-  .ch-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-  .ch-t { font: 500 8px/1 "Inter", sans-serif; color: var(--t3); }
-  .ch-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .leg { display: flex; gap: 7px; overflow: hidden; min-width: 0; }
-  .leg-item {
-    display: flex; align-items: center; gap: 3px;
-    font: 400 8px/1.3 "Inter", sans-serif; color: var(--t2);
-    white-space: nowrap; overflow: hidden; min-width: 20px;
+  .ch-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 8px; }
+  .ch-t { font: 500 8px/1 "Inter", sans-serif; color: var(--t3); flex-shrink: 0; }
+  .ch-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+  /* Legend — its own row beneath the title so model names get real space.
+     Wraps gracefully when many models are present; ellipsis only kicks in
+     for unusually long names that wouldn't fit even on their own line. */
+  .leg {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 10px;
+    row-gap: 4px;
+    margin-bottom: 10px;
+    padding: 0 1px;
+    animation: fadeUp var(--t-normal) var(--ease-out) both;
   }
-  .leg-dot { width: 5px; height: 5px; border-radius: 1.5px; flex-shrink: 0; }
+  .leg-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    min-width: 0;
+    font: 400 9px/1.25 "Inter", sans-serif;
+    color: var(--t2);
+    letter-spacing: 0.1px;
+  }
+  .leg-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .leg-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
 
   /* Mode toggle */
   .mode-toggle {
