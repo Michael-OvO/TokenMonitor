@@ -56,10 +56,14 @@
   --splash-disc: rgba(255,255,255,0.93);
   --splash-eye: #111113;
 
-  --comp-code: #60a5fa;
-  --comp-docs: #a78bfa;
-  --comp-config: #e0a832;
-  --comp-other: rgba(255,255,255,0.15);
+  /* Composition palette — distinct muted hues, dodging provider accents
+     (warm terracotta = Claude, cool blue = Codex) to avoid signalling
+     status. Saturation kept low so the bar reads as a unit, not a stripe
+     of marker pens. */
+  --comp-code: #6FA98C;
+  --comp-docs: #C8A977;
+  --comp-config: #8C8AB8;
+  --comp-other: rgba(255,255,255,0.28);
 
   --ch-plus: #5cb87a;
   --ch-minus: #d06868;
@@ -86,10 +90,10 @@
   --splash-disc: rgba(0,0,0,0.85);
   --splash-eye: #F5F5F7;
 
-  --comp-code: #3b82f6;
-  --comp-docs: #8b5cf6;
-  --comp-config: #c89520;
-  --comp-other: rgba(0,0,0,0.10);
+  --comp-code: #4F8A6E;
+  --comp-docs: #8C7A4E;
+  --comp-config: #6B6AA0;
+  --comp-other: rgba(0,0,0,0.28);
 
   --ch-plus: #1a8a42;
   --ch-minus: #c03030;
@@ -158,10 +162,10 @@
     --splash-disc: rgba(0,0,0,0.85);
     --splash-eye: #F5F5F7;
 
-    --comp-code: #3b82f6;
-    --comp-docs: #8b5cf6;
-    --comp-config: #c89520;
-    --comp-other: rgba(0,0,0,0.10);
+    --comp-code: #4F8A6E;
+    --comp-docs: #8C7A4E;
+    --comp-config: #6B6AA0;
+    --comp-other: rgba(0,0,0,0.28);
 
     --ch-plus: #1a8a42;
     --ch-minus: #c03030;

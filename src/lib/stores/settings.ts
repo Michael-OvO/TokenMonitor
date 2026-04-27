@@ -59,6 +59,16 @@ export interface Settings {
    * back to the CLI probe transparently.
    */
   keychainAccessRequested: boolean;
+  /**
+   * User-controlled toggle for the local session-log parser. When `false`,
+   * the backend's `usage_access_enabled` atomic stays off and the parser
+   * never reads `~/.claude/` or `~/.codex/`, so no data lands in the
+   * dashboard. Defaults to `true` so a brand-new install starts tracking
+   * once the wizard finishes; the Settings panel exposes it as the
+   * "Session Logs" toggle. Decoupled from `hasSeenWelcome` so the user
+   * can disable tracking without resetting the welcome flow.
+   */
+  usageAccessEnabled: boolean;
 }
 
 export const HEADER_TAB_ORDER: UsageProvider[] = [...USAGE_PROVIDER_ORDER];
@@ -104,6 +114,7 @@ const DEFAULTS: Settings = {
   rateLimitsEnabled: false,
   hasSeenWelcome: false,
   keychainAccessRequested: false,
+  usageAccessEnabled: true,
 };
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
@@ -302,6 +313,7 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
       saved?.keychainAccessRequested,
       DEFAULTS.keychainAccessRequested,
     ),
+    usageAccessEnabled: normalizeBoolean(saved?.usageAccessEnabled, DEFAULTS.usageAccessEnabled),
   };
 }
 

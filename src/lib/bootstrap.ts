@@ -60,7 +60,12 @@ export async function initializeRuntimeFromSettings(
 
   const calls: Promise<unknown>[] = [
     invokeFn("set_refresh_interval", { interval: saved.refreshInterval }),
-    invokeFn("set_usage_access_enabled", { enabled: saved.hasSeenWelcome }),
+    // Parser runs only when both gates are true: the user has finished
+    // onboarding (`hasSeenWelcome`) AND the user-controlled toggle in
+    // Settings → Privacy & Permissions (`usageAccessEnabled`) is on.
+    invokeFn("set_usage_access_enabled", {
+      enabled: saved.hasSeenWelcome && saved.usageAccessEnabled,
+    }),
     invokeFn("set_rate_limits_enabled", { enabled: saved.rateLimitsEnabled }),
     syncTrayConfig(saved.trayConfig, null, invokeFn),
   ];

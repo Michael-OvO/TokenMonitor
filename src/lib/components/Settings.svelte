@@ -15,7 +15,7 @@
   import TrayConfigSettings from "./TrayConfigSettings.svelte";
   import HiddenModelsSettings from "./HiddenModelsSettings.svelte";
   import SshHostsSettings from "./SshHostsSettings.svelte";
-  import PermissionDisclosure from "./PermissionDisclosure.svelte";
+  import PermissionSettings from "./PermissionSettings.svelte";
 
   interface Props {
     onBack: () => void;
@@ -177,7 +177,7 @@
 
     <div class="group">
       <div class="group-label">Privacy & Permissions</div>
-      <PermissionDisclosure mode="settings" />
+      <PermissionSettings />
     </div>
 
     <!-- System -->

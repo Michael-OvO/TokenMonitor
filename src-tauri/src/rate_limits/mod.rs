@@ -2,6 +2,7 @@ mod claude;
 mod claude_cli;
 mod codex;
 mod http;
+mod oauth_refresh;
 
 use crate::models::{ProviderRateLimits, RateLimitsPayload};
 use chrono::{DateTime, Duration, Utc};
@@ -21,6 +22,24 @@ use http::{
 #[cfg(target_os = "macos")]
 pub fn request_claude_keychain_access() -> Result<(), String> {
     claude::prime_token_from_keychain_interactive()
+}
+
+/// Returns `true` when a silent token read currently succeeds — either
+/// from our owned mirror item or from Claude Code-credentials' ACL. Used
+/// by the onboarding wizard to detect the already-granted state without
+/// requiring a click. Never opens a UI prompt.
+#[cfg(target_os = "macos")]
+pub fn has_silent_claude_token() -> bool {
+    claude::get_claude_oauth_token().is_ok()
+}
+
+/// Test-only: force a refresh-grant attempt against the owned mirror's
+/// refresh token. Returns a short status string describing the outcome.
+/// Used to exercise the refresh path live without waiting for Anthropic
+/// to rotate the access token naturally.
+#[cfg(target_os = "macos")]
+pub async fn debug_force_refresh() -> String {
+    claude::debug_force_refresh().await
 }
 
 /// Minimum seconds between Claude rate-limit probes.  Both the OAuth API and
@@ -121,22 +140,30 @@ pub async fn fetch_selected_rate_limits(
 
         let now = Utc::now();
 
-        if let Some(rate_limits) = cached_claude.clone() {
-            if provider_cooldown_is_active(&rate_limits, now) {
-                return Some(mark_rate_limits_stale(rate_limits));
-            }
-        }
-
-        // Always try the OAuth API first — it returns all windows (five_hour
-        // + weekly) and does NOT consume any rate-limit budget.
+        // Always try the OAuth API first — it's a metadata endpoint that
+        // returns all windows (five_hour + weekly + per-model + extra usage)
+        // and does NOT consume any rate-limit budget. It works even when the
+        // user has exhausted their 5h window, so a CLI-derived
+        // `cooldown_until` (set when status=rejected lands at the window
+        // reset time) must NOT short-circuit it. Cooldown applies only to
+        // the CLI fallback below, which actually consumes budget.
         match fetch_claude_rate_limits().await {
             Ok(rate_limits) => Some(rate_limits),
             Err(error) => {
                 tracing::debug!(error = %error.message, "Claude OAuth API failed, considering CLI fallback");
 
+                // Provider cooldown gates the CLI probe — running it during
+                // a known rejection window just produces another rejection
+                // and can poke the rate limit further.
+                if let Some(cached) = cached_claude.as_ref() {
+                    if provider_cooldown_is_active(cached, now) {
+                        return Some(mark_rate_limits_stale(cached.clone()));
+                    }
+                }
+
                 // Only fall back to the CLI probe when the cached data is
-                // stale or missing.  The CLI costs rate-limit budget and
-                // can only report one window, so we throttle it.
+                // stale or missing. The CLI costs rate-limit budget and can
+                // only report one window, so we throttle it.
                 if is_fresh(cached_claude.as_ref(), CLAUDE_MIN_REFETCH_SECS, now) {
                     return cached_claude;
                 }

@@ -104,6 +104,7 @@ describe("loadSettings", () => {
       rateLimitsEnabled: true,
       hasSeenWelcome: true,
       keychainAccessRequested: true,
+      usageAccessEnabled: true,
     });
     expect(get(settings)).toEqual(loaded);
     expect(mockSetCurrency).toHaveBeenCalledWith("EUR");
@@ -156,6 +157,7 @@ describe("loadSettings", () => {
       rateLimitsEnabled: false,
       hasSeenWelcome: false,
       keychainAccessRequested: false,
+      usageAccessEnabled: true,
     });
     expect(get(settings)).toEqual(fallback);
     expect(mockSetCurrency).toHaveBeenCalledWith("USD");

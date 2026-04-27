@@ -40,9 +40,17 @@
   });
 
   function utilizationColor(pct: number): string {
-    if (pct >= 80) return "var(--red, #C44B45)";
-    if (pct >= 50) return "var(--yellow, #C49A45)";
+    // Use the provider accent for everything; only signal severity through
+    // opacity so the bar reads as one calm color family instead of a
+    // stoplight. The very-high band shifts to a desaturated alert tone.
+    if (pct >= 90) return "var(--alert, #B05A52)";
     return "var(--accent)";
+  }
+
+  function utilizationFillOpacity(pct: number): number {
+    if (pct >= 90) return 0.95;
+    if (pct >= 50) return 0.85;
+    return 0.7;
   }
 
   function resetsIn(isoString: string | null): string {
@@ -94,7 +102,9 @@
   function paceColor(w: RateLimitWindow, windowHours: number): string {
     const delta = paceDelta(w, windowHours);
     if (delta === null || Math.abs(delta) < 2) return "var(--t3)";
-    return delta > 0 ? "var(--accent)" : "var(--yellow, #C49A45)";
+    // Pace badges share the same calm palette as the bars themselves —
+    // no traffic-light yellow.
+    return "var(--t2)";
   }
 
   function windowHours(windowId: string): number {
@@ -166,7 +176,7 @@
         <div class="ub-track">
           <div
             class="ub-fill"
-            style="width: {Math.min(w.utilization, 100)}%; background: {utilizationColor(w.utilization)}; --bar-delay: {i * 0.09 + 0.04}s;{w.utilization >= 80 ? ` box-shadow: 0 0 7px 1px ${utilizationColor(w.utilization)}55;` : ''}"
+            style="width: {Math.min(w.utilization, 100)}%; background: {utilizationColor(w.utilization)}; opacity: {utilizationFillOpacity(w.utilization)}; --bar-delay: {i * 0.09 + 0.04}s;"
           ></div>
         </div>
         <div class="ub-sub">
@@ -205,7 +215,7 @@
       <div class="ub-track">
         <div
           class="ub-fill"
-          style="width: {Math.min((rateLimits.extraUsage.utilization ?? 0), 100)}%; background: {utilizationColor(rateLimits.extraUsage.utilization ?? 0)}; --bar-delay: {rateLimits.windows.length * 0.09 + 0.04}s;"
+          style="width: {Math.min((rateLimits.extraUsage.utilization ?? 0), 100)}%; background: {utilizationColor(rateLimits.extraUsage.utilization ?? 0)}; opacity: {utilizationFillOpacity(rateLimits.extraUsage.utilization ?? 0)}; --bar-delay: {rateLimits.windows.length * 0.09 + 0.04}s;"
         ></div>
       </div>
       <div class="ub-sub">Monthly overuse budget</div>
@@ -287,20 +297,7 @@
     from { transform: scaleX(0); }
     to   { transform: scaleX(1); }
   }
-  .ub-fill::after {
-    content: '';
-    position: absolute;
-    top: 0; bottom: 0;
-    left: -100%; width: 100%;
-    background: linear-gradient(90deg, transparent 30%, rgba(255,255,255,.22) 50%, transparent 70%);
-    animation: hBarShimmer .5s ease-out both;
-    animation-delay: calc(var(--bar-delay, 0s) + .52s);
-    pointer-events: none;
-  }
-  @keyframes hBarShimmer {
-    from { transform: translateX(0); }
-    to   { transform: translateX(200%); opacity: 0; }
-  }
+  /* Shimmer overlay removed — read calmer without the white sheen flash. */
   .ub-sub {
     font: 400 9px/1 'Inter', sans-serif;
     color: var(--t3);

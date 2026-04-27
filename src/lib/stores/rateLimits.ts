@@ -329,8 +329,14 @@ export async function hydrateRateLimits(): Promise<void> {
   return hydratePromise;
 }
 
-export async function fetchRateLimits(scope: RateLimitScope = "all"): Promise<void> {
-  logger.debug("rateLimits", `Fetching: scope=${scope}`);
+export async function fetchRateLimits(
+  scope: RateLimitScope = "all",
+  options: { force?: boolean } = {},
+): Promise<void> {
+  logger.debug(
+    "rateLimits",
+    `Fetching: scope=${scope}${options.force ? " (forced)" : ""}`,
+  );
   lastRequestedScope = scope;
   requestedScopeStore.set(scope);
   await hydrateRateLimits();
@@ -338,7 +344,15 @@ export async function fetchRateLimits(scope: RateLimitScope = "all"): Promise<vo
   const cached = get(rateLimitsData);
   scheduleScopeRetries(cached, scope);
 
-  const providers = eligibleProviders(cached, scope);
+  // The deferred-until check covers normal polling, where we don't want to
+  // re-hit the API before the server-suggested retry window. After explicit
+  // user actions (Re-grant Keychain access, Enable rate limits) we should
+  // bypass it: the cached cooldown was set before the user resolved the
+  // underlying problem and would otherwise prevent the very fetch that's
+  // supposed to refresh it.
+  const providers = options.force
+    ? requestedProviders(scope)
+    : eligibleProviders(cached, scope);
   if (providers.length === 0) return;
 
   await Promise.all(providers.map((provider) => fetchProviderRateLimits(provider)));

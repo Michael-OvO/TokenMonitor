@@ -15,7 +15,15 @@
     only surface if the user's home is itself on a network/removable volume, or
     if the user explicitly points Claude/Codex config to a protected location.
     The text below explains the intent.
+
+    NSAppDataUsageDescription is the macOS Sequoia (15+) "access other app's
+    data" prompt. It fires the first time we read inside ~/.claude or ~/.codex
+    because Sequoia recognises those as Claude Code / Codex CLI bundle data.
+    Without this key the prompt has no rationale text and Sequoia is more
+    likely to deny by default.
   -->
+  <key>NSAppDataUsageDescription</key>
+  <string>TokenMonitor reads Claude Code and Codex CLI session logs from ~/.claude and ~/.codex to calculate your token usage and cost. Logs stay on this device — nothing is uploaded except optional rate-limit checks against Anthropic's API.</string>
   <key>NSNetworkVolumesUsageDescription</key>
   <string>TokenMonitor reads Claude Code and Codex CLI session logs from your home directory to calculate token usage and cost. Allow access only if your home directory or Claude/Codex config is hosted on a network volume.</string>
   <key>NSRemovableVolumesUsageDescription</key>

@@ -1,12 +1,7 @@
 use super::tray::{patch_tray_utilization, sync_tray_title, tray_utilization_from_rate_limits};
 use super::{AppState, UsageDebugReport};
 use crate::models::*;
-#[cfg(target_os = "macos")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
-
-#[cfg(target_os = "macos")]
-static CLAUDE_KEYCHAIN_REQUESTED_THIS_RUN: AtomicBool = AtomicBool::new(false);
 
 /// Apply native window surface adjustments.
 /// On Windows: sets DWM rounded corners. On other platforms: noop.
@@ -70,14 +65,19 @@ pub async fn set_usage_access_enabled(
     Ok(())
 }
 
-/// Outcome of the one-time interactive Keychain prompt. Surfaced to the
-/// frontend so it can show appropriate copy after the user responds.
+/// Outcome of the interactive Keychain prompt. Surfaced to the frontend so it
+/// can show appropriate copy after the user responds.
 ///
 /// Each variant is constructed on a different OS path (Granted/Denied on
 /// macOS, NotApplicable everywhere else), so per-target dead-code analysis
 /// flags the ones not used on the current platform. Since the enum is the
 /// IPC contract — every variant is "live" from the frontend's perspective —
 /// suppress the lint at the enum level instead of per-variant.
+///
+/// `AlreadyRequested` is no longer returned by the backend (the frontend
+/// short-circuits via the `keychainAccessRequested` setting before invoking
+/// the IPC). It's kept on the type so older frontend builds that still pattern
+/// match on it continue to compile.
 #[derive(serde::Serialize, Clone, Debug)]
 #[serde(rename_all = "snake_case", tag = "status")]
 #[allow(dead_code)]
@@ -88,24 +88,28 @@ pub enum KeychainAccessOutcome {
     Denied { reason: String },
     /// Keychain isn't part of the credentials path on this platform.
     NotApplicable,
-    /// The interactive request has already been attempted in this app process.
+    /// Reserved for backwards compatibility with older frontend builds.
     AlreadyRequested,
 }
 
-/// Request the one-time interactive Keychain prompt for the Claude OAuth
-/// token. This is the **only** code path that allows the macOS Keychain UI
-/// to appear — every other read is silent (`skip_authenticated_items`).
+/// Trigger the interactive Keychain prompt for the Claude OAuth token.
 ///
-/// Whatever the user chooses, the frontend should persist
-/// `keychainAccessRequested = true` so this prompt never recurs on its own.
+/// This is the **only** code path that allows the macOS Keychain UI to
+/// appear — every other read is silent (`skip_authenticated_items` +
+/// `disable_user_interaction`). On a successful read the credentials JSON is
+/// also mirrored into TokenMonitor's owned Keychain item, so subsequent
+/// background refreshes can read silently from our own item without depending
+/// on Claude Code's ACL surviving its next token rotation.
+///
+/// The frontend dedupes concurrent calls via `keychainRequestInFlight` and
+/// gates auto-firing behind the `keychainAccessRequested` setting; the
+/// backend is intentionally re-callable so the user can re-grant on demand
+/// (e.g. via a "Re-grant Keychain access" button) after a token expiry has
+/// invalidated the owned item.
 #[tauri::command]
 pub async fn request_claude_keychain_access() -> Result<KeychainAccessOutcome, String> {
     #[cfg(target_os = "macos")]
     {
-        if CLAUDE_KEYCHAIN_REQUESTED_THIS_RUN.swap(true, Ordering::SeqCst) {
-            return Ok(KeychainAccessOutcome::AlreadyRequested);
-        }
-
         // Run the synchronous Keychain call on a blocking thread so we don't
         // pin the Tauri async runtime while macOS shows the auth panel.
         let outcome =
@@ -122,6 +126,183 @@ pub async fn request_claude_keychain_access() -> Result<KeychainAccessOutcome, S
     #[cfg(not(target_os = "macos"))]
     {
         Ok(KeychainAccessOutcome::NotApplicable)
+    }
+}
+
+/// Result of an App Data TCC probe. We can't query macOS directly for
+/// the user's recorded TCC decision, so we infer it from a `read_dir`
+/// outcome: success means access was granted (or never required because
+/// the directory doesn't exist on this machine); a permission error means
+/// it was denied (or never asked).
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case", tag = "status")]
+#[allow(dead_code)]
+pub enum AppDataAccessState {
+    /// At least one root is readable, *or* none of the roots exist (so no
+    /// prompt would ever fire — treat as a no-op grant).
+    Granted,
+    /// All existing roots returned a permission error. The user either
+    /// previously denied the prompt or it has never been answered. Either
+    /// way, the next step is System Settings — no further `read_dir` will
+    /// re-fire the sheet.
+    Denied,
+    /// macOS Sequoia (App Data TCC) doesn't apply on this OS.
+    NotApplicable,
+}
+
+/// Probe Claude Code / Codex CLI session-log roots to determine the App
+/// Data TCC state without firing the user-facing prompt — the prompt only
+/// fires on the *first* `read_dir` after a fresh install / TCC reset.
+/// After that, this call returns the cached decision silently.
+///
+/// macOS only; other OSes return `NotApplicable` because there's no App
+/// Data TCC layer for them to deny.
+#[tauri::command]
+pub async fn check_app_data_access() -> Result<AppDataAccessState, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::fs;
+        use std::io::ErrorKind;
+
+        let mut roots: Vec<std::path::PathBuf> = crate::paths::claude_project_roots_default();
+        if let Some(p) = crate::paths::codex_sessions_default() {
+            roots.push(p);
+        }
+
+        let mut any_existing = false;
+        let mut any_readable = false;
+        let mut any_permission_denied = false;
+
+        for root in &roots {
+            // `metadata()` doesn't trigger AppData TCC — it only checks the
+            // path's *existence*. If the path doesn't exist, no permission
+            // question applies.
+            if !root.exists() {
+                continue;
+            }
+            any_existing = true;
+            match fs::read_dir(root) {
+                Ok(_) => {
+                    any_readable = true;
+                }
+                Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied) => {
+                    any_permission_denied = true;
+                }
+                Err(_) => {
+                    // Other errors (EIO, ENOTDIR, etc.) — don't infer from these.
+                }
+            }
+        }
+
+        if !any_existing {
+            return Ok(AppDataAccessState::Granted);
+        }
+        if any_readable {
+            return Ok(AppDataAccessState::Granted);
+        }
+        if any_permission_denied {
+            return Ok(AppDataAccessState::Denied);
+        }
+        // No clear signal — treat as Denied so the UI surfaces the action.
+        Ok(AppDataAccessState::Denied)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(AppDataAccessState::NotApplicable)
+    }
+}
+
+/// Force a `read_dir` against Claude Code / Codex CLI session-log roots.
+/// On Sequoia this triggers the App Data TCC prompt the *first* time it's
+/// called for a given app/path pair. After the user answers, this call
+/// becomes a noop and the answer is read from
+/// [`check_app_data_access`].
+#[tauri::command]
+pub async fn request_app_data_access() -> Result<u32, String> {
+    use std::fs;
+
+    let mut probed: u32 = 0;
+    let mut roots: Vec<std::path::PathBuf> = crate::paths::claude_project_roots_default();
+    if let Some(p) = crate::paths::codex_sessions_default() {
+        roots.push(p);
+    }
+
+    for root in roots {
+        let _ = fs::read_dir(&root);
+        probed += 1;
+        tracing::debug!(path = %root.display(), "Requested App Data TCC for path");
+    }
+
+    Ok(probed)
+}
+
+/// Open the macOS System Settings pane where the user can manage App Data
+/// permissions. Used when [`check_app_data_access`] returns `Denied` —
+/// the OS won't re-fire the prompt, so the user has to flip the switch
+/// themselves. macOS only.
+#[tauri::command]
+pub async fn open_app_data_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        // The "App Management" pane on Sequoia covers App Data access.
+        // Apple doesn't expose a deeper anchor, so we land on the Privacy
+        // & Security root if the App-Management URL fails.
+        let urls = [
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AppBundles",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy",
+        ];
+        for url in urls {
+            if Command::new("open").arg(url).status().is_ok() {
+                return Ok(());
+            }
+        }
+        Err("Failed to open System Settings".to_string())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
+/// Probe whether TokenMonitor's silent Keychain read currently succeeds.
+/// True means we hold a usable Claude OAuth token — either via our own
+/// mirror item or via a Claude Code-credentials ACL grant that hasn't yet
+/// been wiped by a token rotation. Used by the onboarding wizard so
+/// "Authorized" is shown without requiring a click.
+#[tauri::command]
+pub async fn check_claude_keychain_access() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(
+            tokio::task::spawn_blocking(crate::rate_limits::has_silent_claude_token)
+                .await
+                .unwrap_or(false),
+        )
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Test-only IPC that runs the OAuth refresh-grant flow against the owned
+/// mirror right now. Used to exercise the refresh path live (and confirm
+/// it works against Anthropic's endpoint) without waiting for a natural
+/// 401. Returns a short status string.
+#[tauri::command]
+pub async fn debug_force_oauth_refresh() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(crate::rate_limits::debug_force_refresh().await)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("not_applicable".to_string())
     }
 }
 

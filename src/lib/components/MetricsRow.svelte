@@ -18,6 +18,15 @@
 
   let inLabel = $derived(formatTokens(data.input_tokens));
   let outLabel = $derived(formatTokens(data.output_tokens));
+  // Cache reads + writes typically dominate Claude Code totals (the model
+  // re-reads cached context every turn). Surfacing this term is what makes
+  // in + out + cache reconcile against the headline `total_tokens`.
+  let cacheTotal = $derived(
+    (data.cache_read_tokens ?? 0)
+      + (data.cache_write_5m_tokens ?? 0)
+      + (data.cache_write_1h_tokens ?? 0),
+  );
+  let cacheLabel = $derived(formatTokens(cacheTotal));
 
   // Change stats derivations
   let cs = $derived(data.change_stats);
@@ -71,8 +80,8 @@
     <div class="m">
       <div class="m-v">{formatTokens(data.total_tokens)}</div>
       <div class="m-l">Tokens</div>
-      {#if data.input_tokens > 0}
-        <div class="m-s">{inLabel} in &middot; {outLabel} out</div>
+      {#if data.input_tokens > 0 || data.output_tokens > 0 || cacheTotal > 0}
+        <div class="m-s">{inLabel} in &middot; {outLabel} out{#if cacheTotal > 0} &middot; {cacheLabel} cache{/if}</div>
       {/if}
     </div>
   </div>

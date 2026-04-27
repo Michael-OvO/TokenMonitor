@@ -62,6 +62,7 @@
   import { isMacOS } from "./lib/utils/platform.js";
   import {
     markClaudeKeychainAccessHandled,
+    requestClaudeKeychainAccessAgain,
     requestClaudeKeychainAccessOnce,
   } from "./lib/permissions/keychain.js";
 
@@ -74,7 +75,6 @@
   import Footer from "./lib/components/Footer.svelte";
   import SetupScreen from "./lib/components/SetupScreen.svelte";
   import SplashScreen from "./lib/components/SplashScreen.svelte";
-  import WelcomeCard from "./lib/components/WelcomeCard.svelte";
   import Settings from "./lib/components/Settings.svelte";
   import Calendar from "./lib/components/Calendar.svelte";
   import DateNav from "./lib/components/DateNav.svelte";
@@ -82,6 +82,8 @@
   import SingleDeviceView from "./lib/components/SingleDeviceView.svelte";
   import UpdateBanner from "./lib/components/UpdateBanner.svelte";
   import PermissionDisclosure from "./lib/components/PermissionDisclosure.svelte";
+  import KeychainPromptPreview from "./lib/components/KeychainPromptPreview.svelte";
+  import PermissionsOnboarding from "./lib/components/PermissionsOnboarding.svelte";
   import type { HeaderTabs, UsagePayload, UsagePeriod, UsageProvider, RateLimitsPayload } from "./lib/types/index.js";
 
   let showSplash = $state(true);
@@ -105,6 +107,37 @@
   });
   let showKeychainPermissionPanel = $state(false);
   let keychainPermissionBusy = $state(false);
+  /** Animated preview of the macOS keychain prompt, shown right before the
+   * real one fires so the user knows to click "Always Allow". */
+  let showKeychainPreview = $state(false);
+  /** Bartender-style onboarding wizard. Driven by the `hasSeenWelcome`
+   * setting now that the test-only auto-open `$effect` has been removed
+   * — first launch shows the wizard, every subsequent launch skips it. */
+  let showPermissionsOnboarding = $derived(!$settings.hasSeenWelcome);
+
+  async function handleOnboardingFinish() {
+    // Order matters: enable parser → wait for the first usage fetch to
+    // populate `data` → only then flip `hasSeenWelcome`. The derived
+    // `showPermissionsOnboarding` watches that flag, so flipping it is
+    // what unmounts the wizard. Doing it last guarantees the dashboard
+    // has data ready and the user never sees a "No usage data found"
+    // flash between wizard close and first IPC return.
+    await invoke("set_usage_access_enabled", { enabled: true }).catch((err) => {
+      logger.error("permissions", `Failed to enable usage access: ${err}`);
+    });
+    await loadInitialData();
+    await updateSetting("hasSeenWelcome", true);
+    await tick();
+    syncSizeAndVerify("onboarding-finish");
+  }
+
+  /** Best-effort signal that the keychain ACL is currently held — true when
+   * the latest rate-limit fetch returned more windows than the CLI fallback
+   * can produce (CLI maxes at one window). */
+  let keychainAuthorized = $derived.by(() => {
+    const claude = providerPayload(rateLimits, "claude");
+    return Boolean(claude && claude.windows.length >= 2);
+  });
   let brandTheming = $state(true);
   let headerTabs = $state<HeaderTabs>(DEFAULT_HEADER_TABS);
   let popEl: HTMLDivElement | null = null;
@@ -210,20 +243,14 @@
     return initialDataLoad;
   }
 
-  async function handleWelcomeDismiss() {
-    await invoke("set_usage_access_enabled", { enabled: true }).catch((err) => {
-      logger.error("permissions", `Failed to enable usage access: ${err}`);
-    });
-    await loadInitialData();
-    await tick();
-    syncSizeAndVerify("welcome-dismiss");
-  }
-
   async function enableRateLimits() {
     showKeychainPermissionPanel = false;
     await updateSetting("rateLimitsEnabled", true);
     await invoke("set_rate_limits_enabled", { enabled: true });
-    await fetchRateLimits(provider);
+    // Force the fetch — the cached payload may carry a cooldownUntil from a
+    // previous CLI rejection that the user has just resolved by re-granting,
+    // and the normal eligibility filter would otherwise skip the call.
+    await fetchRateLimits(provider, { force: true });
     await tick();
     syncSizeAndVerify("rate-limits-enabled");
   }
@@ -265,6 +292,37 @@
     } finally {
       keychainPermissionBusy = false;
     }
+  }
+
+  /** Re-trigger the Keychain prompt after a previous grant went stale (e.g.
+   * the OAuth token expired and the backend dropped its owned mirror on 401).
+   * Unlike the welcome card path, this ignores `keychainAccessRequested` so
+   * the user can recover without flipping a setting.
+   *
+   * The flow is: show our animated macOS-prompt preview → on user
+   * confirmation, fire the real Keychain UI via
+   * `requestClaudeKeychainAccessAgain` → enable rate limits and force a
+   * fetch. The preview is purely visual; it never makes an OS call. */
+  function handleRegrantKeychainForRateLimits() {
+    if (keychainPermissionBusy) return;
+    showKeychainPreview = true;
+  }
+
+  async function runKeychainRegrantFlow() {
+    if (keychainPermissionBusy) return;
+    keychainPermissionBusy = true;
+    try {
+      await requestClaudeKeychainAccessAgain("rate-limits");
+      showKeychainPreview = false;
+      await enableRateLimits();
+    } finally {
+      keychainPermissionBusy = false;
+    }
+  }
+
+  function handleKeychainPreviewCancel() {
+    if (keychainPermissionBusy) return;
+    showKeychainPreview = false;
   }
 
   async function handleProviderChange(p: UsageProvider) {
@@ -647,8 +705,11 @@
     <UpdateBanner />
     {#if showSplash}
       <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
-    {:else if !$settings.hasSeenWelcome}
-      <WelcomeCard onDismiss={handleWelcomeDismiss} />
+    {:else if showPermissionsOnboarding}
+      <PermissionsOnboarding
+        keychainAuthorized={keychainAuthorized}
+        onFinish={handleOnboardingFinish}
+      />
     {:else if appReady && !data}
       <SetupScreen />
     {:else if showSettings}
@@ -716,6 +777,13 @@
           </div>
         </div>
       {:else if period === "5h" && $settings.rateLimitsEnabled && visibleUsableRateLimitProviders.length > 0}
+        {#if showKeychainPreview && isMacOS()}
+          <KeychainPromptPreview
+            busy={keychainPermissionBusy}
+            onContinue={runKeychainRegrantFlow}
+            onCancel={handleKeychainPreviewCancel}
+          />
+        {/if}
         {#each visibleUsableRateLimitProviders as rateLimitProvider, index}
           <UsageBars
             providerLabel={provider === ALL_USAGE_PROVIDER_ID ? getUsageProviderLabel(rateLimitProvider) : undefined}
@@ -725,6 +793,40 @@
             <div class="hr"></div>
           {/if}
         {/each}
+        {#if !showKeychainPreview && isMacOS() && visibleUsableRateLimitProviders.some((p) => {
+          const payload = providerPayload(rateLimits, p);
+          if (!payload) return false;
+          // Auth error surfaced explicitly, payload marked stale, or — for
+          // Claude only — we got back fewer windows than the OAuth API
+          // returns. CLI fallback only ever emits a single five_hour window,
+          // so anything less than 2 means OAuth is degraded and the user
+          // can't see weekly / per-model / extra-usage stats.
+          return Boolean(payload.error)
+            || payload.stale
+            || (p === "claude" && payload.windows.length < 2);
+        })}
+          <div class="rate-limit-stale-banner">
+            <div class="rate-limit-empty-text">
+              Showing limited data. Weekly, weekly Sonnet/Opus, and extra-usage
+              windows only return after a fresh OAuth read.
+            </div>
+            <button
+              type="button"
+              class="kc-cta"
+              onclick={handleRegrantKeychainForRateLimits}
+              disabled={keychainPermissionBusy}
+            >
+              <span class="kc-cta-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="9" cy="13" r="3"/>
+                  <path d="M11.5 11L20 2.5"/>
+                  <path d="M16.5 6L19 8.5"/>
+                </svg>
+              </span>
+              Re-grant Keychain access
+            </button>
+          </div>
+        {/if}
       {:else if period === "5h" && shouldShowFiveHourUsageFallback}
         {#if !$settings.rateLimitsEnabled}
           <div class="rate-limit-note">
@@ -773,6 +875,15 @@
             >
               Review Keychain fallback
             </button>
+          {:else if isMacOS() && rateLimitsRequest.error}
+            <button
+              type="button"
+              class="rate-limit-cta"
+              onclick={handleRegrantKeychainForRateLimits}
+              disabled={keychainPermissionBusy}
+            >
+              Re-grant Keychain access
+            </button>
           {/if}
         </div>
       {:else if data.total_cost === 0 && data.total_tokens === 0}
@@ -802,6 +913,7 @@
     {/if}
   </div>
 </div>
+
 
 <style>
   .pop {
@@ -841,12 +953,16 @@
     padding: 24px 0;
   }
   .rate-limit-empty,
-  .rate-limit-permission {
+  .rate-limit-permission,
+  .rate-limit-stale-banner {
     display: flex;
     flex-direction: column;
     gap: 4px;
     padding: 18px 14px 16px;
     animation: fadeUp .28s ease both .09s;
+  }
+  .rate-limit-stale-banner {
+    padding-top: 8px;
   }
   .rate-limit-permission {
     gap: 7px;
@@ -881,6 +997,46 @@
   .rate-limit-secondary:disabled {
     cursor: default;
     opacity: .55;
+  }
+
+  /* Polished re-grant CTA — quieter than the welcome flow's primary button.
+     Reads as a soft tinted chip, not a saturated action. */
+  .kc-cta {
+    margin-top: 8px;
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 11px 6px 9px;
+    border: 1px solid var(--accent-soft, rgba(255,255,255,0.10));
+    border-radius: 999px;
+    background: var(--accent-soft, rgba(255,255,255,0.06));
+    color: var(--accent, var(--t1));
+    font: 500 10px/1 'Inter', sans-serif;
+    letter-spacing: .15px;
+    cursor: pointer;
+    transition: background var(--t-fast) ease, transform var(--t-fast) ease,
+      border-color var(--t-fast) ease;
+  }
+  .kc-cta:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent, white) 18%, transparent);
+    border-color: color-mix(in srgb, var(--accent, white) 30%, transparent);
+    transform: translateY(-1px);
+  }
+  .kc-cta:active:not(:disabled) {
+    transform: translateY(0);
+  }
+  .kc-cta:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .kc-cta-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px; height: 16px;
+    color: var(--accent, var(--t1));
+    opacity: 0.85;
   }
   .rate-limit-actions {
     display: flex;

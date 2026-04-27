@@ -64,3 +64,42 @@ export async function markClaudeKeychainAccessHandled(): Promise<void> {
   if (get(settings).keychainAccessRequested) return;
   await updateSetting("keychainAccessRequested", true);
 }
+
+/**
+ * Re-trigger the interactive Keychain prompt on demand. Unlike
+ * `requestClaudeKeychainAccessOnce` this ignores the `keychainAccessRequested`
+ * gate, so the user can re-authorize after a previous grant has been
+ * invalidated (e.g. the OAuth token expired and we deleted our owned Keychain
+ * mirror on a 401). Concurrent calls share the in-flight promise so the
+ * prompt only opens once.
+ */
+export async function requestClaudeKeychainAccessAgain(
+  logCategory = "permissions",
+): Promise<KeychainAccessOutcome> {
+  if (keychainRequestInFlight) return keychainRequestInFlight;
+
+  keychainRequestInFlight = (async () => {
+    await updateSetting("keychainAccessRequested", true);
+
+    try {
+      const outcome = await invoke<KeychainAccessOutcome>("request_claude_keychain_access");
+      if (outcome.status !== "granted") {
+        logger.info(
+          logCategory,
+          `Re-grant outcome: ${outcome.status}${"reason" in outcome ? ": " + outcome.reason : ""}`,
+        );
+      }
+      return outcome;
+    } catch (error) {
+      const outcome = deniedOutcome(error);
+      logger.error(logCategory, `Re-grant request failed: ${outcome.reason}`);
+      return outcome;
+    }
+  })();
+
+  try {
+    return await keychainRequestInFlight;
+  } finally {
+    keychainRequestInFlight = null;
+  }
+}
