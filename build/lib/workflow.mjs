@@ -41,7 +41,7 @@ export async function runBuild(options) {
 
   await runTauriBuild(context);
   const copiedArtifacts = await collectArtifacts(context);
-  const checksumFile = await writeChecksums(copiedArtifacts, context.outputDir);
+  const checksumFile = await writeChecksums(copiedArtifacts, context.outputDir, platform.id);
 
   return {
     artifacts: copiedArtifacts.map((artifactPath) => path.basename(artifactPath)),
@@ -188,8 +188,8 @@ async function collectArtifacts(context) {
   return copiedArtifacts;
 }
 
-async function writeChecksums(artifactPaths, outputDir) {
-  const checksumPath = path.join(outputDir, "SHA256SUMS.txt");
+async function writeChecksums(artifactPaths, outputDir, platformId) {
+  const checksumPath = path.join(outputDir, `SHA256SUMS-${platformId}.txt`);
   const lines = [];
 
   for (const artifactPath of artifactPaths) {
