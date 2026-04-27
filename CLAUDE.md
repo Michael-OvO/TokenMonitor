@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A local-first **cross-platform** system tray app (Tauri v2 + Svelte 5 + Rust) that monitors Claude Code, Codex CLI, and Cursor IDE token usage. It reads JSONL session logs from disk, applies pricing rules in Rust, and presents spend/rate-limit data through a native system tray popover. No cloud sync.
 
-Supported platforms: **macOS**, **Windows**, **Linux**. Current version: **0.11.1**.
+Supported platforms: **macOS**, **Windows**, **Linux**. Current version: **0.12.0**.
 
 ### Platform differences
 
