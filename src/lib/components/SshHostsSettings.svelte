@@ -175,6 +175,7 @@
           <polyline points="1 20 1 14 7 14"></polyline>
           <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
         </svg>
+        <span class="sync-label">Sync</span>
       </button>
       <svg class="ssh-chevron" class:open={expanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="6 9 12 15 18 9"></polyline>
@@ -341,6 +342,10 @@
     display: inline-flex;
     align-items: center;
     padding: 2px 5px;
+  }
+  .sync-label {
+    font: 400 8px/1 'Inter', sans-serif;
+    margin-left: 2px;
   }
   .ssh-sync-btn.spinning .sync-icon {
     animation: refresh-spin 900ms linear infinite;

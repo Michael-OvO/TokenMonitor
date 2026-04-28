@@ -354,6 +354,14 @@ html {
   -webkit-backface-visibility: hidden;
   backface-visibility: hidden;
 }
+:root[data-anchor="bottom"] #app {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+:root[data-anchor="top"] #app {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
 
 body {
   font-size: 14px;

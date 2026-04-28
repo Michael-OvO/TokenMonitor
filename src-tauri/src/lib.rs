@@ -222,6 +222,9 @@ pub fn run() {
                                     platform::clamp_window_to_work_area(&window);
                                     let _ = window.show();
                                 }
+                                #[cfg(target_os = "windows")]
+                                platform::windows::window::activate_window(&window);
+                                #[cfg(not(target_os = "windows"))]
                                 let _ = window.set_focus();
                             }
                         }
@@ -367,6 +370,8 @@ pub fn run() {
             commands::config::set_usage_access_enabled,
             commands::config::set_cursor_auth_config,
             commands::config::clear_cursor_auth_config,
+            commands::config::open_cursor_app,
+            commands::config::retry_cursor_auth,
             commands::config::get_cursor_auth_status,
             commands::config::request_claude_keychain_access,
             commands::tray::set_tray_config,
@@ -376,6 +381,7 @@ pub fn run() {
             commands::config::clear_usage_view_cache,
             commands::config::reposition_window,
             commands::config::set_window_size_and_align,
+            commands::config::get_window_anchor_edge,
             commands::config::get_rate_limits,
             commands::float_ball::create_float_ball,
             commands::float_ball::destroy_float_ball,

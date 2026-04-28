@@ -39,6 +39,7 @@ export interface ResizeOrchestrator {
   resizeToContent: (source?: string) => void;
   handleBreakdownAccordionToggle: (detail: AccordionToggleDetail) => void;
   refreshWindowMetrics: () => Promise<void>;
+  setChartHoverActive: (active: boolean) => void;
   destroy: () => void;
   getMaxWindowH: () => number;
   getScrollThresholdH: () => number;
@@ -62,6 +63,7 @@ export function createResizeOrchestrator(
   let isWindowHeightAnimating = false;
   let observerResizeRaf = 0;
   let pendingObserverSource = "observer";
+  let chartHoverActive = false;
 
   // Resize throttle: max 3 operations per 500ms window
   const ANIMATED_RESIZE_FRAME_INTERVAL_MS = 32;
@@ -272,6 +274,14 @@ export function createResizeOrchestrator(
       ...captureDebugSnapshot(`apply-${source}`),
     });
     if (disposition === "skip") return;
+    if (chartHoverActive && nextHeight < lastWindowH) {
+      deps.logDebug("resize:shrink-blocked-chart-hover", {
+        source,
+        nextHeight,
+        lastWindowH,
+      });
+      return;
+    }
     lastWindowH = nextHeight;
     pendingWindowHeightRequest = {
       height: nextHeight,
@@ -544,6 +554,18 @@ export function createResizeOrchestrator(
     applyWindowHeight(measurement.nextHeight, `${source}:target`);
   }
 
+  function setChartHoverActive(active: boolean): void {
+    chartHoverActive = active;
+    deps.logDebug("resize:chart-hover-active", { active });
+    if (active) {
+      // Apply one deterministic resize when detail panel appears,
+      // then block observer-driven feedback while hover stays active.
+      syncSizeAndVerify("chart-hover-start");
+    } else {
+      resizeToContent("chart-hover-end");
+    }
+  }
+
   function destroy(): void {
     if (resizeTimer) clearTimeout(resizeTimer);
     cancelAnimationFrame(resizeRaf);
@@ -564,6 +586,7 @@ export function createResizeOrchestrator(
     resizeToContent,
     handleBreakdownAccordionToggle,
     refreshWindowMetrics,
+    setChartHoverActive,
     destroy,
     getMaxWindowH: () => maxWindowH,
     getScrollThresholdH: () => scrollThresholdH,

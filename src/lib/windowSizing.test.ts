@@ -11,6 +11,8 @@ import {
   measureTargetWindowHeight,
   resolveEffectiveWindowMaxHeight,
   resolveMonitorMaxWindowHeight,
+  resolveScrollThresholdHeight,
+  SCROLL_THRESHOLD_CAP,
 } from "./windowSizing.js";
 
 describe("measureTargetWindowHeight", () => {
@@ -91,5 +93,20 @@ describe("resolveMonitorMaxWindowHeight", () => {
   it("honors the configured fallback cap after subtracting the monitor margin", () => {
     expect(resolveMonitorMaxWindowHeight(3000, 1)).toBe(DEFAULT_MAX_WINDOW_HEIGHT);
     expect(resolveMonitorMaxWindowHeight(1180, 1)).toBe(1180 - WINDOW_MONITOR_MARGIN);
+  });
+});
+
+describe("resolveScrollThresholdHeight", () => {
+  it("caps the threshold at SCROLL_THRESHOLD_CAP even on large monitors", () => {
+    expect(resolveScrollThresholdHeight(2160, 1)).toBe(SCROLL_THRESHOLD_CAP);
+  });
+
+  it("returns the ratio-based value when below the cap", () => {
+    expect(resolveScrollThresholdHeight(600, 1, 0.75)).toBe(450);
+  });
+
+  it("falls back to DEFAULT_MAX_WINDOW_HEIGHT for invalid inputs", () => {
+    expect(resolveScrollThresholdHeight(Number.NaN, 1)).toBe(DEFAULT_MAX_WINDOW_HEIGHT);
+    expect(resolveScrollThresholdHeight(1080, 0)).toBe(DEFAULT_MAX_WINDOW_HEIGHT);
   });
 });

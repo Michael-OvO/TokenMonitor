@@ -1043,12 +1043,11 @@ impl UsageParser {
                 report.strategy = format!("{}+cursor-remote-api", report.strategy);
                 report.emitted_entries = entries.len();
                 if entries.is_empty() {
-                    set_cursor_warning(Some(String::from(
-                        "Cursor remote API returned no usage entries for the selected period.",
-                    )));
-                } else {
-                    set_cursor_warning(None);
+                    tracing::info!(
+                        "Cursor remote API returned no usage entries for the selected period"
+                    );
                 }
+                set_cursor_warning(None);
                 (entries, Vec::new(), report)
             }
             Ok(None) => {
@@ -1069,7 +1068,7 @@ impl UsageParser {
                     Path::new(&format!("cursor-remote-api: {error}")),
                 );
                 report.strategy = format!("{}+cursor-remote-api-failed", report.strategy);
-                set_cursor_warning(Some(error));
+                set_cursor_warning(None);
                 (Vec::new(), Vec::new(), report)
             }
         }

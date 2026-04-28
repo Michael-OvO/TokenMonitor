@@ -8,6 +8,53 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AnchorCorner {
+    TopLeft = 0,
+    TopRight = 1,
+    BottomLeft = 2,
+    BottomRight = 3,
+}
+
+impl AnchorCorner {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::TopLeft,
+            1 => Self::TopRight,
+            2 => Self::BottomLeft,
+            _ => Self::BottomRight,
+        }
+    }
+
+    fn is_bottom(self) -> bool {
+        matches!(self, Self::BottomLeft | Self::BottomRight)
+    }
+}
+
+static ANCHOR: AtomicU8 = AtomicU8::new(AnchorCorner::BottomRight as u8);
+
+fn current_anchor() -> AnchorCorner {
+    AnchorCorner::from_u8(ANCHOR.load(Ordering::Relaxed))
+}
+
+pub fn is_anchor_bottom() -> bool {
+    current_anchor().is_bottom()
+}
+
+fn detect_anchor_corner(work: RECT, win_x: i32, win_y: i32, win_w: i32, win_h: i32) -> AnchorCorner {
+    let work_cx = (work.left + work.right) / 2;
+    let work_cy = (work.top + work.bottom) / 2;
+    let win_cx = win_x + win_w / 2;
+    let win_cy = win_y + win_h / 2;
+    match (win_cx >= work_cx, win_cy >= work_cy) {
+        (false, false) => AnchorCorner::TopLeft,
+        (true, false) => AnchorCorner::TopRight,
+        (false, true) => AnchorCorner::BottomLeft,
+        (true, true) => AnchorCorner::BottomRight,
+    }
+}
 
 /// Get the work area (excludes taskbar) for the monitor containing the given HWND.
 pub fn get_work_area(hwnd: HWND) -> Option<RECT> {
@@ -28,7 +75,13 @@ pub fn get_work_area(hwnd: HWND) -> Option<RECT> {
 // Removed apply_float_ball_region and FloatBallRegionDirection since
 // region clipping causes DWM artifacts on Windows 11 for layered windows.
 
-fn aligned_window_origin(work: RECT, current_rect: RECT, width: i32, height: i32) -> (i32, i32) {
+fn aligned_window_origin(
+    work: RECT,
+    current_rect: RECT,
+    width: i32,
+    height: i32,
+    anchor: AnchorCorner,
+) -> (i32, i32) {
     let mut target_x = current_rect.left;
 
     if target_x + width > work.right {
@@ -38,10 +91,36 @@ fn aligned_window_origin(work: RECT, current_rect: RECT, width: i32, height: i32
         target_x = work.left;
     }
 
-    // Always bottom-anchored: pin window bottom to work area bottom (above taskbar).
-    // This is a tray popover — position_near_tray always pins bottom to work.bottom,
-    // so we maintain that invariant through all resizes regardless of current position.
-    let target_y = work.bottom - height;
+    let target_y = if anchor.is_bottom() {
+        work.bottom - height
+    } else {
+        work.top
+    };
+    let clamped_y = target_y.clamp(work.top, (work.bottom - height).max(work.top));
+
+    (target_x, clamped_y)
+}
+
+fn anchored_resize_origin(
+    work: RECT,
+    current_rect: RECT,
+    width: i32,
+    height: i32,
+    anchor: AnchorCorner,
+) -> (i32, i32) {
+    let mut target_x = current_rect.left;
+    if target_x + width > work.right {
+        target_x = work.right - width;
+    }
+    if target_x < work.left {
+        target_x = work.left;
+    }
+
+    let target_y = if anchor.is_bottom() {
+        work.bottom - height
+    } else {
+        current_rect.top
+    };
     let clamped_y = target_y.clamp(work.top, (work.bottom - height).max(work.top));
 
     (target_x, clamped_y)
@@ -51,11 +130,11 @@ fn resize_window_pos_flags() -> windows::Win32::UI::WindowsAndMessaging::SET_WIN
     SWP_NOZORDER | SWP_NOACTIVATE
 }
 
-/// Position the window above the system tray area (bottom-right of screen).
+/// Position the window near the system tray area.
 ///
 /// Uses Win32 APIs to find the `TrayNotifyWnd` inside `Shell_TrayWnd`, then
-/// places the window so its bottom-right corner is above the tray area.
-/// Falls back to work-area bottom-right if the tray cannot be located.
+/// places the window centered on the tray area. Detects which corner of the
+/// screen the final position is nearest to and stores it as the resize anchor.
 pub fn position_near_tray(window: &WebviewWindow) {
     let Ok(hwnd_raw) = window.hwnd() else { return };
     let hwnd = HWND(hwnd_raw.0 as *mut _);
@@ -74,7 +153,6 @@ pub fn position_near_tray(window: &WebviewWindow) {
     let win_w = win_rect.right - win_rect.left;
     let win_h = win_rect.bottom - win_rect.top;
 
-    // Try to find the system tray area for horizontal centering
     let tray_center_x = unsafe {
         FindWindowW(w!("Shell_TrayWnd"), None)
             .ok()
@@ -89,18 +167,31 @@ pub fn position_near_tray(window: &WebviewWindow) {
 
     let target_x = match tray_center_x {
         Some(cx) => {
-            // Center window horizontally on the tray area, clamped to work area
             let x = cx - win_w / 2;
             x.max(work.left).min(work.right - win_w)
         }
-        None => {
-            // Fallback: right-align to work area
-            work.right - win_w
-        }
+        None => work.right - win_w,
     };
 
-    // Place window bottom at work area bottom (just above the taskbar)
-    let target_y = (work.bottom - win_h).max(work.top);
+    let tray_center_y = unsafe {
+        FindWindowW(w!("Shell_TrayWnd"), None)
+            .ok()
+            .and_then(|taskbar| {
+                let mut tray_rect = RECT::default();
+                GetWindowRect(taskbar, &mut tray_rect)
+                    .ok()
+                    .map(|_| (tray_rect.top + tray_rect.bottom) / 2)
+            })
+    };
+
+    let work_cy = (work.top + work.bottom) / 2;
+    let tray_is_top = tray_center_y.is_some_and(|cy| cy < work_cy);
+
+    let target_y = if tray_is_top {
+        work.top
+    } else {
+        (work.bottom - win_h).max(work.top)
+    };
 
     unsafe {
         let _ = SetWindowPos(
@@ -113,9 +204,25 @@ pub fn position_near_tray(window: &WebviewWindow) {
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE,
         );
     }
+
+    let anchor = detect_anchor_corner(work, target_x, target_y, win_w, win_h);
+    ANCHOR.store(anchor as u8, Ordering::Relaxed);
 }
 
-/// Align window so its bottom edge stays at the work area bottom (above taskbar).
+/// Bring the window to the foreground, ensuring it receives focus.
+///
+/// Uses `SetForegroundWindow` instead of `SetFocus` because the latter
+/// requires the calling thread to already own the foreground — which is
+/// not guaranteed on first show from a tray-icon click handler.
+pub fn activate_window(window: &WebviewWindow) {
+    let Ok(hwnd_raw) = window.hwnd() else { return };
+    let hwnd = HWND(hwnd_raw.0 as *mut _);
+    unsafe {
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+/// Align window to the work area using the last detected anchor corner.
 /// Used after every window resize.
 pub fn align_to_work_area(window: &WebviewWindow) {
     let Ok(hwnd_raw) = window.hwnd() else { return };
@@ -135,7 +242,7 @@ pub fn align_to_work_area(window: &WebviewWindow) {
     let win_h = win_rect.bottom - win_rect.top;
     let win_w = win_rect.right - win_rect.left;
 
-    let (target_x, clamped_y) = aligned_window_origin(work, win_rect, win_w, win_h);
+    let (target_x, clamped_y) = aligned_window_origin(work, win_rect, win_w, win_h, current_anchor());
 
     if target_x != win_rect.left || clamped_y != win_rect.top {
         unsafe {
@@ -152,8 +259,8 @@ pub fn align_to_work_area(window: &WebviewWindow) {
     }
 }
 
-/// Atomically sets the physical size of the window and keeps the bottom edge
-/// pinned to the work area bottom (above taskbar). The window grows upward.
+/// Atomically sets the physical size of the window and keeps the anchored edge
+/// pinned to the work area. The window grows away from the anchor corner.
 /// This prevents visual tearing when resizing heights on Windows.
 pub fn set_size_and_align(window: &WebviewWindow, physical_width: u32, physical_height: u32) {
     let Ok(hwnd_raw) = window.hwnd() else { return };
@@ -173,7 +280,22 @@ pub fn set_size_and_align(window: &WebviewWindow, physical_width: u32, physical_
     let win_w = physical_width as i32;
     let win_h = physical_height as i32;
 
-    let (target_x, clamped_y) = aligned_window_origin(work, win_rect, win_w, win_h);
+    let anchor = current_anchor();
+    let (target_x, clamped_y) = anchored_resize_origin(work, win_rect, win_w, win_h, anchor);
+    let old_bottom = win_rect.bottom;
+    let new_bottom = clamped_y + win_h;
+
+    tracing::debug!(
+        ?anchor,
+        old_top = win_rect.top,
+        old_bottom,
+        new_top = clamped_y,
+        new_bottom,
+        old_h = win_rect.bottom - win_rect.top,
+        new_h = win_h,
+        work_bottom = work.bottom,
+        "set_size_and_align"
+    );
 
     unsafe {
         let _ = SetWindowPos(
@@ -202,41 +324,39 @@ mod tests {
     }
 
     #[test]
-    fn always_bottom_anchored_when_window_at_bottom() {
+    fn bottom_right_anchor_when_window_at_bottom() {
         let work = rect(0, 0, 1200, 900);
         let current = rect(100, 700, 440, 900);
 
-        let (_, target_y) = aligned_window_origin(work, current, 340, 320);
-        assert_eq!(target_y, 900 - 320); // bottom pinned to work.bottom
+        let (_, target_y) = aligned_window_origin(work, current, 340, 320, AnchorCorner::BottomRight);
+        assert_eq!(target_y, 900 - 320);
     }
 
     #[test]
-    fn always_bottom_anchored_even_when_window_at_top() {
-        // Window at default/stale position near top — still pins to work.bottom
+    fn bottom_anchor_even_when_window_at_top() {
         let work = rect(0, 0, 1200, 900);
         let current = rect(100, 0, 440, 280);
 
-        let (_, target_y) = aligned_window_origin(work, current, 340, 420);
-        assert_eq!(target_y, 900 - 420); // bottom pinned, not top=0
+        let (_, target_y) = aligned_window_origin(work, current, 340, 420, AnchorCorner::BottomRight);
+        assert_eq!(target_y, 900 - 420);
     }
 
     #[test]
-    fn always_bottom_anchored_when_window_in_middle() {
+    fn bottom_anchor_when_window_in_middle() {
         let work = rect(0, 0, 1200, 900);
         let current = rect(100, 200, 440, 500);
 
-        let (_, target_y) = aligned_window_origin(work, current, 340, 360);
-        assert_eq!(target_y, 900 - 360); // bottom pinned, ignores current position
+        let (_, target_y) = aligned_window_origin(work, current, 340, 360, AnchorCorner::BottomRight);
+        assert_eq!(target_y, 900 - 360);
     }
 
     #[test]
     fn bottom_anchor_caps_at_work_area_when_behind_taskbar() {
         let work = rect(0, 0, 1200, 900);
-        // Window bottom extends beyond work area (behind taskbar) — still pins to work.bottom
         let current = rect(100, 640, 440, 940);
 
-        let (_, target_y) = aligned_window_origin(work, current, 340, 320);
-        assert_eq!(target_y, 900 - 320); // 580
+        let (_, target_y) = aligned_window_origin(work, current, 340, 320, AnchorCorner::BottomRight);
+        assert_eq!(target_y, 900 - 320);
     }
 
     #[test]
@@ -244,10 +364,59 @@ mod tests {
         let work = rect(0, 0, 1200, 900);
         let current = rect(100, 200, 440, 900);
 
-        // New height exceeds work area
-        let (_, target_y) = aligned_window_origin(work, current, 340, 1000);
-        // Should clamp to work.top since work.bottom - height < work.top
+        let (_, target_y) = aligned_window_origin(work, current, 340, 1000, AnchorCorner::BottomRight);
         assert_eq!(target_y, 0);
+    }
+
+    #[test]
+    fn top_anchor_pins_to_work_area_top() {
+        let work = rect(0, 40, 1200, 900);
+        let current = rect(100, 40, 440, 360);
+
+        let (_, target_y) = aligned_window_origin(work, current, 340, 320, AnchorCorner::TopRight);
+        assert_eq!(target_y, 40);
+    }
+
+    #[test]
+    fn top_left_anchor_pins_to_top() {
+        let work = rect(0, 50, 1200, 900);
+        let current = rect(10, 50, 350, 370);
+
+        let (_, target_y) = aligned_window_origin(work, current, 340, 320, AnchorCorner::TopLeft);
+        assert_eq!(target_y, 50);
+    }
+
+    #[test]
+    fn top_anchor_taller_than_work_area_clamps() {
+        let work = rect(0, 0, 1200, 900);
+        let current = rect(100, 0, 440, 900);
+
+        let (_, target_y) = aligned_window_origin(work, current, 340, 1000, AnchorCorner::TopRight);
+        assert_eq!(target_y, 0);
+    }
+
+    #[test]
+    fn detect_anchor_bottom_right() {
+        let work = rect(0, 0, 1920, 1040);
+        assert_eq!(detect_anchor_corner(work, 1500, 700, 340, 320), AnchorCorner::BottomRight);
+    }
+
+    #[test]
+    fn detect_anchor_top_left() {
+        let work = rect(0, 0, 1920, 1040);
+        assert_eq!(detect_anchor_corner(work, 100, 50, 340, 320), AnchorCorner::TopLeft);
+    }
+
+    #[test]
+    fn detect_anchor_top_right() {
+        let work = rect(0, 40, 1920, 1080);
+        assert_eq!(detect_anchor_corner(work, 1500, 50, 340, 320), AnchorCorner::TopRight);
+    }
+
+    #[test]
+    fn detect_anchor_bottom_left() {
+        let work = rect(0, 0, 1920, 1040);
+        assert_eq!(detect_anchor_corner(work, 100, 700, 340, 320), AnchorCorner::BottomLeft);
     }
 
     #[test]
@@ -256,8 +425,38 @@ mod tests {
 
         assert_ne!(flags & SWP_NOZORDER, Default::default());
         assert_ne!(flags & SWP_NOACTIVATE, Default::default());
-        // SWP_NOCOPYBITS intentionally omitted — preserving old client bits
-        // reduces flicker during animated resizes with WebView2.
         assert_eq!(flags & SWP_NOCOPYBITS, Default::default());
+    }
+
+    #[test]
+    fn anchored_resize_bottom_pins_to_work_bottom() {
+        let work = rect(0, 0, 1200, 900);
+        let current = rect(100, 500, 440, 820);
+
+        let (_, target_y) =
+            anchored_resize_origin(work, current, 340, 420, AnchorCorner::BottomRight);
+
+        assert_eq!(target_y, 900 - 420);
+    }
+
+    #[test]
+    fn anchored_resize_top_keeps_existing_top() {
+        let work = rect(0, 40, 1200, 900);
+        let current = rect(100, 80, 440, 400);
+
+        let (_, target_y) = anchored_resize_origin(work, current, 340, 420, AnchorCorner::TopRight);
+
+        assert_eq!(target_y, 80);
+    }
+
+    #[test]
+    fn anchored_resize_bottom_clamps_when_too_tall() {
+        let work = rect(0, 0, 1200, 900);
+        let current = rect(100, 500, 440, 820);
+
+        let (_, target_y) =
+            anchored_resize_origin(work, current, 340, 1200, AnchorCorner::BottomRight);
+
+        assert_eq!(target_y, 0);
     }
 }

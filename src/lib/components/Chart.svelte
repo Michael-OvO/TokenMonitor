@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { modelColor, formatCost, currencySymbol, convertCost, deviceColor } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
   import { activeOffset, activePeriod, chartMode, chartSegmentMode } from "../stores/usage.js";
@@ -6,10 +7,19 @@
   import type { ChartBucket } from "../types/index.js";
   import { filterVisibleChartBuckets, getXAxisLabels } from "./chartBuckets.js";
 
-  const detailAbove = false;
+  import { isWindows } from "../utils/platform.js";
+  import { invoke } from "@tauri-apps/api/core";
+
+  let detailAbove = $state(false);
+
+  if (isWindows()) {
+    invoke<string>("get_window_anchor_edge").then((edge) => {
+      detailAbove = edge === "bottom";
+    }).catch(() => {});
+  }
   const DETAIL_CONFIG = {
-    HOVER_DELAY_MS: 0,
-    LEAVE_DELAY_MS: 120,
+    HOVER_DELAY_MS: 50,
+    LEAVE_DELAY_MS: 300,
   } as const;
 
   interface Props {
@@ -76,21 +86,58 @@
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let leaveTimer: ReturnType<typeof setTimeout> | null = null;
   let previousDataKey = $state("");
+  let chartContainerEl: HTMLDivElement | null = null;
 
   let displayed = $derived(displayedIdx >= 0 ? visibleBuckets[displayedIdx] ?? null : null);
+
+  function isPointerInsideChartContainer(): boolean {
+    return Boolean(chartContainerEl?.matches(":hover"));
+  }
 
   function onEnter(i: number) {
     if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
     hoveredIdx = i;
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
-    displayedIdx = visibleBuckets[i]?.total > 0 ? i : -1;
+    const hasDetail = (visibleBuckets[i]?.total ?? 0) > 0;
+
+    if (DETAIL_CONFIG.HOVER_DELAY_MS > 0) {
+      hoverTimer = setTimeout(async () => {
+        if (hoveredIdx === i) {
+          displayedIdx = hasDetail ? i : -1;
+          if (hasDetail) {
+            await tick();
+            window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: true } }));
+          }
+        }
+      }, DETAIL_CONFIG.HOVER_DELAY_MS);
+    } else {
+      displayedIdx = hasDetail ? i : -1;
+      if (hasDetail) {
+        tick().then(() => {
+          window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: true } }));
+        });
+      }
+    }
   }
 
   function onLeave() {
     hoveredIdx = -1;
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
     if (leaveTimer) clearTimeout(leaveTimer);
-    leaveTimer = setTimeout(() => { displayedIdx = -1; }, DETAIL_CONFIG.LEAVE_DELAY_MS);
+    leaveTimer = setTimeout(() => {
+      if (hoveredIdx >= 0) return;
+      if (isPointerInsideChartContainer()) return;
+      displayedIdx = -1;
+      window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: false } }));
+    }, DETAIL_CONFIG.LEAVE_DELAY_MS);
+  }
+
+  function clearHoverAndDetailState() {
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+    if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
+    hoveredIdx = -1;
+    displayedIdx = -1;
+    window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: false } }));
   }
 
   // Reset on tab / provider / offset change.
@@ -98,15 +145,13 @@
     if (previousDataKey === "") { previousDataKey = dataKey; return; }
     if (dataKey === previousDataKey) return;
     previousDataKey = dataKey;
-    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
-    hoveredIdx = -1;
-    displayedIdx = -1;
+    clearHoverAndDetailState();
   });
 
   $effect(() => {
     const bucketCount = visibleBuckets.length;
-    if (hoveredIdx >= bucketCount) hoveredIdx = -1;
-    if (displayedIdx >= bucketCount) displayedIdx = -1;
+    const shouldClear = hoveredIdx >= bucketCount || displayedIdx >= bucketCount;
+    if (shouldClear) clearHoverAndDetailState();
   });
 
 
@@ -313,9 +358,17 @@
   function bucketAriaLabel(bucket: ChartBucket): string {
     return `${bucket.label}: ${formatCost(bucket.total)}`;
   }
+
 </script>
 
-<div class="ch" class:detail-above={detailAbove}>
+<div
+  class="ch"
+  class:detail-above={detailAbove}
+  bind:this={chartContainerEl}
+  onmouseleave={onLeave}
+  role="region"
+  aria-label="Usage chart"
+>
   <div class="ch-top">
     <span class="ch-t">Cost by {$chartSegmentMode === "device" ? "device" : "model"}</span>
     <div class="ch-right">
@@ -379,7 +432,11 @@
     </div>
   </div>
 
-  <div class="detail" class:visible={displayed != null}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="detail"
+    class:visible={displayed != null}
+  >
     {#if displayed}
       {@const segs = sortedSegments(displayed)}
       <div class="detail-inner">
@@ -487,7 +544,6 @@
                 role="img"
                 aria-label={bucketAriaLabel(bucket)}
                 onmouseenter={() => onEnter(i)}
-                onmouseleave={onLeave}
                 style="cursor:pointer; --delay: {(i / Math.max(visibleBuckets.length - 1, 1)) * 0.35 + 0.04}s;"
               >
                 <!-- Invisible hit area -->
@@ -563,7 +619,6 @@
                 role="img"
                 aria-label={bucketAriaLabel(bucket)}
                 onmouseenter={() => onEnter(i)}
-                onmouseleave={onLeave}
                 style="cursor:pointer"
               >
                 <rect

@@ -12,8 +12,8 @@
   let availableModels = $state<KnownModel[]>([]);
   let expanded = $state(false);
 
-  let hiddenCount = $derived(
-    availableModels.filter((m) => current.hiddenModels.includes(m.model_key)).length
+  let visibleCount = $derived(
+    availableModels.filter((m) => !current.hiddenModels.includes(m.model_key)).length
   );
 
   function refreshModels() {
@@ -51,9 +51,7 @@
   <button class="row vis-row" type="button" onclick={() => (expanded = !expanded)}>
     <span class="label">Model Visibility</span>
     <div class="vis-right">
-      {#if hiddenCount > 0}
-        <span class="vis-count">{hiddenCount} hidden</span>
-      {/if}
+      <span class="vis-count">{visibleCount} of {availableModels.length} enabled</span>
       <svg class="vis-chevron" class:open={expanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="6 9 12 15 18 9"></polyline>
       </svg>

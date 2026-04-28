@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -38,6 +38,11 @@
   let cursorAuthMessage = $state<string | null>(null);
   let cursorExpanded = $state(false);
   let privacyExpanded = $state(false);
+  let cursorRetrying = $state(false);
+  let cursorRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let cursorRetryCount = $state(0);
+  const CURSOR_RETRY_INTERVAL_MS = 4000;
+  const CURSOR_RETRY_MAX = 8;
 
   type CursorAuthStatus = {
     source: string;
@@ -277,6 +282,55 @@
     if (resetTimer) clearTimeout(resetTimer);
     resetTimer = setTimeout(() => { resetStatus = "idle"; }, 2000);
   }
+
+  function stopCursorRetry() {
+    cursorRetrying = false;
+    cursorRetryCount = 0;
+    if (cursorRetryTimer) {
+      clearTimeout(cursorRetryTimer);
+      cursorRetryTimer = null;
+    }
+  }
+
+  function scheduleCursorRetry() {
+    cursorRetryTimer = setTimeout(async () => {
+      cursorRetryCount++;
+      try {
+        const status = await invoke<CursorAuthStatus>("retry_cursor_auth");
+        cursorAuthStatus = status;
+        if (status.configured && !status.lastWarning) {
+          stopCursorRetry();
+          clearUsageCache();
+          await invoke("clear_payload_cache").catch(() => {});
+          return;
+        }
+      } catch (_) {
+        // Retry silently
+      }
+      if (cursorRetryCount < CURSOR_RETRY_MAX && cursorRetrying) {
+        scheduleCursorRetry();
+      } else {
+        stopCursorRetry();
+      }
+    }, CURSOR_RETRY_INTERVAL_MS);
+  }
+
+  async function openCursorAndRetry() {
+    cursorAuthMessage = null;
+    try {
+      await invoke("open_cursor_app");
+      stopCursorRetry();
+      cursorRetrying = true;
+      cursorRetryCount = 0;
+      scheduleCursorRetry();
+    } catch (error) {
+      cursorAuthMessage = `Unable to launch Cursor: ${error}`;
+    }
+  }
+
+  onDestroy(() => {
+    stopCursorRetry();
+  });
 </script>
 
 <div class="settings">
@@ -427,6 +481,18 @@
             </div>
             {#if cursorAuthMessage || cursorAuthStatus?.lastWarning}
               <div class="cursor-message">{cursorAuthMessage ?? cursorAuthStatus?.lastWarning}</div>
+            {#if cursorStatusTone(cursorAuthStatus) === "amber"}
+              <div class="cursor-actions" style="margin-top: 6px;">
+                <button
+                  type="button"
+                  class="secondary-btn"
+                  disabled={cursorRetrying}
+                  onclick={openCursorAndRetry}
+                >
+                  {cursorRetrying ? "Waiting for Cursor..." : "Open Cursor to refresh token"}
+                </button>
+              </div>
+            {/if}
             {/if}
           </div>
         </div>

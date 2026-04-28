@@ -154,6 +154,79 @@ pub async fn get_cursor_auth_status() -> Result<CursorAuthStatus, String> {
     Ok(crate::usage::cursor_parser::cursor_auth_status())
 }
 
+#[tauri::command]
+pub async fn retry_cursor_auth() -> Result<CursorAuthStatus, String> {
+    let ide_present = crate::usage::cursor_parser::prime_ide_access_token();
+    let backend = if ide_present {
+        secrets::StorageBackend::IdeAuto
+    } else {
+        secrets::StorageBackend::None
+    };
+    Ok(crate::usage::cursor_parser::set_cursor_auth_config(
+        None, backend,
+    ))
+}
+
+#[tauri::command]
+pub async fn open_cursor_app() -> Result<(), String> {
+    launch_cursor().map_err(|e| format!("Failed to launch Cursor: {e}"))
+}
+
+fn launch_cursor() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-a", "Cursor"])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        // Try cursor.cmd on PATH first
+        if let Ok(_child) = std::process::Command::new("cursor.cmd")
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+        {
+            return Ok(());
+        }
+
+        // Fallback to known install location
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let exe = std::path::PathBuf::from(local_app_data)
+                .join("Programs")
+                .join("Cursor")
+                .join("Cursor.exe");
+            if exe.is_file() {
+                std::process::Command::new(&exe)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+        }
+
+        Err("Cursor not found on PATH or in default install location".into())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("cursor")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err("Unsupported platform".into())
+    }
+}
+
 /// Hydrate the in-memory Cursor secret state from disk so the very first
 /// usage refresh after launch can hit the remote API without waiting for
 /// the frontend bootstrap to round-trip an IPC call.
@@ -381,6 +454,22 @@ pub async fn set_window_size_and_align(
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_window_anchor_edge() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if crate::platform::windows::window::is_anchor_bottom() {
+            "bottom".to_string()
+        } else {
+            "top".to_string()
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "bottom".to_string()
+    }
 }
 
 #[tauri::command]

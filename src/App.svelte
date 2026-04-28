@@ -62,7 +62,7 @@
     logResizeDebug,
   } from "./lib/uiStability.js";
   import { setupAppEventListeners } from "./lib/appEventListeners.js";
-  import { isMacOS } from "./lib/utils/platform.js";
+  import { isMacOS, isWindows } from "./lib/utils/platform.js";
   import {
     markClaudeKeychainAccessHandled,
     requestClaudeKeychainAccessOnce,
@@ -635,6 +635,13 @@
         await loadInitialData();
         if (cancelled) return;
       }
+      if (isWindows()) {
+        try {
+          const edge = await invoke<string>("get_window_anchor_edge");
+          document.documentElement.setAttribute("data-anchor", edge);
+        } catch { /* non-critical */ }
+      }
+
       appReady = true;
 
       if (popEl) {
@@ -679,6 +686,12 @@
       }
     };
 
+    function onChartHover(e: Event) {
+      const active = (e as CustomEvent<{ active: boolean }>).detail.active;
+      resizeOrch?.setChartHoverActive(active);
+    }
+    window.addEventListener("chart-hover", onChartHover);
+
     init();
 
     return () => {
@@ -686,6 +699,7 @@
       unlisten?.();
       unlistenWindowResize?.();
       observer?.disconnect();
+      window.removeEventListener("chart-hover", onChartHover);
       resizeOrch?.destroy();
       resizeOrch = null;
       cleanupListeners();

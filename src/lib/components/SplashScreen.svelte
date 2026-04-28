@@ -9,6 +9,7 @@
 
   onMount(() => {
     let timer: ReturnType<typeof setTimeout>;
+    let fallbackTimer: ReturnType<typeof setTimeout>;
     let unlisten: (() => void) | undefined;
 
     async function init() {
@@ -32,6 +33,15 @@
             unlisten = undefined;
           }
         }
+
+        // Safety net: start animation even if focus event never arrives (Windows edge case)
+        fallbackTimer = setTimeout(() => {
+          if (!started) {
+            begin();
+            unlisten?.();
+            unlisten = undefined;
+          }
+        }, 200);
       } catch {
         // Fallback for browser dev mode
         begin();
@@ -47,6 +57,7 @@
 
     return () => {
       clearTimeout(timer);
+      clearTimeout(fallbackTimer);
       unlisten?.();
     };
   });

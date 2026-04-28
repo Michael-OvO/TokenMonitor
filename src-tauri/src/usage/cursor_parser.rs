@@ -12,6 +12,10 @@ use super::parser::{
     SessionParseResult,
 };
 
+/// Windows: CREATE_NO_WINDOW flag prevents a console window from flashing.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Cursor helpers (local probe + remote API)
 //
@@ -487,16 +491,19 @@ pub(crate) fn read_cursor_state_value_from_sqlite3(
         ));
     }
     let query = format!("SELECT value FROM ItemTable WHERE key = '{key}' LIMIT 1;");
-    let output = Command::new("sqlite3")
-        .arg(db_path)
-        .arg(&query)
-        .output()
-        .map_err(|e| {
-            format!(
-                "Failed to run sqlite3 for Cursor state DB {}: {e}",
-                path_to_string(db_path)
-            )
-        })?;
+    let mut cmd = Command::new("sqlite3");
+    cmd.arg(db_path).arg(&query);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().map_err(|e| {
+        format!(
+            "Failed to run sqlite3 for Cursor state DB {}: {e}",
+            path_to_string(db_path)
+        )
+    })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
