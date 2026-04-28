@@ -4,11 +4,11 @@ use tauri::WebviewWindow;
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, RECT};
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use std::sync::atomic::{AtomicU8, Ordering};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AnchorCorner {
@@ -43,7 +43,13 @@ pub fn is_anchor_bottom() -> bool {
     current_anchor().is_bottom()
 }
 
-fn detect_anchor_corner(work: RECT, win_x: i32, win_y: i32, win_w: i32, win_h: i32) -> AnchorCorner {
+fn detect_anchor_corner(
+    work: RECT,
+    win_x: i32,
+    win_y: i32,
+    win_w: i32,
+    win_h: i32,
+) -> AnchorCorner {
     let work_cx = (work.left + work.right) / 2;
     let work_cy = (work.top + work.bottom) / 2;
     let win_cx = win_x + win_w / 2;
@@ -242,7 +248,8 @@ pub fn align_to_work_area(window: &WebviewWindow) {
     let win_h = win_rect.bottom - win_rect.top;
     let win_w = win_rect.right - win_rect.left;
 
-    let (target_x, clamped_y) = aligned_window_origin(work, win_rect, win_w, win_h, current_anchor());
+    let (target_x, clamped_y) =
+        aligned_window_origin(work, win_rect, win_w, win_h, current_anchor());
 
     if target_x != win_rect.left || clamped_y != win_rect.top {
         unsafe {
@@ -328,7 +335,8 @@ mod tests {
         let work = rect(0, 0, 1200, 900);
         let current = rect(100, 700, 440, 900);
 
-        let (_, target_y) = aligned_window_origin(work, current, 340, 320, AnchorCorner::BottomRight);
+        let (_, target_y) =
+            aligned_window_origin(work, current, 340, 320, AnchorCorner::BottomRight);
         assert_eq!(target_y, 900 - 320);
     }
 
@@ -337,7 +345,8 @@ mod tests {
         let work = rect(0, 0, 1200, 900);
         let current = rect(100, 0, 440, 280);
 
-        let (_, target_y) = aligned_window_origin(work, current, 340, 420, AnchorCorner::BottomRight);
+        let (_, target_y) =
+            aligned_window_origin(work, current, 340, 420, AnchorCorner::BottomRight);
         assert_eq!(target_y, 900 - 420);
     }
 
@@ -346,7 +355,8 @@ mod tests {
         let work = rect(0, 0, 1200, 900);
         let current = rect(100, 200, 440, 500);
 
-        let (_, target_y) = aligned_window_origin(work, current, 340, 360, AnchorCorner::BottomRight);
+        let (_, target_y) =
+            aligned_window_origin(work, current, 340, 360, AnchorCorner::BottomRight);
         assert_eq!(target_y, 900 - 360);
     }
 
@@ -355,7 +365,8 @@ mod tests {
         let work = rect(0, 0, 1200, 900);
         let current = rect(100, 640, 440, 940);
 
-        let (_, target_y) = aligned_window_origin(work, current, 340, 320, AnchorCorner::BottomRight);
+        let (_, target_y) =
+            aligned_window_origin(work, current, 340, 320, AnchorCorner::BottomRight);
         assert_eq!(target_y, 900 - 320);
     }
 
@@ -364,7 +375,8 @@ mod tests {
         let work = rect(0, 0, 1200, 900);
         let current = rect(100, 200, 440, 900);
 
-        let (_, target_y) = aligned_window_origin(work, current, 340, 1000, AnchorCorner::BottomRight);
+        let (_, target_y) =
+            aligned_window_origin(work, current, 340, 1000, AnchorCorner::BottomRight);
         assert_eq!(target_y, 0);
     }
 
@@ -398,25 +410,37 @@ mod tests {
     #[test]
     fn detect_anchor_bottom_right() {
         let work = rect(0, 0, 1920, 1040);
-        assert_eq!(detect_anchor_corner(work, 1500, 700, 340, 320), AnchorCorner::BottomRight);
+        assert_eq!(
+            detect_anchor_corner(work, 1500, 700, 340, 320),
+            AnchorCorner::BottomRight
+        );
     }
 
     #[test]
     fn detect_anchor_top_left() {
         let work = rect(0, 0, 1920, 1040);
-        assert_eq!(detect_anchor_corner(work, 100, 50, 340, 320), AnchorCorner::TopLeft);
+        assert_eq!(
+            detect_anchor_corner(work, 100, 50, 340, 320),
+            AnchorCorner::TopLeft
+        );
     }
 
     #[test]
     fn detect_anchor_top_right() {
         let work = rect(0, 40, 1920, 1080);
-        assert_eq!(detect_anchor_corner(work, 1500, 50, 340, 320), AnchorCorner::TopRight);
+        assert_eq!(
+            detect_anchor_corner(work, 1500, 50, 340, 320),
+            AnchorCorner::TopRight
+        );
     }
 
     #[test]
     fn detect_anchor_bottom_left() {
         let work = rect(0, 0, 1920, 1040);
-        assert_eq!(detect_anchor_corner(work, 100, 700, 340, 320), AnchorCorner::BottomLeft);
+        assert_eq!(
+            detect_anchor_corner(work, 100, 700, 340, 320),
+            AnchorCorner::BottomLeft
+        );
     }
 
     #[test]
