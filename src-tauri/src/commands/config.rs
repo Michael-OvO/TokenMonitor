@@ -179,7 +179,7 @@ fn launch_cursor() -> Result<(), String> {
             .args(["-a", "Cursor"])
             .spawn()
             .map_err(|e| e.to_string())?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]
@@ -218,7 +218,7 @@ fn launch_cursor() -> Result<(), String> {
         std::process::Command::new("cursor")
             .spawn()
             .map_err(|e| e.to_string())?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
