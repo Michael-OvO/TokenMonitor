@@ -163,13 +163,20 @@
   });
 
   let legendModels = $derived(() => {
-    const seen = new Map<string, string>();
+    const agg = new Map<string, { key: string; name: string; cost: number }>();
     for (const b of visibleBuckets) {
       for (const s of b.segments) {
-        if (!seen.has(s.model_key)) seen.set(s.model_key, s.model);
+        const existing = agg.get(s.model_key);
+        if (existing) {
+          existing.cost += s.cost;
+        } else {
+          agg.set(s.model_key, { key: s.model_key, name: s.model, cost: s.cost });
+        }
       }
     }
-    return Array.from(seen.entries()).map(([key, name]) => ({ key, name }));
+    return Array.from(agg.values())
+      .sort((a, b) => b.cost - a.cost)
+      .map(({ key, name }) => ({ key, name }));
   });
 
   // Y-axis ticks (3 ticks: 0, mid, max)
