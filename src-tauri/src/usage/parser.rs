@@ -4,7 +4,9 @@ use crate::models::{
 use crate::stats::change::ParsedChangeEvent;
 #[cfg(test)]
 use crate::stats::change::{ChangeEventKind, FileCategory};
-use crate::usage::integrations::{UsageIntegrationId, UsageIntegrationSelection};
+use crate::usage::integrations::{
+    provider_matches_model, UsageIntegrationId, UsageIntegrationSelection,
+};
 use chrono::{DateTime, Local, NaiveDate, Timelike};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -1155,6 +1157,13 @@ impl UsageParser {
             }
         }
 
+        // Drop rows whose model doesn't belong to the selected provider tab.
+        // A third-party model logged through any CLI (e.g. GLM-5 via a Claude
+        // Code proxy) should not show up in the Claude tab; otherwise the
+        // main dashboard total diverges from the Per-Device breakdown, which
+        // applies the same predicate to remote SSH rows.
+        entries.retain(|e| provider_matches_model(provider, &e.model));
+
         (entries, change_events, reports)
     }
 
@@ -2165,6 +2174,35 @@ mod tests {
         assert_eq!(entries[0].cache_read_tokens, 30);
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].emitted_entries, 1);
+    }
+
+    #[test]
+    fn load_entries_drops_third_party_models_from_claude_tab() {
+        // Claude Code CLI logs can contain third-party models when proxied
+        // (e.g. GLM-5 via an Anthropic-compatible proxy). Those rows must
+        // NOT be counted in the "claude" tab, otherwise the main dashboard
+        // total diverges from the Per-Device breakdown (which filters by
+        // model family for remote SSH rows).
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2026-03-15T12:01:00+00:00","message":{"model":"glm-5","stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+
+        let (claude_entries, _, _) = parser.load_entries("claude", parse_since_date("20260301"));
+        assert_eq!(
+            claude_entries.len(),
+            1,
+            "GLM-5 row logged via Claude Code CLI should not count in the Claude tab"
+        );
+        assert_eq!(claude_entries[0].model, "claude-sonnet-4-6");
+
+        let (all_entries, _, _) = parser.load_entries("all", parse_since_date("20260301"));
+        assert!(
+            all_entries.iter().any(|e| e.model == "glm-5"),
+            "the 'all' tab should still include the GLM-5 row"
+        );
     }
 
     #[test]

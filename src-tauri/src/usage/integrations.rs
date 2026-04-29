@@ -83,6 +83,27 @@ pub fn all_usage_integrations() -> &'static [UsageIntegrationId] {
     &ALL_USAGE_INTEGRATIONS
 }
 
+/// Is this row's model relevant to the selected provider tab?
+///
+/// The "Claude / Codex / Cursor" tabs are ultimately per-model-vendor filters,
+/// not per-CLI filters — a GLM-5 row logged through Claude Code CLI does not
+/// belong in the Claude tab, it's a third-party model. This keeps the main
+/// dashboard total and the Per-Device breakdown consistent regardless of
+/// which integration directory produced the row.
+///
+/// `cursor` passes through (no model-family filter) because Cursor IDE
+/// multiplexes composer/gpt/claude/etc. — all rows from the Cursor
+/// integration conceptually belong to the Cursor tab.
+pub fn provider_matches_model(provider: &str, model: &str) -> bool {
+    use crate::models::{detect_model_family, ModelFamily};
+    match provider {
+        ALL_USAGE_INTEGRATIONS_ID => true,
+        "claude" => detect_model_family(model) == ModelFamily::Anthropic,
+        "codex" => detect_model_family(model) == ModelFamily::OpenAI,
+        _ => true,
+    }
+}
+
 fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();

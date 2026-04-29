@@ -2,7 +2,7 @@ use chrono::Timelike;
 
 use crate::commands::AppState;
 use crate::models::{ChartBucket, ChartSegment, DeviceModelSummary, DeviceSummary};
-use crate::usage::integrations::ALL_USAGE_INTEGRATIONS_ID;
+use crate::usage::integrations::{provider_matches_model, ALL_USAGE_INTEGRATIONS_ID};
 use crate::usage::ssh_remote::CompactUsageRecord;
 
 pub(crate) fn parse_remote_ts(ts: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
@@ -22,13 +22,7 @@ pub(crate) fn provider_includes_remote_ssh_usage(provider: &str) -> bool {
 }
 
 pub(crate) fn compact_record_matches_provider(record: &CompactUsageRecord, provider: &str) -> bool {
-    use crate::models::{detect_model_family, ModelFamily};
-    match provider {
-        ALL_USAGE_INTEGRATIONS_ID => true,
-        "claude" => detect_model_family(&record.model) == ModelFamily::Anthropic,
-        "codex" => detect_model_family(&record.model) == ModelFamily::OpenAI,
-        _ => true,
-    }
+    provider_matches_model(provider, &record.model)
 }
 
 // ── Summary builders ────────────────────────────────────────────────────────
