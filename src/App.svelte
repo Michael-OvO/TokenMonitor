@@ -136,13 +136,6 @@
     syncSizeAndVerify("onboarding-finish");
   }
 
-  /** Best-effort signal that the keychain ACL is currently held — true when
-   * the latest rate-limit fetch returned more windows than the CLI fallback
-   * can produce (CLI maxes at one window). */
-  let keychainAuthorized = $derived.by(() => {
-    const claude = providerPayload(rateLimits, "claude");
-    return Boolean(claude && claude.windows.length >= 2);
-  });
   let brandTheming = $state(true);
   let headerTabs = $state<HeaderTabs>(DEFAULT_HEADER_TABS);
   let popEl: HTMLDivElement | null = null;
@@ -730,6 +723,7 @@
         } catch { /* non-critical */ }
       }
 
+      void refreshStatuslineProbe();
       appReady = true;
 
       if (popEl) {
@@ -912,6 +906,41 @@
               <div class="hr"></div>
             {/if}
           {/each}
+          {#if visibleUsableRateLimitProviders.some((p) => {
+            const payload = providerPayload(rateLimits, p);
+            return Boolean(payload && (payload.error || payload.stale));
+          })}
+            {@const probeBroken =
+              statuslineProbeStatus === "script_missing" ||
+              statuslineProbeStatus === "not_installed"}
+            <div class="rate-limit-stale-banner" data-state={probeBroken ? "warn" : "idle"}>
+              <div class="rl-stale-row">
+                <span class="rl-stale-dot" aria-hidden="true"></span>
+                <span class="rl-stale-headline">
+                  {probeBroken
+                    ? "Statusline needs attention"
+                    : "No recent Claude Code activity"}
+                </span>
+              </div>
+              <div class="rl-stale-body">
+                {#if probeBroken}
+                  Reinstall the statusline to restore live updates.
+                {:else}
+                  Numbers refresh automatically on your next prompt.
+                {/if}
+              </div>
+              {#if probeBroken}
+                <button
+                  type="button"
+                  class="rate-limit-cta"
+                  onclick={handleInstallStatusline}
+                  disabled={statuslineBusy}
+                >
+                  {statuslineBusy ? "Reinstalling…" : "Reinstall statusline"}
+                </button>
+              {/if}
+            </div>
+          {/if}
         {:else if period === "5h" && shouldShowFiveHourUsageFallback}
           {#if !$settings.rateLimitsEnabled}
             <div class="rate-limit-note">
@@ -1087,6 +1116,30 @@
   }
   .rate-limit-stale-banner {
     padding-top: 8px;
+  }
+  .rl-stale-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .rl-stale-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--t4);
+    flex-shrink: 0;
+  }
+  .rate-limit-stale-banner[data-state="warn"] .rl-stale-dot {
+    background: #d88d31;
+  }
+  .rl-stale-headline {
+    font: 500 10px/1 'Inter', sans-serif;
+    color: var(--t2);
+  }
+  .rl-stale-body {
+    font: 400 9px/1.4 'Inter', sans-serif;
+    color: var(--t3);
+    padding-left: 12px;
   }
   .rate-limit-permission {
     gap: 7px;
