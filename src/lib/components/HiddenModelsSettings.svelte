@@ -13,6 +13,7 @@
   let costInputFocused = $state(false);
   let availableModels = $state<KnownModel[]>([]);
   let modelsLoading = $state(true);
+  let modelsExpanded = $state(false);
 
   $effect(() => {
     costEnabled = current.costAlertThreshold > 0;
@@ -101,33 +102,43 @@
         onChange={(checked) => updateSetting("showModelChangeStats", checked)}
       />
     </div>
-    {#if modelsLoading}
-      <div class="model-grid" aria-busy="true" aria-label="Loading models">
-        {#each Array(4) as _, i (i)}
-          <div class="model-cell skeleton-cell">
-            <div class="dot skeleton-block"></div>
-            <span class="skeleton-block skeleton-name"></span>
-            <span class="skeleton-block skeleton-toggle"></span>
-          </div>
-        {/each}
+    <button class="row collapsible-toggle" type="button" onclick={() => (modelsExpanded = !modelsExpanded)}>
+      <span class="label">Models</span>
+      <div class="collapsible-right">
+        <svg class="collapsible-chevron" class:open={modelsExpanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
       </div>
-    {:else if availableModels.length > 0}
-      <div class="model-grid">
-        {#each availableModels as model}
-          <div class="model-cell">
-            <div class="dot" style:background={modelColor(model.model_key)}></div>
-            <span class="model-name">{model.display_name}</span>
-            <ToggleSwitch
-              checked={!current.hiddenModels.includes(model.model_key)}
-              color={modelColor(model.model_key)}
-              onChange={() => toggleModel(model.model_key)}
-            />
-          </div>
-        {/each}
-      </div>
-    {:else}
-      <div class="model-empty">No models discovered yet</div>
-    {/if}
+    </button>
+    <div class="models-collapse" class:open={modelsExpanded}>
+      {#if modelsLoading}
+        <div class="model-grid" aria-busy="true" aria-label="Loading models">
+          {#each Array(4) as _, i (i)}
+            <div class="model-cell skeleton-cell">
+              <div class="dot skeleton-block"></div>
+              <span class="skeleton-block skeleton-name"></span>
+              <span class="skeleton-block skeleton-toggle"></span>
+            </div>
+          {/each}
+        </div>
+      {:else if availableModels.length > 0}
+        <div class="model-grid">
+          {#each availableModels as model}
+            <div class="model-cell">
+              <div class="dot" style:background={modelColor(model.model_key)}></div>
+              <span class="model-name">{model.display_name}</span>
+              <ToggleSwitch
+                checked={!current.hiddenModels.includes(model.model_key)}
+                color={modelColor(model.model_key)}
+                onChange={() => toggleModel(model.model_key)}
+              />
+            </div>
+          {/each}
+        </div>
+      {:else}
+        <div class="model-empty">No models discovered yet</div>
+      {/if}
+    </div>
   </div>
 </div>
 
@@ -241,5 +252,37 @@
   }
   .cost-field:focus {
     border-color: var(--t3);
+  }
+  .collapsible-toggle {
+    width: 100%;
+    background: none;
+    border: none;
+    border-top: 1px solid var(--border-subtle);
+    cursor: pointer;
+    user-select: none;
+  }
+  .collapsible-toggle:hover {
+    background: var(--surface-hover);
+  }
+  .collapsible-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .collapsible-chevron {
+    color: var(--t3);
+    transition: transform var(--t-normal, 200ms) ease;
+    transform: rotate(-90deg);
+  }
+  .collapsible-chevron.open {
+    transform: rotate(0deg);
+  }
+  .models-collapse {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height var(--t-normal, 200ms) ease;
+  }
+  .models-collapse.open {
+    max-height: 600px;
   }
 </style>

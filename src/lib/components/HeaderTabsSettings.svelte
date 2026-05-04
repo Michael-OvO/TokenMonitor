@@ -228,12 +228,13 @@
      padding, while letting them grow to fill the row when there's
      extra space. */
   .chip-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
-    gap: 6px;
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 5px;
     padding: 0 2px;
   }
   .chip {
+    flex: 1 1 0;
     min-width: 0;
     display: inline-flex;
     align-items: center;

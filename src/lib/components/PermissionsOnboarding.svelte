@@ -27,6 +27,12 @@
    */
   type AccessState = "loading" | "granted" | "request" | "denied";
   type AppDataResp = { status: "granted" | "denied" | "not_applicable" };
+  type CursorAuthStatus = {
+    source: string;
+    configured: boolean;
+    message: string;
+    lastWarning: string | null;
+  };
 
   interface Props {
     /** Called when the user clicks the final "Open TokenMonitor" CTA.
@@ -82,6 +88,7 @@
 
   let appDataState = $state<AccessState>("loading");
   let statuslineState = $state<AccessState>("loading");
+  let cursorState = $state<"loading" | "configured" | "not_configured">("loading");
   let appDataBusy = $state(false);
   let statuslineBusy = $state(false);
   let finishing = $state(false);
@@ -111,6 +118,13 @@
     } catch (e) {
       logger.error("permissions", `Statusline probe failed: ${e}`);
       statuslineState = "request";
+    }
+    try {
+      const cursor = await invoke<CursorAuthStatus>("get_cursor_auth_status");
+      cursorState = cursor.configured ? "configured" : "not_configured";
+    } catch (e) {
+      logger.error("permissions", `Cursor auth probe failed: ${e}`);
+      cursorState = "not_configured";
     }
   }
 
@@ -489,6 +503,69 @@
             </button>
           {/if}
         </div>
+
+        <div
+          class="po-card"
+          data-done={cursorState === "configured" ? "true" : "false"}
+          style="--icon-tint: 92, 106, 196;"
+        >
+          <div class="po-card-row">
+            <div class="po-card-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3.5" y="3.5" width="17" height="17" rx="4"></rect>
+                <path d="M8 12h8"></path>
+                <path d="M12 8v8"></path>
+              </svg>
+            </div>
+            <div class="po-card-meta">
+              <div class="po-card-title-row">
+                <span class="po-card-title">Cursor IDE</span>
+                {#if cursorState === "configured"}
+                  <svg
+                    class="po-card-check"
+                    aria-label="Connected"
+                    viewBox="0 0 16 16"
+                    width="13"
+                    height="13"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2.2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M3 8.6 L6.7 12 L13 4.6"/>
+                  </svg>
+                {/if}
+              </div>
+              <div class="po-card-text">Track Cursor usage and rate limits</div>
+            </div>
+          </div>
+          <ul class="po-card-bullets">
+            <li>Auto-detected from Cursor IDE login</li>
+          </ul>
+          {#if cursorState === "configured"}
+            <div class="po-card-done-pill" aria-live="polite">
+              <svg
+                viewBox="0 0 16 16"
+                width="11"
+                height="11"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M3 8.6 L6.7 12 L13 4.6"/>
+              </svg>
+              <span>Connected</span>
+            </div>
+          {:else}
+            <div class="po-card-info-pill">
+              Not connected &mdash; set up in Settings
+            </div>
+          {/if}
+        </div>
       </div>
     </div>
   {:else if stepName === "done"}
@@ -515,6 +592,12 @@
           <span class="po-recap-name">Claude Statusline</span>
           <span class="po-recap-status" class:po-recap-status-on={statuslineState === "granted"}>
             {statuslineState === "granted" ? "Installed" : "Off"}
+          </span>
+        </li>
+        <li>
+          <span class="po-recap-name">Cursor IDE</span>
+          <span class="po-recap-status" class:po-recap-status-on={cursorState === "configured"}>
+            {cursorState === "configured" ? "Connected" : "Not connected"}
           </span>
         </li>
       </ul>
@@ -1172,6 +1255,24 @@
   @keyframes poPillRise {
     0%   { opacity: 0; transform: translateY(4px) scale(0.96); }
     100% { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .po-card-info-pill {
+    display: inline-flex;
+    align-items: center;
+    align-self: flex-start;
+    padding: 6px 11px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--t3);
+    font: 500 10.5px/1 'Inter', sans-serif;
+    letter-spacing: -0.05px;
+    margin-top: 2px;
+  }
+  :global([data-theme="light"]) .po-card-info-pill {
+    background: rgba(0, 0, 0, 0.03);
+    border-color: rgba(0, 0, 0, 0.06);
   }
 
   .po-step-done {

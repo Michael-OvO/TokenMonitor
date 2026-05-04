@@ -16,6 +16,7 @@
   let sshSyncing = $state(false);
   let sshSyncResult = $state<{ total: number; msg: string } | null>(null);
   let destroyed = false;
+  let devicesExpanded = $state(false);
 
   onMount(() => {
     destroyed = false;
@@ -143,52 +144,63 @@
 <div class="group">
   <div class="group-label">Remote Devices</div>
   <div class="card">
-    <div class="ssh-section">
-      <div class="ssh-hosts">
-        {#each sshHosts as host (host.alias)}
-          <div class="ssh-host-row">
-            <div class="ssh-host-info">
-              <span class="ssh-alias">{host.alias}</span>
-              <span class="ssh-detail">{host.hostname}{host.user ? ` (${host.user})` : ''}{host.port !== 22 ? `:${host.port}` : ''}</span>
+    <button class="row collapsible-toggle" type="button" onclick={() => (devicesExpanded = !devicesExpanded)}>
+      <span class="label">Devices</span>
+      <div class="collapsible-right">
+        <span class="device-count">{sshHosts.length}</span>
+        <svg class="collapsible-chevron" class:open={devicesExpanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </div>
+    </button>
+    <div class="devices-collapse" class:open={devicesExpanded}>
+      <div class="ssh-section">
+        <div class="ssh-hosts">
+          {#each sshHosts as host (host.alias)}
+            <div class="ssh-host-row">
+              <div class="ssh-host-info">
+                <span class="ssh-alias">{host.alias}</span>
+                <span class="ssh-detail">{host.hostname}{host.user ? ` (${host.user})` : ''}{host.port !== 22 ? `:${host.port}` : ''}</span>
+              </div>
+              <div class="ssh-host-actions">
+                {#if sshTestingHost === host.alias}
+                  <span class="ssh-testing">...</span>
+                {:else if sshTestResults[host.alias]}
+                  <span class="ssh-result" class:ssh-ok={sshTestResults[host.alias].success} class:ssh-fail={!sshTestResults[host.alias].success}>
+                    {sshTestResults[host.alias].success ? 'OK' : 'Fail'}
+                  </span>
+                {/if}
+                <button class="ssh-btn" onclick={() => testSshHost(host.alias)}>Test</button>
+                {#if sshConfiguredHosts.some(h => h.alias === host.alias)}
+                  <ToggleSwitch
+                    checked={sshConfiguredHosts.find(h => h.alias === host.alias)?.enabled ?? false}
+                    onChange={(checked) => toggleSshHost(host.alias, checked)}
+                  />
+                {:else}
+                  <button class="ssh-btn ssh-add" onclick={() => addSshHost(host.alias)}>Add</button>
+                {/if}
+              </div>
             </div>
-            <div class="ssh-host-actions">
-              {#if sshTestingHost === host.alias}
-                <span class="ssh-testing">...</span>
-              {:else if sshTestResults[host.alias]}
-                <span class="ssh-result" class:ssh-ok={sshTestResults[host.alias].success} class:ssh-fail={!sshTestResults[host.alias].success}>
-                  {sshTestResults[host.alias].success ? 'OK' : 'Fail'}
-                </span>
-              {/if}
-              <button class="ssh-btn" onclick={() => testSshHost(host.alias)}>Test</button>
-              {#if sshConfiguredHosts.some(h => h.alias === host.alias)}
-                <ToggleSwitch
-                  checked={sshConfiguredHosts.find(h => h.alias === host.alias)?.enabled ?? false}
-                  onChange={(checked) => toggleSshHost(host.alias, checked)}
-                />
+          {/each}
+          {#if sshHosts.length === 0}
+            <div class="ssh-empty">No hosts found in ~/.ssh/config</div>
+          {/if}
+        </div>
+        {#if sshConfiguredHosts.length > 0}
+          <div class="ssh-sync-row">
+            <span class="ssh-sync-label">
+              {#if sshSyncResult}
+                <span class="ssh-sync-status" class:ssh-sync-error={sshSyncResult.msg.startsWith("Failed")}>{sshSyncResult.msg}</span>
               {:else}
-                <button class="ssh-btn ssh-add" onclick={() => addSshHost(host.alias)}>Add</button>
+                {sshConfiguredHosts.filter(h => h.enabled).length} device(s) enabled
               {/if}
-            </div>
+            </span>
+            <button class="ssh-btn" onclick={syncAllSshHosts} disabled={sshSyncing}>
+              {sshSyncing ? "Syncing..." : "Sync Now"}
+            </button>
           </div>
-        {/each}
-        {#if sshHosts.length === 0}
-          <div class="ssh-empty">No hosts found in ~/.ssh/config</div>
         {/if}
       </div>
-      {#if sshConfiguredHosts.length > 0}
-        <div class="ssh-sync-row">
-          <span class="ssh-sync-label">
-            {#if sshSyncResult}
-              <span class="ssh-sync-status" class:ssh-sync-error={sshSyncResult.msg.startsWith("Failed")}>{sshSyncResult.msg}</span>
-            {:else}
-              {sshConfiguredHosts.filter(h => h.enabled).length} device(s) enabled
-            {/if}
-          </span>
-          <button class="ssh-btn" onclick={syncAllSshHosts} disabled={sshSyncing}>
-            {sshSyncing ? "Syncing..." : "Sync Now"}
-          </button>
-        </div>
-      {/if}
     </div>
   </div>
 </div>
@@ -285,5 +297,48 @@
   }
   .ssh-sync-error {
     color: #f44336;
+  }
+  .collapsible-toggle {
+    width: 100%;
+    background: none;
+    border: none;
+    cursor: pointer;
+    user-select: none;
+    padding: 7px 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .collapsible-toggle:hover {
+    background: var(--surface-hover);
+  }
+  .label {
+    font: 400 10px/1 'Inter', sans-serif;
+    color: var(--t1);
+  }
+  .collapsible-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .collapsible-chevron {
+    color: var(--t3);
+    transition: transform var(--t-normal, 200ms) ease;
+    transform: rotate(-90deg);
+  }
+  .collapsible-chevron.open {
+    transform: rotate(0deg);
+  }
+  .device-count {
+    font: 400 9px/1 'Inter', sans-serif;
+    color: var(--t4);
+  }
+  .devices-collapse {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height var(--t-normal, 200ms) ease;
+  }
+  .devices-collapse.open {
+    max-height: 500px;
   }
 </style>
