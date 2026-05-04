@@ -37,6 +37,7 @@
   const EMPTY_CONFIG: TrayConfig = {
     barDisplay: "both",
     barProvider: "claude",
+    barProviders: ["claude", "codex", "cursor"],
     showPercentages: false,
     percentageFormat: "compact",
     showCost: true,
@@ -104,21 +105,36 @@
   };
 
 
-  // Float ball always shows all rate-limit providers regardless of Settings.
-  const FIXED_PROVIDERS: RateLimitProviderId[] = ["claude", "codex", "cursor"];
+  const FALLBACK_PROVIDERS: RateLimitProviderId[] = ["claude", "codex", "cursor"];
 
-  let bars = $derived.by((): WidgetBar[] =>
-    FIXED_PROVIDERS.map((provider) => ({
-      provider,
-      label: provider === "claude" ? "Claude" : provider === "codex" ? "Codex" : "Cursor",
-      shortLabel: provider === "claude" ? "CL" : provider === "codex" ? "CX" : "CR",
-      utilization:
-        provider === "claude" ? summary.claudeUtil
-        : provider === "codex" ? summary.codexUtil
-        : summary.cursorUtil,
-      color: provider === "claude" ? "#d79b64" : provider === "codex" ? "#72aefc" : "#5c6ac4",
-    })),
-  );
+  const PROVIDER_META: Record<string, { label: string; shortLabel: string; color: string }> = {
+    claude: { label: "Claude", shortLabel: "CL", color: "#d79b64" },
+    codex: { label: "Codex", shortLabel: "CX", color: "#72aefc" },
+    cursor: { label: "Cursor", shortLabel: "CR", color: "#5c6ac4" },
+  };
+
+  function providerUtil(provider: RateLimitProviderId): number | null {
+    if (provider === "claude") return summary.claudeUtil;
+    if (provider === "codex") return summary.codexUtil;
+    if (provider === "cursor") return summary.cursorUtil;
+    return null;
+  }
+
+  let bars = $derived.by((): WidgetBar[] => {
+    const providers = summary.config.barProviders?.length
+      ? summary.config.barProviders
+      : FALLBACK_PROVIDERS;
+    return providers.map((provider) => {
+      const meta = PROVIDER_META[provider] ?? { label: provider, shortLabel: provider.slice(0, 2).toUpperCase(), color: "#888" };
+      return {
+        provider,
+        label: meta.label,
+        shortLabel: meta.shortLabel,
+        utilization: providerUtil(provider),
+        color: meta.color,
+      };
+    });
+  });
 
 
   function nextInteractionId(kind: string): string {

@@ -13,6 +13,7 @@ import type {
   BarDisplay,
   CostPrecision,
   DefaultPeriod,
+  RateLimitProviderId,
   HeaderTabs,
   PercentageFormat,
   SshHostConfig,
@@ -109,7 +110,7 @@ export const SUPPORTED_CLAUDE_PLAN_TIERS: ClaudePlanTier[] = [
   "Custom",
 ];
 
-const SUPPORTED_BAR_DISPLAYS: BarDisplay[] = ["off", "single", "both"];
+const SUPPORTED_BAR_DISPLAYS: BarDisplay[] = ["off", "single", "both", "custom"];
 const SUPPORTED_BAR_PROVIDERS = [...RATE_LIMIT_PROVIDER_ORDER];
 const SUPPORTED_PERCENTAGE_FORMATS: PercentageFormat[] = ["compact", "verbose"];
 const SUPPORTED_COST_PRECISIONS: CostPrecision[] = ["whole", "full"];
@@ -131,6 +132,7 @@ const DEFAULTS: Settings = {
   trayConfig: {
     barDisplay: 'both',
     barProvider: DEFAULT_RATE_LIMIT_PROVIDER,
+    barProviders: [...RATE_LIMIT_PROVIDER_ORDER],
     showPercentages: false,
     percentageFormat: 'compact',
     showCost: true,
@@ -290,17 +292,36 @@ function normalizeSshHosts(value: unknown): SshHostConfig[] {
 }
 
 function normalizeTrayConfig(trayConfig?: Partial<TrayConfig> | null): TrayConfig {
+  const barDisplay = normalizeStringChoice(
+    trayConfig?.barDisplay,
+    SUPPORTED_BAR_DISPLAYS,
+    DEFAULTS.trayConfig.barDisplay,
+  );
+  const barProvider = normalizeStringChoice(
+    trayConfig?.barProvider,
+    SUPPORTED_BAR_PROVIDERS,
+    DEFAULTS.trayConfig.barProvider,
+  );
+
+  let barProviders: RateLimitProviderId[];
+  if (Array.isArray(trayConfig?.barProviders)) {
+    barProviders = (trayConfig!.barProviders as string[])
+      .filter((p): p is RateLimitProviderId => SUPPORTED_BAR_PROVIDERS.includes(p as RateLimitProviderId));
+  } else {
+    if (barDisplay === 'off') barProviders = [];
+    else if (barDisplay === 'single') barProviders = [barProvider];
+    else barProviders = [...RATE_LIMIT_PROVIDER_ORDER];
+  }
+
+  const derivedDisplay: BarDisplay =
+    barProviders.length === 0 ? 'off'
+    : barProviders.length === 1 ? 'single'
+    : 'custom';
+
   return {
-    barDisplay: normalizeStringChoice(
-      trayConfig?.barDisplay,
-      SUPPORTED_BAR_DISPLAYS,
-      DEFAULTS.trayConfig.barDisplay,
-    ),
-    barProvider: normalizeStringChoice(
-      trayConfig?.barProvider,
-      SUPPORTED_BAR_PROVIDERS,
-      DEFAULTS.trayConfig.barProvider,
-    ),
+    barDisplay: derivedDisplay,
+    barProvider: barProviders[0] ?? barProvider,
+    barProviders,
     showPercentages: normalizeBoolean(
       trayConfig?.showPercentages,
       DEFAULTS.trayConfig.showPercentages,
@@ -404,6 +425,7 @@ export async function loadSettings(): Promise<Settings> {
             trayConfig: {
               ...DEFAULTS.trayConfig,
               barDisplay: "off" as const,
+              barProviders: [] as RateLimitProviderId[],
               showCost: (saved as Record<string, unknown>).showTrayAmount !== false,
             },
           }

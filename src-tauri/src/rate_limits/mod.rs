@@ -1,5 +1,4 @@
 mod claude;
-mod claude_cli;
 mod codex;
 mod codex_cli;
 mod cursor;
@@ -10,12 +9,95 @@ mod http;
 #[cfg(target_os = "macos")]
 mod oauth_refresh;
 
+use crate::models::RateLimitWindow;
 use crate::models::{ProviderRateLimits, RateLimitsPayload};
+use crate::statusline;
 use chrono::{DateTime, Duration, Utc};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub(crate) fn command_in_path(binary: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        #[cfg(target_os = "windows")]
+        {
+            // On Windows, prefer .cmd/.exe over bare names — npm installs a
+            // POSIX shell shim as the bare name that cannot be executed
+            // directly by CreateProcessW (error 193).
+            let cmd = dir.join(format!("{binary}.cmd"));
+            if cmd.is_file() {
+                return Some(cmd);
+            }
+            let exe = dir.join(format!("{binary}.exe"));
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let candidate = dir.join(binary);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Freshness window for statusline data. If the last CC prompt was within
+/// this duration, the statusline `used_percentage` is authoritative and we
+/// skip the OAuth/CLI probe entirely.
+const STATUSLINE_FRESHNESS: Duration = Duration::minutes(10);
+
+/// Try to build a `ProviderRateLimits` from the most recent statusline event.
+/// Returns `None` if the statusline is not installed, has no events, or the
+/// most recent event is older than `STATUSLINE_FRESHNESS`.
+fn fetch_claude_from_statusline() -> Option<ProviderRateLimits> {
+    let session = statusline::source::latest_active_session(&statusline::events_file())
+        .ok()
+        .flatten()?;
+
+    if !session.is_fresh(STATUSLINE_FRESHNESS, Utc::now()) {
+        return None;
+    }
+
+    // We need at least one window to consider this a usable payload.
+    if session.five_hour.is_none() && session.seven_day.is_none() {
+        return None;
+    }
+
+    let mut windows = Vec::with_capacity(2);
+    if let Some(w) = session.five_hour {
+        windows.push(RateLimitWindow::new(
+            "five_hour".to_string(),
+            "Session (5hr)".to_string(),
+            w.used_percentage,
+            DateTime::from_timestamp(w.resets_at_unix, 0).map(|dt| dt.to_rfc3339()),
+        ));
+    }
+    if let Some(w) = session.seven_day {
+        windows.push(RateLimitWindow::new(
+            "seven_day".to_string(),
+            "Weekly (7d)".to_string(),
+            w.used_percentage,
+            DateTime::from_timestamp(w.resets_at_unix, 0).map(|dt| dt.to_rfc3339()),
+        ));
+    }
+
+    Some(ProviderRateLimits {
+        provider: "claude".to_string(),
+        plan_tier: None,
+        windows,
+        extra_usage: None,
+        credits: None,
+        stale: false,
+        error: None,
+        retry_after_seconds: None,
+        cooldown_until: None,
+        fetched_at: session.last_seen.to_rfc3339(),
+    })
+}
 
 use claude::fetch_claude_rate_limits;
-use claude_cli::fetch_claude_rate_limits_via_cli;
 use codex::extract_codex_rate_limits;
 use codex_cli::fetch_codex_rate_limits_via_cli;
 use cursor::fetch_cursor_rate_limits;
@@ -73,18 +155,6 @@ impl RateLimitFetchError {
         }
     }
 
-    fn cooldown(message: impl Into<String>, retry_after_seconds: u64) -> Self {
-        let cooldown_until = Utc::now() + Duration::seconds(retry_after_seconds as i64);
-        Self {
-            message: message.into(),
-            retry_after_seconds: Some(retry_after_seconds),
-            cooldown_until: Some(cooldown_until.to_rfc3339()),
-        }
-    }
-
-    fn is_claude_auth_unavailable(&self) -> bool {
-        self.message.contains("Claude Code is not logged in")
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,50 +229,38 @@ pub async fn fetch_selected_rate_limits(
 
         let now = Utc::now();
 
-        // Always try the OAuth API first — it's a metadata endpoint that
-        // returns all windows (five_hour + weekly + per-model + extra usage)
-        // and does NOT consume any rate-limit budget. It works even when the
-        // user has exhausted their 5h window, so a CLI-derived
-        // `cooldown_until` (set when status=rejected lands at the window
-        // reset time) must NOT short-circuit it. Cooldown applies only to
-        // the CLI fallback below, which actually consumes budget.
+        // Primary: statusline — CC pushes server-authoritative used_percentage
+        // on every prompt, no network call, no budget cost.
+        if let Some(sl) = tokio::task::spawn_blocking(fetch_claude_from_statusline)
+            .await
+            .ok()
+            .flatten()
+        {
+            tracing::debug!("Claude rate limits served from statusline");
+            return Some(sl);
+        }
+
+        // Fallback: OAuth API — metadata endpoint, zero budget cost.
         match fetch_claude_rate_limits().await {
             Ok(rate_limits) => Some(rate_limits),
             Err(error) => {
-                tracing::debug!(error = %error.message, "Claude OAuth API failed, considering CLI fallback");
+                tracing::debug!(error = %error.message, "Claude OAuth API failed");
 
-                // Provider cooldown gates the CLI probe — running it during
-                // a known rejection window just produces another rejection
-                // and can poke the rate limit further.
                 if let Some(cached) = cached_claude.as_ref() {
                     if provider_cooldown_is_active(cached, now) {
                         return Some(mark_rate_limits_stale(cached.clone()));
                     }
                 }
 
-                // Only fall back to the CLI probe when the cached data is
-                // stale or missing. The CLI costs rate-limit budget and can
-                // only report one window, so we throttle it.
                 if is_fresh(cached_claude.as_ref(), CLAUDE_MIN_REFETCH_SECS, now) {
                     return cached_claude;
                 }
 
-                match fetch_claude_rate_limits_via_cli(cached_claude.as_ref()).await {
-                    Ok(rate_limits) => Some(rate_limits),
-                    Err(cli_error) => {
-                        tracing::warn!(
-                            api_error = %error.message,
-                            cli_error = %cli_error.message,
-                            "Claude rate-limit: both API and CLI fallback failed"
-                        );
-                        let surfaced_error = if cli_error.is_claude_auth_unavailable() {
-                            cli_error
-                        } else {
-                            error
-                        };
-                        Some(provider_rate_limit_error("claude", surfaced_error))
-                    }
-                }
+                tracing::warn!(
+                    error = %error.message,
+                    "Claude rate-limit: statusline + API both failed"
+                );
+                Some(provider_rate_limit_error("claude", error))
             }
         }
     };

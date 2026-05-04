@@ -37,9 +37,9 @@
   <div class="ft">
     <div class="ft-l">
       {#if fiveHourPct != null}
-        <span>5h · {fiveHourPct}% used</span>
+        <span>{fiveHourPct}% used</span>
       {:else}
-        <span>5h · {formatCost(data.five_hour_cost)}</span>
+        <span>{formatCost(data.five_hour_cost)}</span>
       {/if}
     </div>
   </div>

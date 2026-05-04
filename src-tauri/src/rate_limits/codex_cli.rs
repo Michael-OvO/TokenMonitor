@@ -93,7 +93,7 @@ fn resolve_codex_cli_path_uncached() -> Result<PathBuf, String> {
         }
     }
 
-    if let Some(path) = super::claude_cli::command_in_path("codex") {
+    if let Some(path) = super::command_in_path("codex") {
         return Ok(path);
     }
 

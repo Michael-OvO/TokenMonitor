@@ -214,18 +214,6 @@
       hasRateLimitWindows(providerPayload(rateLimits, candidate)),
     ),
   );
-  let hasFiveHourUsageData = $derived.by(() =>
-    Boolean(data && (
-      data.total_tokens > 0
-      || data.total_cost > 0
-      || data.five_hour_cost > 0
-      || data.chart_buckets.length > 0
-    )),
-  );
-  let shouldShowFiveHourUsageFallback = $derived.by(() =>
-    period === "5h" && hasFiveHourUsageData,
-  );
-
   // Subscribe to stores
   $effect(() => {
     const unsub1 = usageData.subscribe((v) => { if (deviceToggleGuard === 0) data = v; });
@@ -862,163 +850,142 @@
         {/if}
         <div class="hr"></div>
 
-        {#if period === "5h" && showKeychainPermissionPanel && isMacOS() && !$settings.keychainAccessRequested}
-          <div class="rate-limit-permission" role="dialog" aria-labelledby="rate-limit-permission-title">
-            <div class="rate-limit-empty-title" id="rate-limit-permission-title">
-              Keychain fallback for live limits
-            </div>
-            <div class="rate-limit-empty-text">
-              TokenMonitor normally reads Claude live limits from your Claude
-              credentials file without any macOS prompt. If that file is missing
-              or unreadable, you can allow a one-time Keychain fallback.
-            </div>
-            <PermissionDisclosure mode="rate-limit" />
-            <div class="rate-limit-empty-text">
-              macOS may show a Keychain window after you continue. Choose
-              <strong>Always Allow</strong> if you want future fallback checks to stay silent.
-            </div>
-            <div class="rate-limit-actions">
-              <button
-                type="button"
-                class="rate-limit-secondary"
-                onclick={handleSkipKeychainForRateLimits}
-                disabled={keychainPermissionBusy}
-              >
-                Do not use Keychain
-              </button>
-              <button
-                type="button"
-                class="rate-limit-cta"
-                onclick={handleAllowKeychainForRateLimits}
-                disabled={keychainPermissionBusy}
-              >
-                Allow Keychain access
-              </button>
-            </div>
-          </div>
-        {:else if period === "5h" && $settings.rateLimitsEnabled && visibleUsableRateLimitProviders.length > 0}
-          {#each visibleUsableRateLimitProviders as rateLimitProvider, index}
-            <UsageBars
-              providerLabel={provider === ALL_USAGE_PROVIDER_ID ? getUsageProviderLabel(rateLimitProvider) : undefined}
-              rateLimits={providerPayload(rateLimits, rateLimitProvider)!}
-            />
-            {#if index < visibleUsableRateLimitProviders.length - 1}
-              <div class="hr"></div>
-            {/if}
-          {/each}
-          {#if visibleUsableRateLimitProviders.some((p) => {
-            const payload = providerPayload(rateLimits, p);
-            return Boolean(payload && (payload.error || payload.stale));
-          })}
-            {@const probeBroken =
-              statuslineProbeStatus === "script_missing" ||
-              statuslineProbeStatus === "not_installed"}
-            <div class="rate-limit-stale-banner" data-state={probeBroken ? "warn" : "idle"}>
-              <div class="rl-stale-row">
-                <span class="rl-stale-dot" aria-hidden="true"></span>
-                <span class="rl-stale-headline">
-                  {probeBroken
-                    ? "Statusline needs attention"
-                    : "No recent Claude Code activity"}
-                </span>
+        {#if period === "5h"}
+          {#if showKeychainPermissionPanel && isMacOS() && !$settings.keychainAccessRequested}
+            <div class="rate-limit-permission" role="dialog" aria-labelledby="rate-limit-permission-title">
+              <div class="rate-limit-empty-title" id="rate-limit-permission-title">
+                Keychain fallback for live limits
               </div>
-              <div class="rl-stale-body">
-                {#if probeBroken}
-                  Reinstall the statusline to restore live updates.
-                {:else}
-                  Numbers refresh automatically on your next prompt.
-                {/if}
+              <div class="rate-limit-empty-text">
+                TokenMonitor normally reads Claude live limits from your Claude
+                credentials file without any macOS prompt. If that file is missing
+                or unreadable, you can allow a one-time Keychain fallback.
               </div>
-              {#if probeBroken}
+              <PermissionDisclosure mode="rate-limit" />
+              <div class="rate-limit-empty-text">
+                macOS may show a Keychain window after you continue. Choose
+                <strong>Always Allow</strong> if you want future fallback checks to stay silent.
+              </div>
+              <div class="rate-limit-actions">
+                <button
+                  type="button"
+                  class="rate-limit-secondary"
+                  onclick={handleSkipKeychainForRateLimits}
+                  disabled={keychainPermissionBusy}
+                >
+                  Do not use Keychain
+                </button>
                 <button
                   type="button"
                   class="rate-limit-cta"
-                  onclick={handleInstallStatusline}
-                  disabled={statuslineBusy}
+                  onclick={handleAllowKeychainForRateLimits}
+                  disabled={keychainPermissionBusy}
                 >
-                  {statuslineBusy ? "Reinstalling…" : "Reinstall statusline"}
+                  Allow Keychain access
+                </button>
+              </div>
+            </div>
+          {:else if $settings.rateLimitsEnabled && visibleUsableRateLimitProviders.length > 0}
+            {#each visibleUsableRateLimitProviders as rateLimitProvider, index}
+              <UsageBars
+                providerLabel={provider === ALL_USAGE_PROVIDER_ID ? getUsageProviderLabel(rateLimitProvider) : undefined}
+                rateLimits={providerPayload(rateLimits, rateLimitProvider)!}
+              />
+              {#if index < visibleUsableRateLimitProviders.length - 1}
+                <div class="hr"></div>
+              {/if}
+            {/each}
+            {#if visibleUsableRateLimitProviders.some((p) => {
+              const payload = providerPayload(rateLimits, p);
+              return Boolean(payload && (payload.error || payload.stale));
+            })}
+              {@const probeBroken =
+                statuslineProbeStatus === "script_missing" ||
+                statuslineProbeStatus === "not_installed"}
+              <div class="rate-limit-stale-banner" data-state={probeBroken ? "warn" : "idle"}>
+                <div class="rl-stale-row">
+                  <span class="rl-stale-dot" aria-hidden="true"></span>
+                  <span class="rl-stale-headline">
+                    {probeBroken
+                      ? "Statusline needs attention"
+                      : "No recent Claude Code activity"}
+                  </span>
+                </div>
+                <div class="rl-stale-body">
+                  {#if probeBroken}
+                    Reinstall the statusline to restore live updates.
+                  {:else}
+                    Numbers refresh automatically on your next prompt.
+                  {/if}
+                </div>
+                {#if probeBroken}
+                  <button
+                    type="button"
+                    class="rate-limit-cta"
+                    onclick={handleInstallStatusline}
+                    disabled={statuslineBusy}
+                  >
+                    {statuslineBusy ? "Reinstalling…" : "Reinstall statusline"}
+                  </button>
+                {/if}
+              </div>
+            {/if}
+          {:else if !$settings.rateLimitsEnabled}
+            <div class="rate-limit-empty">
+              <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+              </svg>
+              <div class="rate-limit-empty-title">Live rate limits are off</div>
+              <div class="rate-limit-empty-text">
+                Turn this on to see live rate-limit percentages.
+                TokenMonitor uses your Claude credentials file first and does not open Keychain from this button.
+              </div>
+              <button
+                type="button"
+                class="rate-limit-cta"
+                onclick={handleEnableRateLimits}
+                disabled={keychainPermissionBusy}
+              >
+                Enable rate limits
+              </button>
+            </div>
+          {:else if rateLimitsRequest.loading}
+            <div class="rate-limit-skeleton" aria-busy="true">
+              {#each [1, 2] as _}
+                <div class="rate-limit-skeleton-row">
+                  <div class="skeleton" style="width: 50px; height: 8px"></div>
+                  <div class="skeleton" style="width: 100%; height: 14px; border-radius: 7px"></div>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="rate-limit-empty">
+              <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+              </svg>
+              <div class="rate-limit-empty-title">Rate limits unavailable</div>
+              <div class="rate-limit-empty-text">
+                {#if isRateLimitProvider(provider) && (data.total_tokens > 0 || data.total_cost > 0)}
+                  {getRateLimitIdleSummary(provider)}
+                {:else}
+                  {rateLimitsRequest.error ?? "Unable to load rate limit data right now."}
+                {/if}
+              </div>
+              {#if isMacOS() && !$settings.keychainAccessRequested}
+                <button
+                  type="button"
+                  class="rate-limit-secondary"
+                  onclick={handleShowKeychainFallback}
+                  disabled={keychainPermissionBusy}
+                >
+                  Review Keychain fallback
                 </button>
               {/if}
             </div>
           {/if}
-        {:else if period === "5h" && shouldShowFiveHourUsageFallback}
-          {#if !$settings.rateLimitsEnabled}
-            <div class="rate-limit-note">
-              Live rate-limit percentages are off. Showing local 5h usage.
-            </div>
-          {:else if rateLimitsRequest.error}
-            <div class="rate-limit-note">
-              Live rate-limit percentages unavailable: {rateLimitsRequest.error} Showing local 5h usage.
-            </div>
-          {/if}
-          <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} />
-        {:else if period === "5h" && data.provider_detected === false}
-          <div class="rate-limit-empty">
-            <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10"></circle>
-              <line x1="12" y1="8" x2="12" y2="12"></line>
-              <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-            <div class="rate-limit-empty-title">No limit for API billing</div>
-            <div class="rate-limit-empty-text">
-              {providerNotInstalledHint(provider)}
-            </div>
-          </div>
-        {:else if period === "5h" && !$settings.rateLimitsEnabled}
-          <div class="rate-limit-empty">
-            <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-            </svg>
-            <div class="rate-limit-empty-title">Live rate limits are off</div>
-            <div class="rate-limit-empty-text">
-              Turn this on to see live 5h and weekly rate-limit percentages.
-              TokenMonitor uses your Claude credentials file first and does not open Keychain from this button.
-            </div>
-            <button
-              type="button"
-              class="rate-limit-cta"
-              onclick={handleEnableRateLimits}
-              disabled={keychainPermissionBusy}
-            >
-              Enable rate limits
-            </button>
-          </div>
-        {:else if period === "5h" && rateLimitsRequest.loading}
-          <div class="rate-limit-skeleton" aria-busy="true">
-            {#each [1, 2] as _}
-              <div class="rate-limit-skeleton-row">
-                <div class="skeleton" style="width: 50px; height: 8px"></div>
-                <div class="skeleton" style="width: 100%; height: 14px; border-radius: 7px"></div>
-              </div>
-            {/each}
-          </div>
-        {:else if period === "5h"}
-          <div class="rate-limit-empty">
-            <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10"></circle>
-              <line x1="12" y1="8" x2="12" y2="12"></line>
-              <line x1="12" y1="16" x2="12.01" y2="16"></line>
-            </svg>
-            <div class="rate-limit-empty-title">Rate limits unavailable</div>
-            <div class="rate-limit-empty-text">
-              {#if isRateLimitProvider(provider) && (data.total_tokens > 0 || data.total_cost > 0)}
-                {getRateLimitIdleSummary(provider)}
-              {:else}
-                {rateLimitsRequest.error ?? "Unable to load rate limit data right now."}
-              {/if}
-            </div>
-            {#if isMacOS() && !$settings.keychainAccessRequested}
-              <button
-                type="button"
-                class="rate-limit-secondary"
-                onclick={handleShowKeychainFallback}
-                disabled={keychainPermissionBusy}
-              >
-                Review Keychain fallback
-              </button>
-            {/if}
-          </div>
         {:else if data.total_cost === 0 && data.total_tokens === 0}
           <div class="empty-period">
             {#if data.provider_detected === false}

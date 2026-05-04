@@ -5,6 +5,7 @@ import { syncTrayConfig, trayConfigPayload } from "./sync.js";
 const CONFIG: TrayConfig = {
   barDisplay: "both",
   barProvider: "claude",
+  barProviders: ["claude", "codex"],
   showPercentages: true,
   percentageFormat: "compact",
   showCost: true,

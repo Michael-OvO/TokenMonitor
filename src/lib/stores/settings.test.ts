@@ -57,6 +57,7 @@ describe("loadSettings", () => {
       trayConfig: {
         barDisplay: 'both',
         barProvider: 'claude',
+        barProviders: ["claude", "codex"],
         showPercentages: false,
         percentageFormat: 'compact',
         showCost: false,
@@ -86,8 +87,9 @@ describe("loadSettings", () => {
       headerTabs: DEFAULT_HEADER_TABS,
       brandTheming: true,
       trayConfig: {
-        barDisplay: 'both',
+        barDisplay: 'custom',
         barProvider: 'claude',
+        barProviders: ["claude", "codex"],
         showPercentages: false,
         percentageFormat: 'compact',
         showCost: false,
@@ -146,8 +148,9 @@ describe("loadSettings", () => {
       headerTabs: DEFAULT_HEADER_TABS,
       brandTheming: true,
       trayConfig: {
-        barDisplay: 'both',
+        barDisplay: 'custom',
         barProvider: 'claude',
+        barProviders: ["claude", "codex", "cursor"],
         showPercentages: false,
         percentageFormat: 'compact',
         showCost: true,
@@ -279,6 +282,7 @@ describe("loadSettings migration", () => {
       trayConfig: {
         barDisplay: "triple" as Settings["trayConfig"]["barDisplay"],
         barProvider: "all" as Settings["trayConfig"]["barProvider"],
+        barProviders: ["claude", "codex"],
         showPercentages: "yes" as unknown as Settings["trayConfig"]["showPercentages"],
         percentageFormat: "long" as Settings["trayConfig"]["percentageFormat"],
         showCost: "no" as unknown as Settings["trayConfig"]["showCost"],
@@ -302,8 +306,9 @@ describe("loadSettings migration", () => {
       hiddenModels: ["haiku", "gpt-5"],
       brandTheming: true,
       trayConfig: {
-        barDisplay: "both",
+        barDisplay: "custom",
         barProvider: "claude",
+        barProviders: ["claude", "codex"],
         showPercentages: false,
         percentageFormat: "compact",
         showCost: true,

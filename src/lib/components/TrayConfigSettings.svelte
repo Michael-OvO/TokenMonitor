@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { invoke } from "@tauri-apps/api/core";
   import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
   import { rateLimitsData } from "../stores/rateLimits.js";
   import { syncTrayConfig } from "../tray/sync.js";
   import { formatTrayTitle } from "../tray/title.js";
-  import { usesFloatingStatusWidget } from "../utils/platform.js";
+  import { usesFloatingStatusWidget, isWindows } from "../utils/platform.js";
+  import { logger } from "../utils/logger.js";
   import {
     getRateLimitPrimaryWindowId,
     getUsageProviderBrandColor,
@@ -12,6 +14,7 @@
     RATE_LIMIT_PROVIDER_ORDER,
   } from "../providerMetadata.js";
   import type {
+    BarDisplay,
     RateLimitProviderId,
     RateLimitsPayload,
     TrayConfig,
@@ -44,22 +47,25 @@
     return payload;
   }, {} as RateLimitsPayload);
 
+  const PROVIDER_SHORT_LABELS: Record<string, string> = {
+    claude: "C",
+    codex: "X",
+    cursor: "Cr",
+  };
+
   let titlePreview = $derived.by(() => {
     const cfg = current.trayConfig;
     return formatTrayTitle(cfg, PREVIEW_RATE_LIMITS, 17.19);
   });
 
-  let previewBarDisplay = $derived(current.trayConfig.barDisplay);
-  let previewBarProvider = $derived(current.trayConfig.barProvider);
-  const statusWidgetLabel = usesFloatingStatusWidget() ? "Floating Ball" : "Menu Bar";
-  const statusWidgetNote = usesFloatingStatusWidget()
-    ? "These settings control the floating summary widget on Windows and Linux."
-    : null;
-  let verbosePercentagePreview = $derived.by(() =>
-    RATE_LIMIT_PROVIDER_ORDER
+  let previewBarProviders = $derived(current.trayConfig.barProviders ?? []);
+
+  let verbosePercentagePreview = $derived.by(() => {
+    const providers = previewBarProviders.length ? previewBarProviders : RATE_LIMIT_PROVIDER_ORDER;
+    return providers
       .map((provider) => `${getUsageProviderTitle(provider)} ${previewUtilization(provider)}%`)
-      .join(" "),
-  );
+      .join(" ");
+  });
 
   function previewUtilization(provider: RateLimitProviderId): number {
     return PREVIEW_RATE_LIMITS[provider]?.windows[0]?.utilization ?? 0;
@@ -76,93 +82,174 @@
     updateSetting("trayConfig", next);
     void syncTrayConfig(next, $rateLimitsData).catch(() => {});
   }
+
+  function toggleBarProvider(provider: RateLimitProviderId) {
+    const providers = current.trayConfig.barProviders ?? [];
+    const next = providers.includes(provider)
+      ? providers.filter((p) => p !== provider)
+      : [...providers, provider];
+    applyBarProviders(next);
+  }
+
+  function applyBarProviders(providers: RateLimitProviderId[]) {
+    const barDisplay: BarDisplay =
+      providers.length === 0 ? "off"
+      : providers.length === 1 ? "single"
+      : "custom";
+    const barProvider = providers[0] ?? current.trayConfig.barProvider;
+    const next: TrayConfig = {
+      ...current.trayConfig,
+      barProviders: providers,
+      barDisplay,
+      barProvider,
+    };
+    updateSetting("trayConfig", next);
+    void syncTrayConfig(next, $rateLimitsData).catch(() => {});
+  }
+
+  async function handleFloatBall(checked: boolean) {
+    logger.info("settings", `Float ball: ${checked}`);
+    updateSetting("floatBall", checked);
+    try {
+      if (checked) {
+        await invoke("create_float_ball");
+      } else {
+        await invoke("destroy_float_ball");
+      }
+    } catch (e) {
+      console.error("Failed to toggle floating ball:", e);
+    }
+  }
+
+  async function handleTaskbarPanel(checked: boolean) {
+    logger.info("settings", `Taskbar panel: ${checked}`);
+    updateSetting("taskbarPanel", checked);
+    try {
+      if (checked) {
+        await invoke("init_taskbar_panel");
+      } else {
+        await invoke("destroy_taskbar_panel_cmd");
+      }
+    } catch (e) {
+      console.error("Failed to toggle taskbar panel:", e);
+    }
+  }
 </script>
 
 <div class="group">
-  <div class="group-label">{statusWidgetLabel}</div>
+  <div class="group-label">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+      <line x1="8" y1="21" x2="16" y2="21"></line>
+      <line x1="12" y1="17" x2="12" y2="21"></line>
+    </svg>
+    Status Displays
+  </div>
 
   {#if usesFloatingStatusWidget()}
-    <div class="widget-preview">
-      <div class="widget-shell">
-        <div class="widget-panel">
-          <div class="widget-eyebrow">Status</div>
-          <div class="widget-title">{titlePreview || "Widget active"}</div>
-          {#if previewBarDisplay === 'both'}
-            <div class="widget-bars">
-              {#each RATE_LIMIT_PROVIDER_ORDER as provider}
-                <div class="widget-row">
-                  <span class="widget-tag">{provider === 'claude' ? 'C' : 'X'}</span>
-                  <div class="widget-track"><div class="widget-fill" style={previewFillStyle(provider)}></div></div>
-                </div>
-              {/each}
-            </div>
-          {:else if previewBarDisplay === 'single'}
-            <div class="widget-bars">
-              <div class="widget-row">
-                <span class="widget-tag">{previewBarProvider === 'claude' ? 'C' : 'X'}</span>
-                <div class="widget-track"><div class="widget-fill" style={previewFillStyle(previewBarProvider)}></div></div>
+    <div class="card" style="margin-bottom: 4px;">
+      <div class="row" class:border={isWindows()}>
+        <span class="label">Floating Ball</span>
+        <ToggleSwitch
+          checked={current.floatBall}
+          onChange={handleFloatBall}
+        />
+      </div>
+      {#if isWindows()}
+      <div class="row">
+        <span class="label">Taskbar Panel</span>
+        <ToggleSwitch
+          checked={current.taskbarPanel}
+          onChange={handleTaskbarPanel}
+        />
+      </div>
+      {/if}
+    </div>
+  {/if}
+
+  <!-- Combined Preview -->
+  <div class="preview-card">
+    <div class="preview-row">
+      <!-- Menu Bar -->
+      <div class="preview-col">
+        <span class="preview-label">Menu Bar</span>
+        <div class="tray-preview">
+          <div class="tp-inner">
+            <svg class="tp-icon" width="14" height="14" viewBox="0 0 44 44" fill="none">
+              <circle cx="22" cy="22" r="20" fill="currentColor"/>
+              <circle cx="16" cy="23" r="3" fill="#262628"/>
+              <path d="M28 20l-4 3.5 4 3.5" stroke="#262628" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            </svg>
+            {#if previewBarProviders.length > 0}
+              <div class="tp-bars">
+                {#if previewBarProviders.length === 1}
+                  <div class="tp-track single">
+                    <div class="tp-fill" style={previewFillStyle(previewBarProviders[0])}></div>
+                  </div>
+                {:else}
+                  {#each previewBarProviders as provider}
+                    <div class="tp-track"><div class="tp-fill" style={previewFillStyle(provider)}></div></div>
+                  {/each}
+                {/if}
               </div>
-            </div>
-          {/if}
+            {/if}
+            {#if titlePreview}
+              <span class="tp-text">{titlePreview}</span>
+            {/if}
+          </div>
         </div>
-        <div class="widget-ball">$17</div>
       </div>
-    </div>
-  {:else}
-    <div class="tray-preview">
-      <div class="tp-inner">
-        <svg class="tp-icon" width="14" height="14" viewBox="0 0 44 44" fill="none">
-          <circle cx="22" cy="22" r="20" fill="currentColor"/>
-          <circle cx="16" cy="23" r="3" fill="#262628"/>
-          <path d="M28 20l-4 3.5 4 3.5" stroke="#262628" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-        </svg>
-        {#if previewBarDisplay === 'both'}
-          <div class="tp-bars">
-            {#each RATE_LIMIT_PROVIDER_ORDER as provider}
-              <div class="tp-track"><div class="tp-fill" style={previewFillStyle(provider)}></div></div>
-            {/each}
-          </div>
-        {:else if previewBarDisplay === 'single'}
-          <div class="tp-bars">
-            <div class="tp-track single">
-              <div class="tp-fill" style={previewFillStyle(previewBarProvider)}></div>
+
+      <!-- Floating Ball -->
+      {#if usesFloatingStatusWidget() && current.floatBall}
+        <div class="preview-col">
+          <span class="preview-label">Floating Ball</span>
+          <div class="fb-preview">
+            <div class="fb-capsule">
+              <div class="fb-panel">
+                {#if previewBarProviders.length > 0}
+                  <div class="fb-bars">
+                    {#each previewBarProviders as provider}
+                      <div class="fb-row">
+                        <span class="fb-tag" style:color={getUsageProviderBrandColor(provider, 1)}>{PROVIDER_SHORT_LABELS[provider] ?? provider[0]?.toUpperCase()}</span>
+                        <div class="fb-track">
+                          {#if previewUtilization(provider) > 0}
+                            <div class="fb-fill" style={previewFillStyle(provider)}></div>
+                          {/if}
+                        </div>
+                        <span class="fb-pct" style:color={getUsageProviderBrandColor(provider, 1)}>{previewUtilization(provider)}%</span>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+              <div class="fb-ball"><span class="fb-cost">$17</span></div>
             </div>
           </div>
-        {/if}
-        {#if titlePreview}
-          <span class="tp-text">{titlePreview}</span>
-        {/if}
-      </div>
+        </div>
+      {/if}
     </div>
-  {/if}
-  {#if statusWidgetNote}
-    <div class="setting-note">{statusWidgetNote}</div>
-  {/if}
+  </div>
 
   <!-- Bars card -->
   <div class="card" style="margin-bottom: 4px;">
-    <div class="row border">
-      <span class="label">Display</span>
-      <SegmentedControl
-        options={[
-          { value: "off", label: "Off" },
-          { value: "single", label: "Single" },
-          { value: "both", label: "Both" },
-        ]}
-        value={current.trayConfig.barDisplay}
-        onChange={(v) => handleTrayConfig("barDisplay", v as TrayConfig["barDisplay"])}
-      />
-    </div>
-    <div class="row" class:dim={current.trayConfig.barDisplay !== 'single'}>
-      <span class="label">Provider</span>
-      <SegmentedControl
-        options={RATE_LIMIT_PROVIDER_ORDER.map((provider) => ({
-          value: provider,
-          label: getUsageProviderLabel(provider),
-        }))}
-        value={current.trayConfig.barProvider}
-        onChange={(v) => handleTrayConfig("barProvider", v as TrayConfig["barProvider"])}
-      />
+    <div class="row">
+      <span class="label">Bars</span>
+      <div class="provider-chips">
+        <button
+          class="chip off-chip"
+          class:active={previewBarProviders.length === 0}
+          onclick={() => applyBarProviders([])}
+        >Off</button>
+        {#each RATE_LIMIT_PROVIDER_ORDER as provider}
+          <button
+            class="chip"
+            class:active={previewBarProviders.includes(provider)}
+            style:--chip-color={getUsageProviderBrandColor(provider, 1)}
+            onclick={() => toggleBarProvider(provider)}
+          >{getUsageProviderLabel(provider)}</button>
+        {/each}
+      </div>
     </div>
   </div>
 
@@ -179,7 +266,7 @@
       <span class="label">Format</span>
       <SegmentedControl
         options={[
-          { value: "compact", label: "72 \u00b7 35" },
+          { value: "compact", label: "72 · 35" },
           { value: "verbose", label: verbosePercentagePreview },
         ]}
         value={current.trayConfig.percentageFormat}
@@ -215,7 +302,6 @@
   .group {
     margin-bottom: 8px;
   }
-  /* `.group-label` is defined globally in `src/app.css`. */
   .card {
     background: var(--surface-2);
     border-radius: 8px;
@@ -239,95 +325,142 @@
     font: 400 10px/1 'Inter', sans-serif;
     color: var(--t1);
   }
-  .setting-note {
-    font: 400 8px/1.35 'Inter', sans-serif;
-    color: var(--t4);
-    padding: 4px 4px 0;
-  }
 
-  /* Widget preview (Windows/Linux floating ball) */
-  .widget-preview {
+  /* Combined preview card */
+  .preview-card {
     background: var(--surface-2);
     border-radius: 8px;
-    padding: 10px;
+    padding: 8px 10px;
     margin-bottom: 4px;
+  }
+  .preview-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .preview-col {
+    flex: 1;
+    min-width: 0;
+  }
+  .preview-label {
+    display: block;
+    font: 500 8px/1 'Inter', sans-serif;
+    color: var(--t4);
+    letter-spacing: 0.3px;
+    margin-bottom: 6px;
+  }
+
+  /* Provider chips */
+  .provider-chips {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .chip {
+    font: 500 9px/1 'Inter', sans-serif;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-subtle);
+    background: var(--surface-3);
+    color: var(--t3);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .chip:hover {
+    border-color: var(--t4);
+  }
+  .chip.active {
+    background: color-mix(in srgb, var(--chip-color, var(--accent)) 15%, transparent);
+    color: var(--chip-color, var(--accent));
+    border-color: color-mix(in srgb, var(--chip-color, var(--accent)) 40%, transparent);
+  }
+  .chip.off-chip.active {
+    --chip-color: var(--t2);
+  }
+
+  /* Floating Ball preview — matches actual FloatBall.svelte capsule */
+  .fb-preview {
     display: flex;
     justify-content: center;
   }
-  .widget-shell {
-    width: 174px;
+  .fb-capsule {
     display: flex;
-    align-items: flex-end;
-    gap: 8px;
+    align-items: center;
+    border-radius: 999px;
+    background:
+      radial-gradient(150% 150% at 20% 10%, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0) 40%),
+      linear-gradient(160deg, rgba(20, 24, 32, 0.95) 0%, rgba(8, 10, 14, 0.99) 100%);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+      inset 0 2px 4px rgba(255, 255, 255, 0.12),
+      inset 0 -4px 12px rgba(0, 0, 0, 0.8);
+    padding: 6px 6px 6px 10px;
+    gap: 6px;
+    min-height: 40px;
   }
-  .widget-panel {
+  .fb-panel {
     flex: 1;
     min-width: 0;
-    border-radius: 12px;
-    padding: 8px 10px;
-    background: linear-gradient(180deg, rgba(32, 36, 45, 0.96), rgba(17, 20, 27, 0.98));
-    border: 1px solid rgba(255,255,255,0.06);
-  }
-  .widget-eyebrow {
-    font: 500 7px/1 'Inter', sans-serif;
-    color: rgba(148,163,184,0.92);
-    letter-spacing: 0.7px;
-
-    margin-bottom: 4px;
-  }
-  .widget-title {
-    font: 600 10px/1.1 'Inter', sans-serif;
-    color: rgba(255,255,255,0.9);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    margin-bottom: 7px;
-  }
-  .widget-bars {
     display: flex;
     flex-direction: column;
+    justify-content: center;
+  }
+  .fb-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .fb-row {
+    display: grid;
+    grid-template-columns: 12px 1fr 20px;
+    align-items: center;
     gap: 5px;
   }
-  .widget-row {
-    display: grid;
-    grid-template-columns: 10px 1fr;
-    align-items: center;
-    gap: 6px;
+  .fb-tag {
+    font: 800 7px/1 'Inter', sans-serif;
+    text-shadow: 0 0 5px currentColor;
+    opacity: 0.9;
   }
-  .widget-tag {
-    font: 700 8px/1 'Inter', sans-serif;
-    color: rgba(255,255,255,0.86);
-  }
-  .widget-track {
-    height: 5px;
+  .fb-track {
+    height: 4px;
     border-radius: 999px;
-    background: rgba(255,255,255,0.1);
     overflow: hidden;
+    background: rgba(0, 0, 0, 0.4);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.8), 0 1px 0 rgba(255, 255, 255, 0.05);
   }
-  .widget-fill {
+  .fb-fill {
     height: 100%;
     border-radius: inherit;
   }
-  .widget-ball {
-    width: 34px;
-    height: 34px;
+  .fb-pct {
+    font: 700 8px/1 'Inter', sans-serif;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+  .fb-ball {
+    width: 28px;
+    height: 28px;
     flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
     border-radius: 50%;
-    background: linear-gradient(160deg, #2d3138 0%, #171a20 100%);
-    color: rgba(255,255,255,0.92);
+    background:
+      radial-gradient(120% 120% at 30% 10%, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0) 50%),
+      linear-gradient(160deg, rgba(30, 34, 45, 0.9) 0%, rgba(10, 12, 16, 0.98) 100%);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+      inset 0 2px 4px rgba(255, 255, 255, 0.15),
+      inset 0 -4px 12px rgba(0, 0, 0, 0.6);
+  }
+  .fb-cost {
     font: 700 8px/1 'Inter', sans-serif;
-    box-shadow: inset 0 1px 1px rgba(255,255,255,0.1);
+    color: rgba(255, 255, 255, 0.95);
+    font-variant-numeric: tabular-nums;
   }
 
-  /* Tray preview (macOS menu bar) */
+  /* Tray preview (Menu Bar) */
   .tray-preview {
-    background: var(--surface-2);
-    border-radius: 8px;
-    padding: 8px 10px;
-    margin-bottom: 4px;
     display: flex;
     justify-content: center;
   }

@@ -63,7 +63,13 @@
 </script>
 
 <div class="group">
-  <div class="group-label">Monitoring</div>
+  <div class="group-label">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+      <circle cx="12" cy="12" r="3"></circle>
+    </svg>
+    Monitoring
+  </div>
   <div class="card">
     <div class="row border">
       <span class="label">Cost Alert</span>

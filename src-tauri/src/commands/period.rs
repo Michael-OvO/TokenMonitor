@@ -30,35 +30,82 @@ pub(crate) fn first_of_next_month(year: i32, month: u32) -> Option<NaiveDate> {
     }
 }
 
-pub(crate) fn compute_date_bounds(period: &str, offset: i32) -> Option<(NaiveDate, NaiveDate)> {
+/// Resolved date range and label for a (period, offset) pair.
+/// Single source of truth — computed once and threaded through the pipeline.
+pub(crate) struct PeriodBounds {
+    pub start: NaiveDate,
+    pub end: NaiveDate,
+    pub period_label: String,
+}
+
+pub(crate) fn resolve_period_bounds(period: &str, offset: i32) -> Result<PeriodBounds, String> {
     let now = Local::now();
     let today = now.date_naive();
     match period {
-        "5h" => Some((today, today + chrono::Duration::days(1))),
+        "5h" => Ok(PeriodBounds {
+            start: today,
+            end: today + chrono::Duration::days(1),
+            period_label: String::new(),
+        }),
         "day" => {
             let target = today + chrono::Duration::days(offset as i64);
-            Some((target, target + chrono::Duration::days(1)))
+            Ok(PeriodBounds {
+                start: target,
+                end: target + chrono::Duration::days(1),
+                period_label: format_day_label(target),
+            })
         }
         "week" => {
             let current_monday =
                 today - chrono::Duration::days(now.weekday().num_days_from_monday() as i64);
             let target_monday = current_monday + chrono::Duration::days((offset * 7) as i64);
-            Some((target_monday, target_monday + chrono::Duration::days(7)))
+            let end = target_monday + chrono::Duration::days(7);
+            let target_sunday = end - chrono::Duration::days(1);
+            Ok(PeriodBounds {
+                start: target_monday,
+                end,
+                period_label: format_week_label(target_monday, target_sunday),
+            })
         }
         "month" => {
-            let (y, m) = resolve_month_offset(now.year(), now.month(), offset);
-            let first = NaiveDate::from_ymd_opt(y, m, 1)?;
-            let end = first_of_next_month(y, m)?;
-            Some((first, end))
+            let (year, month) = resolve_month_offset(now.year(), now.month(), offset);
+            let start = NaiveDate::from_ymd_opt(year, month, 1)
+                .ok_or_else(|| format!("Invalid month: year={year}, month={month}"))?;
+            let end = first_of_next_month(year, month)
+                .ok_or_else(|| format!("Invalid next month: year={year}, month={month}"))?;
+            Ok(PeriodBounds {
+                start,
+                end,
+                period_label: format_month_label(start),
+            })
         }
         "year" => {
-            let ty = now.year().checked_add(offset)?;
-            let first = NaiveDate::from_ymd_opt(ty, 1, 1)?;
-            let end = NaiveDate::from_ymd_opt(ty.checked_add(1)?, 1, 1)?;
-            Some((first, end))
+            let target_year = now
+                .year()
+                .checked_add(offset)
+                .ok_or_else(|| format!("Year offset overflow: {offset}"))?;
+            let start = NaiveDate::from_ymd_opt(target_year, 1, 1)
+                .ok_or_else(|| format!("Invalid year: {target_year}"))?;
+            let next_year = target_year
+                .checked_add(1)
+                .ok_or_else(|| format!("Year+1 overflow: {target_year}"))?;
+            let end = NaiveDate::from_ymd_opt(next_year, 1, 1)
+                .ok_or_else(|| format!("Invalid next year: {next_year}"))?;
+            Ok(PeriodBounds {
+                start,
+                end,
+                period_label: format_year_label(target_year),
+            })
         }
-        _ => None,
+        _ => Err(format!("Unknown period: {period}")),
     }
+}
+
+/// Convenience wrapper for callers that only need (start, end) dates.
+pub(crate) fn compute_date_bounds(period: &str, offset: i32) -> Option<(NaiveDate, NaiveDate)> {
+    resolve_period_bounds(period, offset)
+        .ok()
+        .map(|b| (b.start, b.end))
 }
 
 pub(crate) fn format_day_label(date: NaiveDate) -> String {

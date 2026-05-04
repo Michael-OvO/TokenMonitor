@@ -23,6 +23,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     trayConfig: {
       barDisplay: "both",
       barProvider: "claude",
+      barProviders: ["claude", "codex"],
       showPercentages: false,
       percentageFormat: "compact",
       showCost: true,

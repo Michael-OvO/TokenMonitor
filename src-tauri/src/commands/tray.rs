@@ -34,6 +34,8 @@ pub enum CostPrecision {
 pub struct TrayConfig {
     pub bar_display: BarDisplay,
     pub bar_provider: String, // "claude" | "codex"
+    #[serde(default)]
+    pub bar_providers: Vec<String>,
     pub show_percentages: bool,
     pub percentage_format: PercentageFormat,
     pub show_cost: bool,
@@ -45,6 +47,7 @@ impl Default for TrayConfig {
         Self {
             bar_display: BarDisplay::Both,
             bar_provider: "claude".to_string(),
+            bar_providers: vec!["claude".to_string(), "codex".to_string(), "cursor".to_string()],
             show_percentages: false,
             percentage_format: PercentageFormat::Compact,
             show_cost: true,
@@ -125,16 +128,49 @@ fn format_tray_title(
     parts.join("  ")
 }
 
-fn primary_window_utilization(rate_limits: Option<&ProviderRateLimits>) -> Option<f64> {
-    rate_limits
-        .and_then(|provider| provider.windows.first())
-        .map(|window| window.utilization)
+/// Must stay in sync with `src/lib/providerMetadata.ts` `primaryWindowId`.
+fn primary_window_id(provider: &str) -> &'static str {
+    match provider {
+        "claude" => "five_hour",
+        "codex" => "primary",
+        "cursor" => "auto_composer",
+        _ => "primary",
+    }
 }
 
-fn extra_usage_utilization(rate_limits: Option<&ProviderRateLimits>) -> Option<f64> {
-    rate_limits
-        .and_then(|provider| provider.extra_usage.as_ref())
-        .and_then(|extra| extra.utilization)
+fn expired_window_grace_ms(provider: &str) -> i64 {
+    match provider {
+        "codex" => 60_000,
+        _ => 0,
+    }
+}
+
+fn is_window_expired(provider: &str, resets_at: Option<&str>) -> bool {
+    let grace_ms = expired_window_grace_ms(provider);
+    if grace_ms == 0 {
+        return false;
+    }
+    let Some(resets_at) = resets_at else {
+        return false;
+    };
+    let Ok(reset_time) = chrono::DateTime::parse_from_rfc3339(resets_at) else {
+        tracing::warn!(provider, resets_at, "Failed to parse resets_at as RFC 3339");
+        return false;
+    };
+    let deadline = reset_time + chrono::Duration::milliseconds(grace_ms);
+    chrono::Utc::now() >= deadline
+}
+
+fn primary_window_utilization(
+    provider: &str,
+    rate_limits: Option<&ProviderRateLimits>,
+) -> Option<f64> {
+    let windows = &rate_limits?.windows;
+    let target_id = primary_window_id(provider);
+    windows
+        .iter()
+        .find(|w| w.window_id == target_id && !is_window_expired(provider, w.resets_at.as_deref()))
+        .map(|w| w.utilization)
 }
 
 pub(crate) fn tray_utilization_from_rate_limits(
@@ -142,12 +178,15 @@ pub(crate) fn tray_utilization_from_rate_limits(
 ) -> TrayUtilization {
     TrayUtilization {
         claude: primary_window_utilization(
+            "claude",
             payload.and_then(|rate_limits| rate_limits.claude.as_ref()),
         ),
         codex: primary_window_utilization(
+            "codex",
             payload.and_then(|rate_limits| rate_limits.codex.as_ref()),
         ),
-        cursor: extra_usage_utilization(
+        cursor: primary_window_utilization(
+            "cursor",
             payload.and_then(|rate_limits| rate_limits.cursor.as_ref()),
         ),
     }
@@ -495,8 +534,8 @@ mod tests {
                 provider: "claude".to_string(),
                 plan_tier: Some("Max 5x".to_string()),
                 windows: vec![RateLimitWindow {
-                    window_id: "c".to_string(),
-                    label: "Primary".to_string(),
+                    window_id: "five_hour".to_string(),
+                    label: "Session (5hr)".to_string(),
                     utilization: 72.0,
                     resets_at: None,
                 }],
@@ -512,8 +551,8 @@ mod tests {
                 provider: "codex".to_string(),
                 plan_tier: Some("Pro".to_string()),
                 windows: vec![RateLimitWindow {
-                    window_id: "x".to_string(),
-                    label: "Primary".to_string(),
+                    window_id: "primary".to_string(),
+                    label: "Session (5hr)".to_string(),
                     utilization: 35.0,
                     resets_at: None,
                 }],
@@ -561,5 +600,122 @@ mod tests {
             },
             TrayUtilization::default(),
         ));
+    }
+
+    fn make_provider(provider: &str, windows: Vec<RateLimitWindow>) -> ProviderRateLimits {
+        ProviderRateLimits {
+            provider: provider.to_string(),
+            plan_tier: None,
+            windows,
+            extra_usage: None,
+            credits: None,
+            stale: false,
+            error: None,
+            retry_after_seconds: None,
+            cooldown_until: None,
+            fetched_at: "2026-03-18T00:00:00Z".to_string(),
+        }
+    }
+
+    fn make_window(window_id: &str, utilization: f64, resets_at: Option<&str>) -> RateLimitWindow {
+        RateLimitWindow {
+            window_id: window_id.to_string(),
+            label: window_id.to_string(),
+            utilization,
+            resets_at: resets_at.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn primary_window_utilization_selects_by_window_id_not_index() {
+        let rate_limits = make_provider(
+            "claude",
+            vec![
+                make_window("seven_day", 10.0, None),
+                make_window("five_hour", 42.0, None),
+            ],
+        );
+        assert_eq!(
+            primary_window_utilization("claude", Some(&rate_limits)),
+            Some(42.0)
+        );
+    }
+
+    #[test]
+    fn primary_window_utilization_returns_none_when_id_missing() {
+        let rate_limits = make_provider("claude", vec![make_window("seven_day", 10.0, None)]);
+        assert_eq!(
+            primary_window_utilization("claude", Some(&rate_limits)),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_expired_window_returns_none() {
+        let rate_limits = make_provider(
+            "codex",
+            vec![make_window("primary", 35.0, Some("2020-01-01T00:00:00Z"))],
+        );
+        assert_eq!(
+            primary_window_utilization("codex", Some(&rate_limits)),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_ignores_expired_window_grace_period() {
+        let rate_limits = make_provider(
+            "claude",
+            vec![make_window("five_hour", 72.0, Some("2020-01-01T00:00:00Z"))],
+        );
+        assert_eq!(
+            primary_window_utilization("claude", Some(&rate_limits)),
+            Some(72.0)
+        );
+    }
+
+    #[test]
+    fn cursor_uses_auto_composer_window() {
+        let rate_limits = make_provider(
+            "cursor",
+            vec![
+                make_window("auto_composer", 55.0, None),
+                make_window("api", 80.0, None),
+            ],
+        );
+        assert_eq!(
+            primary_window_utilization("cursor", Some(&rate_limits)),
+            Some(55.0)
+        );
+    }
+
+    #[test]
+    fn cursor_with_only_extra_usage_returns_none() {
+        let mut rate_limits = make_provider("cursor", vec![]);
+        rate_limits.extra_usage = Some(ExtraUsageInfo {
+            is_enabled: true,
+            monthly_limit: 500.0,
+            used_credits: 100.0,
+            utilization: Some(20.0),
+        });
+        assert_eq!(
+            primary_window_utilization("cursor", Some(&rate_limits)),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_multi_window_selects_primary() {
+        let rate_limits = make_provider(
+            "codex",
+            vec![
+                make_window("primary", 5.0, Some("2099-01-01T00:00:00Z")),
+                make_window("secondary", 36.0, Some("2099-06-01T00:00:00Z")),
+            ],
+        );
+        assert_eq!(
+            primary_window_utilization("codex", Some(&rate_limits)),
+            Some(5.0)
+        );
     }
 }

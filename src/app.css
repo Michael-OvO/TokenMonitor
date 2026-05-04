@@ -423,4 +423,10 @@ body {
   color: var(--t1);
   letter-spacing: -0.05px;
   padding: 4px 4px 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.group-label svg {
+  color: var(--t3);
 }

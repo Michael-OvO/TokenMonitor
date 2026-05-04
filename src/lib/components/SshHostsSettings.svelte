@@ -142,11 +142,24 @@
 </script>
 
 <div class="group">
-  <div class="group-label">Remote Devices</div>
+  <div class="group-label">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+      <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+      <line x1="6" y1="6" x2="6.01" y2="6"></line>
+      <line x1="6" y1="18" x2="6.01" y2="18"></line>
+    </svg>
+    Remote Devices
+  </div>
   <div class="card">
     <button class="row collapsible-toggle" type="button" onclick={() => (devicesExpanded = !devicesExpanded)}>
       <span class="label">Devices</span>
       <div class="collapsible-right">
+        {#if !devicesExpanded && sshConfiguredHosts.filter(h => h.enabled).length > 0}
+          <span role="button" tabindex="0" class="ssh-btn sync-collapsed" onclick={(e) => { e.stopPropagation(); syncAllSshHosts(); }} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); e.preventDefault(); syncAllSshHosts(); }}} aria-disabled={sshSyncing}>
+            {sshSyncing ? "Syncing..." : "Sync All"}
+          </span>
+        {/if}
         <span class="device-count">{sshHosts.length}</span>
         <svg class="collapsible-chevron" class:open={devicesExpanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9"></polyline>
@@ -214,9 +227,12 @@
     background: var(--surface-2);
     border-radius: 8px;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
   .ssh-section {
     padding: 6px 0;
+    border-top: 1px solid var(--border-subtle);
   }
   .ssh-host-row {
     display: flex;
@@ -285,7 +301,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 6px 10px 2px;
+    padding: 6px 10px;
     border-top: 1px solid var(--border);
   }
   .ssh-sync-label {

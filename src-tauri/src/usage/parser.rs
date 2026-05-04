@@ -1612,8 +1612,6 @@ impl UsageParser {
         let mut chart_buckets: Vec<ChartBucket> = Vec::new();
         let mut total_cost = 0.0f64;
         let mut total_tokens = 0u64;
-        let mut total_input = 0u64;
-        let mut total_output = 0u64;
         let mut global_model_map: HashMap<String, (String, f64, u64)> = HashMap::new();
         let mut active_block: Option<ActiveBlock> = None;
         let mut five_hour_cost = 0.0f64;
@@ -1625,11 +1623,6 @@ impl UsageParser {
 
             total_cost += block_cost;
             total_tokens += block_tokens;
-
-            for e in block.iter() {
-                total_input += e.input_tokens;
-                total_output += e.output_tokens;
-            }
 
             for (key, (name, cost, tokens)) in &seg_map {
                 let gm = global_model_map
@@ -1691,8 +1684,8 @@ impl UsageParser {
             total_cost,
             total_tokens,
             session_count,
-            input_tokens: total_input,
-            output_tokens: total_output,
+            input_tokens: 0,
+            output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_5m_tokens: 0,
             cache_write_1h_tokens: 0,

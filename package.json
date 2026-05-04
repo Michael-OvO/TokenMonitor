@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "release": "bash scripts/release.sh",
+    "pretauri": "node scripts/sync-tauri-versions.mjs",
     "dev": "vite",
     "build": "vite build",
     "build:installers": "node build/index.mjs",
@@ -17,7 +18,7 @@
     "test:all": "npm run test:rust && npm run test"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
+    "@tauri-apps/api": "~2.11.0",
     "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "^2.5.3",

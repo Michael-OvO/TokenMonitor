@@ -5,6 +5,7 @@ import type { TrayConfig, RateLimitsPayload } from "../types/index.js";
 const DEFAULT_CONFIG: TrayConfig = {
   barDisplay: 'both',
   barProvider: 'claude',
+  barProviders: ["claude", "codex"],
   showPercentages: true,
   percentageFormat: 'compact',
   showCost: true,
