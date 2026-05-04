@@ -262,7 +262,11 @@ describe("fetchRateLimits", () => {
       loading: false,
       loaded: true,
       error: null,
-      deferredUntil: "2026-03-17T12:06:00.000Z",
+      // Pre-rewrite this was 12:06:00 (a 5-minute throttle floor). Now
+      // that Claude's `minFetchIntervalMs` is 0, the only deferral source
+      // is an active server-side cooldown — and there is none here, so
+      // the next eligible fetch is immediate (`null`).
+      deferredUntil: null,
       failureStreak: 0,
       lastAttemptAt: "2026-03-17T12:01:00.000Z",
       lastSuccessAt: "2026-03-17T12:01:00.000Z",
@@ -271,7 +275,7 @@ describe("fetchRateLimits", () => {
       loading: false,
       loaded: true,
       error: null,
-      deferredUntil: "2026-03-17T12:06:00.000Z",
+      deferredUntil: null,
     });
     expect(claudeStore.set).toHaveBeenCalledWith(
       "payload",
@@ -330,9 +334,12 @@ describe("fetchRateLimits", () => {
     await fetchRateLimits("claude");
 
     expect(mockInvoke).not.toHaveBeenCalled();
-    expect(get(rateLimitsMonitorState).claude.deferredUntil).toBe("2026-03-17T12:05:00.000Z");
+    // Deferral is now driven entirely by `cooldownUntil` since the
+    // throttle is gone — fetch can retry as soon as the cooldown lifts
+    // (12:00:02), not after a 5-minute floor.
+    expect(get(rateLimitsMonitorState).claude.deferredUntil).toBe("2026-03-17T12:00:02.000Z");
 
-    await vi.advanceTimersByTimeAsync(300_100);
+    await vi.advanceTimersByTimeAsync(2_100);
 
     expect(mockInvoke).toHaveBeenCalledWith("get_rate_limits", { provider: "claude" });
     expect(get(rateLimitsMonitorState).claude.lastSuccessAt).toBe("2026-03-17T12:05:00.000Z");
@@ -394,6 +401,11 @@ describe("fetchRateLimits", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-17T12:00:30.000Z"));
 
+    // Pre-rewrite this test relied on the 5-minute throttle to make
+    // Claude ineligible. With `minFetchIntervalMs: 0` for both
+    // providers, the *only* deferral source is an active cooldown — so
+    // we deliberately give Claude a cooldown that runs past `now` to
+    // test the "filter ineligible providers" branch.
     const claudeStore = makeStore({
       payload: providerRateLimits("claude", {
         windows: [
@@ -404,6 +416,7 @@ describe("fetchRateLimits", () => {
             resetsAt: "2026-03-17T14:00:00.000Z",
           },
         ],
+        cooldownUntil: "2026-03-17T12:05:00.000Z",
         fetchedAt: "2026-03-17T12:00:00.000Z",
       }),
       lastSuccessfulAt: "2026-03-17T12:00:00.000Z",

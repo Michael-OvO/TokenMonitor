@@ -11,15 +11,12 @@
   let surfaces = $derived.by(() => {
     const all = getPermissionSurfaces($settings, { macos: isMacOS() });
     if (mode === "rate-limit") {
-      return all.filter((surface) =>
-        surface.id === "claude_credentials" || surface.id === "keychain_fallback",
-      );
+      return all.filter((surface) => surface.id === "claude_statusline");
     }
     if (mode === "welcome") {
       return all.filter((surface) =>
         surface.id === "usage_logs" ||
-        surface.id === "claude_credentials" ||
-        surface.id === "keychain_fallback" ||
+        surface.id === "claude_statusline" ||
         surface.id === "login_item" ||
         surface.id === "updates",
       );

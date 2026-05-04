@@ -80,4 +80,22 @@ describe("footerFiveHourPct", () => {
       footerFiveHourPct(payload, "codex", Date.UTC(2026, 2, 17, 14, 1, 30)),
     ).toBe(0);
   });
+
+  it("rounds away float-precision artifacts from CC's payload", () => {
+    // CC's statusline computes `0.14 * 100 → 14.000000000000002` and we
+    // were rendering that raw in the footer ("14.000000000000002% used"
+    // 5h banner). Round to one decimal so the artifact never reaches
+    // the DOM.
+    const payload = makePayload();
+    if (!payload.claude) throw new Error("expected claude payload");
+    payload.claude.windows = [
+      {
+        windowId: "five_hour",
+        label: "Session (5hr)",
+        utilization: 14.000000000000002,
+        resetsAt: "2026-03-17T14:00:00.000Z",
+      },
+    ];
+    expect(footerFiveHourPct(payload, "claude", Date.UTC(2026, 2, 17, 13, 0, 0))).toBe(14);
+  });
 });

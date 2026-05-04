@@ -3,63 +3,68 @@
   import { isMacOS } from "../utils/platform.js";
   import { settings, updateSetting } from "../stores/settings.js";
   import {
-    requestClaudeKeychainAccessAgain,
-    type KeychainAccessOutcome,
-  } from "../permissions/keychain.js";
+    checkStatusline,
+    installStatusline,
+    uninstallStatusline,
+    readLatestStatuslinePing,
+    type InstalledState,
+    type LatestStatuslinePing,
+  } from "../permissions/statusline.js";
   import { fetchRateLimits } from "../stores/rateLimits.js";
   import { logger } from "../utils/logger.js";
   import ToggleSwitch from "./ToggleSwitch.svelte";
 
   /**
-   * Interactive Privacy & Permissions panel for the Settings view.
-   * Replaces the read-only `PermissionDisclosure` so the user can:
-   *
-   *   - Toggle the local session-log parser on/off (`usageAccessEnabled`)
-   *   - Toggle live rate-limit fetching on/off (`rateLimitsEnabled`)
-   *   - Re-grant Keychain access on demand
+   * Interactive Privacy & Permissions panel for the Settings view. Lets the
+   * user:
+   *   - Toggle the local session-log parser (`usageAccessEnabled`)
+   *   - Toggle live rate-limit fetching (`rateLimitsEnabled`)
+   *   - Install / uninstall the Claude Code statusline integration
    *   - Open System Settings → Privacy & Security when macOS App Data
    *     access has been denied (the only path back from a TCC denial)
-   *
-   * State for the OS-level checks (`appDataState`, `keychainState`) is
-   * probed on mount and re-probed whenever the user clicks an action that
-   * could change it.
    */
   type OsState = "loading" | "granted" | "denied" | "not_applicable";
   type AppDataResp = { status: "granted" | "denied" | "not_applicable" };
+  type StatuslineUiState = "loading" | "installed" | "not_installed" | "script_missing";
 
   let appDataOsState = $state<OsState>("loading");
-  let keychainOsState = $state<OsState>("loading");
+  let statuslineState = $state<StatuslineUiState>("loading");
+  let lastPing = $state<LatestStatuslinePing | null>(null);
 
   let usageBusy = $state(false);
   let rateLimitsBusy = $state(false);
-  let keychainBusy = $state(false);
+  let statuslineBusy = $state(false);
   let openSettingsBusy = $state(false);
-  /** Outcome of the last debug refresh-grant test, surfaced inline so the
-   * user can verify Phase 2 (Anthropic OAuth refresh round-trip) without
-   * touching devtools. Cleared on next attempt. */
-  let refreshTestBusy = $state(false);
-  let refreshTestResult = $state<string | null>(null);
 
   async function detectStates() {
     if (!isMacOS()) {
       appDataOsState = "not_applicable";
-      keychainOsState = "not_applicable";
-      return;
+    } else {
+      try {
+        const r = await invoke<AppDataResp>("check_app_data_access");
+        appDataOsState =
+          r.status === "granted" || r.status === "not_applicable" ? "granted" : "denied";
+      } catch (e) {
+        logger.error("permissions", `App Data probe failed: ${e}`);
+        appDataOsState = "denied";
+      }
     }
     try {
-      const r = await invoke<AppDataResp>("check_app_data_access");
-      appDataOsState =
-        r.status === "granted" || r.status === "not_applicable" ? "granted" : "denied";
+      const probe: InstalledState = await checkStatusline();
+      statuslineState =
+        probe.status === "installed"
+          ? "installed"
+          : probe.status === "script_missing"
+            ? "script_missing"
+            : "not_installed";
     } catch (e) {
-      logger.error("permissions", `App Data probe failed: ${e}`);
-      appDataOsState = "denied";
+      logger.error("permissions", `Statusline probe failed: ${e}`);
+      statuslineState = "not_installed";
     }
     try {
-      const ok = await invoke<boolean>("check_claude_keychain_access");
-      keychainOsState = ok ? "granted" : "denied";
-    } catch (e) {
-      logger.error("permissions", `Keychain probe failed: ${e}`);
-      keychainOsState = "denied";
+      lastPing = await readLatestStatuslinePing();
+    } catch {
+      lastPing = null;
     }
   }
 
@@ -87,8 +92,6 @@
       await updateSetting("rateLimitsEnabled", enabled);
       await invoke("set_rate_limits_enabled", { enabled });
       if (enabled) {
-        // Force a fetch so the bars populate immediately rather than
-        // waiting for the next 30s background tick.
         void fetchRateLimits("claude", { force: true });
       }
     } catch (e) {
@@ -98,46 +101,34 @@
     }
   }
 
-  async function handleReGrantKeychain() {
-    if (keychainBusy) return;
-    keychainBusy = true;
+  async function handleInstallStatusline() {
+    if (statuslineBusy) return;
+    statuslineBusy = true;
     try {
-      const outcome: KeychainAccessOutcome =
-        await requestClaudeKeychainAccessAgain("settings");
-      if (outcome.status === "granted") {
-        keychainOsState = "granted";
-        if (!$settings.rateLimitsEnabled) {
-          await updateSetting("rateLimitsEnabled", true);
-          await invoke("set_rate_limits_enabled", { enabled: true });
-        }
-        void fetchRateLimits("claude", { force: true });
+      await installStatusline("settings");
+      await detectStates();
+      if (!$settings.rateLimitsEnabled) {
+        await updateSetting("rateLimitsEnabled", true);
+        await invoke("set_rate_limits_enabled", { enabled: true });
       }
+      void fetchRateLimits("claude", { force: true });
     } catch (e) {
-      logger.error("permissions", `Keychain re-grant failed: ${e}`);
+      logger.error("permissions", `Statusline install failed: ${e}`);
     } finally {
-      keychainBusy = false;
+      statuslineBusy = false;
     }
   }
 
-  /**
-   * Test the OAuth refresh-grant flow against Anthropic without waiting for
-   * a real 401. Reads the refresh token from the owned mirror, POSTs to
-   * Anthropic's token endpoint, writes the new tokens back. Used to verify
-   * Phase 2 works for this user's mirror.
-   */
-  async function handleVerifyRefresh() {
-    if (refreshTestBusy) return;
-    refreshTestBusy = true;
-    refreshTestResult = null;
+  async function handleUninstallStatusline() {
+    if (statuslineBusy) return;
+    statuslineBusy = true;
     try {
-      const outcome = await invoke<string>("debug_force_oauth_refresh");
-      refreshTestResult = outcome;
-      logger.info("permissions", `refresh-grant verification: ${outcome}`);
+      await uninstallStatusline("settings");
+      await detectStates();
     } catch (e) {
-      refreshTestResult = `error: ${e}`;
-      logger.error("permissions", `refresh-grant verification failed: ${e}`);
+      logger.error("permissions", `Statusline uninstall failed: ${e}`);
     } finally {
-      refreshTestBusy = false;
+      statuslineBusy = false;
     }
   }
 
@@ -149,11 +140,39 @@
     } catch (e) {
       logger.error("permissions", `Open System Settings failed: ${e}`);
     } finally {
-      // Brief delay so the click feedback feels intentional even though
-      // the actual re-probe will happen when the user comes back.
       setTimeout(() => { openSettingsBusy = false; void detectStates(); }, 600);
     }
   }
+
+  /** Human freshness suffix for the "Connected" status. Returns `null`
+   * for anything younger than 5 minutes — the previous behavior, which
+   * tick-tocked "12s ago, 13s ago, 14s ago…" in a healthy install,
+   * created low-grade churn that read as "alarm" rather than "fine".
+   * The user only needs a timing hint once activity has visibly paused.
+   */
+  function freshnessSuffix(iso: string): string | null {
+    const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+    if (seconds < 300) return null; // healthy: just say "Connected"
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `${hours} hr ago`;
+    const days = Math.round(hours / 24);
+    return days === 1 ? "yesterday" : `${days} days ago`;
+  }
+
+  /** Re-render the freshness suffix every 30s so an idle row eventually
+   * picks up the "5 min ago" transition without the constant 1-Hz refresh
+   * the old `formatPing` required. */
+  let freshnessTick = $state(0);
+  $effect(() => {
+    const id = setInterval(() => { freshnessTick += 1; }, 30_000);
+    return () => clearInterval(id);
+  });
+  let connectedSuffix = $derived.by(() => {
+    void freshnessTick;
+    return lastPing?.lastSeenIso ? freshnessSuffix(lastPing.lastSeenIso) : null;
+  });
 </script>
 
 <div class="ps-card">
@@ -161,7 +180,7 @@
   <div class="ps-row ps-row-head">
     <div class="ps-meta">
       <div class="ps-title">Session Logs</div>
-      <div class="ps-sub">Read Claude Code &amp; Codex usage from your home directory.</div>
+      <div class="ps-sub">Track your Claude Code and Codex token usage.</div>
     </div>
     <ToggleSwitch
       checked={$settings.usageAccessEnabled}
@@ -178,9 +197,9 @@
       >
         <span class="ps-dot"></span>
         {appDataOsState === "granted"
-          ? "macOS App Data access allowed"
+          ? "App Data access allowed"
           : appDataOsState === "denied"
-            ? "macOS App Data access denied"
+            ? "App Data access denied"
             : "Checking…"}
       </span>
       {#if appDataOsState === "denied"}
@@ -202,94 +221,83 @@
   <div class="ps-row ps-row-head">
     <div class="ps-meta">
       <div class="ps-title">Live Rate Limits</div>
-      <div class="ps-sub">Fetch 5-hour and weekly windows from Anthropic.</div>
+      <div class="ps-sub">Show your 5-hour and weekly limits as Claude Code reports them.</div>
     </div>
     <ToggleSwitch
       checked={$settings.rateLimitsEnabled}
       onChange={handleRateLimitsToggle}
     />
   </div>
-  {#if isMacOS() && $settings.rateLimitsEnabled}
+
+  {#if $settings.rateLimitsEnabled}
+    <!-- Status row: status pill on the left, primary CTA only when the
+         install actually needs attention. The previous "Uninstall →"
+         next to a healthy green dot was the source of the "alarm next
+         to a green check" effect — Uninstall now lives below as a quiet
+         tertiary action so it's still discoverable but never competes
+         with the primary state. -->
     <div class="ps-row ps-row-status">
       <span
         class="ps-status"
-        class:status-ok={keychainOsState === "granted"}
-        class:status-warn={keychainOsState === "denied"}
-        class:status-loading={keychainOsState === "loading"}
+        class:status-ok={statuslineState === "installed"}
+        class:status-warn={statuslineState === "not_installed" || statuslineState === "script_missing"}
+        class:status-loading={statuslineState === "loading"}
       >
         <span class="ps-dot"></span>
-        {keychainOsState === "granted"
-          ? "Keychain authorized"
-          : keychainOsState === "denied"
-            ? "Keychain not authorized"
-            : "Checking…"}
+        {#if statuslineState === "installed"}
+          {connectedSuffix ? `Connected · ${connectedSuffix}` : "Connected"}
+        {:else if statuslineState === "script_missing"}
+          Statusline needs reinstall
+        {:else if statuslineState === "not_installed"}
+          Statusline not installed
+        {:else}
+          Checking…
+        {/if}
       </span>
-      {#if keychainOsState !== "granted"}
+      {#if statuslineState === "not_installed" || statuslineState === "script_missing"}
         <button
           type="button"
           class="ps-action"
-          onclick={handleReGrantKeychain}
-          disabled={keychainBusy}
+          onclick={handleInstallStatusline}
+          disabled={statuslineBusy}
         >
-          {keychainBusy ? "Opening prompt…" : "Re-grant Keychain →"}
+          {statuslineBusy
+            ? "Installing…"
+            : statuslineState === "script_missing"
+              ? "Reinstall →"
+              : "Install →"}
         </button>
       {/if}
     </div>
-    {#if keychainOsState !== "granted"}
-      <!-- macOS keychain ACL sheet has three buttons (Always Allow / Deny /
-           Allow) and "Always Allow" is the leftmost — easy to mistake for
-           "Allow" (rightmost, default-highlighted). Make the instruction
-           impossible to miss before the user clicks the action button. -->
-      <div class="ps-callout">
-        <span class="ps-callout-icon" aria-hidden="true">
-          <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="8" cy="8" r="6.5"/>
-            <path d="M8 4.5v4"/>
-            <circle cx="8" cy="11.2" r="0.6" fill="currentColor"/>
-          </svg>
-        </span>
-        <span>
-          When the macOS prompt opens, click
-          <strong>Always&nbsp;Allow</strong>
-          (leftmost button, not the highlighted "Allow")
-        </span>
-      </div>
-    {/if}
-    <!-- Phase 2 verification: exchanges the mirror's refresh token at
-         Anthropic's OAuth endpoint and writes the new access token back.
-         Lets the user confirm rotations will be handled silently when
-         Anthropic actually rotates the access token in the wild. -->
-    {#if keychainOsState === "granted"}
-      <div class="ps-row ps-row-status">
-        <span
-          class="ps-status"
-          class:status-ok={refreshTestResult === "refreshed"}
-          class:status-warn={refreshTestResult && refreshTestResult !== "refreshed"}
-          class:status-loading={refreshTestBusy || !refreshTestResult}
-        >
-          <span class="ps-dot"></span>
-          {#if refreshTestBusy}
-            Calling Anthropic…
-          {:else if refreshTestResult === "refreshed"}
-            Token rotation verified
-          {:else if refreshTestResult}
-            Refresh outcome: {refreshTestResult}
-          {:else}
-            Token rotation: not yet verified
-          {/if}
-        </span>
+
+    {#if statuslineState === "installed"}
+      <!-- Tertiary maintenance action. Same place every time so power
+           users can still reach it, but its visual weight (small, muted,
+           bottom-aligned) keeps it from reading as a recommended next
+           step. -->
+      <div class="ps-row ps-row-tertiary">
         <button
           type="button"
-          class="ps-action"
-          onclick={handleVerifyRefresh}
-          disabled={refreshTestBusy}
+          class="ps-action ps-action-tertiary"
+          onclick={handleUninstallStatusline}
+          disabled={statuslineBusy}
         >
-          {refreshTestBusy ? "Verifying…" : "Verify refresh →"}
+          {statuslineBusy ? "Removing…" : "Remove statusline"}
         </button>
       </div>
     {/if}
   {/if}
 </div>
+
+<!-- The Developer panel that previously rendered here (re-run-onboarding
+     buttons gated behind `import.meta.env.DEV`) has been removed now that
+     v0.12 is the published baseline — the in-app affordance was only
+     useful while iterating on the wizard. The same actions remain
+     available in `tauri dev` via the `__tmForceOnboard()` and
+     `__tmResetOnboarding()` console helpers wired up in
+     `lib/bootstrap.ts`, so power users can still re-trigger the flow
+     without a visible UI surface that ships to end users. -->
+
 
 <style>
   .ps-card {
@@ -297,18 +305,42 @@
     border-radius: 8px;
     overflow: hidden;
   }
+
   .ps-row {
     padding: 9px 12px;
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 10px;
+    /* Wrap-anywhere safety net at the row level so any oversized word
+       (long status text, file path, identifier) breaks within the
+       340px popover frame instead of pushing the toggle / action button
+       off-screen. */
+    overflow-wrap: anywhere;
+  }
+  /* Flex children of ps-row that contain text must allow themselves to
+     shrink below their intrinsic content width. Without `min-width: 0`
+     a long status string would force the parent to grow, then either
+     overflow the popover or push the trailing action button outside
+     the frame. The .ps-meta selector already has this; .ps-status
+     needed it added explicitly. */
+  .ps-row > * {
+    min-width: 0;
   }
   .ps-row-head { padding-bottom: 6px; }
   .ps-row-status {
     padding-top: 0;
     padding-bottom: 9px;
     gap: 8px;
+  }
+  /* Footer-like row that holds the tertiary "Remove statusline" link.
+     Right-aligns the action so it never competes with the green status
+     dot above it, and tightens the vertical rhythm so the card doesn't
+     gain visual weight from a row that's intentionally low-priority. */
+  .ps-row-tertiary {
+    padding-top: 0;
+    padding-bottom: 8px;
+    justify-content: flex-end;
   }
   .ps-meta {
     display: flex;
@@ -331,70 +363,68 @@
     margin: 0;
   }
 
-  /* Status pill with a colored dot — matches the app's existing
-     status-indicator language used in the Updates row. */
+  /* Status row is two separate visual layers: a colored dot (the actual
+     traffic-light signal) and a neutral-secondary text label. The
+     previous design colored both in saturated green for the OK state,
+     which made a "fine" row look as alarmed as a "needs attention" row.
+     Now the dot alone carries the color and the text inherits a calm
+     muted tone, so a healthy install reads as ambient rather than
+     announced. The warn state intentionally keeps the colored text
+     because that *should* draw the eye. */
   .ps-status {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    font: 500 9.5px/1 'Inter', sans-serif;
-    color: var(--t3);
+    gap: 6px;
+    font: 500 10px/1 'Inter', sans-serif;
+    color: var(--t2);
+    letter-spacing: -0.04px;
   }
   .ps-dot {
-    width: 5px; height: 5px;
+    width: 6px; height: 6px;
     border-radius: 50%;
-    background: currentColor;
+    background: var(--t4);
     flex-shrink: 0;
-    opacity: 0.9;
+    transition: background var(--t-fast, 120ms) ease;
   }
-  .status-ok      { color: var(--ch-plus); }
-  .status-warn    { color: #E8A060; }
-  .status-loading { color: var(--t4); }
+  /* OK: dot picks up the green, text stays calm. */
+  .status-ok .ps-dot   { background: var(--ch-plus, #34c759); box-shadow: 0 0 0 3px rgba(52, 199, 89, 0.10); }
+  .status-warn .ps-dot { background: #E8A060; box-shadow: 0 0 0 3px rgba(232, 160, 96, 0.12); }
+  .status-warn         { color: #E8A060; }
+  .status-loading      { color: var(--t4); }
+  .status-loading .ps-dot { background: var(--t4); }
 
   .ps-action {
     appearance: none;
     border: none;
     background: transparent;
     color: var(--accent, #1f8cff);
-    font: 500 9.5px/1 'Inter', sans-serif;
+    font: 500 10px/1 'Inter', sans-serif;
     cursor: pointer;
     padding: 3px 4px;
     border-radius: 4px;
-    transition: background var(--t-fast, 120ms) ease, color var(--t-fast, 120ms) ease;
+    transition: background var(--t-fast, 120ms) ease,
+      color var(--t-fast, 120ms) ease;
   }
   .ps-action:hover:not(:disabled) {
     background: var(--accent-soft, rgba(255,255,255,0.06));
   }
+  /* Tertiary action: same hit target, but in muted text color so it
+     reads as "if you really want to" rather than "do this next." Gains
+     the accent color only on hover to confirm interactivity. */
+  .ps-action-tertiary {
+    color: var(--t3);
+    font-weight: 400;
+    letter-spacing: -0.02px;
+  }
+  .ps-action-tertiary:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--t1);
+  }
+  :global([data-theme="light"]) .ps-action-tertiary:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.04);
+  }
   .ps-action:disabled {
     cursor: default;
     opacity: 0.55;
-  }
-
-  /* Always-Allow guidance callout. Sits below the keychain status row so
-     the user reads it before clicking the action button — there's no
-     "click-then-instruct" race. Uses an info icon + amber tint so it
-     reads as guidance rather than an error. */
-  .ps-callout {
-    display: flex;
-    align-items: flex-start;
-    gap: 7px;
-    margin: 4px 12px 10px;
-    padding: 8px 10px;
-    background: rgba(232, 160, 96, 0.10);
-    border: 1px solid rgba(232, 160, 96, 0.22);
-    border-radius: 7px;
-    font: 400 10px/1.4 'Inter', sans-serif;
-    color: var(--t2);
-    letter-spacing: -0.05px;
-  }
-  .ps-callout strong {
-    color: var(--t1);
-    font-weight: 600;
-  }
-  .ps-callout-icon {
-    display: inline-flex;
-    flex-shrink: 0;
-    color: #E8A060;
-    margin-top: 1px;
   }
 </style>

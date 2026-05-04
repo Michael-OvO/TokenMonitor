@@ -59,7 +59,13 @@ const USAGE_INTEGRATION_DEFINITIONS: UsageProviderDefinition[] = [
     supportsRateLimits: true,
     rateLimits: {
       cacheFile: "rate-limits-claude.json",
-      minFetchIntervalMs: 300_000,
+      // Pre-rewrite this was 5 minutes — a budget guard for the OAuth API
+      // path where each fetch counted against Anthropic's rate-limit
+      // budget. The current fetch is a local statusline-events-file read
+      // plus arithmetic, so there's nothing to conserve. Setting to 0
+      // closes the gap where the tray updated within 2s of a CC prompt
+      // but the dashboard sat on the throttled cache for up to 5 min.
+      minFetchIntervalMs: 0,
       primaryWindowId: "five_hour",
       utilizationLabelFormat: "percent",
       idleSummary: "No active rate limit windows were returned for this provider.",
@@ -242,10 +248,18 @@ export function formatRateLimitUtilizationLabel(
   provider: RateLimitProviderId,
   utilization: number,
 ): string {
+  // CC's statusline payload occasionally ships float `used_percentage`
+  // values (e.g. `21.4632984` for the seven-day window). Rendering the raw
+  // float produces a wall of decimals; integer rounding throws away real
+  // signal at low utilizations. Round to one decimal place — accurate to
+  // ±0.05% — and drop a trailing `.0` so clean integer values still
+  // render as integers ("21%" not "21.0%").
+  const rounded = Math.round(utilization * 10) / 10;
+  const text = Number.isInteger(rounded) ? `${rounded}` : rounded.toFixed(1);
   if (rateLimitProviderDefinition(provider).utilizationLabelFormat === "percent_used") {
-    return `${utilization}% used`;
+    return `${text}% used`;
   }
-  return `${utilization}%`;
+  return `${text}%`;
 }
 
 export function getRateLimitIdleSummary(provider: RateLimitProviderId): string {

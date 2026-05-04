@@ -113,7 +113,10 @@ describe("mergeProviderRateLimits", () => {
 });
 
 describe("providerDeferredUntil", () => {
-  it("chooses the later of cooldown and throttling windows", () => {
+  it("returns the cooldown time when Claude has no fetch throttle", () => {
+    // Post-statusline-rewrite, Claude's `minFetchIntervalMs` is 0 — every
+    // fetch is a local file read so there's no budget to conserve. The
+    // only deferral source for Claude is an active server-side cooldown.
     const rateLimits = providerRateLimits("claude", {
       windows: [
         { windowId: "five_hour", label: "Session (5hr)", utilization: 10, resetsAt: "2026-03-17T17:00:00.000Z" },
@@ -124,7 +127,20 @@ describe("providerDeferredUntil", () => {
 
     expect(
       providerDeferredUntil(rateLimits, "claude", Date.parse("2026-03-17T12:00:45.000Z")),
-    ).toBe("2026-03-17T12:05:30.000Z");
+    ).toBe("2026-03-17T12:01:00.000Z");
+  });
+
+  it("returns null when Claude has neither cooldown nor throttle", () => {
+    const rateLimits = providerRateLimits("claude", {
+      windows: [
+        { windowId: "five_hour", label: "Session (5hr)", utilization: 10, resetsAt: "2026-03-17T17:00:00.000Z" },
+      ],
+      fetchedAt: "2026-03-17T12:00:30.000Z",
+    });
+
+    expect(
+      providerDeferredUntil(rateLimits, "claude", Date.parse("2026-03-17T12:00:45.000Z")),
+    ).toBeNull();
   });
 
   it("does not throttle when cached data has no usable windows", () => {

@@ -4,6 +4,7 @@ pub mod float_ball;
 pub mod logging;
 pub mod period;
 pub mod ssh;
+pub mod statusline;
 pub mod tray;
 pub mod updater;
 pub mod usage_query;
@@ -11,6 +12,7 @@ pub mod usage_query;
 pub use tray::sync_tray_title;
 
 use crate::models::*;
+use crate::statusline::windows::ClaudePlanTier;
 use crate::usage::integrations::UsageIntegrationSelection;
 use crate::usage::parser::{UsageParser, UsageQueryDebugReport};
 use crate::usage::ssh_remote::{SshCacheManager, SshHostConfig};
@@ -35,15 +37,19 @@ pub struct AppState {
     /// When true, the main window blur handler skips hiding once.
     /// Set by commands that cause transient focus loss (float ball, dock icon, etc.).
     pub suppress_auto_hide: Arc<AtomicBool>,
-    /// When false, the background loop skips rate-limit refresh so that we
-    /// don't poke macOS Keychain until the user has opted into live rate
-    /// limits. Starts off; the frontend flips it via `set_rate_limits_enabled`
-    /// during bootstrap and whenever the user toggles the setting.
+    /// When false, the background loop skips rate-limit refresh. The flag
+    /// is retained for backwards compatibility with the existing toggle in
+    /// Settings, but rate-limit fetches no longer touch any system credential
+    /// store — they only read the local statusline event file and the JSONL
+    /// parser cache, so leaving it on by default is safe.
     pub rate_limits_enabled: Arc<AtomicBool>,
     /// Gates local Claude/Codex session-log reads until the frontend has shown
     /// the first-run local access disclosure. Existing installs enable this at
     /// bootstrap; new installs flip it after the welcome card is dismissed.
     pub usage_access_enabled: Arc<AtomicBool>,
+    /// Plan tier used to compute the rolling-window utilization percentages.
+    /// Updated by `set_claude_plan_tier`; defaults to `Pro` for new installs.
+    pub claude_plan_tier: Arc<RwLock<ClaudePlanTier>>,
 }
 
 impl AppState {
@@ -63,6 +69,7 @@ impl AppState {
             suppress_auto_hide: Arc::new(AtomicBool::new(false)),
             rate_limits_enabled: Arc::new(AtomicBool::new(false)),
             usage_access_enabled: Arc::new(AtomicBool::new(false)),
+            claude_plan_tier: Arc::new(RwLock::new(ClaudePlanTier::default())),
         }
     }
 }

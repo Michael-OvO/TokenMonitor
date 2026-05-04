@@ -28,20 +28,46 @@
 </div>
 
 <style>
-  .tabs { display: flex; padding: 8px 12px 0; animation: fadeUp var(--t-slow) var(--ease-out) both .05s; }
-  button {
-    padding: 4px 8px; border: none; background: none;
-    font: 500 9px/1 'Inter', sans-serif;
-    color: var(--t3); cursor: pointer;
- position: relative;
-    transition: color var(--t-fast) ease, background var(--t-fast) ease;
-    border-radius: 4px;
+  .tabs {
+    display: flex;
+    margin: 6px 12px 0;
+    background: var(--surface-2);
+    border-radius: 5px;
+    padding: 2px;
+    gap: 1px;
+    animation: fadeUp var(--t-slow) var(--ease-out) both .05s;
   }
-  button:hover { color: var(--t2); background: rgba(255,255,255,0.02); }
-  button.on { color: var(--t1); }
-  button.on::after {
-    content: ''; position: absolute; bottom: 0; left: 8px; right: 8px;
-    height: 1.5px; background: var(--accent); border-radius: .5px;
-    animation: tabUnderline var(--t-normal) var(--ease-out) both; transform-origin: left;
+  button {
+    flex: 1;
+    padding: 3px 7px;
+    border: none;
+    background: transparent;
+    font: 500 8.5px/1 'Inter', sans-serif;
+    color: var(--t3);
+    cursor: pointer;
+    border-radius: 4px;
+    transition: color var(--t-fast) ease, background var(--t-fast) ease;
+  }
+  button:hover { color: var(--t2); }
+  button.on {
+    color: var(--t1);
+    background: var(--accent-soft, rgba(255,255,255,0.07));
+  }
+
+  :global(:root[data-glass="true"]) .tabs {
+    background: rgba(255, 255, 255, 0.07);
+    backdrop-filter: blur(20px) saturate(1.8);
+    -webkit-backdrop-filter: blur(20px) saturate(1.8);
+    box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.12);
+  }
+  :global(:root[data-glass="true"]) button.on {
+    background: rgba(255, 255, 255, 0.14);
+  }
+  :global(:root[data-glass="true"][data-theme="light"]) .tabs {
+    background: rgba(0, 0, 0, 0.04);
+    box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.4);
+  }
+  :global(:root[data-glass="true"][data-theme="light"]) button.on {
+    background: rgba(255, 255, 255, 0.45);
   }
 </style>

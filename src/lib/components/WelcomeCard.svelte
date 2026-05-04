@@ -1,6 +1,5 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { isMacOS } from "../utils/platform.js";
   import { settings, updateSetting } from "../stores/settings.js";
   import { logger } from "../utils/logger.js";
   import PermissionDisclosure from "./PermissionDisclosure.svelte";
@@ -57,9 +56,7 @@
         <span class="opt-text">
           <span class="opt-title">Live rate limits</span>
           <span class="opt-hint">
-            {isMacOS()
-              ? "Uses your Claude credentials file silently; Keychain is fallback-only."
-              : "Reads your Claude Code credentials file."}
+            Computed locally from a small statusline script Claude Code runs on every prompt.
           </span>
         </span>
       </label>
@@ -74,7 +71,7 @@
     </div>
 
     <p class="welcome-reassure">
-      TokenMonitor never opens a Keychain, notification, or folder permission prompt from the background.
+      TokenMonitor never opens a Keychain, notification, or folder permission prompt — live limits are computed entirely from local files.
     </p>
 
     <button class="welcome-cta" type="button" onclick={handleGetStarted} disabled={busy}>

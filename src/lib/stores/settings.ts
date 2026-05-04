@@ -19,9 +19,12 @@ import type {
   TrayConfig,
   UsageProvider,
 } from "../types/index.js";
+import { CURRENT_ONBOARDING_VERSION, compareSemver } from "../changelog.js";
 import { setCurrency } from "../utils/format.js";
 import { logger } from "../utils/logger.js";
 import { isLinux } from "../utils/platform.js";
+export type ClaudePlanTier = "Free" | "Pro" | "Max5x" | "Max20x" | "Custom";
+
 export interface Settings {
   theme: "light" | "dark" | "system";
   defaultProvider: UsageProvider;
@@ -42,25 +45,44 @@ export interface Settings {
   sshHosts: SshHostConfig[];
   debugLogging: boolean;
   /**
-   * Whether to fetch live rate-limit data. Requires Keychain access on macOS,
-   * so we leave it off for brand-new installs until the user opts in through
-   * the welcome card or the rate-limits CTA. Existing installs are migrated
-   * to `true` to preserve current behavior.
+   * Whether to compute live rate-limit data. The fetch is fully local now
+   * (statusline event file + JSONL parser), so this is effectively a
+   * cosmetic toggle — kept so users can hide the rate-limit row entirely.
    */
   rateLimitsEnabled: boolean;
   /** Optional Cursor Admin/Analytics API key. Stored locally and never logged. */
   cursorApiKey: string;
+  /** Legacy: set once the user has handled the Keychain access prompt. */
+  keychainAccessRequested: boolean;
   /** Set once the user has seen (and dismissed) the first-launch welcome. */
   hasSeenWelcome: boolean;
   /**
-   * Set to `true` after the one-time Keychain access prompt has been shown.
-   * Once true the app never invokes the interactive Keychain prompt again,
-   * regardless of whether the user actually granted access — this is the
-   * "never show anything about it again" contract. Background reads stay
-   * silent (`skip_authenticated_items`); if access is gone the app falls
-   * back to the CLI probe transparently.
+   * Stamp of the last `CURRENT_ONBOARDING_VERSION` value the user accepted.
+   * `null` for never-onboarded fresh installs. When the saved value is
+   * older than the current build's onboarding version, `loadSettings`
+   * forces `hasSeenWelcome=false` so the wizard re-opens with the
+   * "What's New" step. The wizard writes the current version back here
+   * on finish, so subsequent launches skip the wizard until we bump the
+   * constant again.
    */
-  keychainAccessRequested: boolean;
+  lastOnboardedVersion: string | null;
+  /**
+   * Set to `true` after the user has installed the TokenMonitor statusline
+   * into Claude Code's `~/.claude/settings.json`. The onboarding wizard
+   * uses this to short-circuit the install card on subsequent launches
+   * without re-probing the filesystem.
+   */
+  statuslineInstalled: boolean;
+  /**
+   * Plan tier used when computing rolling-window utilization percentages.
+   * `Custom` lets the user paste their own per-window budgets when the
+   * built-in tier defaults don't match their actual Anthropic limits.
+   */
+  claudePlanTier: ClaudePlanTier;
+  /** Custom 5h budget in tokens. Only honored when `claudePlanTier === "Custom"`. */
+  claudePlanCustomFiveHourTokens: number | null;
+  /** Custom weekly budget in tokens. Only honored when `claudePlanTier === "Custom"`. */
+  claudePlanCustomWeeklyTokens: number | null;
   /**
    * User-controlled toggle for the local session-log parser. When `false`,
    * the backend's `usage_access_enabled` atomic stays off and the parser
@@ -79,6 +101,13 @@ export const SUPPORTED_THEMES = ["light", "dark", "system"] as const;
 export const SUPPORTED_DEFAULT_PERIODS: DefaultPeriod[] = ["5h", "day", "week", "month"];
 export const SUPPORTED_REFRESH_INTERVALS = [30, 60, 300, 0] as const;
 export const SUPPORTED_CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CNY"] as const;
+export const SUPPORTED_CLAUDE_PLAN_TIERS: ClaudePlanTier[] = [
+  "Free",
+  "Pro",
+  "Max5x",
+  "Max20x",
+  "Custom",
+];
 
 const SUPPORTED_BAR_DISPLAYS: BarDisplay[] = ["off", "single", "both"];
 const SUPPORTED_BAR_PROVIDERS = [...RATE_LIMIT_PROVIDER_ORDER];
@@ -115,8 +144,13 @@ const DEFAULTS: Settings = {
   debugLogging: false,
   rateLimitsEnabled: false,
   cursorApiKey: "",
-  hasSeenWelcome: false,
   keychainAccessRequested: false,
+  hasSeenWelcome: false,
+  lastOnboardedVersion: null,
+  statuslineInstalled: false,
+  claudePlanTier: "Pro",
+  claudePlanCustomFiveHourTokens: null,
+  claudePlanCustomWeeklyTokens: null,
   usageAccessEnabled: true,
 };
 
@@ -316,13 +350,41 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
     debugLogging: normalizeBoolean(saved?.debugLogging, DEFAULTS.debugLogging),
     rateLimitsEnabled: normalizeBoolean(saved?.rateLimitsEnabled, DEFAULTS.rateLimitsEnabled),
     cursorApiKey: normalizeSecretString(saved?.cursorApiKey),
+    keychainAccessRequested: normalizeBoolean(saved?.keychainAccessRequested, DEFAULTS.keychainAccessRequested),
     hasSeenWelcome: normalizeBoolean(saved?.hasSeenWelcome, DEFAULTS.hasSeenWelcome),
-    keychainAccessRequested: normalizeBoolean(
-      saved?.keychainAccessRequested,
-      DEFAULTS.keychainAccessRequested,
+    lastOnboardedVersion: normalizeOnboardedVersion(saved?.lastOnboardedVersion),
+    statuslineInstalled: normalizeBoolean(saved?.statuslineInstalled, DEFAULTS.statuslineInstalled),
+    claudePlanTier: normalizeStringChoice(
+      saved?.claudePlanTier,
+      SUPPORTED_CLAUDE_PLAN_TIERS,
+      DEFAULTS.claudePlanTier,
+    ),
+    claudePlanCustomFiveHourTokens: normalizePositiveNumberOrNull(
+      saved?.claudePlanCustomFiveHourTokens,
+    ),
+    claudePlanCustomWeeklyTokens: normalizePositiveNumberOrNull(
+      saved?.claudePlanCustomWeeklyTokens,
     ),
     usageAccessEnabled: normalizeBoolean(saved?.usageAccessEnabled, DEFAULTS.usageAccessEnabled),
   };
+}
+
+function normalizePositiveNumberOrNull(value: unknown): number | null {
+  const numeric = normalizeFiniteNumber(value);
+  if (numeric === null || numeric <= 0) return null;
+  return Math.round(numeric);
+}
+
+/**
+ * Coerce a saved `lastOnboardedVersion` to a clean semver string or `null`.
+ * Anything that doesn't look like a `MAJOR.MINOR(.PATCH)?` shape gets
+ * dropped — better to re-onboard than to mis-compare a corrupted stamp.
+ */
+function normalizeOnboardedVersion(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return /^\d+\.\d+(\.\d+)?(-[\w.-]+)?$/.test(trimmed) ? trimmed : null;
 }
 
 export const settings = writable<Settings>(normalizeSettings());
@@ -346,9 +408,9 @@ export async function loadSettings(): Promise<Settings> {
             },
           }
         : saved;
-    // Preserve behavior for existing installs: any saved settings file means
-    // the user was already using the app, so silently opt them into the
-    // features that now gate on explicit consent.
+    // Preserve behavior for existing installs: any saved settings file
+    // means the user was already using the app, so silently opt them into
+    // the features that now gate on explicit consent.
     const migrated =
       legacyTrayConfig && !("rateLimitsEnabled" in legacyTrayConfig)
         ? {
@@ -357,16 +419,61 @@ export async function loadSettings(): Promise<Settings> {
             hasSeenWelcome: true,
           }
         : legacyTrayConfig;
-    // Separate migration step: anyone who already had `rateLimitsEnabled`
-    // saved was running the app before the one-time Keychain prompt was
-    // introduced — they've already lived with whatever Keychain UX existed,
-    // so don't surface the new tutorial to them. Brand-new installs (no
-    // saved settings) leave this `false` so the welcome card can drive it.
-    const migratedKeychain =
-      migrated && "rateLimitsEnabled" in migrated && !("keychainAccessRequested" in migrated)
-        ? { ...migrated, keychainAccessRequested: true }
-        : migrated;
-    const merged = normalizeSettings(migratedKeychain);
+    // The `keychainAccessRequested` field was retired with the OAuth
+    // pipeline; if it shows up in an old settings.json we just ignore it.
+    const merged = normalizeSettings(migrated);
+
+    // Force re-onboarding when the saved `lastOnboardedVersion` is older
+    // than the current build's onboarding version. We *only* flip the
+    // welcome flag when the user already had it set (i.e. they were a
+    // returning user) — fresh installs already have hasSeenWelcome=false
+    // and don't need this branch. Setting hasSeenWelcome=false here is
+    // an in-memory mutation; it persists to disk on the next setting
+    // change, which is fine because re-running the migration is
+    // idempotent and the wizard's handleFinish writes the current
+    // version stamp back.
+    const stampStale =
+      merged.lastOnboardedVersion === null ||
+      compareSemver(merged.lastOnboardedVersion, CURRENT_ONBOARDING_VERSION) < 0;
+    if (merged.hasSeenWelcome && stampStale) {
+      logger.info(
+        "settings",
+        `Re-onboarding: lastOnboardedVersion=${merged.lastOnboardedVersion ?? "null"} < current=${CURRENT_ONBOARDING_VERSION}`,
+      );
+      merged.hasSeenWelcome = false;
+    }
+
+    // Dev-only override: when `VITE_TM_FORCE_ONBOARDING` is set in the
+    // environment (and we're in a dev build), simulate a returning user
+    // upgrading from an older version on every launch. The wizard opens
+    // with the "What's New" first step and the full permissions flow.
+    // Production builds skip this branch entirely thanks to the DEV
+    // gate, so the flag can never leak to end users by accident.
+    if (import.meta.env.DEV) {
+      // Log the flag's value on every load so it's obvious in DevTools
+      // whether Vite picked it up. Common gotchas: `.env.local` lives at
+      // the project root, must be present *when the dev server starts*,
+      // and Vite hot-reloads but doesn't always re-evaluate env files
+      // mid-session — kill and restart `tauri dev` after changing it.
+      // eslint-disable-next-line no-console
+      console.info(
+        `[TokenMonitor] VITE_TM_FORCE_ONBOARDING=${JSON.stringify(
+          import.meta.env.VITE_TM_FORCE_ONBOARDING,
+        )} (DEV=${import.meta.env.DEV})`,
+      );
+      if (import.meta.env.VITE_TM_FORCE_ONBOARDING) {
+        logger.info(
+          "settings",
+          `VITE_TM_FORCE_ONBOARDING active — re-opening onboarding (current=${CURRENT_ONBOARDING_VERSION})`,
+        );
+        merged.hasSeenWelcome = false;
+        // Pin to a fixed older version so the changelog step renders
+        // entries newer than this stamp. "0.0.0" guarantees every
+        // existing changelog entry shows up regardless of what the
+        // current version is.
+        merged.lastOnboardedVersion = "0.0.0";
+      }
+    }
 
     settings.set(merged);
     setCurrency(merged.currency);

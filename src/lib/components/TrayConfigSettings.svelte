@@ -1,6 +1,5 @@
 <script lang="ts">
   import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
-  import { logger } from "../utils/logger.js";
   import { rateLimitsData } from "../stores/rateLimits.js";
   import { syncTrayConfig } from "../tray/sync.js";
   import { formatTrayTitle } from "../tray/title.js";
@@ -75,7 +74,7 @@
   function handleTrayConfig<K extends keyof TrayConfig>(key: K, value: TrayConfig[K]) {
     const next = { ...current.trayConfig, [key]: value };
     updateSetting("trayConfig", next);
-    void syncTrayConfig(next, $rateLimitsData).catch((e) => logger.debug("tray", `syncTrayConfig failed: ${e}`));
+    void syncTrayConfig(next, $rateLimitsData).catch(() => {});
   }
 </script>
 
@@ -216,11 +215,7 @@
   .group {
     margin-bottom: 8px;
   }
-  .group-label {
-    font: 500 10px/1 'Inter', sans-serif;
-    color: var(--t4);
-    padding: 2px 4px 4px;
-  }
+  /* `.group-label` is defined globally in `src/app.css`. */
   .card {
     background: var(--surface-2);
     border-radius: 8px;

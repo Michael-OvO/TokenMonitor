@@ -2,8 +2,7 @@ import type { Settings } from "../stores/settings.js";
 
 export type PermissionSurfaceId =
   | "usage_logs"
-  | "claude_credentials"
-  | "keychain_fallback"
+  | "claude_statusline"
   | "login_item"
   | "ssh_config"
   | "updates";
@@ -12,8 +11,7 @@ export type PermissionTone = "ok" | "warn" | "neutral";
 
 export type PermissionRequestPolicy =
   | "after_first_run_disclosure"
-  | "silent_when_enabled"
-  | "explicit_once"
+  | "explicit_install"
   | "explicit_toggle"
   | "configured_only"
   | "never_requests_os_prompt";
@@ -35,14 +33,14 @@ export interface PermissionPlatform {
 
 type PermissionSettings = Pick<
   Settings,
-  "hasSeenWelcome" | "rateLimitsEnabled" | "keychainAccessRequested" | "launchAtLogin" | "sshHosts"
+  "hasSeenWelcome" | "rateLimitsEnabled" | "statuslineInstalled" | "launchAtLogin" | "sshHosts"
 >;
 
 export function getPermissionSurfaces(
   settings: PermissionSettings,
-  platform: PermissionPlatform,
+  _platform: PermissionPlatform,
 ): PermissionSurface[] {
-  const surfaces: PermissionSurface[] = [
+  return [
     {
       id: "usage_logs",
       title: "Session logs",
@@ -52,9 +50,7 @@ export function getPermissionSurfaces(
         "Reads Claude Code and Codex session logs to calculate tokens, cost, models, and local activity.",
       requestPolicy: "after_first_run_disclosure",
       requestCopy:
-        platform.macos
-          ? "macOS folder access can appear only if those CLI folders live in Desktop, Documents, Downloads, a network volume, or an external drive."
-          : "No OS permission prompt is expected on this platform.",
+        "Reads files inside your home directory only — TokenMonitor never opens an OS-level permission prompt for these paths.",
       paths: [
         "~/.claude/projects",
         "~/.config/claude/projects",
@@ -62,16 +58,27 @@ export function getPermissionSurfaces(
       ],
     },
     {
-      id: "claude_credentials",
-      title: "Claude rate-limit credentials",
-      status: settings.rateLimitsEnabled ? "Enabled" : "Off",
-      tone: settings.rateLimitsEnabled ? "ok" : "neutral",
+      id: "claude_statusline",
+      title: "Claude statusline",
+      status: settings.statuslineInstalled
+        ? "Installed"
+        : settings.rateLimitsEnabled
+        ? "Pending install"
+        : "Off",
+      tone: settings.statuslineInstalled
+        ? "ok"
+        : settings.rateLimitsEnabled
+        ? "warn"
+        : "neutral",
       why:
-        "Reads the Claude Code credentials file to fetch live 5h and weekly rate-limit windows.",
-      requestPolicy: "silent_when_enabled",
+        "Lets TokenMonitor see which Claude Code session is active so it can show live 5h and weekly utilization. The script is plain shell, runs as you, and writes a single JSON line per prompt.",
+      requestPolicy: "explicit_install",
       requestCopy:
-        "This is the primary rate-limit path and does not show a Keychain prompt.",
-      paths: ["~/.claude/.credentials.json"],
+        "Click \"Install\" to write a small script under TokenMonitor's data directory and add a `statusLine` entry to ~/.claude/settings.json. No Keychain prompt, no network request.",
+      paths: [
+        "~/.claude/settings.json (statusLine entry)",
+        "<app-data>/statusline/events.jsonl",
+      ],
     },
     {
       id: "login_item",
@@ -82,9 +89,7 @@ export function getPermissionSurfaces(
         "Registers TokenMonitor as a login item only when you enable Launch at Login.",
       requestPolicy: "explicit_toggle",
       requestCopy:
-        platform.macos
-          ? "macOS may list this under Login Items; TokenMonitor changes it only from the welcome card or Settings toggle."
-          : "TokenMonitor changes this only from the welcome card or Settings toggle.",
+        "TokenMonitor changes this only from the welcome card or Settings toggle.",
       paths: [],
     },
     {
@@ -112,23 +117,6 @@ export function getPermissionSurfaces(
       paths: [],
     },
   ];
-
-  if (platform.macos) {
-    surfaces.splice(2, 0, {
-      id: "keychain_fallback",
-      title: "Keychain fallback",
-      status: settings.keychainAccessRequested ? "Handled" : "Available if needed",
-      tone: settings.keychainAccessRequested ? "ok" : "warn",
-      why:
-        "Optional fallback for Claude live rate limits if the credentials file is unavailable.",
-      requestPolicy: "explicit_once",
-      requestCopy:
-        "TokenMonitor never opens the Keychain prompt automatically. It can appear once only after you click Allow Keychain access.",
-      paths: ["Claude Code-credentials item in macOS Keychain"],
-    });
-  }
-
-  return surfaces;
 }
 
 export function permissionSurfaceById(

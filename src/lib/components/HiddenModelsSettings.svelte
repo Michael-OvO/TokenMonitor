@@ -1,23 +1,28 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
-  import { modelColor } from "../utils/format.js";
+  import { currencySymbol, modelColor } from "../utils/format.js";
   import type { KnownModel } from "../types/index.js";
   import ToggleSwitch from "./ToggleSwitch.svelte";
 
   let current = $derived($settings as SettingsType);
 
+  let costInput = $state("50.00");
+  let costEnabled = $state(true);
+  let costInputFocused = $state(false);
   let availableModels = $state<KnownModel[]>([]);
-  let expanded = $state(false);
   let modelsLoading = $state(true);
 
-  let visibleCount = $derived(
-    availableModels.filter((m) => !current.hiddenModels.includes(m.model_key)).length
-  );
+  $effect(() => {
+    costEnabled = current.costAlertThreshold > 0;
+    // Don't overwrite the input while the user is actively editing.
+    if (!costInputFocused) {
+      costInput = current.costAlertThreshold > 0 ? current.costAlertThreshold.toFixed(2) : "50.00";
+    }
+  });
 
-  function refreshModels() {
+  onMount(() => {
     invoke<KnownModel[]>("get_known_models", { provider: "all" })
       .then((models) => {
         availableModels = [...models].sort((a, b) =>
@@ -30,18 +35,23 @@
       .finally(() => {
         modelsLoading = false;
       });
+  });
+
+  function handleCostBlur() {
+    const val = parseFloat(costInput);
+    if (!isNaN(val) && val >= 0) {
+      updateSetting("costAlertThreshold", val);
+      costInput = val.toFixed(2);
+    } else {
+      costInput = current.costAlertThreshold.toFixed(2);
+    }
   }
 
-  let unlisten: UnlistenFn | undefined;
-
-  onMount(() => {
-    refreshModels();
-    listen("data-updated", () => refreshModels()).then((fn) => (unlisten = fn));
-  });
-
-  onDestroy(() => {
-    unlisten?.();
-  });
+  function handleCostKeydown(e: KeyboardEvent) {
+    if (e.key === "Enter") {
+      (e.target as HTMLInputElement).blur();
+    }
+  }
 
   function toggleModel(key: string) {
     const hidden = current.hiddenModels.includes(key)
@@ -51,17 +61,46 @@
   }
 </script>
 
-<div class="block">
-  <button class="row vis-row" type="button" onclick={() => (expanded = !expanded)}>
-    <span class="label">Model Visibility</span>
-    <div class="vis-right">
-      <span class="vis-count">{visibleCount} of {availableModels.length} enabled</span>
-      <svg class="vis-chevron" class:open={expanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="6 9 12 15 18 9"></polyline>
-      </svg>
+<div class="group">
+  <div class="group-label">Monitoring</div>
+  <div class="card">
+    <div class="row border">
+      <span class="label">Cost Alert</span>
+      <div class="cost-row-right">
+        {#if costEnabled}
+          <div class="cost-input">
+            <span class="dollar">{currencySymbol()}</span>
+            <input
+              type="text"
+              bind:value={costInput}
+              onfocus={() => { costInputFocused = true; }}
+              onblur={() => { costInputFocused = false; handleCostBlur(); }}
+              onkeydown={handleCostKeydown}
+              class="cost-field"
+            />
+          </div>
+        {/if}
+        <ToggleSwitch
+          checked={costEnabled}
+          onChange={(checked) => {
+            costEnabled = checked;
+            if (!checked) {
+              updateSetting("costAlertThreshold", 0);
+            } else {
+              const val = parseFloat(costInput);
+              updateSetting("costAlertThreshold", !isNaN(val) && val > 0 ? val : 50);
+            }
+          }}
+        />
+      </div>
     </div>
-  </button>
-  <div class="model-collapse" class:open={expanded}>
+    <div class="row border">
+      <span class="label">Model Change Stats</span>
+      <ToggleSwitch
+        checked={current.showModelChangeStats}
+        onChange={(checked) => updateSetting("showModelChangeStats", checked)}
+      />
+    </div>
     {#if modelsLoading}
       <div class="model-grid" aria-busy="true" aria-label="Loading models">
         {#each Array(4) as _, i (i)}
@@ -93,7 +132,13 @@
 </div>
 
 <style>
-  .block {
+  .group {
+    margin-bottom: 8px;
+  }
+  /* `.group-label` is defined globally in `src/app.css`. */
+  .card {
+    background: var(--surface-2);
+    border-radius: 8px;
     overflow: hidden;
   }
   .row {
@@ -102,45 +147,12 @@
     justify-content: space-between;
     align-items: center;
   }
+  .row.border {
+    border-bottom: 1px solid var(--border-subtle);
+  }
   .label {
     font: 400 10px/1 'Inter', sans-serif;
     color: var(--t1);
-  }
-  .vis-row {
-    width: 100%;
-    background: none;
-    border: none;
-    cursor: pointer;
-    user-select: none;
-  }
-  .vis-row:hover {
-    background: var(--surface-hover);
-  }
-  .vis-right {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .vis-count {
-    font: 400 9px/1 'Inter', sans-serif;
-    color: var(--t3);
-  }
-  .vis-chevron {
-    color: var(--t3);
-    transition: transform var(--t-normal) ease;
-    transform: rotate(-90deg);
-  }
-  .vis-chevron.open {
-    transform: rotate(0deg);
-  }
-  .model-collapse {
-    max-height: 0;
-    overflow: hidden;
-    transition: max-height var(--t-normal) ease;
-  }
-  .model-collapse.open {
-    max-height: 400px;
-    border-top: 1px solid var(--border-subtle);
   }
   .model-grid {
     display: flex;
@@ -201,5 +213,33 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .skeleton-block { animation: none; opacity: 0.6; }
+  }
+  .cost-row-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .cost-input {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .dollar {
+    font: 400 9px/1 'Inter', sans-serif;
+    color: var(--t3);
+  }
+  .cost-field {
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 3px 6px;
+    width: 54px;
+    text-align: right;
+    font: 400 9px/1 'Inter', sans-serif;
+    color: var(--t1);
+    outline: none;
+  }
+  .cost-field:focus {
+    border-color: var(--t3);
   }
 </style>

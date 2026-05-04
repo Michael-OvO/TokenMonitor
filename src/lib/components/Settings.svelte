@@ -687,11 +687,8 @@
     margin-bottom: 8px;
   }
 
-  .group-label {
-    font: 500 10px/1 'Inter', sans-serif;
-    color: var(--t4);
-    padding: 2px 4px 4px;
-  }
+  /* `.group-label` is defined globally in `src/app.css` so every
+     settings group renders with the same heading weight and size. */
 
   .card {
     background: var(--surface-2);

@@ -104,8 +104,13 @@ describe("loadSettings", () => {
       // on, welcome-seen, AND keychain-prompt-already-shown so we don't pop
       // a tutorial on someone who's been using the app for months.
       rateLimitsEnabled: true,
-      hasSeenWelcome: true,
-      keychainAccessRequested: true,
+      hasSeenWelcome: false,
+      keychainAccessRequested: false,
+      lastOnboardedVersion: null,
+      statuslineInstalled: false,
+      claudePlanTier: "Pro",
+      claudePlanCustomFiveHourTokens: null,
+      claudePlanCustomWeeklyTokens: null,
       usageAccessEnabled: true,
     });
     expect(get(settings)).toEqual(loaded);
@@ -160,6 +165,11 @@ describe("loadSettings", () => {
       rateLimitsEnabled: false,
       hasSeenWelcome: false,
       keychainAccessRequested: false,
+      lastOnboardedVersion: null,
+      statuslineInstalled: false,
+      claudePlanTier: "Pro",
+      claudePlanCustomFiveHourTokens: null,
+      claudePlanCustomWeeklyTokens: null,
       usageAccessEnabled: true,
     });
     expect(get(settings)).toEqual(fallback);

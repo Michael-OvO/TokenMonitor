@@ -125,6 +125,22 @@ pub fn ssh_config() -> Option<PathBuf> {
     home().map(|h| h.join(".ssh").join("config"))
 }
 
+/// Path of `~/.claude/settings.json` — read and patched by the statusline
+/// installer to point Claude Code at our script.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn claude_settings_file() -> Option<PathBuf> {
+    env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .and_then(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .find(|entry| !entry.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| home().map(|h| h.join(".claude")))
+        .map(|p| p.join("settings.json"))
+}
+
 /// Claude credentials JSON (non-macOS fallback when Keychain isn't used).
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn claude_credentials_file() -> Option<PathBuf> {

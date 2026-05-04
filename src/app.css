@@ -312,10 +312,6 @@
   0%,100% { opacity: .45; }
   50% { opacity: 1; }
 }
-@keyframes tabUnderline {
-  from { transform: scaleX(0); }
-  to { transform: scaleX(1); }
-}
 @keyframes tipReveal {
   from { opacity: 0; transform: translateX(-50%) translateY(4px); }
   to { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -398,4 +394,33 @@ body {
   -moz-osx-font-smoothing: grayscale;
   user-select: none;
   cursor: default;
+  /* Wrap-anywhere safety net for the entire popover. The frame is fixed
+     at 340px, so any single overflowing token (long URL, file path,
+     identifier, hash) needs to break instead of pushing siblings out
+     of the visible window. `anywhere` only kicks in when no normal
+     break would fit — prose still wraps at word boundaries — and it
+     also relaxes the implicit min-content size of flex items so a long
+     status string never forces its row off-screen. */
+  overflow-wrap: anywhere;
+}
+
+/* ── Settings section header (.group-label) ───────────────────────────
+   Centralized here because every settings group sub-component
+   (PermissionSettings, ThemeSettings, HeaderTabsSettings, etc.) used
+   to define its own copy of these rules — six identical blocks
+   diverging the moment one was tweaked. One global rule keeps the
+   visual hierarchy consistent across every Settings card.
+
+   Sizing was originally 8px / muted color, which made the section
+   header *smaller* than the item titles (11px) inside its card —
+   inverted hierarchy that read as "items are more important than the
+   sections they belong to." The current 12px / weight 600 / primary
+   color is one step larger and bolder than `.ps-title` (11px / 500),
+   so the eye lands on the section name first, then on individual
+   items. Letter-spacing tightens the heavier weight at this size. */
+.group-label {
+  font: 600 12px/1.2 'Inter', sans-serif;
+  color: var(--t1);
+  letter-spacing: -0.05px;
+  padding: 4px 4px 6px;
 }

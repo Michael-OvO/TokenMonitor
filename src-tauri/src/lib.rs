@@ -6,6 +6,8 @@ mod platform;
 mod rate_limits;
 mod secrets;
 mod stats;
+#[allow(dead_code)]
+mod statusline;
 mod tray;
 mod updater;
 mod usage;
@@ -355,6 +357,15 @@ pub fn run() {
                 background_loop(app_handle).await;
             });
 
+            // Reactive statusline poll — fires within ~2s of any Claude Code
+            // prompt by watching the events-file mtime. Independent of the
+            // slow background loop so the dashboard keeps pace with the
+            // user without cranking up the global refresh interval.
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                fast_statusline_poll(app_handle).await;
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -374,11 +385,16 @@ pub fn run() {
             commands::config::retry_cursor_auth,
             commands::config::get_cursor_auth_status,
             commands::config::request_claude_keychain_access,
+            commands::config::check_claude_keychain_access,
+            commands::config::debug_force_oauth_refresh,
             commands::config::request_app_data_access,
             commands::config::check_app_data_access,
             commands::config::open_app_data_settings,
-            commands::config::check_claude_keychain_access,
-            commands::config::debug_force_oauth_refresh,
+            commands::statusline::install_statusline,
+            commands::statusline::check_statusline,
+            commands::statusline::uninstall_statusline,
+            commands::statusline::set_claude_plan_tier,
+            commands::statusline::read_latest_statusline_ping,
             commands::tray::set_tray_config,
             commands::tray::get_status_widget_summary,
             commands::config::clear_cache,
@@ -427,6 +443,8 @@ pub fn run() {
 
 /// Fetch fresh rate limits and update cached state + tray utilization.
 async fn refresh_rate_limits(app: &tauri::AppHandle, state: &AppState) {
+    statusline::source::maybe_trim(&statusline::events_file());
+
     let codex_dir = state.parser.codex_dir().to_path_buf();
     let cached = state.cached_rate_limits.read().await.clone();
     let fresh = rate_limits::fetch_selected_rate_limits(
@@ -443,7 +461,6 @@ async fn refresh_rate_limits(app: &tauri::AppHandle, state: &AppState) {
 
     tracing::debug!("Background rate-limit refresh complete");
 
-    // Emit so the float ball and main window pick up the new data.
     let _ = app.emit("status-widget-updated", ());
 }
 
@@ -453,6 +470,53 @@ const SSH_SYNC_EVERY_N_CYCLES: u64 = 10;
 const RATE_LIMIT_REFRESH_EVERY_N_CYCLES: u64 = 5;
 /// Pricing/exchange-rate TTL check: every 120 cycles (~1h at 30s interval).
 const PRICING_CHECK_EVERY_N_CYCLES: u64 = 120;
+
+async fn fast_statusline_poll(app: tauri::AppHandle) {
+    use std::fs;
+    use std::time::SystemTime;
+
+    const POLL_INTERVAL_SECS: u64 = 2;
+
+    let path = crate::statusline::events_file();
+    let mut last_mtime: Option<SystemTime> =
+        fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+
+    let state = app.state::<AppState>();
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+
+        if !state
+            .usage_access_enabled
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            continue;
+        }
+
+        let now_mtime = fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        let events_moved = now_mtime != last_mtime;
+        if events_moved {
+            last_mtime = now_mtime;
+        }
+        let parser_changed = state.parser.invalidate_if_changed();
+
+        if !events_moved && !parser_changed {
+            continue;
+        }
+
+        state.parser.clear_payload_cache();
+
+        if events_moved
+            && state
+                .rate_limits_enabled
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            refresh_rate_limits(&app, &state).await;
+        }
+        sync_tray_title(&app, &state).await;
+        let _ = app.emit("data-updated", 0u64);
+    }
+}
 
 async fn background_loop(app: tauri::AppHandle) {
     tokio::time::sleep(Duration::from_secs(1)).await;

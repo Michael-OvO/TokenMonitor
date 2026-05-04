@@ -69,6 +69,7 @@
     markClaudeKeychainAccessHandled,
     requestClaudeKeychainAccessOnce,
   } from "./lib/permissions/keychain.js";
+  import { installStatusline, checkStatusline, type InstalledState } from "./lib/permissions/statusline.js";
 
   import Toggle from "./lib/components/Toggle.svelte";
   import TimeTabs from "./lib/components/TimeTabs.svelte";
@@ -111,6 +112,9 @@
   });
   let showKeychainPermissionPanel = $state(false);
   let keychainPermissionBusy = $state(false);
+  let statuslineBusy = $state(false);
+  let statuslineInstalled = $state<boolean | null>(null);
+  let statuslineProbeStatus = $state<InstalledState["status"] | null>(null);
   /** Bartender-style onboarding wizard. Driven by the `hasSeenWelcome`
    * setting now that the test-only auto-open `$effect` has been removed
    * — first launch shows the wizard, every subsequent launch skips it. */
@@ -361,6 +365,34 @@
       await enableRateLimits();
     } finally {
       keychainPermissionBusy = false;
+    }
+  }
+
+  async function handleInstallStatusline() {
+    if (statuslineBusy) return;
+    statuslineBusy = true;
+    try {
+      await installStatusline();
+      statuslineInstalled = true;
+      statuslineProbeStatus = "installed";
+      await updateSetting("statuslineInstalled", true);
+    } catch (e) {
+      console.error("Statusline install failed:", e);
+    } finally {
+      statuslineBusy = false;
+    }
+  }
+
+  async function refreshStatuslineProbe() {
+    try {
+      const state = await checkStatusline();
+      statuslineInstalled = state.status === "installed";
+      statuslineProbeStatus = state.status;
+      if (statuslineInstalled !== $settings.statuslineInstalled) {
+        await updateSetting("statuslineInstalled", statuslineInstalled);
+      }
+    } catch {
+      // non-critical
     }
   }
 
@@ -781,7 +813,6 @@
       <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
     {:else if showPermissionsOnboarding}
       <PermissionsOnboarding
-        keychainAuthorized={keychainAuthorized}
         onFinish={handleOnboardingFinish}
       />
     {:else if appReady && !data}

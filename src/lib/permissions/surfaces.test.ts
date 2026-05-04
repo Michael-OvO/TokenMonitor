@@ -35,9 +35,14 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     sshHosts: [],
     debugLogging: false,
     cursorApiKey: "",
+    keychainAccessRequested: false,
     rateLimitsEnabled: false,
     hasSeenWelcome: false,
-    keychainAccessRequested: false,
+    lastOnboardedVersion: null,
+    statuslineInstalled: false,
+    claudePlanTier: "Pro",
+    claudePlanCustomFiveHourTokens: null,
+    claudePlanCustomWeeklyTokens: null,
     usageAccessEnabled: true,
     ...overrides,
   };
@@ -56,26 +61,27 @@ describe("permission surfaces", () => {
     }
   });
 
-  it("keeps Keychain as an explicit macOS-only one-shot fallback", () => {
-    const macSurfaces = getPermissionSurfaces(settings(), { macos: true });
-    const keychain = permissionSurfaceById(macSurfaces, "keychain_fallback");
+  it("surfaces the statusline as the explicit-install path for live limits", () => {
+    const surfaces = getPermissionSurfaces(settings(), { macos: true });
+    const statusline = permissionSurfaceById(surfaces, "claude_statusline");
 
-    expect(keychain?.requestPolicy).toBe("explicit_once");
-    expect(keychain?.requestCopy).toContain("never opens the Keychain prompt automatically");
-
-    const nonMacSurfaces = getPermissionSurfaces(settings(), { macos: false });
-    expect(permissionSurfaceById(nonMacSurfaces, "keychain_fallback")).toBeUndefined();
+    expect(statusline).toBeDefined();
+    expect(statusline?.requestPolicy).toBe("explicit_install");
+    // The user-visible reassurance that no OS prompt is involved is the
+    // load-bearing claim of this rewrite — pin it explicitly so a future
+    // copy edit can't quietly drop it.
+    expect(statusline?.requestCopy).toContain("No Keychain prompt");
   });
 
-  it("describes Claude credentials as the silent primary live-limits path", () => {
-    const surfaces = getPermissionSurfaces(settings({ rateLimitsEnabled: true }), {
-      macos: true,
-    });
-    const credentials = permissionSurfaceById(surfaces, "claude_credentials");
+  it("marks the statusline as Installed once the user has set it up", () => {
+    const surfaces = getPermissionSurfaces(
+      settings({ statuslineInstalled: true, rateLimitsEnabled: true }),
+      { macos: true },
+    );
+    const statusline = permissionSurfaceById(surfaces, "claude_statusline");
 
-    expect(credentials?.status).toBe("Enabled");
-    expect(credentials?.requestPolicy).toBe("silent_when_enabled");
-    expect(credentials?.requestCopy).toContain("does not show a Keychain prompt");
+    expect(statusline?.status).toBe("Installed");
+    expect(statusline?.tone).toBe("ok");
   });
 
   it("documents update checks as banner-only with no notification prompt", () => {
@@ -84,5 +90,10 @@ describe("permission surfaces", () => {
 
     expect(updates?.status).toBe("Banner only");
     expect(updates?.requestPolicy).toBe("never_requests_os_prompt");
+  });
+
+  it("does not include any keychain surface", () => {
+    const surfaces = getPermissionSurfaces(settings(), { macos: true });
+    expect(surfaces.find((s) => s.id.includes("keychain" as never))).toBeUndefined();
   });
 });
