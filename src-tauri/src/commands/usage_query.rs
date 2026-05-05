@@ -13,7 +13,7 @@ use crate::usage::integrations::{
 use crate::usage::parser::UsageParser;
 use chrono::NaiveDate;
 #[cfg(test)]
-use chrono::{Datelike, Local};
+use chrono::Datelike;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
 use tauri::State;

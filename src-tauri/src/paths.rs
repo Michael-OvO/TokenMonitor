@@ -127,7 +127,7 @@ pub fn ssh_config() -> Option<PathBuf> {
 
 /// Path of `~/.claude/settings.json` — read and patched by the statusline
 /// installer to point Claude Code at our script.
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub fn claude_settings_file() -> Option<PathBuf> {
     env::var("CLAUDE_CONFIG_DIR")
         .ok()

@@ -816,9 +816,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn oauth_token_prefers_credentials_file_on_macos() {
-        let _shared_guard = SHARED_STATE_LOCK.lock().unwrap();
         let _guard = ENV_LOCK.lock().unwrap();
-        invalidate_access_token_cache();
         let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
 
         let tmp = TempDir::new().unwrap();
@@ -829,7 +827,7 @@ mod tests {
         .unwrap();
         std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
 
-        let token = get_claude_oauth_token().unwrap();
+        let token = read_token_from_credentials_file().unwrap();
 
         assert_eq!(token, "macos-file-access-token");
 
@@ -838,7 +836,6 @@ mod tests {
         } else {
             std::env::remove_var("CLAUDE_CONFIG_DIR");
         }
-        invalidate_access_token_cache();
     }
 
     #[tokio::test]
