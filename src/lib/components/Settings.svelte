@@ -375,7 +375,8 @@
           </div>
         </button>
         <div class="cursor-collapse" class:open={cursorExpanded}>
-          <div class="cursor-section">
+          <div class="collapse-inner">
+            <div class="cursor-section">
             <label class="label" for="cursor-api-key">Official API Key</label>
             <input
               id="cursor-api-key"
@@ -418,6 +419,7 @@
             {/if}
           </div>
         </div>
+      </div>
       </div>
     </div>
 
@@ -553,7 +555,9 @@
           </div>
         </button>
         <div class="privacy-collapse" class:open={privacyExpanded}>
-          <PermissionDisclosure mode="settings" />
+          <div class="collapse-inner">
+            <PermissionDisclosure mode="settings" />
+          </div>
         </div>
       </div>
     </div>
@@ -666,15 +670,16 @@
   }
   .cursor-collapse,
   .privacy-collapse {
-    max-height: 0;
-    overflow: hidden;
-    transition: max-height var(--t-normal) ease;
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows var(--t-normal) ease;
   }
-  .cursor-collapse.open {
-    max-height: 400px;
-  }
+  .cursor-collapse.open,
   .privacy-collapse.open {
-    max-height: 800px;
+    grid-template-rows: 1fr;
+  }
+  .collapse-inner {
+    overflow: hidden;
   }
 
   .cursor-section {

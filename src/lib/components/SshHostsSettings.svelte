@@ -27,7 +27,11 @@
     }));
 
     invoke<SshHostInfo[]>("get_ssh_hosts")
-      .then((hosts) => { sshHosts = hosts; })
+      .then((hosts) => {
+        sshHosts = [...hosts].sort((a, b) => 
+          a.alias.localeCompare(b.alias, undefined, { sensitivity: "base" })
+        );
+      })
       .catch((e) => { logger.warn("ssh", `Failed to load SSH hosts: ${e}`); });
     invoke<{ alias: string; enabled: boolean }[]>("get_ssh_host_statuses")
       .then((statuses) => {
@@ -167,7 +171,8 @@
       </div>
     </button>
     <div class="devices-collapse" class:open={devicesExpanded}>
-      <div class="ssh-section">
+      <div class="collapse-inner">
+        <div class="ssh-section">
         <div class="ssh-hosts">
           {#each sshHosts as host (host.alias)}
             <div class="ssh-host-row">
@@ -215,6 +220,7 @@
         {/if}
       </div>
     </div>
+  </div>
   </div>
 </div>
 
@@ -350,11 +356,14 @@
     color: var(--t4);
   }
   .devices-collapse {
-    max-height: 0;
-    overflow: hidden;
-    transition: max-height var(--t-normal, 200ms) ease;
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows var(--t-normal, 200ms) ease;
   }
   .devices-collapse.open {
-    max-height: 500px;
+    grid-template-rows: 1fr;
+  }
+  .collapse-inner {
+    overflow: hidden;
   }
 </style>

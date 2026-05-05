@@ -117,7 +117,8 @@
       </div>
     </button>
     <div class="models-collapse" class:open={modelsExpanded}>
-      {#if modelsLoading}
+      <div class="collapse-inner">
+        {#if modelsLoading}
         <div class="model-grid" aria-busy="true" aria-label="Loading models">
           {#each Array(4) as _, i (i)}
             <div class="model-cell skeleton-cell">
@@ -143,7 +144,8 @@
         </div>
       {:else}
         <div class="model-empty">No models discovered yet</div>
-      {/if}
+        {/if}
+      </div>
     </div>
   </div>
 </div>
@@ -263,7 +265,6 @@
     width: 100%;
     background: none;
     border: none;
-    border-top: 1px solid var(--border-subtle);
     cursor: pointer;
     user-select: none;
   }
@@ -284,11 +285,14 @@
     transform: rotate(0deg);
   }
   .models-collapse {
-    max-height: 0;
-    overflow: hidden;
-    transition: max-height var(--t-normal, 200ms) ease;
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows var(--t-normal, 200ms) ease;
   }
   .models-collapse.open {
-    max-height: 600px;
+    grid-template-rows: 1fr;
+  }
+  .collapse-inner {
+    overflow: hidden;
   }
 </style>

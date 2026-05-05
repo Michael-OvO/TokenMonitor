@@ -434,10 +434,11 @@
     class="detail"
     class:visible={displayed != null}
   >
-    {#if displayed}
-      {@const segs = sortedSegments(displayed)}
-      <div class="detail-inner">
-        <div class="detail-head">
+    <div class="collapse-inner">
+      {#if displayed}
+        {@const segs = sortedSegments(displayed)}
+        <div class="detail-inner">
+          <div class="detail-head">
           <span class="detail-label">{displayed.label}</span>
           <span class="detail-total">{formatCost(displayed.total)}</span>
         </div>
@@ -454,6 +455,7 @@
         {/if}
       </div>
     {/if}
+    </div>
   </div>
 
   <div class="chart-body" class:pie-mode={$chartMode === "pie"}>
@@ -702,17 +704,18 @@
   }
 
   .detail {
-    background: var(--surface-2);
-    border-radius: 8px;
-    overflow: hidden;
+    display: grid;
+    grid-template-rows: 0fr;
     opacity: 0;
-    max-height: 0;
-    will-change: opacity;
-    transition: opacity 0.12s ease;
+    will-change: opacity, grid-template-rows;
+    transition: grid-template-rows 0.15s ease, opacity 0.15s ease;
   }
   .detail.visible {
     opacity: 1;
-    max-height: 200px;
+    grid-template-rows: 1fr;
+  }
+  .collapse-inner {
+    overflow: hidden;
   }
   .ch.detail-above .detail { margin-bottom: 10px; }
   .ch:not(.detail-above) .detail { margin-top: 10px; }
@@ -904,6 +907,8 @@
     padding: 8px 10px;
     min-height: 0;
     overflow: hidden;
+    background: var(--surface-2);
+    border-radius: 8px;
   }
   .detail-head {
     display: flex; justify-content: space-between; align-items: baseline;
