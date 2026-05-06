@@ -4,7 +4,9 @@ mod models;
 mod paths;
 mod platform;
 mod rate_limits;
+mod secrets;
 mod stats;
+#[allow(dead_code)]
 mod statusline;
 mod tray;
 mod updater;
@@ -222,6 +224,9 @@ pub fn run() {
                                     platform::clamp_window_to_work_area(&window);
                                     let _ = window.show();
                                 }
+                                #[cfg(target_os = "windows")]
+                                platform::windows::window::activate_window(&window);
+                                #[cfg(not(target_os = "windows"))]
                                 let _ = window.set_focus();
                             }
                         }
@@ -305,7 +310,35 @@ pub fn run() {
                         }
                     });
                 }
+
+                // Load cached exchange rates immediately.
+                if let Some(rates) = usage::exchange_rates::load_cached(&app_data) {
+                    usage::exchange_rates::set_exchange_rates(rates);
+                }
+
+                // Spawn async refresh if exchange rate cache is stale (>24h).
+                if usage::exchange_rates::should_refresh(&app_data) {
+                    let data_dir = app_data.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match usage::exchange_rates::fetch_and_cache(&data_dir).await {
+                            Ok(rates) => {
+                                usage::exchange_rates::set_exchange_rates(rates);
+                                tracing::info!("Exchange rates refreshed (frankfurter.dev)");
+                            }
+                            Err(e) => {
+                                tracing::warn!("Exchange rate fetch failed (using fallback): {e}");
+                            }
+                        }
+                    });
+                }
             }
+
+            // Hydrate the in-memory Cursor secret cache from keyring (or
+            // file fallback) so the first usage refresh after launch can
+            // hit the remote API without waiting for the frontend to
+            // round-trip a `set_cursor_auth_config` call. Best-effort: a
+            // missing/locked keychain just leaves the cache empty.
+            commands::config::prime_cursor_auth_from_disk(app.handle());
 
             // Load persisted updater state
             {
@@ -346,6 +379,14 @@ pub fn run() {
             commands::config::set_refresh_interval,
             commands::config::set_rate_limits_enabled,
             commands::config::set_usage_access_enabled,
+            commands::config::set_cursor_auth_config,
+            commands::config::clear_cursor_auth_config,
+            commands::config::open_cursor_app,
+            commands::config::retry_cursor_auth,
+            commands::config::get_cursor_auth_status,
+            commands::config::request_claude_keychain_access,
+            commands::config::check_claude_keychain_access,
+            commands::config::debug_force_oauth_refresh,
             commands::config::request_app_data_access,
             commands::config::check_app_data_access,
             commands::config::open_app_data_settings,
@@ -361,6 +402,7 @@ pub fn run() {
             commands::config::clear_usage_view_cache,
             commands::config::reposition_window,
             commands::config::set_window_size_and_align,
+            commands::config::get_window_anchor_edge,
             commands::config::get_rate_limits,
             commands::float_ball::create_float_ball,
             commands::float_ball::destroy_float_ball,
@@ -392,6 +434,8 @@ pub fn run() {
             commands::updater::updater_set_auto_check,
             commands::updater::updater_skip_version,
             commands::updater::updater_dismiss,
+            commands::config::get_exchange_rates,
+            commands::config::quit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error running TokenMonitor");
@@ -399,17 +443,12 @@ pub fn run() {
 
 /// Fetch fresh rate limits and update cached state + tray utilization.
 async fn refresh_rate_limits(app: &tauri::AppHandle, state: &AppState) {
-    // Periodically trim the events file so it doesn't grow unbounded over
-    // long-running sessions. Best-effort; failures are swallowed inside.
     statusline::source::maybe_trim(&statusline::events_file());
 
     let codex_dir = state.parser.codex_dir().to_path_buf();
-    let plan = *state.claude_plan_tier.read().await;
     let cached = state.cached_rate_limits.read().await.clone();
     let fresh = rate_limits::fetch_selected_rate_limits(
-        std::sync::Arc::clone(&state.parser),
-        codex_dir,
-        plan,
+        &codex_dir,
         rate_limits::RateLimitSelection::All,
         cached.as_ref(),
     )
@@ -422,39 +461,23 @@ async fn refresh_rate_limits(app: &tauri::AppHandle, state: &AppState) {
 
     tracing::debug!("Background rate-limit refresh complete");
 
-    // Emit so the float ball and main window pick up the new data.
     let _ = app.emit("status-widget-updated", ());
 }
 
-/// Reactive refresh loop that polls the statusline events-file mtime and
-/// fires an immediate parser + rate-limit refresh whenever Claude Code
-/// fires its statusline hook.
-///
-/// The slow background loop is fine for periodic upkeep, but it ticks at
-/// `refresh_interval` (default 30s) and the user expects the dashboard to
-/// reflect a CC prompt within a beat or two of typing. Polling the events
-/// file's modification time is essentially free — one stat call every
-/// `POLL_INTERVAL_SECS` — and lets us react in close-to-real-time without
-/// cranking the global refresh interval down (which would make every
-/// other periodic task pay the cost too).
-///
-/// Gated on `usage_access_enabled` so a brand-new install with onboarding
-/// not yet finished doesn't fire pre-emptive parses.
+/// SSH sync interval: every 10 local refresh cycles (~5 min at 30s interval).
+const SSH_SYNC_EVERY_N_CYCLES: u64 = 10;
+/// Rate limit refresh: every 5 cycles (~2.5 min at 30s interval).
+const RATE_LIMIT_REFRESH_EVERY_N_CYCLES: u64 = 5;
+/// Pricing/exchange-rate TTL check: every 120 cycles (~1h at 30s interval).
+const PRICING_CHECK_EVERY_N_CYCLES: u64 = 120;
+
 async fn fast_statusline_poll(app: tauri::AppHandle) {
     use std::fs;
     use std::time::SystemTime;
 
-    /// 2 seconds is the sweet spot — well below human reaction time so the
-    /// update feels live, far above the granularity at which CC will fire
-    /// the hook (one per prompt), and trivial in stat-call overhead.
     const POLL_INTERVAL_SECS: u64 = 2;
 
     let path = crate::statusline::events_file();
-
-    // Seed with the current mtime so the very first observation isn't
-    // mis-classified as a change. On a fresh install the file doesn't
-    // exist yet → seed is `None`, which still works: when the script
-    // first writes, `Some(t) != None` and the refresh fires.
     let mut last_mtime: Option<SystemTime> =
         fs::metadata(&path).ok().and_then(|m| m.modified().ok());
 
@@ -470,16 +493,6 @@ async fn fast_statusline_poll(app: tauri::AppHandle) {
             continue;
         }
 
-        // Two independent change signals on every tick:
-        //   1. `events.jsonl` mtime → CC fired a new statusline hook, i.e.
-        //      a new prompt landed. Triggers rate-limit refresh because
-        //      the bars come from the latest event's payload.
-        //   2. `parser.invalidate_if_changed()` → any transcript JSONL
-        //      moved, including the *streaming* writes a single response
-        //      generates. Without this, the dashboard's price + token
-        //      number sat on a 30s slow-loop ceiling because events.jsonl
-        //      only ticks once per prompt, not once per chunk. Now the
-        //      cost number tracks the response as it flushes.
         let now_mtime = fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         let events_moved = now_mtime != last_mtime;
         if events_moved {
@@ -491,11 +504,6 @@ async fn fast_statusline_poll(app: tauri::AppHandle) {
             continue;
         }
 
-        // Drop the aggregated-payload cache so the next `get_usage_data`
-        // IPC re-aggregates from the freshly-invalidated entry cache.
-        // Required even when only `parser_changed` fired, because the
-        // payload cache is keyed on provider/period/offset and outlives
-        // a single entry-cache invalidation.
         state.parser.clear_payload_cache();
 
         if events_moved
@@ -522,19 +530,6 @@ async fn background_loop(app: tauri::AppHandle) {
     let mut ssh_sync_counter: u64 = 0;
     let mut rate_limit_counter: u64 = 0;
     let mut pricing_counter: u64 = 0;
-
-    // SSH sync interval: every 10 local refresh cycles (~5 min at 30s interval).
-    const SSH_SYNC_EVERY_N_CYCLES: u64 = 10;
-    // Rate-limit refresh: every cycle. Prior to the statusline rewrite this
-    // throttled API calls to Anthropic (each cost rate-limit budget); since
-    // the fetch is now a local statusline-event-file read + arithmetic,
-    // there's nothing to conserve. Pair with the `fast_statusline_poll`
-    // task below for sub-second reactivity to fresh CC prompts.
-    const RATE_LIMIT_REFRESH_EVERY_N_CYCLES: u64 = 1;
-    // Pricing refresh: every 120 cycles (~1h at 30s interval).
-    // The actual TTL check (7 days) is inside should_refresh(), so this just
-    // controls how often we check the TTL, not how often we actually fetch.
-    const PRICING_CHECK_EVERY_N_CYCLES: u64 = 120;
 
     loop {
         let interval_secs = {
@@ -596,6 +591,19 @@ async fn background_loop(app: tauri::AppHandle) {
                         }
                         Err(e) => {
                             tracing::warn!("Background pricing refresh failed: {e}");
+                        }
+                    }
+                }
+
+                // Also check exchange rate cache (24h TTL).
+                if usage::exchange_rates::should_refresh(&app_data) {
+                    match usage::exchange_rates::fetch_and_cache(&app_data).await {
+                        Ok(rates) => {
+                            usage::exchange_rates::set_exchange_rates(rates);
+                            tracing::info!("Exchange rates refreshed (background)");
+                        }
+                        Err(e) => {
+                            tracing::warn!("Background exchange rate refresh failed: {e}");
                         }
                     }
                 }
@@ -721,15 +729,12 @@ async fn archive_ssh_device_usage(state: &AppState) {
         let entries: Vec<usage::parser::ParsedEntry> = records
             .iter()
             .filter_map(|r| {
-                let dt = chrono::DateTime::parse_from_rfc3339(&r.ts)
-                    .or_else(|_| chrono::DateTime::parse_from_str(&r.ts, "%Y-%m-%dT%H:%M:%S%.f%z"));
-                let dt = match dt {
-                    Ok(d) => d,
-                    Err(e) => {
+                let dt = match usage::device_aggregation::parse_remote_ts(&r.ts) {
+                    Some(d) => d,
+                    None => {
                         tracing::warn!(
                             device = alias.as_str(),
                             ts = %r.ts,
-                            error = %e,
                             "Skipping record with unparseable timestamp"
                         );
                         return None;

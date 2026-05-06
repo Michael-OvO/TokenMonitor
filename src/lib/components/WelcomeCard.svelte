@@ -20,7 +20,7 @@
       await updateSetting("hasSeenWelcome", true);
       await invoke("set_rate_limits_enabled", { enabled: enableRateLimits });
       if (enableAutostart) {
-        await invoke("plugin:autostart|enable").catch(() => {});
+        await invoke("plugin:autostart|enable").catch((e) => logger.debug("welcome", `autostart enable failed: ${e}`));
       }
     } catch (e) {
       logger.error("welcome", `Failed to persist welcome choices: ${e}`);

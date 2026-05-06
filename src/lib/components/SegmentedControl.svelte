@@ -43,8 +43,10 @@
     transition: color var(--t-fast) ease, background var(--t-fast) ease;
     white-space: nowrap;
   }
-  .seg-btn:hover {
+  .seg-btn:hover:not(.active) {
     color: var(--t2);
+    background: var(--surface-hover);
+    border-radius: 4px;
   }
   .seg-btn.active {
     background: var(--surface-hover);
@@ -64,11 +66,17 @@
     background: rgba(255, 255, 255, 0.14);
     box-shadow: none;
   }
+  :global(:root[data-glass="true"]) .seg-btn:hover:not(.active) {
+    background: rgba(255, 255, 255, 0.06);
+  }
   :global(:root[data-glass="true"][data-theme="light"]) .seg {
     background: rgba(0, 0, 0, 0.04);
     box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.4);
   }
   :global(:root[data-glass="true"][data-theme="light"]) .seg-btn.active {
     background: rgba(255, 255, 255, 0.45);
+  }
+  :global(:root[data-glass="true"][data-theme="light"]) .seg-btn:hover:not(.active) {
+    background: rgba(0, 0, 0, 0.03);
   }
 </style>

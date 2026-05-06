@@ -8,7 +8,6 @@ use crate::stats::change::{ChangeStats, ModelChangeSummary};
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UsageSource {
-    Ccusage,
     Parser,
     Mixed,
 }
@@ -17,6 +16,7 @@ pub enum UsageSource {
 pub struct UsagePayload {
     pub total_cost: f64,
     pub total_tokens: u64,
+    /// 5H: number of activity blocks (split by 30-min gaps); others: buckets with nonzero cost
     pub session_count: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -26,7 +26,9 @@ pub struct UsagePayload {
     pub web_search_requests: u64,
     pub chart_buckets: Vec<ChartBucket>,
     pub model_breakdown: Vec<ModelSummary>,
+    /// 5H period only — current session burn rate and projection
     pub active_block: Option<ActiveBlock>,
+    /// 5H period only — cost of the active (or total) block
     pub five_hour_cost: f64,
     pub last_updated: String,
     pub from_cache: bool,
@@ -38,6 +40,7 @@ pub struct UsagePayload {
     pub subagent_stats: Option<crate::stats::subagent::SubagentStats>,
     pub device_breakdown: Option<Vec<DeviceSummary>>,
     pub device_chart_buckets: Option<Vec<ChartBucket>>,
+    pub provider_detected: Option<bool>,
 }
 
 impl Default for UsagePayload {
@@ -66,6 +69,7 @@ impl Default for UsagePayload {
             subagent_stats: None,
             device_breakdown: None,
             device_chart_buckets: None,
+            provider_detected: None,
         }
     }
 }
@@ -164,11 +168,20 @@ pub struct ExtraUsageInfo {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct CreditsInfo {
+    pub balance: Option<f64>,
+    pub has_credits: bool,
+    pub unlimited: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderRateLimits {
     pub provider: String,
     pub plan_tier: Option<String>,
     pub windows: Vec<RateLimitWindow>,
     pub extra_usage: Option<ExtraUsageInfo>,
+    pub credits: Option<CreditsInfo>,
     pub stale: bool,
     pub error: Option<String>,
     pub retry_after_seconds: Option<u64>,
@@ -181,6 +194,7 @@ pub struct ProviderRateLimits {
 pub struct RateLimitsPayload {
     pub claude: Option<ProviderRateLimits>,
     pub codex: Option<ProviderRateLimits>,
+    pub cursor: Option<ProviderRateLimits>,
 }
 
 // ── Helpers ──
@@ -194,6 +208,7 @@ pub enum ModelFamily {
     Qwen,
     Glm,
     DeepSeek,
+    Cursor,
     Unknown,
 }
 
@@ -237,6 +252,10 @@ pub fn detect_model_family(raw: &str) -> ModelFamily {
 
     if normalized.starts_with("deepseek") {
         return ModelFamily::DeepSeek;
+    }
+
+    if normalized.starts_with("composer") {
+        return ModelFamily::Cursor;
     }
 
     ModelFamily::Unknown
@@ -311,12 +330,13 @@ pub fn normalize_codex_model(raw: &str) -> (String, String) {
     let normalized_key = display_name.to_ascii_lowercase();
     for &(prefix_lower, display_prefix) in CODEX_PREFIXES {
         if normalized_key.starts_with(prefix_lower) {
-            let display = format!("{display_prefix}{}", &display_name[prefix_lower.len()..]);
+            let suffix = &display_name[prefix_lower.len()..];
+            let display = format!("{display_prefix}{}", suffix.replace('-', " "));
             return (display, normalized_key);
         }
     }
 
-    (display_name.to_string(), normalized_key)
+    (display_name.replace('-', " "), normalized_key)
 }
 
 fn normalize_prefixed_model(
@@ -331,9 +351,10 @@ fn normalize_prefixed_model(
 
     let normalized_key = display_name.to_ascii_lowercase();
     let normalized_display_name = if normalized_key.starts_with(prefix_lower) {
-        format!("{display_prefix}{}", &display_name[prefix_lower.len()..])
+        let suffix = &display_name[prefix_lower.len()..];
+        format!("{display_prefix}{}", suffix.replace('-', " "))
     } else {
-        display_name.to_string()
+        display_name.replace('-', " ")
     };
 
     (normalized_display_name, normalized_key)
@@ -346,11 +367,14 @@ pub fn normalize_generic_model(raw: &str) -> (String, String) {
         ModelFamily::Qwen => normalize_prefixed_model(raw, "qwen", "Qwen"),
         ModelFamily::Glm => normalize_prefixed_model(raw, "glm", "GLM"),
         ModelFamily::DeepSeek => normalize_prefixed_model(raw, "deepseek", "DeepSeek"),
+        ModelFamily::Cursor => normalize_prefixed_model(raw, "composer", "Composer"),
         _ => {
             let display_name = raw.trim();
             if display_name.is_empty() {
                 return (String::from("Unknown"), String::from("unknown"));
             }
+            // Unknown brand: we don't know which '-' separates brand from version,
+            // so keep the raw display verbatim and let the user interpret it.
             (display_name.to_string(), display_name.to_ascii_lowercase())
         }
     }
@@ -365,6 +389,7 @@ pub fn normalize_model(raw: &str) -> (String, String) {
         | ModelFamily::Qwen
         | ModelFamily::Glm
         | ModelFamily::DeepSeek
+        | ModelFamily::Cursor
         | ModelFamily::Unknown => normalize_generic_model(raw),
     }
 }
@@ -618,7 +643,7 @@ mod tests {
     fn codex_gpt_5_4() {
         assert_eq!(
             normalize_codex_model("gpt-5.4-turbo"),
-            ("GPT-5.4-turbo".into(), "gpt-5.4-turbo".into())
+            ("GPT 5.4 turbo".into(), "gpt-5.4-turbo".into())
         );
     }
 
@@ -626,7 +651,7 @@ mod tests {
     fn codex_gpt_5_3() {
         assert_eq!(
             normalize_codex_model("gpt-5.3-codex"),
-            ("GPT-5.3-codex".into(), "gpt-5.3-codex".into())
+            ("GPT 5.3 codex".into(), "gpt-5.3-codex".into())
         );
     }
 
@@ -634,7 +659,7 @@ mod tests {
     fn codex_gpt_5_2() {
         assert_eq!(
             normalize_codex_model("gpt-5.2"),
-            ("GPT-5.2".into(), "gpt-5.2".into())
+            ("GPT 5.2".into(), "gpt-5.2".into())
         );
     }
 
@@ -642,7 +667,7 @@ mod tests {
     fn codex_gpt_5_1_codex_max() {
         assert_eq!(
             normalize_codex_model("gpt-5.1-codex-max"),
-            ("GPT-5.1-codex-max".into(), "gpt-5.1-codex-max".into())
+            ("GPT 5.1 codex max".into(), "gpt-5.1-codex-max".into())
         );
     }
 
@@ -650,7 +675,7 @@ mod tests {
     fn codex_gpt_5_1_codex_mini() {
         assert_eq!(
             normalize_codex_model("gpt-5.1-codex-mini"),
-            ("GPT-5.1-codex-mini".into(), "gpt-5.1-codex-mini".into())
+            ("GPT 5.1 codex mini".into(), "gpt-5.1-codex-mini".into())
         );
     }
 
@@ -658,7 +683,7 @@ mod tests {
     fn codex_gpt_5_1_codex() {
         assert_eq!(
             normalize_codex_model("gpt-5.1-codex"),
-            ("GPT-5.1-codex".into(), "gpt-5.1-codex".into())
+            ("GPT 5.1 codex".into(), "gpt-5.1-codex".into())
         );
     }
 
@@ -666,7 +691,7 @@ mod tests {
     fn codex_gpt_5_codex() {
         assert_eq!(
             normalize_codex_model("gpt-5-codex"),
-            ("GPT-5-codex".into(), "gpt-5-codex".into())
+            ("GPT 5 codex".into(), "gpt-5-codex".into())
         );
     }
 
@@ -674,7 +699,7 @@ mod tests {
     fn codex_mini_latest() {
         assert_eq!(
             normalize_codex_model("codex-mini-latest"),
-            ("codex-mini-latest".into(), "codex-mini-latest".into())
+            ("codex mini latest".into(), "codex-mini-latest".into())
         );
     }
 
@@ -682,7 +707,7 @@ mod tests {
     fn codex_o4_mini() {
         assert_eq!(
             normalize_codex_model("o4-mini-2025-04-16"),
-            ("o4-mini-2025-04-16".into(), "o4-mini-2025-04-16".into())
+            ("o4 mini 2025 04 16".into(), "o4-mini-2025-04-16".into())
         );
     }
 
@@ -690,7 +715,7 @@ mod tests {
     fn codex_o3_mini() {
         assert_eq!(
             normalize_codex_model("o3-mini-2025-01-31"),
-            ("o3-mini-2025-01-31".into(), "o3-mini-2025-01-31".into())
+            ("o3 mini 2025 01 31".into(), "o3-mini-2025-01-31".into())
         );
     }
 
@@ -698,7 +723,7 @@ mod tests {
     fn codex_o3() {
         assert_eq!(
             normalize_codex_model("o3-2025-04-16"),
-            ("o3-2025-04-16".into(), "o3-2025-04-16".into())
+            ("o3 2025 04 16".into(), "o3-2025-04-16".into())
         );
     }
 
@@ -706,7 +731,7 @@ mod tests {
     fn codex_o1_mini() {
         assert_eq!(
             normalize_codex_model("o1-mini-2024-09-12"),
-            ("o1-mini-2024-09-12".into(), "o1-mini-2024-09-12".into())
+            ("o1 mini 2024 09 12".into(), "o1-mini-2024-09-12".into())
         );
     }
 
@@ -714,7 +739,7 @@ mod tests {
     fn codex_o1() {
         assert_eq!(
             normalize_codex_model("o1-2024-12-17"),
-            ("o1-2024-12-17".into(), "o1-2024-12-17".into())
+            ("o1 2024 12 17".into(), "o1-2024-12-17".into())
         );
     }
 
@@ -722,7 +747,7 @@ mod tests {
     fn codex_fallback() {
         assert_eq!(
             normalize_codex_model("some-future-model"),
-            ("some-future-model".into(), "some-future-model".into())
+            ("some future model".into(), "some-future-model".into())
         );
     }
 
@@ -750,7 +775,7 @@ mod tests {
         // in display, while key is always lowercased.
         assert_eq!(
             normalize_codex_model("GPT-5.4-Turbo"),
-            ("GPT-5.4-Turbo".into(), "gpt-5.4-turbo".into())
+            ("GPT 5.4 Turbo".into(), "gpt-5.4-turbo".into())
         );
     }
 
@@ -758,7 +783,7 @@ mod tests {
     fn codex_leading_trailing_whitespace() {
         assert_eq!(
             normalize_codex_model("  gpt-5.2  "),
-            ("GPT-5.2".into(), "gpt-5.2".into())
+            ("GPT 5.2".into(), "gpt-5.2".into())
         );
     }
 
@@ -770,7 +795,7 @@ mod tests {
     fn generic_gemini() {
         assert_eq!(
             normalize_generic_model("gemini-2.5-pro"),
-            ("Gemini-2.5-pro".into(), "gemini-2.5-pro".into())
+            ("Gemini 2.5 pro".into(), "gemini-2.5-pro".into())
         );
     }
 
@@ -778,15 +803,17 @@ mod tests {
     fn generic_kimi() {
         assert_eq!(
             normalize_generic_model("kimi-k2"),
-            ("Kimi-k2".into(), "kimi-k2".into())
+            ("Kimi k2".into(), "kimi-k2".into())
         );
     }
 
     #[test]
     fn generic_qwen() {
+        // "qwen3-coder" has no hyphen immediately after the brand prefix
+        // ("qwen"), so the suffix "3-coder" becomes "3 coder".
         assert_eq!(
             normalize_generic_model("qwen3-coder"),
-            ("Qwen3-coder".into(), "qwen3-coder".into())
+            ("Qwen3 coder".into(), "qwen3-coder".into())
         );
     }
 
@@ -794,7 +821,7 @@ mod tests {
     fn generic_glm() {
         assert_eq!(
             normalize_generic_model("glm-4.5"),
-            ("GLM-4.5".into(), "glm-4.5".into())
+            ("GLM 4.5".into(), "glm-4.5".into())
         );
     }
 
@@ -802,12 +829,21 @@ mod tests {
     fn generic_deepseek() {
         assert_eq!(
             normalize_generic_model("deepseek-chat"),
-            ("DeepSeek-chat".into(), "deepseek-chat".into())
+            ("DeepSeek chat".into(), "deepseek-chat".into())
+        );
+    }
+
+    #[test]
+    fn generic_composer() {
+        assert_eq!(
+            normalize_generic_model("composer-1"),
+            ("Composer 1".into(), "composer-1".into())
         );
     }
 
     #[test]
     fn generic_completely_unknown() {
+        // Unknown brand: we can't safely reformat hyphens, so keep verbatim.
         assert_eq!(
             normalize_generic_model("my-custom-model"),
             ("my-custom-model".into(), "my-custom-model".into())
@@ -835,13 +871,13 @@ mod tests {
     #[test]
     fn dispatch_routes_openai_to_codex() {
         let (d, k) = normalize_model("gpt-5.3-codex");
-        assert_eq!((d.as_str(), k.as_str()), ("GPT-5.3-codex", "gpt-5.3-codex"));
+        assert_eq!((d.as_str(), k.as_str()), ("GPT 5.3 codex", "gpt-5.3-codex"));
     }
 
     #[test]
     fn dispatch_routes_o_series_to_codex() {
         let (d, k) = normalize_model("o3-2025-04-16");
-        assert_eq!((d.as_str(), k.as_str()), ("o3-2025-04-16", "o3-2025-04-16"));
+        assert_eq!((d.as_str(), k.as_str()), ("o3 2025 04 16", "o3-2025-04-16"));
     }
 
     #[test]
@@ -849,14 +885,14 @@ mod tests {
         let (d, k) = normalize_model("gemini-2.5-pro");
         assert_eq!(
             (d.as_str(), k.as_str()),
-            ("Gemini-2.5-pro", "gemini-2.5-pro")
+            ("Gemini 2.5 pro", "gemini-2.5-pro")
         );
     }
 
     #[test]
     fn dispatch_routes_deepseek_to_generic() {
         let (d, k) = normalize_model("deepseek-chat");
-        assert_eq!((d.as_str(), k.as_str()), ("DeepSeek-chat", "deepseek-chat"));
+        assert_eq!((d.as_str(), k.as_str()), ("DeepSeek chat", "deepseek-chat"));
     }
 
     #[test]
@@ -919,6 +955,7 @@ mod tests {
         assert_eq!(detect_model_family("qwen3-coder"), ModelFamily::Qwen);
         assert_eq!(detect_model_family("glm-4.5"), ModelFamily::Glm);
         assert_eq!(detect_model_family("deepseek-chat"), ModelFamily::DeepSeek);
+        assert_eq!(detect_model_family("composer-1"), ModelFamily::Cursor);
     }
 
     #[test]
@@ -953,7 +990,7 @@ mod tests {
         assert_eq!(
             known_model_from_raw("gpt-5.3-codex"),
             KnownModel {
-                display_name: "GPT-5.3-codex".into(),
+                display_name: "GPT 5.3 codex".into(),
                 model_key: "gpt-5.3-codex".into(),
             }
         );
@@ -964,14 +1001,14 @@ mod tests {
         assert_eq!(
             known_model_from_raw("glm-4.5"),
             KnownModel {
-                display_name: "GLM-4.5".into(),
+                display_name: "GLM 4.5".into(),
                 model_key: "glm-4.5".into(),
             }
         );
         assert_eq!(
             known_model_from_raw("gemini-2.5-pro"),
             KnownModel {
-                display_name: "Gemini-2.5-pro".into(),
+                display_name: "Gemini 2.5 pro".into(),
                 model_key: "gemini-2.5-pro".into(),
             }
         );

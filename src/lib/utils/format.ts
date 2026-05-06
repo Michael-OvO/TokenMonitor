@@ -1,34 +1,49 @@
-// Approximate exchange rates from USD (updated 2025-03)
-const CURRENCIES: Record<string, { symbol: string; rate: number }> = {
-  USD: { symbol: "$", rate: 1 },
-  EUR: { symbol: "€", rate: 0.92 },
-  GBP: { symbol: "£", rate: 0.79 },
-  JPY: { symbol: "¥", rate: 149.5 },
-  CNY: { symbol: "¥", rate: 7.24 },
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  JPY: "¥",
+  CNY: "¥",
 };
 
+const DEFAULT_RATES: Record<string, number> = {
+  EUR: 0.92,
+  GBP: 0.79,
+  JPY: 149.5,
+  CNY: 7.24,
+};
+
+let exchangeRates: Record<string, number> = { ...DEFAULT_RATES };
 let activeCurrency = "USD";
 
 export function setCurrency(currency: string) {
   activeCurrency = currency;
 }
 
+export function setRates(rates: Record<string, number>) {
+  exchangeRates = { ...DEFAULT_RATES, ...rates };
+}
+
 export function currencySymbol(): string {
-  return CURRENCIES[activeCurrency]?.symbol ?? "$";
+  return CURRENCY_SYMBOLS[activeCurrency] ?? "$";
+}
+
+function rateFor(currency: string): number {
+  if (currency === "USD") return 1;
+  return exchangeRates[currency] ?? 1;
 }
 
 export function convertCost(value: number): number {
-  const cur = CURRENCIES[activeCurrency] ?? CURRENCIES.USD;
-  return value * cur.rate;
+  return value * rateFor(activeCurrency);
 }
 
 export function formatCost(value: number): string {
-  const cur = CURRENCIES[activeCurrency] ?? CURRENCIES.USD;
-  const converted = value * cur.rate;
+  const symbol = CURRENCY_SYMBOLS[activeCurrency] ?? "$";
+  const converted = value * rateFor(activeCurrency);
   if (activeCurrency === "JPY") {
-    return `${cur.symbol}${Math.round(converted)}`;
+    return `${symbol}${Math.round(converted)}`;
   }
-  return `${cur.symbol}${converted.toFixed(2)}`;
+  return `${symbol}${converted.toFixed(2)}`;
 }
 
 export function formatTokens(count: number): string {
@@ -147,6 +162,70 @@ const PREFIX_RULES: readonly PrefixRule[] = [
   { prefix: "o1", color: EXACT_COLORS.o1 },
 ] as const;
 
+// Brand families beyond Anthropic/OpenAI. Each family maps to three shades
+// (deep/mid/soft) so same-brand models stay in the same hue but are
+// distinguishable by version tier. The version tier is picked by the major
+// version number extracted from the key — newer/flagship models get the
+// deepest shade so they stand out in charts.
+interface FamilyRule {
+  readonly prefix: string;
+  readonly shades: readonly [string, string, string];
+  readonly tier: (major: number) => 0 | 1 | 2;
+}
+
+const FAMILY_RULES: readonly FamilyRule[] = [
+  {
+    prefix: "gemini",
+    shades: ["var(--gemini)", "var(--gemini-mid)", "var(--gemini-soft)"],
+    tier: (m) => (m >= 3 ? 0 : m >= 2 ? 1 : 2),
+  },
+  {
+    prefix: "glm",
+    shades: ["var(--glm)", "var(--glm-mid)", "var(--glm-soft)"],
+    tier: (m) => (m >= 5 ? 0 : m >= 4 ? 1 : 2),
+  },
+  {
+    prefix: "deepseek",
+    shades: ["var(--deepseek)", "var(--deepseek-mid)", "var(--deepseek-soft)"],
+    tier: (m) => (m >= 3 ? 0 : m >= 2 ? 1 : 2),
+  },
+  {
+    prefix: "composer",
+    shades: ["var(--composer)", "var(--composer-mid)", "var(--composer-soft)"],
+    tier: () => 0,
+  },
+  {
+    prefix: "kimi",
+    shades: ["var(--kimi)", "var(--kimi-mid)", "var(--kimi-soft)"],
+    // Kimi K2 is the current flagship; earlier k-series fall to mid.
+    tier: (m) => (m >= 2 ? 0 : 1),
+  },
+  {
+    prefix: "qwen",
+    shades: ["var(--qwen)", "var(--qwen-mid)", "var(--qwen-soft)"],
+    tier: (m) => (m >= 3 ? 0 : m >= 2 ? 1 : 2),
+  },
+] as const;
+
+// Extract the first integer found after the brand prefix — covers
+// "glm-4.5" (→ 4), "kimi-k2" (→ 2), "qwen3-coder" (→ 3),
+// "gemini-2.5-pro" (→ 2), "deepseek-v3" (→ 3). Returns NaN if none.
+function extractMajor(suffix: string): number {
+  const match = suffix.match(/\d+/);
+  return match ? parseInt(match[0], 10) : NaN;
+}
+
+function familyColor(key: string): string | null {
+  for (const rule of FAMILY_RULES) {
+    if (!key.startsWith(rule.prefix)) continue;
+    const suffix = key.slice(rule.prefix.length);
+    const major = extractMajor(suffix);
+    const tier = Number.isNaN(major) ? 2 : rule.tier(major);
+    return rule.shades[tier];
+  }
+  return null;
+}
+
 // ── Device colors ──
 // Palette chosen to be visually distinct from model colors and from each other.
 // Deterministic: same alias always maps to the same color.
@@ -182,6 +261,9 @@ export function modelColor(key: string): string {
   for (const rule of PREFIX_RULES) {
     if (normalized.startsWith(rule.prefix)) return rule.color;
   }
+
+  const family = familyColor(normalized);
+  if (family) return family;
 
   return hashedModelColor(normalized);
 }

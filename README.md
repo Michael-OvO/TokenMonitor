@@ -5,7 +5,7 @@
 <h1 align="center">TokenMonitor</h1>
 
 <p align="center">
-  <strong>Local-first cross-platform system tray app for monitoring Claude Code and Codex CLI token usage</strong>
+  <strong>Local-first cross-platform system tray app for monitoring Claude Code, Codex CLI, and Cursor IDE token usage</strong>
 </p>
 
 <p align="center">
@@ -42,7 +42,7 @@
 
 ---
 
-TokenMonitor is a local-first cross-platform system tray app for people who use Claude Code and Codex heavily and want a cleaner, faster way to monitor usage.
+TokenMonitor is a local-first cross-platform system tray app for people who use Claude Code, Codex, and Cursor IDE heavily and want a cleaner, faster way to monitor usage.
 
 It reads the session logs already on your machine, applies provider-aware pricing rules in Rust, and turns them into a compact desktop interface for current-session spend, history, model mix, and rate-limit context.
 
@@ -67,22 +67,33 @@ Grab the installer for your platform from the [latest release](https://github.co
 - Current-session spend, burn rate, and 5-hour context
 - Period views for `5h`, `day`, `week`, `month`, and `year`
 - Historical navigation with offset-based browsing
-- Claude-only, Codex-only, and merged provider views
+- Claude-only, Codex-only, Cursor-only, and merged provider views
 - Optional live tray spend display for quick check-ins
+- Agent/subagent cost breakdown with proportion visualization
 
 ### Analysis & Visualization
 
 - Per-model cost and token breakdowns
 - Hidden-model filtering
-- Bar-chart and line-chart modes
+- Bar-chart, line-chart, and pie-chart modes
 - Calendar heatmap for monthly usage patterns
 - Active-session footer with pacing and recent spend context
 
 ### Rate Limits & Session Context
 
-- Claude and Codex rate-limit panels when provider data is available
+- Claude, Codex, and Cursor rate-limit panels when provider data is available
 - Utilization, reset timing, cooldown state, and pace hints
+- Cursor plan usage + spend limit tracking via API
 - Local fallback paths for rate-limit context when direct provider data is incomplete
+
+### Auto-Updater
+
+- In-app update banner with download progress
+- Tray icon red badge dot when an update is available
+- OS notification (deduped per version, 6h check interval with exponential backoff)
+- Skip / Later / Update Now actions
+- Persisted updater state across restarts (skipped versions, last check)
+- Platform-aware: macOS/Linux auto-install, Windows passive NSIS, Linux .deb shows "Download" link
 
 ### SSH Remote Devices
 
@@ -104,6 +115,8 @@ Grab the installer for your platform from the [latest release](https://github.co
 - Theme, currency, refresh interval, and branding controls
 - macOS glass (vibrancy) effect with toggle (opaque on Windows/Linux)
 - Integrated settings and calendar panels inside the same popover flow
+- First-launch welcome card with permission disclosures and opt-in toggles
+- Dynamic exchange rates (USD, EUR, GBP, JPY, CNY) with 24h cache
 
 ### Pricing Accuracy
 
@@ -112,6 +125,8 @@ Grab the installer for your platform from the [latest release](https://github.co
 - Codex/OpenAI cached input separated from standard input
 - Codex `token_count` normalization for both per-turn and cumulative log formats
 - Reasoning output folded into output billing where applicable
+- Dynamic pricing from LiteLLM and OpenRouter APIs (24h TTL cache)
+- Usage archive for persistent hourly aggregates (survives log deletion)
 
 #### Claude Cache-Write Tiers
 
@@ -123,10 +138,11 @@ Grab the installer for your platform from the [latest release](https://github.co
 
 ### Local-First & Privacy
 
-- Reads Claude Code and Codex logs already present on disk
+- Reads Claude Code, Codex, and Cursor IDE logs already present on disk
 - No cloud sync and no remote account required for usage history
 - Works passively until local logs exist
 - Optional rate-limit panels only use provider-authenticated state already available on the machine
+- Cursor access token auto-detected from Cursor IDE's local storage (zero-config) or manually stored in OS keyring
 
 ### Performance
 
@@ -135,6 +151,7 @@ Grab the installer for your platform from the [latest release](https://github.co
 - Stale-while-revalidate loading for fast repeat views
 - Frontend payload cache eliminates IPC round-trips on tab switches
 - Adjacent-window warming for quicker historical navigation
+- Window height is restored from the previous session before the chart renders, so cold launches don't visibly grow after data arrives
 
 ## Platform Differences
 
@@ -144,10 +161,12 @@ Grab the installer for your platform from the [latest release](https://github.co
 | Cost display | `set_title()` text beside icon | Tooltip on hover | Tooltip on hover |
 | Rate limits (Claude) | OAuth via Keychain + API, CLI probe fallback | CLI probe only | CLI probe only |
 | Rate limits (Codex) | JSONL session files | JSONL session files | JSONL session files |
+| Rate limits (Cursor) | API (auto-detected or manual token) | API (auto-detected or manual token) | API (manual token) |
 | Glass blur effect | Supported (toggle in Settings) | Not available (opaque) | Not available (opaque) |
 | Dock icon toggle | Supported | Not applicable | Not applicable |
 | Autostart | LaunchAgent | Registry | XDG autostart |
-| Installer | DMG (signed + notarized) | NSIS .exe | .deb package |
+| Auto-update | DMG in-place replace | NSIS passive install | AppImage replace (.deb: download link) |
+| Installer | DMG (signed + notarized) | NSIS .exe | .deb / .AppImage |
 
 ## Local Data
 
@@ -159,6 +178,7 @@ TokenMonitor works from usage data you already have on disk. If no logs are pres
 |---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | Also checks `$CLAUDE_CONFIG_DIR/projects` when set |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | Also respects `$CODEX_HOME/sessions` when set |
+| Cursor IDE | Cursor workspace storage `state.vscdb` | Auto-detected from Cursor IDE's local data directory |
 
 ### Rate-Limit Data
 
@@ -166,6 +186,7 @@ Rate-limit visibility is separate from usage history parsing:
 
 - Claude rate limits use local authentication state already on the machine and fall back to CLI probe when needed
 - Codex rate limits are read from recent session metadata in local Codex JSONL files
+- Cursor rate limits are fetched from the Cursor API using an access token auto-detected from Cursor IDE or manually provided
 
 ## Installation
 
@@ -221,12 +242,15 @@ npm run test:all       # both Rust and frontend tests sequentially
 graph LR
     A["Claude logs<br/><sub>~/.claude/projects/**/*.jsonl</sub>"] --> B["Rust parser + pricing engine"]
     D["Codex logs<br/><sub>~/.codex/sessions/YYYY/MM/DD/*.jsonl</sub>"] --> B
+    K["Cursor workspace<br/><sub>state.vscdb</sub>"] --> B
     S["SSH remote logs"] --> B
     B --> C["Tauri IPC layer"]
     C --> E["Svelte 5 desktop UI"]
     C --> F["System tray updater"]
     C --> H["FloatBall overlay"]
+    C --> U["Auto-updater"]
     B --> G["In-memory query + file caches"]
+    B --> AR["Usage archive<br/><sub>persistent hourly aggregates</sub>"]
 ```
 
 ### Project Structure
@@ -240,26 +264,38 @@ src/
     ├── stores/
     │   ├── usage.ts               # Usage fetching, in-memory cache, period/provider state
     │   ├── rateLimits.ts          # Rate-limit fetching and persistence
-    │   └── settings.ts            # Theme, tray, currency, and local preferences
+    │   ├── settings.ts            # Theme, tray, currency, and local preferences
+    │   └── updater.ts             # Auto-updater state, IPC wiring, event listeners
     ├── providerMetadata.ts        # Central usage/rate-limit provider metadata for the UI
     ├── components/                # Metrics, charts, calendar, footer, settings UI
-    │   ├── Chart.svelte           # Bar/line chart visualization
+    │   ├── Chart.svelte           # Bar/line/pie chart visualization
+    │   ├── chartBuckets.ts        # Chart bucket computation helpers
     │   ├── Breakdown.svelte       # Per-model cost breakdown
     │   ├── Calendar.svelte        # Heatmap calendar view
     │   ├── DevicesView.svelte     # SSH remote device management
     │   ├── FloatBall.svelte       # Always-on-top overlay component
+    │   ├── floatBallInteraction.ts # FloatBall drag/scale detection
+    │   ├── floatBallUtils.ts      # FloatBall formatting and constants
     │   ├── Footer.svelte          # Active session, burn rate
+    │   ├── PermissionDisclosure.svelte # Privacy/permission surface display
     │   ├── Settings.svelte        # Settings panel
-    │   └── UsageBars.svelte       # Rate limit utilization bars
+    │   ├── SubagentList.svelte    # Agent/subagent cost breakdown
+    │   ├── UpdateBanner.svelte    # In-app update notification banner
+    │   ├── UsageBars.svelte       # Rate limit utilization bars
+    │   └── WelcomeCard.svelte     # First-launch onboarding card
+    ├── permissions/
+    │   ├── keychain.ts            # macOS Keychain access flow
+    │   └── surfaces.ts            # Permission surface definitions
     ├── tray/
     │   ├── sync.ts                # Frontend-to-native tray state syncing
     │   └── title.ts               # Tray title formatting
     ├── views/                     # View-model logic (footer, rate limits, devices)
     ├── window/
-    │   ├── appearance.ts          # Window surface syncing
-    │   └── sizing.ts              # Window size management
+    │   └── appearance.ts          # Window surface syncing
+    ├── windowSizing.ts            # Window size management
     └── utils/
         ├── platform.ts            # OS detection (macOS/Windows/Linux)
+        ├── plans.ts               # Plan tier cost lookups
         ├── calendar.ts            # Calendar utilities
         ├── format.ts              # Number/currency formatting
         └── logger.ts              # Frontend logging via Rust file writer
@@ -274,21 +310,38 @@ src-tauri/src/
 │       ├── config.rs              # Settings sync
 │       ├── tray.rs                # Title/utilization rendering
 │       ├── ssh.rs                 # Remote device management
-│       ├── float_ball.rs          # Overlay state
+│       ├── float_ball/            # Overlay state + layout engine
+│       ├── updater.rs             # Auto-update IPC commands
 │       └── logging.rs             # Log-level control
 ├── logging.rs                     # tracing + rolling file appender
 ├── models.rs                      # Shared backend payload types
+├── paths.rs                       # Central registry of all filesystem paths read
 ├── usage/
 │   ├── parser.rs                  # JSONL discovery, parsing, normalization
+│   ├── claude_parser.rs           # Claude Code-specific deep parser
 │   ├── pricing.rs                 # Model-family-aware token pricing
-│   ├── integrations.rs            # Usage integration registry
+│   ├── integrations.rs            # Usage integration registry (Claude, Codex, Cursor)
+│   ├── archive.rs                 # Persistent hourly aggregate storage
+│   ├── device_aggregation.rs      # Remote device data aggregation
+│   ├── exchange_rates.rs          # Dynamic USD→EUR/GBP/JPY/CNY rates (24h TTL)
+│   ├── litellm.rs                 # LiteLLM dynamic pricing (24h TTL)
+│   ├── openrouter.rs              # OpenRouter dynamic pricing
 │   ├── ssh_remote.rs              # SSH remote log sync
 │   └── ssh_config.rs              # SSH host discovery
 ├── rate_limits/
 │   ├── claude.rs                  # OAuth Keychain + API (macOS)
 │   ├── claude_cli.rs              # CLI probe fallback (all platforms)
 │   ├── codex.rs                   # Session file parsing
+│   ├── cursor.rs                  # Cursor API usage + spend limit
 │   └── http.rs                    # Shared HTTP client
+├── secrets/
+│   ├── mod.rs                     # Secret persistence layer (keyring-first strategy)
+│   └── cursor.rs                  # Cursor access token management
+├── updater/
+│   ├── mod.rs                     # Updater module entry
+│   ├── state.rs                   # UpdaterState type + banner/notify predicates
+│   ├── persistence.rs             # Persist updater state via tauri-plugin-store
+│   └── scheduler.rs               # Check scheduler with exponential backoff
 ├── tray/
 │   └── render.rs                  # Native tray icon + utilization bars (RGBA)
 ├── stats/
@@ -373,7 +426,7 @@ Issues and pull requests are welcome, especially around:
 - New provider support
 - Cross-platform compatibility
 
-If you use Claude Code or Codex heavily, this repo is intended to be a practical local utility and a solid foundation for usage observability across macOS, Windows, and Linux.
+If you use Claude Code, Codex, or Cursor heavily, this repo is intended to be a practical local utility and a solid foundation for usage observability across macOS, Windows, and Linux.
 
 ## License
 

@@ -17,6 +17,7 @@ function providerRateLimits(
     planTier: provider === "claude" ? "Pro" : null,
     windows: [],
     extraUsage: null,
+    credits: null,
     stale: false,
     error: null,
     retryAfterSeconds: null,

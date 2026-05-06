@@ -35,6 +35,19 @@
   .toggle.on {
     background: var(--toggle-color);
   }
+  .toggle:hover {
+    box-shadow: 0 0 0 2px rgba(120, 120, 128, 0.12);
+  }
+  .toggle.on:hover {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--toggle-color) 25%, transparent);
+  }
+  .toggle:hover .knob {
+    transform: scale(1.05);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  }
+  .toggle.on:hover .knob {
+    transform: translateX(12px) scale(1.05);
+  }
   .knob {
     width: 16px;
     height: 16px;
@@ -59,6 +72,9 @@
     box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.15);
     backdrop-filter: blur(20px) saturate(1.8);
     -webkit-backdrop-filter: blur(20px) saturate(1.8);
+  }
+  :global(:root[data-glass="true"]) .toggle:hover {
+    box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.15), 0 0 0 2px rgba(255, 255, 255, 0.06);
   }
   :global(:root[data-glass="true"]) .toggle.on {
     background: color-mix(in srgb, var(--toggle-color) 60%, transparent);

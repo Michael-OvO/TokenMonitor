@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { formatCost, formatTokens, modelColor } from "../utils/format.js";
-  import { activePeriod, activeOffset } from "../stores/usage.js";
+  import { activePeriod, activeOffset, activeProvider } from "../stores/usage.js";
   import type { UsagePayload } from "../types/index.js";
   import Chart from "./Chart.svelte";
 
@@ -15,6 +15,7 @@
   let data = $state<UsagePayload | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let provider = $derived($activeProvider);
   let period = $derived($activePeriod);
   let offset = $derived($activeOffset);
 
@@ -24,6 +25,7 @@
     try {
       data = await invoke<UsagePayload>("get_single_device_usage", {
         device,
+        provider,
         period,
         offset,
       });
@@ -34,9 +36,10 @@
     loading = false;
   }
 
-  // Fetch on mount and re-fetch when period or offset changes.
+  // Fetch on mount and re-fetch when provider/period/offset changes.
   // In Svelte 5, $effect runs immediately on mount, so onMount is not needed.
   $effect(() => {
+    void provider;
     void period;
     void offset;
     fetchDeviceUsage();
@@ -63,9 +66,29 @@
   </div>
 
   {#if loading}
-    <div class="placeholder">Loading...</div>
+    <div class="skeleton-content" aria-busy="true">
+      <div class="skeleton skeleton-chart"></div>
+      <div class="skeleton-models">
+        {#each [1, 2] as _}
+          <div class="skeleton-model-row">
+            <div class="skeleton skeleton-bar-sm"></div>
+            <div class="skeleton skeleton-name"></div>
+            <div class="skeleton skeleton-cost"></div>
+          </div>
+        {/each}
+      </div>
+    </div>
   {:else if error}
-    <div class="placeholder error-text">{error}</div>
+    <div class="error-state">
+      <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="15" y1="9" x2="9" y2="15"></line>
+        <line x1="9" y1="9" x2="15" y2="15"></line>
+      </svg>
+      <div class="error-title">Failed to load data</div>
+      <div class="error-text">{error}</div>
+      <button class="retry-btn" type="button" onclick={fetchDeviceUsage}>Retry</button>
+    </div>
   {:else if data}
     <div class="scroll">
       <!-- Chart section -->
@@ -131,14 +154,48 @@
     overflow-y: auto;
   }
 
-  .placeholder {
+  /* ── Skeleton loading ── */
+  .skeleton-content { padding: 10px 12px; }
+  .skeleton-chart { height: 108px; width: 100%; margin-bottom: 12px; border-radius: 6px; }
+  .skeleton-models { display: flex; flex-direction: column; gap: 8px; }
+  .skeleton-model-row { display: flex; align-items: center; gap: 8px; }
+  .skeleton-bar-sm { width: 3px; height: 14px; border-radius: 1.5px; }
+  .skeleton-name { height: 10px; width: 70px; }
+  .skeleton-cost { height: 10px; width: 35px; margin-left: auto; }
+
+  /* ── Error state ── */
+  .error-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
     padding: 30px 10px;
     text-align: center;
-    font: 400 10px/1.6 'Inter', sans-serif;
-    color: var(--t3);
+  }
+  .empty-icon { display: block; margin-bottom: 4px; opacity: 0.6; }
+  .error-title {
+    font: 500 11px/1 'Inter', sans-serif;
+    color: var(--t1);
   }
   .error-text {
+    font: 400 9px/1.4 'Inter', sans-serif;
     color: #ef4444;
+    max-width: 220px;
+  }
+  .retry-btn {
+    margin-top: 8px;
+    padding: 5px 12px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--t2);
+    font: 500 9px/1 'Inter', sans-serif;
+    cursor: pointer;
+    transition: background var(--t-fast) ease, color var(--t-fast) ease;
+  }
+  .retry-btn:hover {
+    background: var(--surface-hover);
+    color: var(--t1);
   }
 
   .models-section {

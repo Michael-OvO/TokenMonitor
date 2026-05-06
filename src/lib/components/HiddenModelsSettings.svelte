@@ -2,25 +2,16 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
-  import { currencySymbol, modelColor } from "../utils/format.js";
+  import { modelColor } from "../utils/format.js";
   import type { KnownModel } from "../types/index.js";
   import ToggleSwitch from "./ToggleSwitch.svelte";
 
   let current = $derived($settings as SettingsType);
 
-  let costInput = $state("50.00");
-  let costEnabled = $state(true);
-  let costInputFocused = $state(false);
   let availableModels = $state<KnownModel[]>([]);
   let modelsLoading = $state(true);
+  let modelsExpanded = $state(false);
 
-  $effect(() => {
-    costEnabled = current.costAlertThreshold > 0;
-    // Don't overwrite the input while the user is actively editing.
-    if (!costInputFocused) {
-      costInput = current.costAlertThreshold > 0 ? current.costAlertThreshold.toFixed(2) : "50.00";
-    }
-  });
 
   onMount(() => {
     invoke<KnownModel[]>("get_known_models", { provider: "all" })
@@ -37,21 +28,6 @@
       });
   });
 
-  function handleCostBlur() {
-    const val = parseFloat(costInput);
-    if (!isNaN(val) && val >= 0) {
-      updateSetting("costAlertThreshold", val);
-      costInput = val.toFixed(2);
-    } else {
-      costInput = current.costAlertThreshold.toFixed(2);
-    }
-  }
-
-  function handleCostKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter") {
-      (e.target as HTMLInputElement).blur();
-    }
-  }
 
   function toggleModel(key: string) {
     const hidden = current.hiddenModels.includes(key)
@@ -61,47 +37,19 @@
   }
 </script>
 
-<div class="group">
-  <div class="group-label">Monitoring</div>
-  <div class="card">
-    <div class="row border">
-      <span class="label">Cost Alert</span>
-      <div class="cost-row-right">
-        {#if costEnabled}
-          <div class="cost-input">
-            <span class="dollar">{currencySymbol()}</span>
-            <input
-              type="text"
-              bind:value={costInput}
-              onfocus={() => { costInputFocused = true; }}
-              onblur={() => { costInputFocused = false; handleCostBlur(); }}
-              onkeydown={handleCostKeydown}
-              class="cost-field"
-            />
-          </div>
-        {/if}
-        <ToggleSwitch
-          checked={costEnabled}
-          onChange={(checked) => {
-            costEnabled = checked;
-            if (!checked) {
-              updateSetting("costAlertThreshold", 0);
-            } else {
-              const val = parseFloat(costInput);
-              updateSetting("costAlertThreshold", !isNaN(val) && val > 0 ? val : 50);
-            }
-          }}
-        />
-      </div>
+<div class="block">
+  <button class="row collapsible-toggle" type="button" onclick={() => (modelsExpanded = !modelsExpanded)}>
+    <span class="label">Models</span>
+    <div class="collapsible-right">
+      <span class="count">{modelsLoading ? "..." : `${availableModels.length - current.hiddenModels.length} of ${availableModels.length}`}</span>
+      <svg class="collapsible-chevron" class:open={modelsExpanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6 9 12 15 18 9"></polyline>
+      </svg>
     </div>
-    <div class="row border">
-      <span class="label">Model Change Stats</span>
-      <ToggleSwitch
-        checked={current.showModelChangeStats}
-        onChange={(checked) => updateSetting("showModelChangeStats", checked)}
-      />
-    </div>
-    {#if modelsLoading}
+  </button>
+  <div class="models-collapse" class:open={modelsExpanded}>
+    <div class="collapse-inner">
+      {#if modelsLoading}
       <div class="model-grid" aria-busy="true" aria-label="Loading models">
         {#each Array(4) as _, i (i)}
           <div class="model-cell skeleton-cell">
@@ -127,18 +75,14 @@
       </div>
     {:else}
       <div class="model-empty">No models discovered yet</div>
-    {/if}
+      {/if}
+    </div>
   </div>
 </div>
 
 <style>
-  .group {
-    margin-bottom: 8px;
-  }
-  /* `.group-label` is defined globally in `src/app.css`. */
-  .card {
-    background: var(--surface-2);
-    border-radius: 8px;
+  .block {
+    border-top: 1px solid var(--border-subtle);
     overflow: hidden;
   }
   .row {
@@ -147,12 +91,36 @@
     justify-content: space-between;
     align-items: center;
   }
-  .row.border {
-    border-bottom: 1px solid var(--border-subtle);
-  }
   .label {
     font: 400 10px/1 'Inter', sans-serif;
     color: var(--t1);
+  }
+  .collapsible-toggle {
+    width: 100%;
+    background: none;
+    border: none;
+    cursor: pointer;
+    user-select: none;
+  }
+  .collapsible-toggle:hover {
+    background: var(--surface-hover);
+  }
+  .collapsible-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .collapsible-chevron {
+    color: var(--t3);
+    transition: transform 200ms ease;
+    transform: rotate(-90deg);
+  }
+  .collapsible-chevron.open {
+    transform: rotate(0deg);
+  }
+  .count {
+    font: 400 9px/1 'Inter', sans-serif;
+    color: var(--t3);
   }
   .model-grid {
     display: flex;
@@ -214,32 +182,38 @@
   @media (prefers-reduced-motion: reduce) {
     .skeleton-block { animation: none; opacity: 0.6; }
   }
-  .cost-row-right {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  .collapsible-toggle {
+    width: 100%;
+    background: none;
+    border: none;
+    cursor: pointer;
+    user-select: none;
   }
-  .cost-input {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-  }
-  .dollar {
-    font: 400 9px/1 'Inter', sans-serif;
-    color: var(--t3);
-  }
-  .cost-field {
+  .collapsible-toggle:hover {
     background: var(--surface-hover);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 3px 6px;
-    width: 54px;
-    text-align: right;
-    font: 400 9px/1 'Inter', sans-serif;
-    color: var(--t1);
-    outline: none;
   }
-  .cost-field:focus {
-    border-color: var(--t3);
+  .collapsible-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .collapsible-chevron {
+    color: var(--t3);
+    transition: transform var(--t-normal, 200ms) ease;
+    transform: rotate(-90deg);
+  }
+  .collapsible-chevron.open {
+    transform: rotate(0deg);
+  }
+  .models-collapse {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows var(--t-normal, 200ms) ease;
+  }
+  .models-collapse.open {
+    grid-template-rows: 1fr;
+  }
+  .collapse-inner {
+    overflow: hidden;
   }
 </style>

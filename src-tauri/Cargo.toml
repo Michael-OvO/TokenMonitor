@@ -1,6 +1,6 @@
 [package]
 name = "token-monitor"
-version = "0.12.0"
+version = "0.13.1"
 description = "Cross-platform system tray token usage monitor for Claude Code and Codex"
 edition = "2021"
 
@@ -19,7 +19,7 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["process", "fs", "time"] }
 dirs = "6"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
 tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"
@@ -33,6 +33,14 @@ tracing-appender = "0.2"
 gtk = "0.18"
 webkit2gtk = "2.0"
 cairo-rs = "0.18"
+# Cross-platform secret storage. Linux backend talks to the FreeDesktop
+# Secret Service (libsecret/GNOME Keyring/KWallet) over D-Bus via pure Rust;
+# `crypto-rust` avoids pulling libssl. Falls back to a 0600-perm file in the
+# app data dir when the daemon isn't running (headless / fresh install).
+keyring = { version = "3", default-features = false, features = [
+    "sync-secret-service",
+    "crypto-rust",
+] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
@@ -45,6 +53,8 @@ windows = { version = "0.58", features = [
     "Win32_System_Registry",
     "Win32_Graphics_Dwm",
 ] }
+# Cross-platform secret storage on Windows Credential Manager (CredRead/Write).
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -58,6 +68,8 @@ objc2-app-kit = { version = "0.3.2", features = [
     "NSStatusItem",
     "NSView",
 ] }
+security-framework = "3"
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
 
 [dev-dependencies]
 filetime = "0.2"

@@ -165,9 +165,13 @@ async fn get_monthly_usage_with_debug(
 
     let (mut payload, queries) = get_monthly_usage_with_debug_sync(state, provider, year, month)?;
 
-    if let Some(included) =
-        crate::commands::ssh::build_included_devices_payload(state, provider, "month", month_offset)
-            .await
+    if let Some(included) = crate::usage::device_aggregation::build_included_devices_payload(
+        state,
+        provider,
+        "month",
+        month_offset,
+    )
+    .await
     {
         let included_days = calendar_days_from_payload(&included, month_start, end_date);
         payload.usage_source = merge_usage_source(payload.usage_source, included.usage_source);

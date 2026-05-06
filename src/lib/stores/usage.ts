@@ -16,6 +16,7 @@ export const chartMode = writable<"bar" | "line" | "pie">("bar");
 export const chartSegmentMode = writable<"model" | "device">("model");
 export const usageData = writable<UsagePayload | null>(null);
 export const isLoading = writable(false);
+export const isPlaceholderLoading = writable(false);
 
 function emptyPayload(): UsagePayload {
   return {
@@ -42,6 +43,7 @@ function emptyPayload(): UsagePayload {
     usage_warning: null,
     device_breakdown: null,
     device_chart_buckets: null,
+    provider_detected: null,
   };
 }
 /**
@@ -66,11 +68,14 @@ export function shallowPayloadEqual(a: UsagePayload, b: UsagePayload): boolean {
     ) &&
     a.period_label === b.period_label &&
     a.has_earlier_data === b.has_earlier_data &&
+    a.usage_warning === b.usage_warning &&
     (a.device_breakdown?.length ?? 0) === (b.device_breakdown?.length ?? 0) &&
-    (a.device_breakdown?.[0]?.total_cost ?? 0) === (b.device_breakdown?.[0]?.total_cost ?? 0) &&
-    (a.device_breakdown ?? []).every((d, i) =>
-      d.include_in_stats === b.device_breakdown?.[i]?.include_in_stats,
-    )
+    (a.device_breakdown ?? []).every(
+      (d, i) =>
+        d.total_cost === b.device_breakdown?.[i]?.total_cost &&
+        d.include_in_stats === b.device_breakdown?.[i]?.include_in_stats,
+    ) &&
+    (a.device_chart_buckets?.length ?? 0) === (b.device_chart_buckets?.length ?? 0)
   );
 }
 
@@ -141,6 +146,7 @@ function invalidateMatchingUsageCache(
   currentCacheEpoch += 1;
   currentRequestId += 1;
   isLoading.set(false);
+  isPlaceholderLoading.set(false);
 }
 
 function requestUsagePayload(
@@ -166,6 +172,7 @@ function applyUsageDataIfCurrent(requestId: number, data: UsagePayload): boolean
     if (current === null || !shallowPayloadEqual(current, data)) {
       usageData.set(data);
     }
+    isPlaceholderLoading.set(false);
   }
   return appliedToUi;
 }
@@ -224,6 +231,18 @@ interface FetchCtx {
   cacheKey: string;
 }
 
+function logPayloadWarning(
+  ctx: Omit<FetchCtx, "requestId"> | FetchCtx,
+  data: UsagePayload,
+  source: string,
+) {
+  if (!data.usage_warning) return;
+  logger.warn(
+    "usage",
+    `Backend warning (${source}): provider=${ctx.provider} period=${ctx.period} offset=${ctx.offset} warning=${data.usage_warning}`,
+  );
+}
+
 function logBackgroundRefreshResult(
   ctx: FetchCtx,
   prev: UsagePayload,
@@ -269,11 +288,13 @@ export async function fetchData(
       usageData.set(cached.data);
     }
     isLoading.set(false);
+    isPlaceholderLoading.set(false);
     logger.debug("usage", `Cache hit: ${key}`);
     logResizeDebug("usage:frontend-cache-hit", { ...ctx, cacheAgeMs: Date.now() - cached.at });
     // Silent background refresh — no loading indicator
     requestUsagePayload(provider, period, offset)
       .then((fresh: UsagePayload) => {
+        logPayloadWarning(ctx, fresh, "background-refresh");
         cachePayload(key, fresh, cacheEpoch);
         const appliedToUi = applyUsageDataIfCurrent(requestId, fresh);
         logBackgroundRefreshResult(ctx, cached.data, fresh, appliedToUi);
@@ -287,8 +308,10 @@ export async function fetchData(
   // ── Cold path: no cache — show loading indicator ──
   if (cached) {
     usageData.set(cached.data);
+    isPlaceholderLoading.set(false);
   } else {
     usageData.set(emptyPayload());
+    isPlaceholderLoading.set(true);
   }
   isLoading.set(true);
   try {
@@ -300,6 +323,7 @@ export async function fetchData(
       fetchInFlight.set(key, pending);
     }
     const data = await pending;
+    logPayloadWarning(ctx, data, "fetch");
     cachePayload(key, data, cacheEpoch);
     const appliedToUi = applyUsageDataIfCurrent(requestId, data);
     await logUsageReadDebug("usage:fetch-resolved", {
@@ -311,6 +335,7 @@ export async function fetchData(
   } finally {
     if (requestId === currentRequestId) {
       isLoading.set(false);
+      isPlaceholderLoading.set(false);
     }
   }
 }
@@ -329,6 +354,7 @@ export function warmCache(
   const cacheEpoch = currentCacheEpoch;
   requestUsagePayload(provider, period, offset)
     .then((data: UsagePayload) => {
+      logPayloadWarning({ provider, period, offset, cacheKey: key }, data, "warm-cache");
       cachePayload(key, data, cacheEpoch);
       void logUsageReadDebug("usage:warm-cache-resolved", {
         provider,

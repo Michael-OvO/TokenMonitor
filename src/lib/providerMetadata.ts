@@ -8,7 +8,7 @@ import {
 
 export { ALL_USAGE_PROVIDER_ID } from "./types/index.js";
 
-export type UsageProviderLogoKind = "all" | "claude" | "codex" | "generic";
+export type UsageProviderLogoKind = "all" | "claude" | "codex" | "cursor" | "generic";
 type UsageProviderBrandColor = readonly [red: number, green: number, blue: number];
 type RateLimitUtilizationLabelFormat = "percent" | "percent_used";
 
@@ -101,6 +101,21 @@ const USAGE_INTEGRATION_DEFINITIONS: UsageProviderDefinition[] = [
       },
       expiredWindowGraceMs: 60_000,
       preservePeakUtilization: true,
+    },
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    title: "Cursor IDE",
+    logoKind: "cursor",
+    brandColor: [92, 106, 196],
+    supportsRateLimits: true,
+    rateLimits: {
+      cacheFile: "rate-limits-cursor.json",
+      minFetchIntervalMs: 300_000,
+      primaryWindowId: "auto_composer",
+      utilizationLabelFormat: "percent_used",
+      idleSummary: "No Cursor usage data available. Make sure Cursor IDE is signed in on this machine.",
     },
   },
 ];

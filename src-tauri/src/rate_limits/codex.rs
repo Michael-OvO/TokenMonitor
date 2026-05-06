@@ -3,6 +3,9 @@ use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::time::SystemTime;
+
+const CODEX_FILE_STALE_SECS: u64 = 600;
 
 #[derive(Deserialize)]
 struct CodexJsonlLine {
@@ -33,11 +36,11 @@ pub(super) fn extract_codex_rate_limits(codex_dir: &Path) -> Result<ProviderRate
     let mut newest_file: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
     find_newest_jsonl(codex_dir, &mut newest_file, 0);
 
-    let file_path = newest_file
-        .map(|(_, p)| p)
-        .ok_or_else(|| "No Codex session files found".to_string())?;
+    let (file_mtime, file_path) =
+        newest_file.ok_or_else(|| "No Codex session files found".to_string())?;
 
     // Read from the end looking for rate_limits
+    tracing::debug!(path = %file_path.display(), "opening file (codex rate limits)");
     let file =
         std::fs::File::open(&file_path).map_err(|e| format!("Failed to open Codex file: {e}"))?;
     let reader = BufReader::new(file);
@@ -78,17 +81,44 @@ pub(super) fn extract_codex_rate_limits(codex_dir: &Path) -> Result<ProviderRate
         other => other.to_string(),
     });
 
+    let stale = is_codex_data_stale(file_mtime, &windows, Utc::now());
+
     Ok(ProviderRateLimits {
         provider: "codex".to_string(),
         plan_tier,
         windows,
         extra_usage: None,
-        stale: false,
+        credits: None,
+        stale,
         error: None,
         retry_after_seconds: None,
         cooldown_until: None,
         fetched_at: Local::now().to_rfc3339(),
     })
+}
+
+fn is_codex_data_stale(
+    file_mtime: SystemTime,
+    windows: &[RateLimitWindow],
+    now: DateTime<Utc>,
+) -> bool {
+    for window in windows {
+        if let Some(resets_at) = &window.resets_at {
+            if let Ok(reset_dt) = DateTime::parse_from_rfc3339(resets_at) {
+                if now > reset_dt.with_timezone(&Utc) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    if let Ok(elapsed) = file_mtime.elapsed() {
+        if elapsed.as_secs() > CODEX_FILE_STALE_SECS {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn codex_window_to_rate_limit(id: &str, w: &CodexWindowData) -> RateLimitWindow {
@@ -114,9 +144,13 @@ fn find_newest_jsonl(
     if depth > 5 {
         return;
     }
+    tracing::debug!(path = %dir.display(), depth, "read_dir (codex find_newest_jsonl)");
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => {
+            tracing::debug!(path = %dir.display(), error = %e, "read_dir failed");
+            return;
+        }
     };
     for entry in entries.flatten() {
         let Ok(file_type) = entry.file_type() else {
@@ -145,6 +179,7 @@ fn find_newest_jsonl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn codex_window_preserves_used_percent_scale() {
@@ -160,5 +195,54 @@ mod tests {
         assert_eq!(window.label, "Session (5hr)");
         assert_eq!(window.utilization, 1.0);
         assert_eq!(window.window_id, "primary");
+    }
+
+    #[test]
+    fn stale_when_resets_at_in_the_past() {
+        let now = Utc::now();
+        let past_reset = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let windows = vec![RateLimitWindow::new(
+            "primary".into(),
+            "Session (5hr)".into(),
+            50.0,
+            Some(past_reset),
+        )];
+        let recent_mtime = SystemTime::now();
+        assert!(is_codex_data_stale(recent_mtime, &windows, now));
+    }
+
+    #[test]
+    fn not_stale_when_recent_file_and_future_reset() {
+        let now = Utc::now();
+        let future_reset = (now + chrono::Duration::hours(3)).to_rfc3339();
+        let windows = vec![RateLimitWindow::new(
+            "primary".into(),
+            "Session (5hr)".into(),
+            23.0,
+            Some(future_reset),
+        )];
+        let recent_mtime = SystemTime::now();
+        assert!(!is_codex_data_stale(recent_mtime, &windows, now));
+    }
+
+    #[test]
+    fn stale_when_file_is_old_even_with_future_reset() {
+        let now = Utc::now();
+        let future_reset = (now + chrono::Duration::hours(3)).to_rfc3339();
+        let windows = vec![RateLimitWindow::new(
+            "primary".into(),
+            "Session (5hr)".into(),
+            23.0,
+            Some(future_reset),
+        )];
+        let old_mtime = SystemTime::now() - Duration::from_secs(CODEX_FILE_STALE_SECS + 60);
+        assert!(is_codex_data_stale(old_mtime, &windows, now));
+    }
+
+    #[test]
+    fn not_stale_with_empty_windows() {
+        let now = Utc::now();
+        let recent_mtime = SystemTime::now();
+        assert!(!is_codex_data_stale(recent_mtime, &[], now));
     }
 }

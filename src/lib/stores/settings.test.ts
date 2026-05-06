@@ -20,6 +20,7 @@ const DEFAULT_HEADER_TABS = {
   all: { label: "All", enabled: true },
   claude: { label: "Claude", enabled: true },
   codex: { label: "Codex", enabled: true },
+  cursor: { label: "Cursor", enabled: true },
 } as const;
 
 function makePersistedStore(saved: Partial<Settings> | null = {}) {
@@ -56,6 +57,7 @@ describe("loadSettings", () => {
       trayConfig: {
         barDisplay: 'both',
         barProvider: 'claude',
+        barProviders: ["claude", "codex"],
         showPercentages: false,
         percentageFormat: 'compact',
         showCost: false,
@@ -85,8 +87,9 @@ describe("loadSettings", () => {
       headerTabs: DEFAULT_HEADER_TABS,
       brandTheming: true,
       trayConfig: {
-        barDisplay: 'both',
+        barDisplay: 'custom',
         barProvider: 'claude',
+        barProviders: ["claude", "codex"],
         showPercentages: false,
         percentageFormat: 'compact',
         showCost: false,
@@ -98,14 +101,13 @@ describe("loadSettings", () => {
       taskbarPanel: false,
       sshHosts: [],
       debugLogging: false,
-      // Existing installs (non-empty saved settings) migrate to
-      // rate-limits-on. `hasSeenWelcome` would be set by the legacy
-      // migration too, but the version-stamp migration on top of that
-      // forces it back to `false` because `lastOnboardedVersion` is
-      // null (this saved settings predates the field). That re-opens
-      // the wizard so the user sees the statusline install step.
+      cursorApiKey: "",
+      // Existing installs (non-empty saved settings) migrate to rate-limits
+      // on, welcome-seen, AND keychain-prompt-already-shown so we don't pop
+      // a tutorial on someone who's been using the app for months.
       rateLimitsEnabled: true,
       hasSeenWelcome: false,
+      keychainAccessRequested: false,
       lastOnboardedVersion: null,
       statuslineInstalled: false,
       claudePlanTier: "Pro",
@@ -146,8 +148,9 @@ describe("loadSettings", () => {
       headerTabs: DEFAULT_HEADER_TABS,
       brandTheming: true,
       trayConfig: {
-        barDisplay: 'both',
+        barDisplay: 'custom',
         barProvider: 'claude',
+        barProviders: ["claude", "codex", "cursor"],
         showPercentages: false,
         percentageFormat: 'compact',
         showCost: true,
@@ -159,12 +162,12 @@ describe("loadSettings", () => {
       taskbarPanel: false,
       sshHosts: [],
       debugLogging: false,
-      // Failure path goes through pure defaults (no migration). Rate
-      // limits default to on now since the fetch is fully local — the
-      // user just needs to install the statusline before they see live
-      // numbers, which the onboarding wizard prompts for.
-      rateLimitsEnabled: true,
+      cursorApiKey: "",
+      // Failure path goes through pure defaults (no migration), so the
+      // opt-in flags stay off.
+      rateLimitsEnabled: false,
       hasSeenWelcome: false,
+      keychainAccessRequested: false,
       lastOnboardedVersion: null,
       statuslineInstalled: false,
       claudePlanTier: "Pro",
@@ -242,6 +245,7 @@ describe("loadSettings migration", () => {
         all: { label: "Overview", enabled: false },
         claude: { label: "Claude Code", enabled: true },
         codex: { label: "Codex", enabled: false },
+        cursor: { label: "Cursor", enabled: true },
       },
     });
     mockLoad.mockResolvedValueOnce(store);
@@ -254,6 +258,7 @@ describe("loadSettings migration", () => {
       all: { label: "Overview", enabled: false },
       claude: { label: "Claude Code", enabled: true },
       codex: { label: "Codex", enabled: false },
+      cursor: { label: "Cursor", enabled: true },
     });
   });
 
@@ -271,11 +276,13 @@ describe("loadSettings migration", () => {
         all: { label: "   ", enabled: false },
         claude: { label: "Claude Claude Claude", enabled: false },
         codex: { label: "Codex", enabled: false },
+        cursor: { label: "Cursor", enabled: false },
       },
       brandTheming: "yes" as unknown as Settings["brandTheming"],
       trayConfig: {
         barDisplay: "triple" as Settings["trayConfig"]["barDisplay"],
         barProvider: "all" as Settings["trayConfig"]["barProvider"],
+        barProviders: ["claude", "codex"],
         showPercentages: "yes" as unknown as Settings["trayConfig"]["showPercentages"],
         percentageFormat: "long" as Settings["trayConfig"]["percentageFormat"],
         showCost: "no" as unknown as Settings["trayConfig"]["showCost"],
@@ -299,8 +306,9 @@ describe("loadSettings migration", () => {
       hiddenModels: ["haiku", "gpt-5"],
       brandTheming: true,
       trayConfig: {
-        barDisplay: "both",
+        barDisplay: "custom",
         barProvider: "claude",
+        barProviders: ["claude", "codex"],
         showPercentages: false,
         percentageFormat: "compact",
         showCost: true,
@@ -315,77 +323,9 @@ describe("loadSettings migration", () => {
         enabled: false,
       },
       codex: { label: "Codex", enabled: false },
+      cursor: { label: "Cursor", enabled: false },
     });
     expect(loaded.headerTabs.claude.label).toHaveLength(MAX_HEADER_TAB_LABEL_LENGTH);
-  });
-
-  // ── lastOnboardedVersion migration ────────────────────────────────
-  // The contract: when the saved stamp is older than the build's
-  // current onboarding version, force `hasSeenWelcome=false` so the
-  // wizard re-opens. When the stamp matches, leave `hasSeenWelcome`
-  // alone. When the user is fresh (`hasSeenWelcome=false`), the
-  // migration is a no-op regardless of stamp.
-
-  it("forces re-onboarding when lastOnboardedVersion is older than current", async () => {
-    const store = makePersistedStore({
-      hasSeenWelcome: true,
-      lastOnboardedVersion: "0.10.0",
-      rateLimitsEnabled: true,
-    } as Partial<Settings>);
-    mockLoad.mockResolvedValueOnce(store);
-
-    const { loadSettings } = await loadSettingsModule();
-    const loaded = await loadSettings();
-
-    expect(loaded.hasSeenWelcome).toBe(false);
-    // Stamp is preserved so the wizard's "What's New" step can render
-    // the diff between saved and current.
-    expect(loaded.lastOnboardedVersion).toBe("0.10.0");
-  });
-
-  it("does not re-onboard when lastOnboardedVersion already matches current", async () => {
-    const { CURRENT_ONBOARDING_VERSION } = await import("../changelog.js");
-    const store = makePersistedStore({
-      hasSeenWelcome: true,
-      lastOnboardedVersion: CURRENT_ONBOARDING_VERSION,
-      rateLimitsEnabled: true,
-    } as Partial<Settings>);
-    mockLoad.mockResolvedValueOnce(store);
-
-    const { loadSettings } = await loadSettingsModule();
-    const loaded = await loadSettings();
-
-    expect(loaded.hasSeenWelcome).toBe(true);
-  });
-
-  it("treats a missing lastOnboardedVersion stamp as stale and re-onboards", async () => {
-    const store = makePersistedStore({
-      hasSeenWelcome: true,
-      // No lastOnboardedVersion field — simulates an old build that
-      // had the welcome flag but predates the version stamp.
-      rateLimitsEnabled: true,
-    } as Partial<Settings>);
-    mockLoad.mockResolvedValueOnce(store);
-
-    const { loadSettings } = await loadSettingsModule();
-    const loaded = await loadSettings();
-
-    expect(loaded.hasSeenWelcome).toBe(false);
-    expect(loaded.lastOnboardedVersion).toBeNull();
-  });
-
-  it("leaves fresh installs alone (hasSeenWelcome stays false, no fake migration)", async () => {
-    const store = makePersistedStore({
-      hasSeenWelcome: false,
-      lastOnboardedVersion: null,
-    } as Partial<Settings>);
-    mockLoad.mockResolvedValueOnce(store);
-
-    const { loadSettings } = await loadSettingsModule();
-    const loaded = await loadSettings();
-
-    expect(loaded.hasSeenWelcome).toBe(false);
-    expect(loaded.lastOnboardedVersion).toBeNull();
   });
 });
 
@@ -398,6 +338,7 @@ describe("header tab helpers", () => {
         all: { label: "All", enabled: true },
         claude: { label: "Claude", enabled: true },
         codex: { label: "Codex", enabled: true },
+        cursor: { label: "Cursor", enabled: true },
       }),
     ).toBe(true);
   });
@@ -410,6 +351,7 @@ describe("header tab helpers", () => {
         all: { label: "Overview", enabled: true },
         claude: { label: "Claude", enabled: true },
         codex: { label: "Codex", enabled: true },
+        cursor: { label: "Cursor", enabled: true },
       }),
     ).toBe(false);
 
@@ -418,6 +360,7 @@ describe("header tab helpers", () => {
         all: { label: "All", enabled: true },
         claude: { label: "Claude", enabled: false },
         codex: { label: "Codex", enabled: true },
+        cursor: { label: "Cursor", enabled: true },
       }),
     ).toBe(false);
   });
@@ -429,12 +372,14 @@ describe("header tab helpers", () => {
       all: { label: "Overview", enabled: false },
       claude: { label: "Claude Code", enabled: false },
       codex: { label: "Codex", enabled: false },
+      cursor: { label: "Cursor", enabled: false },
     });
 
     expect(normalized).toEqual({
       all: { label: "Overview", enabled: true },
       claude: { label: "Claude Code", enabled: false },
       codex: { label: "Codex", enabled: false },
+      cursor: { label: "Cursor", enabled: false },
     });
     expect(resolveVisibleProvider("codex", normalized)).toBe("all");
   });
@@ -528,6 +473,7 @@ describe("updateSetting", () => {
       all: { label: "Overview", enabled: true },
       claude: { label: "Claude Code", enabled: false },
       codex: { label: "Codex", enabled: false },
+      cursor: { label: "Cursor", enabled: true },
     });
 
     expect(get(settings).defaultProvider).toBe("all");
@@ -539,6 +485,7 @@ describe("updateSetting", () => {
           all: { label: "Overview", enabled: true },
           claude: { label: "Claude Code", enabled: false },
           codex: { label: "Codex", enabled: false },
+          cursor: { label: "Cursor", enabled: true },
         },
       }),
     );

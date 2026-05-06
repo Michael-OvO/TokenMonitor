@@ -17,19 +17,27 @@
     getPhysicalWindowPositionFromPointer,
     shouldHandleFloatBallPointerButton,
   } from "./floatBallInteraction.js";
+  import { DragMachine, type DragState } from "./floatBallDragMachine.js";
+  import { MoveQueue } from "./floatBallMoveQueue.js";
+  import {
+    percent,
+    fillWidth,
+    formatBallCost,
+    formatPoint,
+    formatMonitor,
+    formatError,
+    formatInteraction,
+    resolveExpandDirection,
+    type FloatBallPositionPayload,
+  } from "./floatBallUtils.js";
 
   const appWindow = getCurrentWebviewWindow();
   const IS_LINUX = isLinux();
-  const DRAG_THRESHOLD_PX = 5;
   const BLUR_GUARD_MS = 180;
-  const COLLAPSE_TRANSITION_MS = 260;
-  const BALL_SIZE_CSS_PX = 56;
-  const EXPANDED_WIDTH_CSS_PX = 152;
-  const EXPAND_MARGIN_CSS_PX = 8;
-
   const EMPTY_CONFIG: TrayConfig = {
     barDisplay: "both",
     barProvider: "claude",
+    barProviders: ["claude", "codex", "cursor"],
     showPercentages: false,
     percentageFormat: "compact",
     showCost: true,
@@ -41,28 +49,44 @@
     totalCost: 0,
     claudeUtil: null,
     codexUtil: null,
+    cursorUtil: null,
     title: "$0.00",
   });
   let expanded = $state(false);
-  let nativeExpanded = false;
   let expandDirection = $state<FloatBallExpandDirection>("right");
 
   let dragging = $state(false);
+  const dragMachine = new DragMachine();
+
   let ignoreBlurUntil = 0;
   let suppressShellClick = false;
   let expansionRequestId = 0;
-  let interactionCounter = 0;
-  let moveSequence = 0;
   let collapsedAnchor = $state<"top" | "left" | "right" | "bottom" | null>(null);
-  let queuedMove:
-    | {
-        x: number;
-        y: number;
-        interactionId: string | null | undefined;
-      }
-    | null = null;
-  let moveFlushRaf = 0;
-  let moveInFlight = false;
+
+  function moveFloatBallTo(
+    x: number,
+    y: number,
+    interactionId: string | null | undefined,
+  ): Promise<void> {
+    const sequence = moveQueue.nextSequence();
+    logger.debug(
+      "floatBall",
+      `Move invoke: ${formatInteraction(interactionId)} sequence=${sequence} target=${formatPoint({ x, y })}`,
+    );
+    return invoke<void>("move_float_ball_to", { x, y, sequence, interactionId }).catch((error) => {
+      logger.warn(
+        "floatBall",
+        `Move invoke failed: ${formatInteraction(interactionId)} sequence=${sequence} target=${formatPoint({ x, y })} error=${formatError(error)}`,
+      );
+      throw error;
+    });
+  }
+
+  const moveQueue = new MoveQueue({
+    requestAnimationFrame: (cb) => requestAnimationFrame(cb),
+    cancelAnimationFrame: (id) => cancelAnimationFrame(id),
+    sendMove: moveFloatBallTo,
+  });
 
   let activePointer: {
     pointerId: number;
@@ -70,17 +94,7 @@
     interactionId: string;
   } | null = null;
   let dragGeneration = 0;
-  let dragState: {
-    pointerId: number;
-    button: number;
-    interactionId: string;
-    startScreenX: number;
-    startScreenY: number;
-    startWindowX: number;
-    startWindowY: number;
-    screenToPhysicalScale: number;
-    initiated: boolean;
-  } | null = null;
+  let dragState: DragState | null = null;
 
   type WidgetBar = {
     provider: RateLimitProviderId;
@@ -90,111 +104,43 @@
     color: string;
   };
 
-  type FloatBallPositionPayload = {
-    x: number;
-    y: number;
-    anchor?: "top" | "left" | "right" | "bottom" | null;
-    expanded?: boolean;
-    ballOffsetX?: number;
+
+  const FALLBACK_PROVIDERS: RateLimitProviderId[] = ["claude", "codex", "cursor"];
+
+  const PROVIDER_META: Record<string, { label: string; shortLabel: string; color: string }> = {
+    claude: { label: "Claude", shortLabel: "CL", color: "#d79b64" },
+    codex: { label: "Codex", shortLabel: "CX", color: "#72aefc" },
+    cursor: { label: "Cursor", shortLabel: "CR", color: "#5c6ac4" },
   };
 
-  // Float ball always shows both providers regardless of Settings.
-  const FIXED_PROVIDERS: RateLimitProviderId[] = ["claude", "codex"];
-
-  let bars = $derived.by((): WidgetBar[] =>
-    FIXED_PROVIDERS.map((provider) => ({
-      provider,
-      label: provider === "claude" ? "Claude" : "Codex",
-      shortLabel: provider === "claude" ? "CL" : "CX",
-      utilization: provider === "claude" ? summary.claudeUtil : summary.codexUtil,
-      color: provider === "claude" ? "#d79b64" : "#72aefc",
-    })),
-  );
-
-  function percent(value: number | null): string {
-    return value == null ? "N/A" : `${Math.round(value)}%`;
+  function providerUtil(provider: RateLimitProviderId): number | null {
+    if (provider === "claude") return summary.claudeUtil;
+    if (provider === "codex") return summary.codexUtil;
+    if (provider === "cursor") return summary.cursorUtil;
+    return null;
   }
 
-  function fillWidth(value: number | null): string {
-    const safe = value == null ? 0 : Math.max(0, Math.min(value, 100));
-    return `${safe}%`;
-  }
+  let bars = $derived.by((): WidgetBar[] => {
+    const providers = summary.config.barProviders?.length
+      ? summary.config.barProviders
+      : FALLBACK_PROVIDERS;
+    return providers.map((provider) => {
+      const meta = PROVIDER_META[provider] ?? { label: provider, shortLabel: provider.slice(0, 2).toUpperCase(), color: "#888" };
+      return {
+        provider,
+        label: meta.label,
+        shortLabel: meta.shortLabel,
+        utilization: providerUtil(provider),
+        color: meta.color,
+      };
+    });
+  });
 
-  function formatBallCost(cost: number): string {
-    if (cost <= 0) return "$0";
-    if (cost < 1) return `$${cost.toFixed(2)}`;
-    if (cost < 10) return `$${cost.toFixed(1)}`;
-    return `$${Math.round(cost)}`;
-  }
-
-  function formatPoint(point: { x: number; y: number } | null): string {
-    return point ? `(${point.x}, ${point.y})` : "n/a";
-  }
-
-  function formatMonitor(
-    monitor: { position: { x: number; y: number }; size: { width: number; height: number } } | null,
-  ): string {
-    if (!monitor) return "none";
-    return `pos=${formatPoint(monitor.position)} size=${monitor.size.width}x${monitor.size.height}`;
-  }
-
-  function formatError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
 
   function nextInteractionId(kind: string): string {
-    interactionCounter += 1;
-    return `${kind}-${Date.now().toString(36)}-${interactionCounter}`;
+    return dragMachine.nextInteractionId(kind);
   }
 
-  function formatInteraction(interactionId: string | null | undefined): string {
-    return `interaction=${interactionId ?? "n/a"}`;
-  }
-
-  function resolveExpandDirection(
-    position: FloatBallPositionPayload,
-    monitor:
-      | {
-          position: { x: number; y: number };
-          size: { width: number; height: number };
-          workArea?: {
-            position: { x: number; y: number };
-            size: { width: number; height: number };
-          };
-          scaleFactor?: number;
-        }
-      | null,
-    currentDirection: FloatBallExpandDirection,
-  ): FloatBallExpandDirection {
-    if (position.anchor === "left") return "right";
-    if (position.anchor === "right") return "left";
-    if (!monitor) return currentDirection;
-
-    const workArea = monitor.workArea ?? {
-      position: monitor.position,
-      size: monitor.size,
-    };
-    const scale = monitor.scaleFactor ?? 1;
-    const ballWidth = Math.round(BALL_SIZE_CSS_PX * scale);
-    const expandedWidth = Math.round(EXPANDED_WIDTH_CSS_PX * scale);
-    const expandMargin = Math.round(EXPAND_MARGIN_CSS_PX * scale);
-    const innerLeft = workArea.position.x + expandMargin;
-    const innerRight = workArea.position.x + workArea.size.width - expandMargin;
-    const roomRight = innerRight - (position.x + expandedWidth);
-    const roomLeft = position.x - (expandedWidth - ballWidth) - innerLeft;
-
-    if (currentDirection === "right") {
-      if (roomRight >= 0) return "right";
-      if (roomLeft >= 0) return "left";
-    } else {
-      if (roomLeft >= 0) return "left";
-      if (roomRight >= 0) return "right";
-    }
-
-    if (roomRight > roomLeft) return "right";
-    if (roomLeft > roomRight) return "left";
-    return currentDirection;
-  }
 
   async function getFloatBallPosition(
     interactionId: string | null | undefined,
@@ -239,7 +185,7 @@
     const requestId = ++expansionRequestId;
     logger.info(
       "floatBall",
-      `setExpanded requested: ${formatInteraction(interactionId)} source=${source} next=${next} requestId=${requestId} expanded=${expanded} nativeExpanded=${nativeExpanded} direction=${expandDirection}`,
+      `setExpanded requested: ${formatInteraction(interactionId)} source=${source} next=${next} requestId=${requestId} expanded=${expanded} direction=${expandDirection}`,
     );
 
     if (next) {
@@ -253,22 +199,6 @@
         return;
       }
 
-      // On Linux: window is always expanded-size, no native resize needed.
-      // On other platforms: need to resize the native window.
-      if (!IS_LINUX) {
-        ignoreBlurUntil = Date.now() + BLUR_GUARD_MS;
-
-        if (nativeExpanded) {
-          expanded = true;
-          collapsedAnchor = null;
-          logger.debug(
-            "floatBall",
-            `Expand reused native state: ${formatInteraction(interactionId)} source=${source} requestId=${requestId}`,
-          );
-          return;
-        }
-      }
-
       try {
         const pos = await getFloatBallPosition(interactionId, "expand-preflight");
         const monitor = await currentMonitor();
@@ -278,24 +208,18 @@
         );
         expandDirection = resolveExpandDirection(pos, monitor, expandDirection);
 
-        // Let Svelte update DOM with correct flex-direction BEFORE backend call
         await new Promise((r) => requestAnimationFrame(r));
 
-        // Backend: on Linux this just repositions window + updates input shape.
-        // On other platforms it resizes the native window.
         const nextLayout = await invoke<{ expandDirection: FloatBallExpandDirection }>(
           "set_float_ball_expanded",
           { expanded: true, interactionId, source },
         );
         if (requestId !== expansionRequestId) return;
         expandDirection = nextLayout.expandDirection;
-        nativeExpanded = true;
         expanded = true;
         collapsedAnchor = null;
 
-        if (!IS_LINUX) {
-          ignoreBlurUntil = Date.now() + BLUR_GUARD_MS;
-        }
+        ignoreBlurUntil = Date.now() + BLUR_GUARD_MS;
         logger.info(
           "floatBall",
           `Expand applied: ${formatInteraction(interactionId)} source=${source} requestId=${requestId} direction=${nextLayout.expandDirection}`,
@@ -307,7 +231,6 @@
           `Expansion failed: ${formatInteraction(interactionId)} source=${source} requestId=${requestId} error=${formatError(e)}`,
         );
         expanded = false;
-        nativeExpanded = false;
       }
       return;
     }
@@ -316,28 +239,18 @@
       return;
     }
 
-    // On non-Linux, also check nativeExpanded
-    if (!IS_LINUX && !nativeExpanded) return;
-
-    // Trigger visual collapse first (ordering: CSS BEFORE shrinking input shape)
     expanded = false;
     logger.debug(
       "floatBall",
-      `Collapse visual phase: ${formatInteraction(interactionId)} source=${source} requestId=${requestId} isLinux=${IS_LINUX} waitMs=${IS_LINUX ? 0 : COLLAPSE_TRANSITION_MS}`,
+      `Collapse visual phase: ${formatInteraction(interactionId)} source=${source} requestId=${requestId}`,
     );
 
     await tick();
     await new Promise((r) => requestAnimationFrame(r));
 
-    // On non-Linux: wait for CSS width transition to complete before native resize
-    if (!IS_LINUX) {
-      await new Promise((r) => setTimeout(r, COLLAPSE_TRANSITION_MS));
-    }
-
     if (requestId !== expansionRequestId) return;
 
     try {
-      // Backend: on Linux this just updates input shape (no resize).
       const nextLayout = await invoke<{ expandDirection: FloatBallExpandDirection }>(
         "set_float_ball_expanded",
         { expanded: false, interactionId, source },
@@ -355,7 +268,6 @@
       );
     } finally {
       if (requestId === expansionRequestId) {
-        nativeExpanded = false;
         expanded = false;
       }
     }
@@ -364,70 +276,6 @@
   function releasePointerCapture(target: HTMLElement, pointerId: number) {
     if (target.hasPointerCapture(pointerId)) {
       target.releasePointerCapture(pointerId);
-    }
-  }
-
-  function moveFloatBallTo(
-    x: number,
-    y: number,
-    interactionId: string | null | undefined,
-  ): Promise<void> {
-    const sequence = ++moveSequence;
-    logger.debug(
-      "floatBall",
-      `Move invoke: ${formatInteraction(interactionId)} sequence=${sequence} target=${formatPoint({ x, y })}`,
-    );
-    return invoke<void>("move_float_ball_to", { x, y, sequence, interactionId }).catch((error) => {
-      logger.warn(
-        "floatBall",
-        `Move invoke failed: ${formatInteraction(interactionId)} sequence=${sequence} target=${formatPoint({ x, y })} error=${formatError(error)}`,
-      );
-      throw error;
-    });
-  }
-
-  function cancelQueuedMove() {
-    queuedMove = null;
-    if (moveFlushRaf !== 0) {
-      cancelAnimationFrame(moveFlushRaf);
-      moveFlushRaf = 0;
-    }
-  }
-
-  function requestMoveFlush() {
-    if (moveFlushRaf !== 0) return;
-    moveFlushRaf = requestAnimationFrame(() => {
-      moveFlushRaf = 0;
-      void flushQueuedMove();
-    });
-  }
-
-  async function flushQueuedMove() {
-    if (moveInFlight || !queuedMove) return;
-    const nextMove = queuedMove;
-    queuedMove = null;
-    moveInFlight = true;
-
-    try {
-      await moveFloatBallTo(nextMove.x, nextMove.y, nextMove.interactionId);
-    } catch {
-      // moveFloatBallTo already logs failures.
-    } finally {
-      moveInFlight = false;
-      if (queuedMove) {
-        requestMoveFlush();
-      }
-    }
-  }
-
-  function queueMoveFloatBallTo(
-    x: number,
-    y: number,
-    interactionId: string | null | undefined,
-  ) {
-    queuedMove = { x, y, interactionId };
-    if (!moveInFlight) {
-      requestMoveFlush();
     }
   }
 
@@ -448,13 +296,12 @@
 
   function resetPointerInteraction(target: HTMLElement, pointerId: number) {
     releasePointerCapture(target, pointerId);
-    cancelQueuedMove();
-    // Linux: restore input shape if drag was active
-    if (IS_LINUX && dragState?.initiated) {
+    moveQueue.cancel();
+    if (dragState?.initiated) {
       void invoke("set_float_ball_dragging", {
         dragging: false,
         interactionId: dragState.interactionId,
-      }).catch(() => {});
+      }).catch((e) => logger.debug("floatBall", `set_float_ball_dragging(false) failed: ${e}`));
     }
     dragGeneration += 1;
     activePointer = null;
@@ -468,7 +315,7 @@
     const interactionId = nextInteractionId(event.button === 2 ? "secondary" : "pointer");
     logger.info(
       "floatBall",
-      `Pointer down: ${formatInteraction(interactionId)} pointerId=${event.pointerId} button=${event.button} screen=${formatPoint({ x: event.screenX, y: event.screenY })} client=${formatPoint({ x: event.clientX, y: event.clientY })} expanded=${expanded} nativeExpanded=${nativeExpanded}`,
+      `Pointer down: ${formatInteraction(interactionId)} pointerId=${event.pointerId} button=${event.button} screen=${formatPoint({ x: event.screenX, y: event.screenY })} client=${formatPoint({ x: event.clientX, y: event.clientY })} expanded=${expanded}`,
     );
 
     const target = event.currentTarget as HTMLElement;
@@ -503,17 +350,10 @@
           screenX,
           screenY,
         });
-        dragState = {
-          pointerId: event.pointerId,
-          button: event.button,
-          interactionId,
-          startScreenX: screenX,
-          startScreenY: screenY,
-          startWindowX: pos.x,
-          startWindowY: pos.y,
-          screenToPhysicalScale,
-          initiated: false,
-        };
+        dragState = dragMachine.createDragState(
+          event.pointerId, event.button, interactionId,
+          screenX, screenY, pos.x, pos.y, screenToPhysicalScale,
+        );
         logger.debug(
           "floatBall",
           `Pointer init ready: ${formatInteraction(interactionId)} pointerId=${event.pointerId} button=${event.button} startWindow=${formatPoint(pos)} scale=${scale} detectedScale=${screenToPhysicalScale}`,
@@ -534,43 +374,30 @@
     if (!dragState || event.pointerId !== dragState.pointerId) return;
     if (dragState.button !== 0) return; // Only allow drag with left click
 
-    const dx = event.screenX - dragState.startScreenX;
-    const dy = event.screenY - dragState.startScreenY;
+    const result = dragMachine.computeMove(dragState, event.screenX, event.screenY);
+    if (!result) return;
 
-    if (!dragState.initiated && Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) {
+    if (result.shouldInitiate) {
       dragState.initiated = true;
       dragging = true;
       collapsedAnchor = null;
-      // Linux: expand input shape to full window so pointer events keep
-      // arriving even when the cursor leaves the 56×56 ball region.
-      if (IS_LINUX) {
-        void invoke("set_float_ball_dragging", {
-          dragging: true,
-          interactionId: dragState.interactionId,
-        }).catch(() => {});
-      }
+      void invoke("set_float_ball_dragging", {
+        dragging: true,
+        interactionId: dragState.interactionId,
+      }).catch((e) => logger.debug("floatBall", `set_float_ball_dragging(true) failed: ${e}`));
+      const dx = event.screenX - dragState.startScreenX;
+      const dy = event.screenY - dragState.startScreenY;
       logger.info(
         "floatBall",
         `Drag started: ${formatInteraction(dragState.interactionId)} pointerId=${event.pointerId} startWindow=${formatPoint({ x: dragState.startWindowX, y: dragState.startWindowY })} delta=${formatPoint({ x: dx, y: dy })} scale=${dragState.screenToPhysicalScale}`,
       );
     }
 
-    if (dragState.initiated) {
-      const { x: newX, y: newY } = getPhysicalWindowPositionFromPointer({
-        startScreenX: dragState.startScreenX,
-        startScreenY: dragState.startScreenY,
-        startWindowX: dragState.startWindowX,
-        startWindowY: dragState.startWindowY,
-        screenX: event.screenX,
-        screenY: event.screenY,
-        screenToPhysicalScale: dragState.screenToPhysicalScale,
-      });
-      logger.debug(
-        "floatBall",
-        `Drag move: ${formatInteraction(dragState.interactionId)} pointerId=${event.pointerId} target=${formatPoint({ x: newX, y: newY })} screen=${formatPoint({ x: event.screenX, y: event.screenY })}`,
-      );
-      queueMoveFloatBallTo(newX, newY, dragState.interactionId);
-    }
+    logger.debug(
+      "floatBall",
+      `Drag move: ${formatInteraction(dragState.interactionId)} pointerId=${event.pointerId} target=${formatPoint({ x: result.physicalX, y: result.physicalY })} screen=${formatPoint({ x: event.screenX, y: event.screenY })}`,
+    );
+    moveQueue.queue(result.physicalX, result.physicalY, dragState.interactionId);
   }
 
   function onPointerUp(event: PointerEvent) {
@@ -616,18 +443,16 @@
           "floatBall",
           `Drag ended: ${formatInteraction(interactionId)} requesting final move at ${formatPoint(finalPosition)}`,
         );
-        cancelQueuedMove();
+        moveQueue.cancel();
         void moveFloatBallTo(finalPosition.x, finalPosition.y, interactionId)
-          .then(() => {
-            // Linux: restore input shape to ball-only after drag
-            if (IS_LINUX) {
-              return invoke("set_float_ball_dragging", {
-                dragging: false,
-                interactionId,
-              }).catch(() => {});
-            }
-          })
-          .catch(() => {});
+          .then(() => snapFloatBall(interactionId))
+          .then(() =>
+            invoke("set_float_ball_dragging", {
+              dragging: false,
+              interactionId,
+            }).catch((e) => logger.debug("floatBall", `set_float_ball_dragging(false) after snap failed: ${e}`)),
+          )
+          .catch((e) => logger.debug("floatBall", `moveFloatBallTo/snap failed: ${e}`));
       } else if (!wasDragging) {
         logger.debug(
           "floatBall",
@@ -684,7 +509,7 @@
     void refreshSummary();
     void getFloatBallPosition(nextInteractionId("mount"), "mount")
       .then((position) => syncCollapsedAnchor(position))
-      .catch(() => {});
+      .catch((e) => logger.debug("floatBall", `getFloatBallPosition failed: ${e}`));
 
     let destroyed = false;
     const cleanups: (() => void)[] = [];
@@ -720,7 +545,7 @@
 
     return () => {
       destroyed = true;
-      cancelQueuedMove();
+      moveQueue.destroy();
       for (const fn of cleanups) fn();
     };
   });
@@ -832,23 +657,11 @@
     isolation: isolate;
   }
 
-  /* Linux: fixed-size window — ball position depends on direction ALWAYS
-     (not just when expanded), because the window is always 152×56. */
-  .shell.linux[data-direction="left"] {
+  .shell[data-direction="left"] {
     justify-content: flex-end;
   }
 
-  .shell.linux[data-direction="right"] {
-    justify-content: flex-start;
-  }
-
-  /* Non-Linux: keep direction-based alignment active even during collapse
-     transition so the ball doesn't drift to center while the capsule shrinks. */
-  .shell:not(.linux)[data-direction="left"] {
-    justify-content: flex-end;
-  }
-
-  .shell:not(.linux)[data-direction="right"] {
+  .shell[data-direction="right"] {
     justify-content: flex-start;
   }
 
@@ -859,7 +672,7 @@
     max-height: 100%;
     min-width: 0;
     min-height: 0;
-    border-radius: 28px;
+    border-radius: 50%;
     display: flex;
     flex-shrink: 0;
     align-items: center;
@@ -871,7 +684,6 @@
       inset 0 2px 4px rgba(255, 255, 255, 0.15),
       inset 0 -4px 12px rgba(0, 0, 0, 0.6);
     transition:
-      width 250ms cubic-bezier(0.175, 0.885, 0.32, 1.1),
       background 200ms ease,
       box-shadow 200ms ease;
     overflow: hidden;
@@ -879,7 +691,9 @@
   }
 
   .capsule.expanded {
-    width: 100%; /* expands fully to match OS window */
+    width: 100%;
+    height: 100%;
+    border-radius: 999px;
     background:
       radial-gradient(150% 150% at 20% 10%, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0) 40%),
       linear-gradient(160deg, rgba(20, 24, 32, 0.95) 0%, rgba(8, 10, 14, 0.99) 100%);
@@ -887,25 +701,6 @@
       inset 0 0 0 1px rgba(255, 255, 255, 0.1),
       inset 0 2px 4px rgba(255, 255, 255, 0.12),
       inset 0 -4px 12px rgba(0, 0, 0, 0.8);
-  }
-
-  /* Linux: fixed-size window is always 152×56. The capsule fills the window
-     when expanded; when collapsed, it shows just the 56×56 ball at one end.
-     No width transition needed (no native resize to synchronize with). */
-  .shell.linux .capsule {
-    width: 56px;
-    height: 56px;
-    max-height: 100%;
-    border-radius: 50%;
-    transition:
-      background 200ms ease,
-      box-shadow 200ms ease;
-  }
-
-  .shell.linux .capsule.expanded {
-    width: 100%;
-    height: 100%;
-    border-radius: 999px;
   }
 
   .shell[data-direction="left"] .capsule {
@@ -943,16 +738,6 @@
     position: relative;
     z-index: 2;
     transition: transform 150ms cubic-bezier(0.175, 0.885, 0.32, 1.275);
-  }
-
-  .shell.linux .ball-handle {
-    width: 56px;
-    height: 56px;
-    min-width: 56px;
-    min-height: 56px;
-    max-width: 100%;
-    max-height: 100%;
-    flex: 0 0 56px;
   }
 
   .ball-handle:hover, .capsule.expanded .ball-handle:hover {
@@ -1007,7 +792,7 @@
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    gap: 8px; /* more spacing, sleeker look */
+    gap: 5px;
   }
 
   .usage-row {

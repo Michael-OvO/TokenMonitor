@@ -154,6 +154,26 @@ describe("modelColor", () => {
     ["gpt-5.2", "var(--gpt52)"],
     ["codex", "var(--codex)"],
     ["unknown", "var(--t3)"],
+    // ── Gemini: major>=3 deep, ==2 mid, else soft ──
+    ["gemini-3.0", "var(--gemini)"],
+    ["gemini-2.5-pro", "var(--gemini-mid)"],
+    ["gemini-1.5-flash", "var(--gemini-soft)"],
+    // ── GLM: >=5 deep, ==4 mid, else soft ──
+    ["glm-5", "var(--glm)"],
+    ["glm-4.5", "var(--glm-mid)"],
+    ["glm-3-turbo", "var(--glm-soft)"],
+    // ── DeepSeek: >=3 deep, ==2 mid, else soft ──
+    ["deepseek-v3", "var(--deepseek)"],
+    ["deepseek-v2.5", "var(--deepseek-mid)"],
+    ["deepseek-chat", "var(--deepseek-soft)"], // no version → soft
+    // ── Kimi: K2+ deep, else mid ──
+    ["kimi-k2", "var(--kimi)"],
+    ["kimi-k1", "var(--kimi-mid)"],
+    // ── Qwen: >=3 deep, ==2 mid, else soft ──
+    ["qwen3-coder", "var(--qwen)"],
+    ["qwen2.5-max", "var(--qwen-mid)"],
+    // ── Composer: single tier ──
+    ["composer-1", "var(--composer)"],
   ])("returns correct CSS var for %s", (key, expected) => {
     expect(modelColor(key)).toBe(expected);
   });

@@ -96,7 +96,7 @@ export function readSurfaceColor(
 
 export async function syncNativeWindowSurface(
   invokeFn: typeof invoke = invoke,
-  glassEnabled: boolean = false,
+  _glassEnabled: boolean = false,
 ): Promise<void> {
   if (typeof document === "undefined") return;
 

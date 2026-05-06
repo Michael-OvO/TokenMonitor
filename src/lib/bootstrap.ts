@@ -10,6 +10,7 @@ import {
 import { isMacOS, isWindows } from "./utils/platform.js";
 import { logger } from "./utils/logger.js";
 import { hydrateUpdater, installUpdaterListeners } from "./stores/updater.js";
+import { setRates } from "./utils/format.js";
 
 /**
  * Dev-only console helpers for testing the onboarding flow without
@@ -86,6 +87,16 @@ export async function initializeRuntimeFromSettings(
   }
   logger.info("bootstrap", `Initializing: provider=${provider}, period=${saved.defaultPeriod}, theme=${saved.theme}`);
 
+  // Load dynamic exchange rates from Rust backend (non-blocking).
+  invokeFn<Record<string, number>>("get_exchange_rates")
+    .then((rates) => {
+      if (rates && Object.keys(rates).length > 0) {
+        setRates(rates);
+        logger.info("bootstrap", `Exchange rates loaded: ${Object.keys(rates).length} currencies`);
+      }
+    })
+    .catch((e) => logger.debug("bootstrap", `Exchange rates fetch failed: ${e}`));
+
   // Wire dev-only onboarding helpers onto `window`. No-op in production.
   installDevOnboardingHelpers();
 
@@ -117,6 +128,9 @@ export async function initializeRuntimeFromSettings(
       enabled: saved.hasSeenWelcome && saved.usageAccessEnabled,
     }),
     invokeFn("set_rate_limits_enabled", { enabled: saved.rateLimitsEnabled }),
+    invokeFn("set_cursor_auth_config", {
+      apiKey: saved.cursorApiKey,
+    }),
     invokeFn("set_claude_plan_tier", {
       tier: saved.claudePlanTier,
       fiveHourTokens: saved.claudePlanCustomFiveHourTokens,
@@ -137,7 +151,7 @@ export async function initializeRuntimeFromSettings(
 
   // Sync debug log level to Rust backend
   if (saved.debugLogging) {
-    invokeFn("set_log_level", { level: "debug" }).catch(() => {});
+    invokeFn("set_log_level", { level: "debug" }).catch((e) => logger.debug("bootstrap", `set_log_level failed: ${e}`));
   }
 
   // Wire updater listeners + initial status pull.

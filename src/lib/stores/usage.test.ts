@@ -3,9 +3,19 @@ import { get } from "svelte/store";
 import type { UsagePayload } from "../types/index.js";
 
 const mockInvoke = vi.fn();
+const mockLogger = vi.hoisted(() => ({
+  error: vi.fn(),
+  warn: vi.fn(),
+  info: vi.fn(),
+  debug: vi.fn(),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
+}));
+
+vi.mock("../utils/logger.js", () => ({
+  logger: mockLogger,
 }));
 
 vi.mock("../uiStability.js", () => ({
@@ -49,6 +59,7 @@ function makePayload(overrides: Partial<UsagePayload> = {}): UsagePayload {
     usage_warning: null,
     device_breakdown: null,
     device_chart_buckets: null,
+    provider_detected: null,
     ...overrides,
   };
 }
@@ -61,6 +72,9 @@ beforeEach(() => {
   vi.resetModules();
   vi.useRealTimers();
   mockInvoke.mockReset();
+  for (const log of Object.values(mockLogger)) {
+    log.mockReset();
+  }
 });
 
 afterEach(() => {
@@ -234,6 +248,24 @@ describe("fetchData", () => {
     expect(get(isLoading)).toBe(false);
   });
 
+  it("logs backend usage warnings returned by successful fetches", async () => {
+    const { fetchData } = await loadUsageModule();
+    mockInvoke.mockResolvedValueOnce(
+      makePayload({ usage_warning: "Cursor API unauthorized. Refresh your token." }),
+    );
+
+    await fetchData("cursor", "day");
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "usage",
+      expect.stringContaining("provider=cursor period=day offset=0"),
+    );
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "usage",
+      expect.stringContaining("Cursor API unauthorized"),
+    );
+  });
+
   it("ignores stale responses from earlier requests", async () => {
     const { usageData, isLoading, fetchData } = await loadUsageModule();
     const slow = deferred<UsagePayload>();
@@ -359,6 +391,22 @@ describe("warmCache", () => {
     await fetchPromise;
 
     expect(get(usageData)).toEqual(expect.objectContaining({ total_cost: 7.1 }));
+  });
+
+  it("logs backend usage warnings returned by warm-cache requests", async () => {
+    const { warmCache } = await loadUsageModule();
+    mockInvoke.mockResolvedValueOnce(
+      makePayload({ usage_warning: "Cursor API returned no usage entries." }),
+    );
+
+    warmCache("cursor", "week");
+
+    await vi.waitFor(() => {
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        "usage",
+        expect.stringContaining("Backend warning (warm-cache): provider=cursor period=week offset=0"),
+      );
+    });
   });
 });
 

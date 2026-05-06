@@ -24,7 +24,7 @@ function deferred<T>() {
 }
 
 function providerRateLimits(
-  provider: "claude" | "codex",
+  provider: "claude" | "codex" | "cursor",
   overrides: Partial<ProviderRateLimits> = {},
 ): ProviderRateLimits {
   return {
@@ -32,6 +32,7 @@ function providerRateLimits(
     planTier: provider === "claude" ? "Pro" : null,
     windows: [],
     extraUsage: null,
+    credits: null,
     stale: false,
     error: null,
     retryAfterSeconds: null,
@@ -127,6 +128,7 @@ describe("hydrateRateLimits", () => {
       "rate-limits.json": legacyStore,
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
+      "rate-limits-cursor.json": makeStore(),
     });
 
     const { hydrateRateLimits, rateLimitsData, rateLimitsMonitorState, rateLimitsRequestState } =
@@ -139,6 +141,7 @@ describe("hydrateRateLimits", () => {
       codex: expect.objectContaining({
         provider: "codex",
       }),
+      cursor: null,
     });
     expect(get(rateLimitsMonitorState).claude.lastSuccessAt).toBe("2026-03-17T12:00:00.000Z");
     expect(get(rateLimitsRequestState).deferredUntil).toBe("2026-03-17T12:05:00.000Z");
@@ -169,6 +172,7 @@ describe("fetchRateLimits", () => {
       "rate-limits.json": legacyStore,
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
+      "rate-limits-cursor.json": makeStore(),
     });
 
     const request = deferred<RateLimitsPayload>();
@@ -220,6 +224,7 @@ describe("fetchRateLimits", () => {
       "rate-limits.json": legacyStore,
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
+      "rate-limits-cursor.json": makeStore(),
     });
 
     const request = deferred<RateLimitsPayload>();
@@ -304,6 +309,7 @@ describe("fetchRateLimits", () => {
       "rate-limits.json": legacyStore,
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
+      "rate-limits-cursor.json": makeStore(),
     });
 
     mockInvoke.mockResolvedValueOnce(
@@ -358,6 +364,7 @@ describe("fetchRateLimits", () => {
       "rate-limits.json": legacyStore,
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
+      "rate-limits-cursor.json": makeStore(),
     });
 
     mockInvoke.mockResolvedValueOnce(
@@ -433,32 +440,36 @@ describe("fetchRateLimits", () => {
       "rate-limits.json": legacyStore,
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
+      "rate-limits-cursor.json": makeStore(),
     });
 
-    mockInvoke.mockResolvedValueOnce(
-      makePayload({
-        claude: null,
-        codex: providerRateLimits("codex", {
-          windows: [
-            {
-              windowId: "primary",
-              label: "Session (5hr)",
-              utilization: 9,
-              resetsAt: "2026-03-17T13:30:00.000Z",
-            },
-          ],
-          fetchedAt: "2026-03-17T12:00:30.000Z",
-        }),
-      }),
-    );
+    mockInvoke.mockImplementation(async (_cmd: string, args: Record<string, string>) => {
+      if (args.provider === "codex") {
+        return makePayload({
+          claude: null,
+          codex: providerRateLimits("codex", {
+            windows: [
+              {
+                windowId: "primary",
+                label: "Session (5hr)",
+                utilization: 9,
+                resetsAt: "2026-03-17T13:30:00.000Z",
+              },
+            ],
+            fetchedAt: "2026-03-17T12:00:30.000Z",
+          }),
+        });
+      }
+      return makePayload({ claude: null, codex: null });
+    });
 
     const { fetchRateLimits, rateLimitsData, rateLimitsMonitorState, rateLimitsRequestState } =
       await loadRateLimitStore();
 
     await fetchRateLimits("all");
 
-    expect(mockInvoke).toHaveBeenCalledTimes(1);
     expect(mockInvoke).toHaveBeenCalledWith("get_rate_limits", { provider: "codex" });
+    expect(mockInvoke).toHaveBeenCalledWith("get_rate_limits", { provider: "cursor" });
     expect(get(rateLimitsData)?.claude).toEqual(expect.objectContaining({ provider: "claude" }));
     expect(get(rateLimitsData)?.codex).toEqual(
       expect.objectContaining({
@@ -494,6 +505,7 @@ describe("fetchRateLimits", () => {
       "rate-limits.json": legacyStore,
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
+      "rate-limits-cursor.json": makeStore(),
     });
 
     mockInvoke.mockRejectedValueOnce(new Error("backend unavailable"));

@@ -31,8 +31,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v6
@@ -51,16 +49,13 @@ jobs:
           path: node_modules
           key: node-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            src-tauri/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
+          workspaces: "src-tauri -> target"
 
       - name: Install Node deps
         run: npm ci
@@ -127,6 +122,30 @@ jobs:
           P8_PATH="$RUNNER_TEMP/apikey.p8"
           echo "$APPLE_API_KEY_CONTENT" > "$P8_PATH"
           echo "APPLE_API_KEY_PATH=$P8_PATH" >> "$GITHUB_ENV"
+
+      # ── Set up updater signing key ──────────────────────────────────────
+      - name: Set up updater signing key
+        shell: bash
+        env:
+          RAW_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          RAW_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$RAW_KEY" ]; then
+            echo "::notice::No TAURI_SIGNING_PRIVATE_KEY set — updater signing disabled"
+            exit 0
+          fi
+          if [[ "$RAW_KEY" == untrusted\ comment:* ]]; then
+            FINAL_KEY="$RAW_KEY"
+          else
+            FINAL_KEY="$(printf 'untrusted comment: minisign secret key\n%s' "$RAW_KEY")"
+            echo "::notice::Prepended missing comment line to TAURI_SIGNING_PRIVATE_KEY"
+          fi
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<SIGNING_KEY_EOF"
+            echo "$FINAL_KEY"
+            echo "SIGNING_KEY_EOF"
+          } >> "$GITHUB_ENV"
+          echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$RAW_PASSWORD" >> "$GITHUB_ENV"
 
       # ── Build installers ───────────────────────────────────────────────────
       - name: Build installers (macOS — signed)
@@ -268,6 +287,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
+          draft: false
           files: |
             artifacts/installers-macos/*
             artifacts/installers-windows/*

@@ -5,6 +5,7 @@ import { syncTrayConfig, trayConfigPayload } from "./sync.js";
 const CONFIG: TrayConfig = {
   barDisplay: "both",
   barProvider: "claude",
+  barProviders: ["claude", "codex"],
   showPercentages: true,
   percentageFormat: "compact",
   showCost: true,
@@ -17,6 +18,7 @@ const RATE_LIMITS: RateLimitsPayload = {
     planTier: "Max 5x",
     windows: [{ windowId: "c", label: "Primary", utilization: 72, resetsAt: null }],
     extraUsage: null,
+    credits: null,
     stale: false,
     error: null,
     retryAfterSeconds: null,
@@ -28,6 +30,7 @@ const RATE_LIMITS: RateLimitsPayload = {
     planTier: "Pro",
     windows: [{ windowId: "x", label: "Primary", utilization: 35, resetsAt: null }],
     extraUsage: null,
+    credits: null,
     stale: false,
     error: null,
     retryAfterSeconds: null,

@@ -2,9 +2,12 @@
 
 ## Prerequisites
 
-- **Node.js** ≥ 18 (frontend tooling only — not required to *run* the app)
+- **Node.js** >= 18 (frontend tooling only — not required to *run* the app)
 - **Rust** toolchain via [rustup](https://rustup.rs/) (for Tauri backend)
-- **Xcode Command Line Tools** — `xcode-select --install`
+- Platform-specific Tauri dependencies:
+  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+  - **Windows**: Visual Studio C++ Build Tools, WebView2 (pre-installed on Windows 11)
+  - **Linux**: `sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf`
 
 ## Quick Start
 
@@ -16,59 +19,162 @@ npm install
 npx tauri dev
 ```
 
-The app appears as a **menu bar icon** (no dock icon). Click it to open the popover.
+The app appears as a **system tray icon**:
+- **macOS**: Menu bar (top-right, near the clock) — no dock icon by default
+- **Windows**: System tray (bottom-right)
+- **Linux**: System tray area (varies by DE)
+
+Click it to open the popover.
 
 ## Project Structure
 
 ```
 TokenMonitor/
-├── src/                          # Svelte frontend (WebView)
+├── src/                          # Svelte 5 frontend (WebView)
 │   ├── App.svelte                # Root component — layout orchestration
 │   ├── app.css                   # Global styles, CSS variables, keyframes
 │   ├── main.ts                   # Svelte mount point
+│   ├── float-ball.ts             # FloatBall entry point (separate Vite entry)
 │   └── lib/
+│       ├── bootstrap.ts          # Startup wiring and runtime initialization
 │       ├── components/
-│       │   ├── Toggle.svelte          # Claude/Codex provider switch
-│       │   ├── TimeTabs.svelte        # 5H | Day | Week | Month tabs
+│       │   ├── Toggle.svelte          # Provider tab switch
+│       │   ├── TimeTabs.svelte        # 5H | Day | Week | Month | Year tabs
 │       │   ├── MetricsRow.svelte      # Cost / Tokens / Sessions cards
-│       │   ├── Chart.svelte           # Stacked bar chart + inline detail panel
+│       │   ├── Chart.svelte           # Stacked bar / line / pie chart
+│       │   ├── chartBuckets.ts        # Chart bucket computation helpers
+│       │   ├── Breakdown.svelte       # Per-model cost breakdown
 │       │   ├── UsageBars.svelte       # Horizontal progress bars (5H view)
 │       │   ├── ModelList.svelte       # Per-model cost/token rows
+│       │   ├── SubagentList.svelte    # Agent/subagent cost breakdown
 │       │   ├── Footer.svelte          # Live session indicator, timestamps
 │       │   ├── DateNav.svelte         # Calendar navigation (day/week/month offset)
-│       │   ├── Calendar.svelte        # Date picker
-│       │   ├── Settings.svelte        # Settings panel
+│       │   ├── Calendar.svelte        # Date picker / heatmap
+│       │   ├── Settings.svelte        # Settings panel (delegates to sub-panels)
+│       │   ├── HeaderTabsSettings.svelte  # Tab configuration
+│       │   ├── HiddenModelsSettings.svelte # Model filtering
+│       │   ├── ThemeSettings.svelte   # Theme configuration
+│       │   ├── TrayConfigSettings.svelte  # Tray display options
+│       │   ├── SshHostsSettings.svelte    # SSH device management
 │       │   ├── SplashScreen.svelte    # Initial loading screen
 │       │   ├── SetupScreen.svelte     # Empty-state screen (no data found)
-│       │   ├── SegmentedControl.svelte# Reusable segmented control
-│       │   ├── ToggleSwitch.svelte    # Reusable toggle
-│       │   └── ResizeDebugOverlay.svelte # Resize debug overlay (dev only)
+│       │   ├── WelcomeCard.svelte     # First-launch onboarding with opt-in toggles
+│       │   ├── UpdateBanner.svelte    # In-app update notification banner
+│       │   ├── PermissionDisclosure.svelte # Privacy/permission surface display
+│       │   ├── DevicesView.svelte     # SSH remote device list + stats
+│       │   ├── SingleDeviceView.svelte # Single device usage detail
+│       │   ├── FloatBall.svelte       # Always-on-top overlay component
+│       │   ├── floatBallInteraction.ts # FloatBall drag/scale detection
+│       │   ├── floatBallUtils.ts      # FloatBall formatting and constants
+│       │   ├── SegmentedControl.svelte # Reusable segmented control
+│       │   └── ToggleSwitch.svelte    # Reusable toggle
 │       ├── stores/
 │       │   ├── usage.ts          # Svelte stores + IPC fetch logic
 │       │   ├── rateLimits.ts     # Rate limit store + fetch logic
-│       │   └── settings.ts       # Settings store + persistence
+│       │   ├── settings.ts       # Settings store + persistence
+│       │   └── updater.ts        # Auto-updater state, IPC, events
 │       ├── providerMetadata.ts   # Frontend provider metadata + tab ordering
+│       ├── permissions/
+│       │   ├── keychain.ts       # macOS Keychain one-time prompt flow
+│       │   └── surfaces.ts       # Permission surface definitions
+│       ├── tray/
+│       │   ├── sync.ts           # Frontend-to-native tray state syncing
+│       │   └── title.ts          # Tray title formatting
+│       ├── views/
+│       │   ├── footer.ts         # Footer view-model logic
+│       │   ├── rateLimits.ts     # Rate limit view-model
+│       │   ├── rateLimitMonitor.ts # Rate limit monitoring
+│       │   └── deviceStats.ts    # Device data aggregation
+│       ├── window/
+│       │   └── appearance.ts     # Window surface syncing
+│       ├── windowSizing.ts       # Window size management
+│       ├── resizeOrchestrator.ts # Window resize orchestration
+│       ├── uiStability.ts        # UI stability utilities
 │       ├── types/
 │       │   └── index.ts          # TypeScript interfaces (mirrors Rust structs)
 │       └── utils/
-│           └── format.ts         # Cost/token/time formatting + model colors
+│           ├── platform.ts       # OS detection (macOS/Windows/Linux)
+│           ├── plans.ts          # Plan tier cost lookups
+│           ├── format.ts         # Cost/token/time formatting + model colors
+│           ├── calendar.ts       # Calendar utilities
+│           └── logger.ts         # Frontend logging via Rust file writer
 ├── src-tauri/                    # Rust backend (Tauri)
 │   ├── Cargo.toml
-│   ├── tauri.conf.json           # Window, bundle, and app config
+│   ├── tauri.conf.json           # Window, bundle, updater, and app config
 │   ├── Info.plist                # LSUIElement (no dock icon)
 │   ├── capabilities/default.json # Permission grants
 │   ├── icons/                    # Tray + app icons
 │   └── src/
 │       ├── main.rs               # Entry point
 │       ├── lib.rs                # Tauri setup, tray icon, background polling
-│       ├── integrations.rs       # Usage integration IDs, selection, and root discovery
-│       ├── parser.rs             # Integration-driven JSONL reader + aggregations
-│       ├── pricing.rs            # Pricing table + model-family-aware fallback logic
-│       ├── commands.rs           # IPC handlers + data transformation
-│       ├── rate_limits.rs        # Rate limit fetching + caching
-│       └── models.rs             # Serde structs for frontend payload
+│       ├── commands.rs           # IPC dispatch hub
+│       ├── commands/
+│       │   ├── usage_query.rs    # Data fetching
+│       │   ├── calendar.rs       # Heatmap queries
+│       │   ├── period.rs         # Time range selection
+│       │   ├── config.rs         # Settings sync
+│       │   ├── tray.rs           # Title/utilization rendering
+│       │   ├── ssh.rs            # Remote device management
+│       │   ├── float_ball/       # Overlay state + layout engine
+│       │   │   ├── mod.rs
+│       │   │   └── layout.rs
+│       │   ├── updater.rs        # Auto-update IPC commands
+│       │   └── logging.rs        # Log-level control
+│       ├── logging.rs            # tracing + rolling file appender
+│       ├── models.rs             # Serde structs for frontend payload
+│       ├── paths.rs              # Central filesystem path registry
+│       ├── usage/
+│       │   ├── mod.rs
+│       │   ├── parser.rs         # JSONL discovery, parsing, normalization
+│       │   ├── claude_parser.rs  # Claude Code-specific deep parser
+│       │   ├── pricing.rs        # Model-family-aware token pricing
+│       │   ├── integrations.rs   # Integration registry (Claude, Codex, Cursor)
+│       │   ├── archive.rs        # Persistent hourly aggregate storage
+│       │   ├── device_aggregation.rs # Remote device data aggregation
+│       │   ├── exchange_rates.rs # Dynamic USD→multi-currency rates (24h TTL)
+│       │   ├── litellm.rs        # LiteLLM dynamic pricing (24h TTL)
+│       │   ├── openrouter.rs     # OpenRouter dynamic pricing
+│       │   ├── ssh_remote.rs     # SSH remote log sync
+│       │   └── ssh_config.rs     # SSH host discovery
+│       ├── rate_limits/
+│       │   ├── mod.rs
+│       │   ├── claude.rs         # OAuth Keychain + API (macOS)
+│       │   ├── claude_cli.rs     # CLI probe fallback (all platforms)
+│       │   ├── codex.rs          # Session file parsing
+│       │   ├── cursor.rs         # Cursor API plan usage + spend limit
+│       │   └── http.rs           # Shared HTTP client
+│       ├── secrets/
+│       │   ├── mod.rs            # Secret persistence (keyring-first strategy)
+│       │   └── cursor.rs         # Cursor access token management
+│       ├── updater/
+│       │   ├── mod.rs
+│       │   ├── state.rs          # UpdaterState type + predicates
+│       │   ├── persistence.rs    # Persist via tauri-plugin-store
+│       │   └── scheduler.rs      # Check scheduler with exponential backoff
+│       ├── tray/
+│       │   ├── mod.rs
+│       │   └── render.rs         # Native tray icon + utilization bars (RGBA)
+│       ├── stats/
+│       │   ├── mod.rs
+│       │   ├── change.rs         # Change statistics
+│       │   └── subagent.rs       # Subagent statistics
+│       └── platform/
+│           ├── mod.rs            # Cross-platform helpers
+│           ├── macos/            # macOS window management
+│           ├── windows/
+│           │   ├── taskbar.rs    # GDI taskbar panel
+│           │   └── window.rs     # Taskbar-aligned positioning
+│           └── linux/            # Linux window management
+├── float-ball.html               # FloatBall HTML entry (separate Vite entry)
+├── build/                        # Modular build system
+│   ├── index.mjs                 # Build entry point
+│   ├── lib/                      # CLI, platform, workflow helpers
+│   └── config/                   # Platform-specific Tauri configs
+├── scripts/                      # Release and setup scripts
+├── docs/                         # Design notes, tutorial, test matrices
 ├── package.json
 ├── vite.config.ts
+├── vitest.config.ts
 └── svelte.config.js
 ```
 
@@ -108,27 +214,71 @@ cd src-tauri && cargo check
 npx tauri build
 ```
 
-Output: `src-tauri/target/release/bundle/dmg/TokenMonitor_0.1.0_aarch64.dmg`
+Platform-specific outputs:
+- **macOS**: `src-tauri/target/release/bundle/dmg/TokenMonitor_x.y.z_aarch64.dmg`
+- **Windows**: `src-tauri/target/release/bundle/nsis/TokenMonitor_x.y.z_x64-setup.exe`
+- **Linux**: `src-tauri/target/release/bundle/deb/token-monitor_x.y.z_amd64.deb` + `.AppImage`
+
+### Testing
+
+```bash
+npm test               # vitest (frontend unit tests)
+npm run test:watch     # vitest in watch mode
+npm run test:rust      # cargo test (Rust backend tests)
+npm run test:all       # both Rust and frontend tests sequentially
+```
+
+Run a single frontend test file:
+```bash
+npx vitest run src/lib/stores/usage.test.ts
+```
+
+Run a single Rust test:
+```bash
+cd src-tauri && cargo test test_name
+```
+
+### CI checks
+
+```bash
+npx svelte-check                # Svelte type checking
+npm test                        # Vitest
+cd src-tauri && cargo fmt --check       # Rust format
+cd src-tauri && cargo clippy -- -D warnings  # Rust lints
+cd src-tauri && cargo test      # Rust tests
+```
+
+A pre-commit hook runs all CI checks before each commit.
 
 ## Data Flow
 
 ```
 ~/.claude/projects/**/*.jsonl        (Claude Code integration)
 ~/.codex/sessions/YYYY/MM/DD/*.jsonl (Codex CLI integration)
+Cursor workspace state.vscdb         (Cursor IDE integration)
     ↓ native Rust file I/O
-integrations.rs + parser.rs + pricing.rs
+integrations.rs + parser.rs + claude_parser.rs + pricing.rs
     (integration selection, JSONL parsing, token aggregation, cost calculation)
+    ↓ archive.rs (persist completed hours)
     ↓ IPC invoke
 Svelte frontend (stores/usage.ts → components)
 ```
 
-No external processes, no Node.js at runtime, no network calls for usage data.
+No external processes, no Node.js at runtime. Network calls are limited to:
+- Dynamic pricing (LiteLLM, OpenRouter) — optional, 24h cached
+- Exchange rates (Frankfurter API) — optional, 24h cached
+- Cursor rate limits (Cursor API) — when enabled
+- Auto-updater (GitHub releases) — configurable
 
 ### In-Memory Cache
 
-A single `Mutex<HashMap<String, (UsagePayload, Instant)>>` with a 2-minute TTL.
-Reading local JSONL files takes milliseconds, so no disk cache layer is needed.
+`Arc<RwLock<HashMap<String, (UsagePayload, Instant)>>>` with a 2-minute TTL.
+Reading local JSONL files takes milliseconds, so no disk cache layer is needed for live data.
 Background polling refreshes every 120 seconds and emits a `data-updated` event.
+
+### Usage Archive
+
+Completed hours are archived to persistent per-month JSONL files under `{app_data_dir}/usage-archive/`. Uses time-boundary partitioning: archive covers `[0..frontier]`, live source covers `(frontier..now]`. This prevents data loss when source JSONL files are deleted.
 
 ### Parser: Period → Method Dispatch
 
@@ -138,13 +288,15 @@ Background polling refreshes every 120 seconds and emits a `data-updated` event.
 | `day` | `get_hourly` | Today's date |
 | `week` | `get_daily` | Monday of current week |
 | `month` | `get_daily` | 1st of current month |
+| `year` | `get_monthly` | January 1st of current year |
 
 ### Pricing
 
-`pricing.rs` contains a hardcoded pricing table for Anthropic and OpenAI-family models,
+`pricing.rs` contains a hardcoded pricing table for Anthropic, OpenAI, and Cursor-family models,
 matched by pattern (most-specific first). Known families fall back within-family; unsupported
-families currently price at zero until explicit rates are added. Pricing version is stamped as
-`PRICING_VERSION` for debugging.
+families can be resolved via dynamic pricing from LiteLLM (`litellm.rs`) and OpenRouter
+(`openrouter.rs`) APIs with 24h TTL caching. Pricing version is stamped as `PRICING_VERSION`
+for debugging.
 
 ### Data Sources
 
@@ -152,12 +304,13 @@ families currently price at zero until explicit rates are added. Pricing version
 |----------|-------------|-----------|
 | Claude | `~/.claude/projects/**/*.jsonl` | `type == "assistant"` entries |
 | Codex | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | Final `token_count` event per session file |
+| Cursor | Workspace storage `state.vscdb` | Usage records from Cursor IDE |
 
 ## Troubleshooting
 
 **Two tray icons appearing** — Kill all processes and restart: `pkill -f "token-monitor"`
 
-**Blank popover / no data** — Check that Claude Code or Codex CLI have been used at least once:
+**Blank popover / no data** — Check that Claude Code, Codex CLI, or Cursor IDE have been used at least once:
 ```bash
 ls ~/.claude/projects/
 ls ~/.codex/sessions/

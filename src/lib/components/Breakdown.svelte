@@ -228,7 +228,7 @@
                 class:active={device.include_in_stats}
                 type="button"
                 title={device.include_in_stats ? "Included in stats — click to exclude" : "Excluded from stats — click to include"}
-                onclick={(e: MouseEvent) => onToggleDeviceStats?.(device.device, !device.include_in_stats)}
+                onclick={() => onToggleDeviceStats?.(device.device, !device.include_in_stats)}
               >
                 <svg width="14" height="14" viewBox="0 0 14 14">
                   {#if device.include_in_stats}
@@ -335,6 +335,11 @@
   .sub-row {
     display: flex; align-items: flex-start;
     min-height: 22px; padding: 4px 7px 4px 24px; gap: 7px;
+    border-radius: 5px;
+    transition: background var(--t-fast) ease;
+  }
+  .sub-row:hover {
+    background: var(--surface-2);
   }
   .sub-bar { width: 2px; height: 10px; border-radius: 1px; flex-shrink: 0; margin-top: 2px; }
   .sub-info { flex: 1; min-width: 0; }

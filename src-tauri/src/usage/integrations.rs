@@ -8,16 +8,21 @@ pub const ALL_USAGE_INTEGRATIONS_ID: &str = "all";
 pub enum UsageIntegrationId {
     Claude,
     Codex,
+    Cursor,
 }
 
-const ALL_USAGE_INTEGRATIONS: [UsageIntegrationId; 2] =
-    [UsageIntegrationId::Claude, UsageIntegrationId::Codex];
+const ALL_USAGE_INTEGRATIONS: [UsageIntegrationId; 3] = [
+    UsageIntegrationId::Claude,
+    UsageIntegrationId::Codex,
+    UsageIntegrationId::Cursor,
+];
 
 impl UsageIntegrationId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -25,6 +30,7 @@ impl UsageIntegrationId {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
+            Self::Cursor => "Cursor IDE",
         }
     }
 
@@ -32,6 +38,7 @@ impl UsageIntegrationId {
         match value {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "cursor" => Some(Self::Cursor),
             _ => None,
         }
     }
@@ -40,6 +47,7 @@ impl UsageIntegrationId {
         match self {
             Self::Claude => detect_claude_project_dirs(),
             Self::Codex => vec![detect_codex_sessions_dir()],
+            Self::Cursor => detect_cursor_workspace_storage_dirs(),
         }
     }
 }
@@ -63,7 +71,8 @@ impl UsageIntegrationSelection {
         match self {
             Self::Single(id) => match id {
                 UsageIntegrationId::Claude => &ALL_USAGE_INTEGRATIONS[..1],
-                UsageIntegrationId::Codex => &ALL_USAGE_INTEGRATIONS[1..],
+                UsageIntegrationId::Codex => &ALL_USAGE_INTEGRATIONS[1..2],
+                UsageIntegrationId::Cursor => &ALL_USAGE_INTEGRATIONS[2..3],
             },
             Self::All => &ALL_USAGE_INTEGRATIONS,
         }
@@ -72,6 +81,27 @@ impl UsageIntegrationSelection {
 
 pub fn all_usage_integrations() -> &'static [UsageIntegrationId] {
     &ALL_USAGE_INTEGRATIONS
+}
+
+/// Is this row's model relevant to the selected provider tab?
+///
+/// The "Claude / Codex / Cursor" tabs are ultimately per-model-vendor filters,
+/// not per-CLI filters — a GLM-5 row logged through Claude Code CLI does not
+/// belong in the Claude tab, it's a third-party model. This keeps the main
+/// dashboard total and the Per-Device breakdown consistent regardless of
+/// which integration directory produced the row.
+///
+/// `cursor` passes through (no model-family filter) because Cursor IDE
+/// multiplexes composer/gpt/claude/etc. — all rows from the Cursor
+/// integration conceptually belong to the Cursor tab.
+pub fn provider_matches_model(provider: &str, model: &str) -> bool {
+    use crate::models::{detect_model_family, ModelFamily};
+    match provider {
+        ALL_USAGE_INTEGRATIONS_ID => true,
+        "claude" => detect_model_family(model) == ModelFamily::Anthropic,
+        "codex" => detect_model_family(model) == ModelFamily::OpenAI,
+        _ => true,
+    }
 }
 
 fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -104,6 +134,22 @@ fn normalize_codex_sessions_dir(path: PathBuf) -> PathBuf {
     }
 }
 
+fn normalize_cursor_workspace_storage_dir(path: PathBuf) -> PathBuf {
+    if path
+        .file_name()
+        .is_some_and(|name| name == "workspaceStorage")
+    {
+        return path;
+    }
+    if path.file_name().is_some_and(|name| name == "User") {
+        return path.join("workspaceStorage");
+    }
+    if path.file_name().is_some_and(|name| name == "Cursor") {
+        return path.join("User").join("workspaceStorage");
+    }
+    path.join("workspaceStorage")
+}
+
 fn detect_claude_project_dirs() -> Vec<PathBuf> {
     if let Ok(raw) = env::var("CLAUDE_CONFIG_DIR") {
         let explicit = raw
@@ -115,6 +161,9 @@ fn detect_claude_project_dirs() -> Vec<PathBuf> {
             .collect::<Vec<_>>();
 
         if !explicit.is_empty() {
+            for p in &explicit {
+                tracing::debug!(path = %p.display(), "Claude root (from CLAUDE_CONFIG_DIR)");
+            }
             return dedupe_paths(explicit);
         }
     }
@@ -123,6 +172,40 @@ fn detect_claude_project_dirs() -> Vec<PathBuf> {
     if roots.is_empty() {
         tracing::warn!("Could not determine home directory for Claude projects");
     }
+    for p in &roots {
+        tracing::debug!(path = %p.display(), "Claude root (default)");
+    }
+    dedupe_paths(roots)
+}
+
+fn detect_cursor_workspace_storage_dirs() -> Vec<PathBuf> {
+    if let Ok(raw) = env::var("CURSOR_USER_DIR") {
+        let explicit = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map(normalize_cursor_workspace_storage_dir)
+            .collect::<Vec<_>>();
+
+        if !explicit.is_empty() {
+            for p in &explicit {
+                tracing::debug!(path = %p.display(), "Cursor root (from CURSOR_USER_DIR)");
+            }
+            return dedupe_paths(explicit);
+        }
+    }
+
+    let mut roots = Vec::new();
+    if let Some(default_root) = crate::paths::cursor_workspace_storage_default() {
+        roots.push(default_root);
+    }
+    if roots.is_empty() {
+        tracing::warn!("Could not determine Cursor workspace storage directory");
+    }
+    for p in &roots {
+        tracing::debug!(path = %p.display(), "Cursor root (default)");
+    }
     dedupe_paths(roots)
 }
 
@@ -130,14 +213,18 @@ fn detect_codex_sessions_dir() -> PathBuf {
     if let Ok(raw) = env::var("CODEX_HOME") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
-            return normalize_codex_sessions_dir(PathBuf::from(trimmed));
+            let p = normalize_codex_sessions_dir(PathBuf::from(trimmed));
+            tracing::debug!(path = %p.display(), "Codex root (from CODEX_HOME)");
+            return p;
         }
     }
 
-    crate::paths::codex_sessions_default().unwrap_or_else(|| {
+    let p = crate::paths::codex_sessions_default().unwrap_or_else(|| {
         tracing::warn!("Could not determine home directory for Codex sessions");
         PathBuf::new()
-    })
+    });
+    tracing::debug!(path = %p.display(), "Codex root (default)");
+    p
 }
 
 #[cfg(test)]
@@ -163,6 +250,12 @@ mod tests {
         assert_eq!(
             UsageIntegrationSelection::parse("codex"),
             Some(UsageIntegrationSelection::Single(UsageIntegrationId::Codex))
+        );
+        assert_eq!(
+            UsageIntegrationSelection::parse("cursor"),
+            Some(UsageIntegrationSelection::Single(
+                UsageIntegrationId::Cursor
+            ))
         );
     }
 

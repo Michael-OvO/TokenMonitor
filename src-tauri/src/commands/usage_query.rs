@@ -11,7 +11,9 @@ use crate::usage::integrations::{
     all_usage_integrations, UsageIntegrationSelection, ALL_USAGE_INTEGRATIONS_ID,
 };
 use crate::usage::parser::UsageParser;
-use chrono::{Datelike, Local, NaiveDate};
+#[cfg(test)]
+use chrono::Datelike;
+use chrono::NaiveDate;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
 use tauri::State;
@@ -107,156 +109,79 @@ fn parser_payload_for_period(
     parser: &UsageParser,
     provider: &str,
     period: &str,
-    offset: i32,
+    bounds: &PeriodBounds,
 ) -> Result<UsagePayload, String> {
-    let now = Local::now();
-    let today = now.date_naive();
+    let since_str = bounds.start.format("%Y%m%d").to_string();
 
-    match period {
-        "5h" => {
-            let today_str = today.format("%Y%m%d").to_string();
-            Ok(parser.get_blocks(provider, &today_str))
-        }
-        "day" => {
-            let target = today + chrono::Duration::days(offset as i64);
-            let since_str = target.format("%Y%m%d").to_string();
-            let mut payload = parser.get_hourly(provider, &since_str);
-            payload.period_label = format_day_label(target);
-            payload.has_earlier_data = parser.has_entries_before(provider, target);
-            Ok(payload)
-        }
+    let mut payload = match period {
+        "5h" => parser.get_blocks(provider, &since_str),
+        "day" => parser.get_hourly(provider, &since_str),
         "week" => {
-            let current_monday =
-                today - chrono::Duration::days(now.weekday().num_days_from_monday() as i64);
-            let target_monday = current_monday + chrono::Duration::days((offset * 7) as i64);
-            let target_sunday = target_monday + chrono::Duration::days(6);
-            let since_str = target_monday.format("%Y%m%d").to_string();
-            let end_date = target_sunday + chrono::Duration::days(1);
-            let mut payload = parser.get_daily(provider, &since_str);
-            filter_buckets_to_range(&mut payload, target_monday, end_date);
-            pad_daily_buckets(&mut payload, target_monday, end_date);
-            payload.period_label = format_week_label(target_monday, target_sunday);
-            payload.has_earlier_data = parser.has_entries_before(provider, target_monday);
-            Ok(payload)
+            let mut p = parser.get_daily(provider, &since_str);
+            filter_buckets_to_range(&mut p, bounds.start, bounds.end);
+            pad_daily_buckets(&mut p, bounds.start, bounds.end);
+            p
         }
         "month" => {
-            let (year, month) = resolve_month_offset(now.year(), now.month(), offset);
-            let first_of_month = NaiveDate::from_ymd_opt(year, month, 1)
-                .ok_or_else(|| format!("Invalid month offset: year={year}, month={month}"))?;
-            let end_of_month = first_of_next_month(year, month)
-                .ok_or_else(|| format!("Invalid next month: year={year}, month={month}"))?;
-            let since_str = first_of_month.format("%Y%m%d").to_string();
-            let mut payload = parser.get_daily(provider, &since_str);
-            filter_buckets_to_range(&mut payload, first_of_month, end_of_month);
-            pad_daily_buckets(&mut payload, first_of_month, end_of_month);
-            payload.period_label = format_month_label(first_of_month);
-            payload.has_earlier_data = parser.has_entries_before(provider, first_of_month);
-            Ok(payload)
+            let mut p = parser.get_daily(provider, &since_str);
+            filter_buckets_to_range(&mut p, bounds.start, bounds.end);
+            pad_daily_buckets(&mut p, bounds.start, bounds.end);
+            p
         }
         "year" => {
-            let target_year = now.year() + offset;
-            let first_of_year = NaiveDate::from_ymd_opt(target_year, 1, 1).unwrap();
-            let end_of_year = NaiveDate::from_ymd_opt(target_year + 1, 1, 1).unwrap();
-            let since_str = first_of_year.format("%Y%m%d").to_string();
-            let mut payload = parser.get_monthly(provider, &since_str);
-            filter_buckets_to_range(&mut payload, first_of_year, end_of_year);
-            payload.period_label = format_year_label(target_year);
-            payload.has_earlier_data = parser.has_entries_before(provider, first_of_year);
-            Ok(payload)
-        }
-        _ => Err(format!("Unknown period: {period}")),
-    }
-}
-
-fn apply_period_context(
-    parser: &UsageParser,
-    payload: &mut UsagePayload,
-    provider: &str,
-    period: &str,
-    offset: i32,
-) -> Result<(), String> {
-    let now = Local::now();
-    let today = now.date_naive();
-
-    match period {
-        "5h" => {
-            payload.period_label.clear();
-            payload.has_earlier_data = false;
-        }
-        "day" => {
-            let target = today + chrono::Duration::days(offset as i64);
-            payload.period_label = format_day_label(target);
-            payload.has_earlier_data = parser.has_entries_before(provider, target);
-        }
-        "week" => {
-            let current_monday =
-                today - chrono::Duration::days(now.weekday().num_days_from_monday() as i64);
-            let target_monday = current_monday + chrono::Duration::days((offset * 7) as i64);
-            let target_sunday = target_monday + chrono::Duration::days(6);
-            payload.period_label = format_week_label(target_monday, target_sunday);
-            payload.has_earlier_data = parser.has_entries_before(provider, target_monday);
-        }
-        "month" => {
-            let (year, month) = resolve_month_offset(now.year(), now.month(), offset);
-            let first_of_month = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
-            payload.period_label = format_month_label(first_of_month);
-            payload.has_earlier_data = parser.has_entries_before(provider, first_of_month);
-        }
-        "year" => {
-            let target_year = now.year() + offset;
-            let first_of_year = NaiveDate::from_ymd_opt(target_year, 1, 1).unwrap();
-            payload.period_label = format_year_label(target_year);
-            payload.has_earlier_data = parser.has_entries_before(provider, first_of_year);
+            let mut p = parser.get_monthly(provider, &since_str);
+            filter_buckets_to_range(&mut p, bounds.start, bounds.end);
+            p
         }
         _ => return Err(format!("Unknown period: {period}")),
+    };
+
+    payload.period_label = bounds.period_label.clone();
+    if period != "5h" {
+        payload.has_earlier_data = parser.has_entries_before(provider, bounds.start);
     }
 
-    Ok(())
+    Ok(payload)
 }
 
 fn attach_local_stats(
     parser: &UsageParser,
     payload: &mut UsagePayload,
     provider: &str,
-    period: &str,
-    offset: i32,
+    bounds: &PeriodBounds,
 ) {
-    if let Some((start_date, end_date)) = compute_date_bounds(period, offset) {
-        let (mut entries, mut change_events, _reports) =
-            parser.load_entries(provider, Some(start_date));
+    let (mut entries, mut change_events, _reports) =
+        parser.load_entries(provider, Some(bounds.start));
 
-        change_events.retain(|event| {
-            let date = event.timestamp.date_naive();
-            date >= start_date && date < end_date
-        });
-        entries.retain(|entry| {
-            let date = entry.timestamp.date_naive();
-            date >= start_date && date < end_date
-        });
+    change_events.retain(|event| {
+        let date = event.timestamp.date_naive();
+        date >= bounds.start && date < bounds.end
+    });
+    entries.retain(|entry| {
+        let date = entry.timestamp.date_naive();
+        date >= bounds.start && date < bounds.end
+    });
 
-        payload.change_stats =
-            aggregate_change_stats(&change_events, payload.total_cost, payload.total_tokens);
-        for model in &mut payload.model_breakdown {
-            model.change_stats = aggregate_model_change_summary(&change_events, &model.model_key);
-        }
-
-        if period != "5h" && payload.usage_source == UsageSource::Parser {
-            payload.input_tokens = entries.iter().map(|entry| entry.input_tokens).sum();
-            payload.output_tokens = entries.iter().map(|entry| entry.output_tokens).sum();
-            payload.cache_read_tokens = entries.iter().map(|e| e.cache_read_tokens).sum();
-            payload.cache_write_5m_tokens =
-                entries.iter().map(|e| e.cache_creation_5m_tokens).sum();
-            payload.cache_write_1h_tokens =
-                entries.iter().map(|e| e.cache_creation_1h_tokens).sum();
-            payload.web_search_requests = entries.iter().map(|e| e.web_search_requests).sum();
-        }
-
-        payload.subagent_stats = crate::stats::subagent::aggregate_subagent_stats(
-            &entries,
-            &change_events,
-            payload.total_cost,
-        );
+    payload.change_stats =
+        aggregate_change_stats(&change_events, payload.total_cost, payload.total_tokens);
+    for model in &mut payload.model_breakdown {
+        model.change_stats = aggregate_model_change_summary(&change_events, &model.model_key);
     }
+
+    if payload.usage_source == UsageSource::Parser {
+        payload.input_tokens = entries.iter().map(|entry| entry.input_tokens).sum();
+        payload.output_tokens = entries.iter().map(|entry| entry.output_tokens).sum();
+        payload.cache_read_tokens = entries.iter().map(|e| e.cache_read_tokens).sum();
+        payload.cache_write_5m_tokens = entries.iter().map(|e| e.cache_creation_5m_tokens).sum();
+        payload.cache_write_1h_tokens = entries.iter().map(|e| e.cache_creation_1h_tokens).sum();
+        payload.web_search_requests = entries.iter().map(|e| e.web_search_requests).sum();
+    }
+
+    payload.subagent_stats = crate::stats::subagent::aggregate_subagent_stats(
+        &entries,
+        &change_events,
+        payload.total_cost,
+    );
 }
 
 fn final_usage_cache_key(provider: &str, period: &str, offset: i32) -> String {
@@ -271,19 +196,35 @@ async fn finalize_usage_payload(
     mut payload: UsagePayload,
 ) -> UsagePayload {
     payload.device_breakdown =
-        crate::commands::ssh::build_device_breakdown_for_payload(state, provider, period, offset)
-            .await;
+        crate::usage::device_aggregation::build_device_breakdown_for_payload(
+            state, provider, period, offset,
+        )
+        .await;
     payload.device_chart_buckets =
-        crate::commands::ssh::build_device_time_chart_buckets(state, provider, period, offset)
-            .await;
+        crate::usage::device_aggregation::build_device_time_chart_buckets(
+            state, provider, period, offset,
+        )
+        .await;
 
-    if let Some(included) =
-        crate::commands::ssh::build_included_devices_payload(state, provider, period, offset).await
+    if let Some(included) = crate::usage::device_aggregation::build_included_devices_payload(
+        state, provider, period, offset,
+    )
+    .await
     {
         payload = merge_payloads(payload, included);
     }
 
     payload
+}
+
+fn get_provider_chart_data(
+    parser: &UsageParser,
+    provider: &str,
+    period: &str,
+    offset: i32,
+) -> Result<UsagePayload, String> {
+    let bounds = resolve_period_bounds(period, offset)?;
+    parser_payload_for_period(parser, provider, period, &bounds)
 }
 
 pub(crate) fn get_provider_data(
@@ -298,10 +239,9 @@ pub(crate) fn get_provider_data(
         return Ok(cached);
     }
 
-    let mut payload = parser_payload_for_period(parser, provider, period, offset)?;
-
-    apply_period_context(parser, &mut payload, provider, period, offset)?;
-    attach_local_stats(parser, &mut payload, provider, period, offset);
+    let bounds = resolve_period_bounds(period, offset)?;
+    let mut payload = parser_payload_for_period(parser, provider, period, &bounds)?;
+    attach_local_stats(parser, &mut payload, provider, &bounds);
 
     // Store the complete payload so cache hits skip everything above.
     parser.store_cache(&cache_key, payload.clone());
@@ -462,6 +402,31 @@ pub async fn get_known_models(
         let model = crate::models::known_model_from_raw(&entry.model);
         models.entry(model.model_key.clone()).or_insert(model);
     }
+
+    // Also include models discovered from SSH remote caches.
+    if crate::usage::device_aggregation::provider_includes_remote_ssh_usage(&provider) {
+        let cache_guard = state.ssh_cache.read().await;
+        if let Some(mgr) = cache_guard.as_ref() {
+            let hosts = state.ssh_hosts.read().await;
+            for cfg in hosts.iter().filter(|c| c.enabled) {
+                if let Ok(records) = mgr.load_cached_records(&cfg.alias) {
+                    for record in &records {
+                        if record.model.starts_with('<') {
+                            continue;
+                        }
+                        if !crate::usage::device_aggregation::compact_record_matches_provider(
+                            record, &provider,
+                        ) {
+                            continue;
+                        }
+                        let model = crate::models::known_model_from_raw(&record.model);
+                        models.entry(model.model_key.clone()).or_insert(model);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(models.into_values().collect())
 }
 
@@ -510,7 +475,9 @@ pub(crate) async fn get_usage_data_inner(
 
     let payload = match selection {
         UsageIntegrationSelection::Single(integration_id) => {
-            let payload = get_provider_data(parser, provider, period, offset)?;
+            let mut payload = get_provider_data(parser, provider, period, offset)?;
+            payload.provider_detected =
+                Some(integration_id.detect_roots().iter().any(|r| r.exists()));
             set_last_usage_debug(
                 state,
                 UsageDebugReport {
@@ -530,12 +497,13 @@ pub(crate) async fn get_usage_data_inner(
             finalize_usage_payload(state, provider, period, offset, payload).await
         }
         UsageIntegrationSelection::All => {
+            let bounds = resolve_period_bounds(period, offset)?;
             let mut merged: Option<UsagePayload> = None;
             let mut queries = Vec::new();
 
             for integration_id in all_usage_integrations() {
                 let mut payload =
-                    get_provider_data(parser, integration_id.as_str(), period, offset)?;
+                    get_provider_chart_data(parser, integration_id.as_str(), period, offset)?;
                 if let Some(warning) = payload.usage_warning.take() {
                     payload.usage_warning =
                         Some(format!("{}: {warning}", integration_id.display_name()));
@@ -565,36 +533,8 @@ pub(crate) async fn get_usage_data_inner(
             )
             .await;
 
-            // Re-aggregate change stats and subagent stats from all providers' entries
-            // in a single load_entries call instead of two separate calls.
-            if let Some((start_date, end_date)) = compute_date_bounds(period, offset) {
-                let (mut all_entries, mut all_change_events, _) =
-                    parser.load_entries(ALL_USAGE_INTEGRATIONS_ID, Some(start_date));
-
-                all_change_events.retain(|event| {
-                    let date = event.timestamp.date_naive();
-                    date >= start_date && date < end_date
-                });
-                all_entries.retain(|entry| {
-                    let date = entry.timestamp.date_naive();
-                    date >= start_date && date < end_date
-                });
-
-                merged.change_stats = aggregate_change_stats(
-                    &all_change_events,
-                    merged.total_cost,
-                    merged.total_tokens,
-                );
-                for model in &mut merged.model_breakdown {
-                    model.change_stats =
-                        aggregate_model_change_summary(&all_change_events, &model.model_key);
-                }
-                merged.subagent_stats = crate::stats::subagent::aggregate_subagent_stats(
-                    &all_entries,
-                    &all_change_events,
-                    merged.total_cost,
-                );
-            }
+            // Aggregate stats once from all providers' entries.
+            attach_local_stats(parser, &mut merged, ALL_USAGE_INTEGRATIONS_ID, &bounds);
 
             finalize_usage_payload(state, provider, period, offset, merged).await
         }
@@ -842,7 +782,7 @@ mod tests {
     #[test]
     fn merge_payloads_marks_mixed_sources_and_combines_warnings() {
         let left = UsagePayload {
-            usage_source: UsageSource::Ccusage,
+            usage_source: UsageSource::Mixed,
             usage_warning: Some(String::from("Claude: fallback one")),
             ..UsagePayload::default()
         };

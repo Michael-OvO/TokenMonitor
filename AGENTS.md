@@ -2,9 +2,9 @@
 
 ## Project Structure & Module Organization
 
-`src/` contains the Svelte 5 frontend. `App.svelte` is the main shell, `lib/components/` holds UI components, `lib/stores/` manages app state and IPC-backed data loading, and `lib/utils/`, `lib/window/`, `lib/tray/`, and `lib/views/` contain focused helpers. Frontend tests live beside the code as `*.test.ts`.
+`src/` contains the Svelte 5 frontend. `App.svelte` is the main shell, `lib/components/` holds UI components, `lib/stores/` manages app state and IPC-backed data loading, `lib/permissions/` handles privacy surfaces and Keychain access, and `lib/utils/`, `lib/window/`, `lib/tray/`, and `lib/views/` contain focused helpers. Frontend tests live beside the code as `*.test.ts`.
 
-`src-tauri/` contains the Rust backend. `src/lib.rs` wires the app, `src/commands/` exposes Tauri commands, and modules such as `usage/`, `stats/`, `tray/`, `platform/`, and `rate_limits/` hold domain logic. Use `docs/` for design notes, `build/` for packaging scripts, and `scripts/` for release/setup helpers.
+`src-tauri/` contains the Rust backend. `src/lib.rs` wires the app, `src/commands/` exposes Tauri commands, and modules such as `usage/`, `stats/`, `tray/`, `platform/`, `rate_limits/`, `secrets/`, and `updater/` hold domain logic. `paths.rs` is the central filesystem path registry. Use `docs/` for design notes, `build/` for packaging scripts, and `scripts/` for release/setup helpers.
 
 ## Build, Test, and Development Commands
 
@@ -12,10 +12,12 @@
 - `npx tauri dev`: run the desktop app with the Svelte frontend and Rust backend together.
 - `npm run dev`: run the Vite frontend only.
 - `npm run build`: build the frontend into `dist/`.
-- `npx tauri build`: create production desktop bundles.
+- `npx tauri build`: create production desktop bundles (macOS DMG, Windows NSIS, Linux .deb/.AppImage).
 - `npm test`: run Vitest.
+- `npm run test:rust`: run Rust backend tests.
 - `npm run test:coverage`: generate V8 coverage in `coverage/`.
 - `npm run test:all`: run Rust and TypeScript tests together.
+- `npm run release -- X.Y.Z`: bump version in all 3 files, commit, tag, push.
 - `npx svelte-check`, `cargo fmt --manifest-path src-tauri/Cargo.toml --check`, `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`: match the main validation checks.
 
 ## Coding Style & Naming Conventions
@@ -24,7 +26,7 @@ Use 2-space indentation in TypeScript and Svelte, 4 spaces in Rust, double quote
 
 ## Testing Guidelines
 
-Use Vitest for frontend/unit tests and inline `#[cfg(test)]` modules for Rust. Add targeted tests when changing parsing, pricing, rate-limit logic, store behavior, or provider merges. Keep test files colocated with source and named `*.test.ts`.
+Use Vitest for frontend/unit tests and inline `#[cfg(test)]` modules for Rust. Add targeted tests when changing parsing, pricing, rate-limit logic, store behavior, provider merges, updater logic, or secret management. Keep test files colocated with source and named `*.test.ts`.
 
 ## Commit & Pull Request Guidelines
 
@@ -32,4 +34,4 @@ Prefer short, imperative commit subjects. Recent history favors prefixes like `f
 
 ## Configuration & Safety Notes
 
-This app is local-first and reads logs from paths like `~/.claude/projects/**` and `~/.codex/sessions/**`. Prefer config-aware paths over hardcoded user directories. Do not commit generated outputs such as `dist/`, `coverage/`, `src-tauri/target/`, `src-tauri/gen/`, or signing artifacts.
+This app is local-first and reads logs from paths like `~/.claude/projects/**`, `~/.codex/sessions/**`, and Cursor workspace storage. All filesystem paths the app reads are registered in `src-tauri/src/paths.rs`. Prefer config-aware paths over hardcoded user directories. Do not commit generated outputs such as `dist/`, `coverage/`, `src-tauri/target/`, `src-tauri/gen/`, or signing artifacts.

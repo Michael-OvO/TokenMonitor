@@ -35,6 +35,29 @@
   --o1: #6A8898;
   --o1mini: #7A9098;
   --codex: #4A8DB8;
+
+  /* Extended brand palette — same-family shades (deep/mid/soft) picked by
+     model version tier. Hue spread: 195 teal (GLM) → 205 GPT → 220 DeepSeek
+     → 230 Gemini → 245 Composer → 270 Kimi → 290 Qwen, all kept at similar
+     saturation/lightness so charts read as a unified palette. */
+  --gemini: #5B7FE8;
+  --gemini-mid: #7A95EC;
+  --gemini-soft: #9AABF0;
+  --glm: #3E9B52;
+  --glm-mid: #65B277;
+  --glm-soft: #93C9A0;
+  --deepseek: #3D6BB8;
+  --deepseek-mid: #5F86C8;
+  --deepseek-soft: #8AA5D8;
+  --composer: #6C7BDB;
+  --composer-mid: #8590E2;
+  --composer-soft: #A4AAEB;
+  --kimi: #8B6FD4;
+  --kimi-mid: #A48ADE;
+  --kimi-soft: #BFA8E8;
+  --qwen: #A466C0;
+  --qwen-mid: #B887CE;
+  --qwen-soft: #CCA8DC;
 }
 
 /* ── Dark theme (default) ── */
@@ -141,6 +164,18 @@
   --provider-bg: rgba(46,126,181,0.05);
 }
 
+/* ── Provider: Cursor (indigo) ── */
+[data-provider="cursor"] {
+  --accent: #6C7BDB;
+  --accent-soft: rgba(108,123,219,0.14);
+  --provider-bg: rgba(108,123,219,0.05);
+}
+[data-theme="light"][data-provider="cursor"] {
+  --accent: #4D5EBE;
+  --accent-soft: rgba(77,94,190,0.14);
+  --provider-bg: rgba(77,94,190,0.06);
+}
+
 /* ── System theme: follow OS preference ── */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
@@ -182,6 +217,11 @@
     --accent: #2E7EB5;
     --accent-soft: rgba(46,126,181,0.14);
     --provider-bg: rgba(46,126,181,0.05);
+  }
+  :root:not([data-theme])[data-provider="cursor"] {
+    --accent: #4D5EBE;
+    --accent-soft: rgba(77,94,190,0.14);
+    --provider-bg: rgba(77,94,190,0.06);
   }
 }
 
@@ -237,6 +277,9 @@
   :root[data-glass="true"]:not([data-theme])[data-provider="codex"] {
     --accent: #2E7EB5;
   }
+  :root[data-glass="true"]:not([data-theme])[data-provider="cursor"] {
+    --accent: #4D5EBE;
+  }
 }
 
 /* Glass dark mode: deeper accent colors for contrast against blurred bg */
@@ -247,6 +290,10 @@
 :root[data-glass="true"][data-theme="dark"][data-provider="codex"],
 :root[data-glass="true"]:not([data-theme])[data-provider="codex"] {
   --accent: #3D93C8;
+}
+:root[data-glass="true"][data-theme="dark"][data-provider="cursor"],
+:root[data-glass="true"]:not([data-theme])[data-provider="cursor"] {
+  --accent: #5667CF;
 }
 
 @keyframes popIn {
@@ -271,6 +318,35 @@
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* ── View entrance transitions ── */
+@keyframes viewFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes viewSlideInRight {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes viewSlideInLeft {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes contentFade {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}
+@keyframes skeletonShimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-hover) 50%, var(--surface-2) 75%);
+  background-size: 200% 100%;
+  animation: skeletonShimmer 1.5s ease-in-out infinite;
+  border-radius: 4px;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; }
@@ -300,6 +376,14 @@ html {
   isolation: isolate;
   -webkit-backface-visibility: hidden;
   backface-visibility: hidden;
+}
+:root[data-anchor="bottom"] #app {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+:root[data-anchor="top"] #app {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
 }
 
 body {
@@ -339,4 +423,10 @@ body {
   color: var(--t1);
   letter-spacing: -0.05px;
   padding: 4px 4px 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.group-label svg {
+  color: var(--t3);
 }

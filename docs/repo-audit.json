@@ -1,0 +1,501 @@
+{
+  "audit_metadata": {
+    "version": "1.2",
+    "timestamp": "2026-04-26T00:00:00+08:00",
+    "project": "TokenMonitor",
+    "scope": {
+      "total_files": 142,
+      "analyzed_files": 142,
+      "coverage_percent": 100
+    },
+    "tool": "repo-audit skill"
+  },
+  "summary": {
+    "total_findings": 24,
+    "by_severity": {
+      "high": 2,
+      "medium": 8,
+      "low": 10,
+      "info": 4
+    },
+    "by_priority": {
+      "P1_structure": 6,
+      "P2_logic": 5,
+      "P3_duplication": 4,
+      "P4_config": 2,
+      "P5_dead_code": 2,
+      "P6_hardcoded": 3,
+      "P7_dependency": 2
+    },
+    "actionable_by_tidy": 3,
+    "actionable_by_optimize": 10
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "priority": 1,
+      "category": "structure",
+      "severity": "high",
+      "location": "src-tauri/src/usage/parser.rs",
+      "description": "Monolithic parser: 5,578 lines handling Claude + Codex + Cursor parsing in a single file. Largest file by 3.7x.",
+      "suggestion": "Split into provider-specific parser files (cursor_parser.rs, codex_parser.rs) similar to existing claude_parser.rs.",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-002",
+      "priority": 1,
+      "category": "structure",
+      "severity": "medium",
+      "location": "src-tauri/src/commands/float_ball/",
+      "description": "Float ball module totals 1,786 lines across mod.rs (891) + layout.rs (895). Layout calculations tightly coupled with IPC.",
+      "suggestion": "Extract pure geometry/layout math into a standalone module testable without Tauri.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-003",
+      "priority": 1,
+      "category": "structure",
+      "severity": "medium",
+      "location": "src/lib/components/FloatBall.svelte",
+      "description": "Largest Svelte component at 985 lines, mixing drag interaction, layout, animation, and IPC.",
+      "suggestion": "Decompose into sub-components (FloatBallDrag, FloatBallExpanded, FloatBallLayout).",
+      "confidence": 0.75,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-004",
+      "priority": 1,
+      "category": "structure",
+      "severity": "low",
+      "location": "src/App.svelte",
+      "description": "963 lines with significant business logic mixed with view routing.",
+      "suggestion": "Extract handler functions into a dedicated module (e.g., lib/appHandlers.ts).",
+      "confidence": 0.70,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-005",
+      "priority": 1,
+      "category": "structure",
+      "severity": "medium",
+      "location": "tmp/",
+      "description": "4 development artifacts (bedrock_usage.py, compare_usage.py, etc.) tracked in git, not part of the build.",
+      "suggestion": "Add tmp/ to .gitignore, remove from tracking with git rm --cached tmp/.",
+      "confidence": 0.95,
+      "status": "confirmed",
+      "actionable_by_tidy": true,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-006",
+      "priority": 1,
+      "category": "structure",
+      "severity": "low",
+      "location": "archive/ccusage.rs",
+      "description": "32KB legacy file tracked in git. Not referenced by any build or source file.",
+      "suggestion": "Document purpose or move to a separate branch; add archive/ to .gitignore if purely historical.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": true,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-007",
+      "priority": 2,
+      "category": "logic",
+      "severity": "medium",
+      "location": "src-tauri/src/ (328 calls)",
+      "description": "328 unwrap() calls across the Rust codebase. Several in I/O paths where panics crash the app.",
+      "suggestion": "Audit unwrap() calls in I/O-facing code; replace with ? or .unwrap_or_default().",
+      "confidence": 0.75,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-008",
+      "priority": 2,
+      "category": "logic",
+      "severity": "medium",
+      "location": "src-tauri/src/updater/",
+      "description": "7 #[allow(dead_code)] in scheduler.rs + 4 in state.rs suggest incomplete updater implementation.",
+      "suggestion": "Audit dead code: remove if truly unused, or document if planned for future use.",
+      "confidence": 0.70,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-009",
+      "priority": 2,
+      "category": "logic",
+      "severity": "low",
+      "location": "src/ (15 instances)",
+      "description": "15 silent .catch(() => {}) blocks swallow errors without logging.",
+      "suggestion": "Replace with .catch((e) => logger.debug('context', e)) for debug visibility.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-010",
+      "priority": 2,
+      "category": "logic",
+      "severity": "low",
+      "location": "src-tauri/src/usage/parser.rs",
+      "description": "8 #[allow(dead_code)] annotations, mostly on test helper structs and cache fields.",
+      "suggestion": "Clean up: remove annotations if items are used in tests; delete truly dead items.",
+      "confidence": 0.75,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-011",
+      "priority": 2,
+      "category": "logic",
+      "severity": "info",
+      "location": "src-tauri/src/lib.rs:439",
+      "description": "background_loop() at 126 lines orchestrates 5 concerns: rate limits, pricing, exchange rates, SSH sync, archival.",
+      "suggestion": "Consider splitting into focused async tasks coordinated by the main loop.",
+      "confidence": 0.70,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-012",
+      "priority": 3,
+      "category": "duplication",
+      "severity": "medium",
+      "location": "src-tauri/src/rate_limits/",
+      "description": "claude.rs, cursor.rs, codex.rs each independently implement HTTP fetch + parse + convert patterns.",
+      "suggestion": "Extract a shared trait or helper for rate-limit fetch/parse.",
+      "confidence": 0.75,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-013",
+      "priority": 3,
+      "category": "duplication",
+      "severity": "low",
+      "location": "src-tauri/src/usage/litellm.rs + openrouter.rs + exchange_rates.rs",
+      "description": "Three files implement similar fetch-parse-cache-with-TTL patterns for external data.",
+      "suggestion": "Consolidate into a generic cached-remote-resource helper.",
+      "confidence": 0.70,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-014",
+      "priority": 3,
+      "category": "duplication",
+      "severity": "low",
+      "location": "src/lib/components/Settings.svelte",
+      "description": "8+ similar toggle handler functions following try/invoke/updateSetting/catch pattern.",
+      "suggestion": "Extract a generic handleSettingsToggle(command, settingKey, value) helper.",
+      "confidence": 0.75,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-015",
+      "priority": 3,
+      "category": "duplication",
+      "severity": "low",
+      "location": "src-tauri/src/usage/parser.rs:5320-5492",
+      "description": "4 nearly identical Cursor API POST requests to different endpoints.",
+      "suggestion": "Refactor into an endpoint-list iteration with a shared request builder.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-016",
+      "priority": 4,
+      "category": "config",
+      "severity": "high",
+      "location": "package-lock.json",
+      "description": "Lockfile version is 0.10.6 but package.json is 0.11.1. npm ci in CI installs stale deps.",
+      "suggestion": "Run npm install to regenerate package-lock.json, commit the updated file.",
+      "confidence": 0.95,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-017",
+      "priority": 4,
+      "category": "config",
+      "severity": "low",
+      "location": "tsconfig.json",
+      "description": "noUnusedLocals and noUnusedParameters both set to false — permissive settings.",
+      "suggestion": "Set both to true and clean up resulting errors.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-018",
+      "priority": 5,
+      "category": "dead_code",
+      "severity": "medium",
+      "location": "src-tauri/src/ (33 annotations)",
+      "description": "33 #[allow(dead_code)] annotations. Heaviest in updater/scheduler.rs (7), usage/parser.rs (8), updater/state.rs (4).",
+      "suggestion": "Audit each annotation: remove if item is used in tests; delete if truly dead.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-019",
+      "priority": 5,
+      "category": "dead_code",
+      "severity": "low",
+      "location": "src-tauri/src/usage/mod.rs:1",
+      "description": "Module-level #[allow(dead_code)] blanket-suppresses warnings for entire usage module tree.",
+      "suggestion": "Remove blanket annotation; add targeted #[allow(dead_code)] only where needed.",
+      "confidence": 0.85,
+      "status": "confirmed",
+      "actionable_by_tidy": true,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-020",
+      "priority": 6,
+      "category": "hardcoded",
+      "severity": "medium",
+      "location": "src-tauri/src/ (7 files)",
+      "description": "13+ hardcoded API URLs scattered across 7 Rust files.",
+      "suggestion": "Centralize external URLs into a config.rs or constants module.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-021",
+      "priority": 6,
+      "category": "hardcoded",
+      "severity": "low",
+      "location": "src-tauri/src/lib.rs",
+      "description": "Background loop cycle constants (SSH=10, rate_limit=5, pricing=120) are local const in function body.",
+      "suggestion": "Move to a central configuration module or make configurable.",
+      "confidence": 0.70,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-022",
+      "priority": 6,
+      "category": "hardcoded",
+      "severity": "low",
+      "location": "src/lib/components/SplashScreen.svelte",
+      "description": "Splash screen minimum display time hardcoded to 2900ms.",
+      "suggestion": "Extract to a named constant or make configurable.",
+      "confidence": 0.60,
+      "status": "unresolved",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-023",
+      "priority": 7,
+      "category": "dependency",
+      "severity": "info",
+      "location": "package.json",
+      "description": "All dependencies use appropriate caret ranges. No outdated or deprecated packages.",
+      "suggestion": "No action needed.",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-024",
+      "priority": 7,
+      "category": "dependency",
+      "severity": "info",
+      "location": "src-tauri/Cargo.toml",
+      "description": "Rust dependencies are current with appropriate platform-specific feature flags.",
+      "suggestion": "No action needed.",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    }
+  ],
+  "dependency_map": {
+    "hub_files": [
+      {
+        "file": "src-tauri/src/usage/parser.rs",
+        "role": "Central parser engine",
+        "imported_by": ["usage_query", "calendar", "device_aggregation", "ssh", "archive", "lib.rs"]
+      },
+      {
+        "file": "src-tauri/src/models.rs",
+        "role": "Shared payload types",
+        "imported_by": ["nearly all Rust modules"]
+      },
+      {
+        "file": "src-tauri/src/commands.rs",
+        "role": "AppState + IPC hub",
+        "imported_by": ["all command submodules", "lib.rs"]
+      },
+      {
+        "file": "src/lib/types/index.ts",
+        "role": "Shared TS interfaces",
+        "imported_by": ["12+ frontend files"]
+      },
+      {
+        "file": "src/lib/stores/settings.ts",
+        "role": "Settings store",
+        "imported_by": ["12+ components"]
+      },
+      {
+        "file": "src/lib/providerMetadata.ts",
+        "role": "Provider definitions",
+        "imported_by": ["6+ files"]
+      }
+    ],
+    "orphan_files": [
+      {"file": "tmp/bedrock_usage.py", "notes": "Dev artifact, not imported anywhere"},
+      {"file": "tmp/bedrock_usage_report.json", "notes": "Dev artifact"},
+      {"file": "tmp/compare_usage.py", "notes": "Dev artifact"},
+      {"file": "tmp/usage_comparison.json", "notes": "Dev artifact"},
+      {"file": "archive/ccusage.rs", "notes": "Legacy code, not part of build"}
+    ],
+    "circular_dependencies": []
+  },
+  "tidy_recommendations": [
+    {
+      "finding_id": "F-005",
+      "action": "untrack",
+      "targets": ["tmp/bedrock_usage.py", "tmp/bedrock_usage_report.json", "tmp/compare_usage.py", "tmp/usage_comparison.json"],
+      "description": "Remove tmp/ artifacts from git tracking and add to .gitignore"
+    },
+    {
+      "finding_id": "F-006",
+      "action": "review_and_archive",
+      "targets": ["archive/ccusage.rs"],
+      "description": "Review legacy file: document purpose or remove from tracking"
+    },
+    {
+      "finding_id": "F-019",
+      "action": "edit",
+      "targets": ["src-tauri/src/usage/mod.rs"],
+      "description": "Remove blanket #[allow(dead_code)] annotation"
+    }
+  ],
+  "optimize_recommendations": {
+    "files_to_optimize": [
+      {
+        "finding_id": "F-001",
+        "file": "src-tauri/src/usage/parser.rs",
+        "dimension": "structure",
+        "line_range": "1-5578",
+        "description": "Split monolithic parser into provider-specific files"
+      },
+      {
+        "finding_id": "F-003",
+        "file": "src/lib/components/FloatBall.svelte",
+        "dimension": "structure",
+        "line_range": "1-985",
+        "description": "Decompose into sub-components"
+      },
+      {
+        "finding_id": "F-004",
+        "file": "src/App.svelte",
+        "dimension": "structure",
+        "line_range": "1-963",
+        "description": "Extract handler functions into dedicated module"
+      },
+      {
+        "finding_id": "F-009",
+        "file": "src/",
+        "dimension": "logic",
+        "line_range": "multiple",
+        "description": "Replace 15 silent .catch(() => {}) with debug logging"
+      },
+      {
+        "finding_id": "F-014",
+        "file": "src/lib/components/Settings.svelte",
+        "dimension": "duplication",
+        "line_range": "multiple",
+        "description": "Extract generic settings toggle handler"
+      },
+      {
+        "finding_id": "F-015",
+        "file": "src-tauri/src/usage/parser.rs",
+        "dimension": "duplication",
+        "line_range": "5320-5492",
+        "description": "Refactor repeated Cursor API calls into endpoint iteration"
+      },
+      {
+        "finding_id": "F-020",
+        "file": "src-tauri/src/",
+        "dimension": "hardcoded",
+        "line_range": "multiple",
+        "description": "Centralize 13+ hardcoded API URLs into constants module"
+      },
+      {
+        "finding_id": "F-021",
+        "file": "src-tauri/src/lib.rs",
+        "dimension": "hardcoded",
+        "line_range": "453-459",
+        "description": "Move background loop cycle constants to configuration"
+      }
+    ],
+    "duplication_groups": [
+      {
+        "finding_id": "F-012",
+        "files": [
+          "src-tauri/src/rate_limits/claude.rs",
+          "src-tauri/src/rate_limits/cursor.rs",
+          "src-tauri/src/rate_limits/codex.rs"
+        ],
+        "pattern": "HTTP fetch + parse + convert to RateLimitWindow",
+        "suggestion": "Extract shared trait or helper for rate-limit provider fetch/parse"
+      },
+      {
+        "finding_id": "F-013",
+        "files": [
+          "src-tauri/src/usage/litellm.rs",
+          "src-tauri/src/usage/openrouter.rs",
+          "src-tauri/src/usage/exchange_rates.rs"
+        ],
+        "pattern": "Fetch external data + parse + cache with TTL",
+        "suggestion": "Consolidate into generic cached-remote-resource helper"
+      }
+    ]
+  },
+  "questions": {
+    "resolved": [],
+    "unresolved": [
+      {
+        "finding_id": "F-022",
+        "question": "Splash screen 2900ms minimum display time — is this an intentional branding choice or should it be shorter/configurable?",
+        "confidence": 0.60
+      }
+    ]
+  }
+}

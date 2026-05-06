@@ -14,6 +14,7 @@
     "core:window:allow-set-position",
     "core:window:allow-set-effects",
     "core:window:allow-set-theme",
+    "core:window:allow-set-background-color",
     "positioner:default",
     "store:default",
     "autostart:default",
@@ -21,7 +22,10 @@
     "notification:allow-is-permission-granted",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "https://github.com/Michael-OvO/TokenMonitor/releases/**" }]
+      "allow": [
+        { "url": "https://github.com/Michael-OvO/TokenMonitor/releases/**" },
+        { "url": "https://cursor.com/dashboard" }
+      ]
     }
   ]
 }

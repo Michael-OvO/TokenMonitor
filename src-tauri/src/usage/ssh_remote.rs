@@ -1,3 +1,4 @@
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use tokio::process::Command;
@@ -76,6 +77,13 @@ pub struct CompactUsageRecord {
     pub speed: Option<String>,
 }
 
+fn compact_record_key(r: &CompactUsageRecord) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        r.ts, r.model, r.input_tokens, r.output_tokens
+    )
+}
+
 /// Test SSH connectivity to a host using `ssh <host> echo ok`.
 pub async fn test_connection(alias: &str) -> SshTestResult {
     let start = std::time::Instant::now();
@@ -139,9 +147,12 @@ pub async fn test_connection(alias: &str) -> SshTestResult {
 
 /// Build the remote extraction script.
 ///
-/// The script searches `~/.claude/projects/` and `~/.config/claude/projects/`
-/// for .jsonl files, extracts assistant entries with usage data, and outputs
-/// compact JSON records.
+/// The script auto-discovers Claude project directories on the remote host:
+/// 1. All `~/.claude*/projects/` directories (covers `.claude`, `.claude-code`, etc.)
+/// 2. `$XDG_CONFIG_HOME/claude/projects/` (or `~/.config/claude/projects/`)
+/// 3. Any additional directories listed in the remote `$CLAUDE_CONFIG_DIR` env var
+///    for .jsonl files, extracts assistant entries with usage data, and outputs
+///    compact JSON records.
 fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) -> String {
     let newer_filter = claude_since
         .map(|ts| format!(" -newer /tmp/.tm-marker-{ts}"))
@@ -151,11 +162,33 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
         .map(|ts| format!("touch -d @{ts} /tmp/.tm-marker-{ts} 2>/dev/null; "))
         .unwrap_or_default();
 
-    // Claude: search both config locations.
+    // Claude: auto-discover all directories that look like Claude config roots.
+    // 1. Glob ~/.claude* for any dir with a projects/ subdir (covers .claude,
+    //    .claude-code, etc.)
+    // 2. Check XDG config dir
+    // 3. Source shell rc files and honour $CLAUDE_CONFIG_DIR (comma-separated)
     let claude_find = format!(
-        "for d in ~/.claude/projects ~/.config/claude/projects; do \
-           [ -d \"$d\" ] && find \"$d\" -name '*.jsonl'{newer_filter} -type f 2>/dev/null; \
-         done"
+        "{{ \
+           for f in ~/.bashrc ~/.bash_profile ~/.profile ~/.zshrc; do \
+             [ -f \"$f\" ] && . \"$f\" 2>/dev/null; \
+           done; \
+           _TM_DIRS=''; \
+           for _cd in \"$HOME\"/.claude*; do \
+             [ -d \"$_cd/projects\" ] && _TM_DIRS=\"$_TM_DIRS $_cd/projects\"; \
+           done; \
+           _xdg=\"${{XDG_CONFIG_HOME:-$HOME/.config}}/claude/projects\"; \
+           [ -d \"$_xdg\" ] && _TM_DIRS=\"$_TM_DIRS $_xdg\"; \
+           if [ -n \"$CLAUDE_CONFIG_DIR\" ]; then \
+             IFS=','; for _cd in $CLAUDE_CONFIG_DIR; do \
+               _cd=$(echo \"$_cd\" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); \
+               [ -z \"$_cd\" ] && continue; \
+               case \"$_cd\" in */projects) _TM_DIRS=\"$_TM_DIRS $_cd\" ;; *) _TM_DIRS=\"$_TM_DIRS $_cd/projects\" ;; esac; \
+             done; unset IFS; \
+           fi; \
+           for d in $_TM_DIRS; do \
+             find \"$d\" -name '*.jsonl'{newer_filter} -type f 2>/dev/null; \
+           done; \
+         }}"
     );
 
     // Codex: search session directory.
@@ -164,7 +197,7 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
     // permanently skip them once Claude data advances the sync timestamp.
     // We always find ALL Codex files and filter by timestamp in the Python
     // extraction script instead.
-    let codex_find = "for d in ~/.codex/sessions; do \
+    let codex_find = "for d in ~/.codex*; do \\
            [ -d \"$d\" ] && find \"$d\" -name '*.jsonl' -type f 2>/dev/null; \
          done"
         .to_string();
@@ -173,16 +206,23 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
     // Rust's trailing-backslash line continuation eating the leading spaces.
     let claude_py = concat!(
         "import json,sys\n",
+        "seen=set()\n",
         "for f in sys.argv[1:]:\n",
         " try:\n",
         "  for line in open(f):\n",
         "   try:\n",
         "    d=json.loads(line)\n",
         "    if d.get('type')=='assistant':\n",
-        "     u=d.get('message',{}).get('usage')\n",
+        "     msg=d.get('message',{})\n",
+        "     mid=msg.get('id','')\n",
+        "     rid=d.get('requestId','')\n",
+        "     dk=mid+':'+rid if rid else mid\n",
+        "     if dk and dk in seen:continue\n",
+        "     if dk:seen.add(dk)\n",
+        "     u=msg.get('usage')\n",
         "     if u:\n",
         "      r={'ts':d.get('timestamp',''),",
-        "'m':d.get('message',{}).get('model',''),",
+        "'m':msg.get('model',''),",
         "'in':u.get('input_tokens',0),",
         "'out':u.get('output_tokens',0),",
         "'c5':u.get('cache_creation_input_tokens',0),",
@@ -261,15 +301,7 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
          CODEX_FILES=$({codex_find}); \
          [ -z \"$CLAUDE_FILES\" ] && [ -z \"$CODEX_FILES\" ] && exit 0; \
          if [ -n \"$CLAUDE_FILES\" ]; then \
-           if command -v jq >/dev/null 2>&1; then \
-             echo \"$CLAUDE_FILES\" | xargs jq -c 'select(.type==\"assistant\" and .message.usage) | \
-               {{ts:.timestamp, m:.message.model, \
-                 \"in\":.message.usage.input_tokens, \
-                 out:.message.usage.output_tokens, \
-                 c5:(.message.usage.cache_creation_input_tokens // 0), \
-                 cr:(.message.usage.cache_read_input_tokens // 0)}} + \
-                 (if .message.usage.speed == \"fast\" then {{sp:\"fast\"}} else {{}} end)'; \
-           elif command -v python3 >/dev/null 2>&1; then \
+           if command -v python3 >/dev/null 2>&1; then \
              echo \"$CLAUDE_FILES\" | tr '\\n' '\\0' | xargs -0 python3 -c \"{claude_py}\"; \
            else \
              echo \"$CLAUDE_FILES\" | xargs grep -lh '\"usage\"' 2>/dev/null | xargs grep -h '\"assistant\"' 2>/dev/null; \
@@ -482,6 +514,14 @@ impl SshCacheManager {
         }
     }
 
+    pub fn reset_all_caches(&self) {
+        if self.base_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&self.base_dir) {
+                tracing::warn!("Failed to remove remote cache dir {:?}: {e}", self.base_dir);
+            }
+        }
+    }
+
     /// Get the cache directory for a specific host.
     ///
     /// Validates that the resolved path stays within `base_dir` to prevent
@@ -654,18 +694,39 @@ impl SshCacheManager {
             return Ok(0);
         }
 
-        // Append new records to the cache file.
+        // Append new records to the cache file, deduplicating against existing cache.
         let cache_path = self.usage_cache_path(alias)?;
         let dir = self.host_cache_dir(alias)?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
 
+        // Build a set of existing record keys for dedup.
+        let mut existing_keys = std::collections::HashSet::new();
+        if let Ok(file) = std::fs::File::open(&cache_path) {
+            for line in std::io::BufReader::new(file).lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                if let Ok(r) = serde_json::from_str::<CompactUsageRecord>(&line) {
+                    existing_keys.insert(compact_record_key(&r));
+                }
+            }
+        }
+
         let mut lines = String::new();
         let mut has_claude = false;
         let mut has_codex = false;
+        let mut new_count = 0u32;
         for record in &records {
+            let key = compact_record_key(record);
+            if existing_keys.contains(&key) {
+                continue;
+            }
+            existing_keys.insert(key);
             if let Ok(json) = serde_json::to_string(record) {
                 lines.push_str(&json);
                 lines.push('\n');
+                new_count += 1;
             }
             // Detect provider by model family.
             use crate::models::{detect_model_family, ModelFamily};
@@ -695,32 +756,36 @@ impl SshCacheManager {
             self.set_last_sync(alias, "codex")?;
         }
 
-        Ok(records.len() as u32)
+        Ok(new_count)
     }
 
     /// Count cached records without parsing JSON (line count).
     pub fn count_cached_records(&self, alias: &str) -> Result<u32, String> {
         let cache_path = self.usage_cache_path(alias)?;
-        let content = match std::fs::read_to_string(&cache_path) {
-            Ok(c) => c,
+        let file = match std::fs::File::open(&cache_path) {
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(format!("Failed to read cache for {alias}: {e}")),
         };
-        Ok(content.lines().filter(|l| !l.trim().is_empty()).count() as u32)
+        let count = std::io::BufReader::new(file)
+            .lines()
+            .filter(|l| l.as_ref().is_ok_and(|s| !s.trim().is_empty()))
+            .count() as u32;
+        Ok(count)
     }
 
     /// Load all cached compact records for a host.
     pub fn load_cached_records(&self, alias: &str) -> Result<Vec<CompactUsageRecord>, String> {
         let cache_path = self.usage_cache_path(alias)?;
-        let content = match std::fs::read_to_string(&cache_path) {
-            Ok(c) => c,
+        let file = match std::fs::File::open(&cache_path) {
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(format!("Failed to read cache for {alias}: {e}")),
         };
-
-        Ok(content
+        Ok(std::io::BufReader::new(file)
             .lines()
-            .filter_map(|line| serde_json::from_str::<CompactUsageRecord>(line).ok())
+            .map_while(Result::ok)
+            .filter_map(|line| serde_json::from_str::<CompactUsageRecord>(&line).ok())
             .collect())
     }
 }
