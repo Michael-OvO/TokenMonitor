@@ -1,0 +1,468 @@
+ecl_version: "1.0"
+feature: "architecture-refactor"
+status: phase-6-complete
+created: 2026-04-26
+updated: 2026-04-26
+
+prompt_calibration:
+  raw_input: "请你规划重构 (based on repo-audit findings F-001, F-003, F-004, F-012, F-013)"
+  intent_decomposition:
+    total_intents: 5
+    total_tracks: 4
+    tracks:
+      - track_id: T1
+        name: "parser.rs provider split"
+        priority: 1
+      - track_id: T2
+        name: "FloatBall.svelte decomposition"
+        priority: 2
+      - track_id: T3
+        name: "App.svelte event listener extraction"
+        priority: 3
+      - track_id: T4
+        name: "Rust DiskCache abstraction"
+        priority: 4
+
+decisions:
+  - id: DEC-001
+    date: 2026-04-26
+    decision: "T1: Direct import path changes, no re-exports from parser.rs"
+    rationale: "Cleaner dependency graph; re-exports add an indirection layer"
+  - id: DEC-002
+    date: 2026-04-26
+    decision: "T2: Extract to .ts modules, not sub-components"
+    rationale: "Drag/layout/expand are tightly coupled via shared state"
+  - id: DEC-003
+    date: 2026-04-26
+    decision: "T3: Only extract event listener wiring, skip handler extraction"
+    rationale: "All handlers depend on reactive $state. Even loadInitialData/enableRateLimits capture closure state — injection overhead exceeds readability gain (Phase 5 Finding 8)"
+  - id: DEC-004
+    date: 2026-04-26
+    decision: "T4: DiskCache<T> only — disk read/write + TTL check. No fetch abstraction"
+    rationale: "litellm multi-source merge and exchange_rates global static make fetch logic too divergent to unify (Phase 5 Finding 5)"
+  - id: DEC-005
+    date: 2026-04-26
+    decision: "UsageParser methods stay in parser.rs as thin wrappers"
+    rationale: "They are &self methods on UsageParser which is defined in parser.rs. Cannot move to separate files. (Phase 5 Finding 2)"
+  - id: DEC-006
+    date: 2026-04-26
+    decision: "Rename CodexParseResult → SessionParseResult, keep in parser.rs"
+    rationale: "Used by both Cursor and Codex — provider modules should not depend on each other (Phase 5 Finding 3)"
+  - id: DEC-007
+    date: 2026-04-26
+    decision: "T2 scope narrowed: only extract pure state transitions and computations"
+    rationale: "Async IPC + Svelte $state mutations must stay in .svelte. Extracted modules return command objects (Phase 5 Finding 4)"
+  - id: DEC-008
+    date: 2026-04-26
+    decision: "Test partitioning: unit tests of free functions move, UsageParser integration tests stay"
+    rationale: "Phase 5 Finding 7 — cross-provider integration tests exercise UsageParser methods"
+
+adversarial_findings:
+  phase: 5
+  total_findings: 10
+  findings:
+    - id: AF-001
+      severity: critical
+      target: REQ-001
+      description: "Cursor statics create cross-subsystem dependency with rate_limits/cursor.rs"
+      resolution: "Move all Cursor code (including statics) to cursor_parser.rs. rate_limits/cursor.rs changes import path — no circularity."
+      status: resolved
+    - id: AF-002
+      severity: critical
+      target: [REQ-001, REQ-002]
+      description: "UsageParser &self methods cannot move to separate files"
+      resolution: "Keep as thin wrappers in parser.rs. Free functions in new modules receive data as parameters."
+      status: resolved
+    - id: AF-003
+      severity: high
+      target: [REQ-001, REQ-002]
+      description: "CodexParseResult type alias shared between Cursor and Codex"
+      resolution: "Rename to SessionParseResult, keep in parser.rs as shared type"
+      status: resolved
+    - id: AF-004
+      severity: high
+      target: REQ-005
+      description: "Drag state machine extraction breaks Svelte 5 reactivity"
+      resolution: "Narrow scope: extract pure logic only, return command objects. Keep $state mutations in .svelte"
+      status: resolved
+    - id: AF-005
+      severity: high
+      target: REQ-009
+      description: "CachedFetch<T> cannot unify divergent caching semantics"
+      resolution: "Narrow to DiskCache<T> (disk ops + TTL only). Each module owns its own fetch logic"
+      status: resolved
+    - id: AF-006
+      severity: medium
+      target: REQ-003
+      description: "Plan misses extract_diff_paths/split_patch_by_file duplication"
+      resolution: "Diff utilities stay in parser.rs as pub(crate), move with codex code if exclusively used by codex"
+      status: resolved
+    - id: AF-007
+      severity: medium
+      target: REQ-004
+      description: "Cross-provider integration tests have no partitioning rule"
+      resolution: "Rule: free function unit tests move; UsageParser integration tests stay in parser.rs"
+      status: resolved
+    - id: AF-008
+      severity: medium
+      target: [REQ-007, REQ-008]
+      description: "loadInitialData/enableRateLimits depend on closure state and $state"
+      resolution: "Drop REQ-007 entirely. Only REQ-008 (event listener wiring) survives"
+      status: resolved
+    - id: AF-009
+      severity: medium
+      target: REQ-001
+      description: "SQL interpolation in read_cursor_state_value_from_sqlite3"
+      resolution: "Add debug_assert guard as improvement item, not a blocker"
+      status: noted
+    - id: AF-010
+      severity: low
+      target: REQ-006
+      description: "Move queue RAF lifecycle and testing underspecified"
+      resolution: "Specify RAF injection deps and 3 unit tests in acceptance criteria"
+      status: resolved
+
+requirements:
+  # ── T1: parser.rs split ──
+  - id: REQ-001
+    track: T1
+    text: "Cursor parsing code lives in a dedicated cursor_parser.rs file"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "All Cursor-specific types, enums, constants, statics (~L1050-1084) moved"
+      - "All Cursor-specific free functions (~L1086-2046) moved"
+      - "cursor_parser.rs imports ParsedEntry, ProviderReadDebug, SessionParseResult, glob_jsonl_files, modified_since, path_to_string, push_sample_path from super::parser"
+      - "UsageParser::load_cursor_entries_with_debug stays in parser.rs as thin wrapper calling cursor_parser free functions"
+      - "commands/config.rs imports updated from usage::parser to usage::cursor_parser (~12 occurrences)"
+      - "rate_limits/cursor.rs import updated for read_cursor_ide_access_token"
+      - "lib.rs import updated for prime_ide_access_token"
+      - "cargo test passes, cargo clippy -- -D warnings clean"
+    decomposition:
+      features: [FEAT-001, FEAT-002]
+
+  - id: REQ-002
+    track: T1
+    text: "Codex parsing code lives in a dedicated codex_parser.rs file"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "CodexJsonlEntry, CodexRawUsage structs moved"
+      - "All codex_* free functions moved (~L339-953)"
+      - "Diff utilities (extract_diff_paths, split_patch_by_file) moved with codex code"
+      - "codex_parser.rs imports shared types from super::parser"
+      - "read_codex_entries/read_codex_entries_with_debug become pub entry points in codex_parser.rs"
+      - "UsageParser::load_codex_entries_with_debug stays in parser.rs as thin wrapper"
+      - "cargo test passes, cargo clippy -- -D warnings clean"
+    decomposition:
+      features: [FEAT-003, FEAT-004]
+
+  - id: REQ-003
+    track: T1
+    text: "Shared types are provider-neutral and accessible to all parser modules"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "CodexParseResult renamed to SessionParseResult in parser.rs"
+      - "count_diff_lines exists in exactly one location (parser.rs pub(crate))"
+      - "claude_parser.rs removes its duplicate and imports from parser"
+      - "codex_parser.rs imports count_diff_lines from parser"
+    decomposition:
+      features: [FEAT-005]
+
+  - id: REQ-004
+    track: T1
+    text: "Provider-specific tests move with their code"
+    status: verified
+    confidence: 0.9
+    acceptance_criteria:
+      - "Rule: unit tests of free functions move; UsageParser integration tests stay"
+      - "Cursor free-function tests (~16 tests like classify_cursor_secret_*) move to cursor_parser.rs"
+      - "path_a_smoke module moves to cursor_parser.rs"
+      - "Codex free-function tests move to codex_parser.rs"
+      - "UsageParser integration tests (daily_aggregation_*, has_entries_before_*) stay in parser.rs"
+      - "debug_compare stays in parser.rs (cross-provider comparison)"
+      - "Shared test helpers (write_file) stay in parser.rs or become pub(crate)"
+      - "Total test count unchanged: cargo test passes with same count"
+    decomposition:
+      features: [FEAT-006]
+
+  # ── T2: FloatBall decomposition ──
+  - id: REQ-005
+    track: T2
+    text: "FloatBall pure drag logic extracted to TypeScript module"
+    status: verified
+    confidence: 0.85
+    acceptance_criteria:
+      - "floatBallDragMachine.ts contains: pointer classification, drag threshold detection, drag coordinate computation"
+      - "No Svelte imports, no invoke() calls, no $state access in extracted module"
+      - "Returns typed command objects (InitDragCommand, MoveDragCommand, EndDragCommand)"
+      - "FloatBall.svelte onPointer* handlers call drag machine, then apply returned commands to $state and invoke()"
+      - "svelte-check passes"
+    decomposition:
+      features: [FEAT-007]
+
+  - id: REQ-006
+    track: T2
+    text: "FloatBall move queue extracted to TypeScript module"
+    status: verified
+    confidence: 0.85
+    acceptance_criteria:
+      - "floatBallMoveQueue.ts contains: queue coalescing, RAF-based flush scheduling, in-flight tracking"
+      - "Accepts MoveQueueDeps interface: { requestAnimationFrame, cancelAnimationFrame, sendMove }"
+      - "No direct window.* access in module (injected via deps)"
+      - "At least 3 unit tests: (1) coalesce multiple queued moves, (2) in-flight blocks concurrent dispatch, (3) cancel cleans up RAF"
+      - "svelte-check passes"
+    decomposition:
+      features: [FEAT-008]
+
+  # ── T3: App.svelte event listener extraction ──
+  - id: REQ-007
+    track: T3
+    text: "DROPPED — loadInitialData/enableRateLimits extraction"
+    status: invalidated
+    confidence: 0
+    reason: "Phase 5 Finding 8: closure-captured mutable state + $state deps make injection overhead exceed benefit"
+
+  - id: REQ-008
+    track: T3
+    text: "App event listener wiring extracted to dedicated module"
+    status: verified
+    confidence: 0.8
+    acceptance_criteria:
+      - "lib/appEventListeners.ts exports setupAppEventListeners(window, callbacks)"
+      - "Wires resize, focus, blur, error, visibility, color-scheme listeners"
+      - "Returns cleanup function for onMount teardown"
+      - "Callbacks interface typed: { onResize, onFocus, onBlur, onError, onVisibilityChange, onColorSchemeChange }"
+      - "App.svelte onMount reduces by ~60 lines"
+      - "svelte-check passes"
+    decomposition:
+      features: [FEAT-010]
+
+  # ── T4: DiskCache ──
+  - id: REQ-009
+    track: T4
+    text: "Generic DiskCache<T> helper for TTL-based disk caching"
+    status: verified
+    confidence: 0.85
+    acceptance_criteria:
+      - "usage/disk_cache.rs with DiskCache<T: Serialize + DeserializeOwned>"
+      - "Methods: should_refresh(dir) -> bool, load(dir) -> Option<T>, save(dir, data) -> Result"
+      - "Configurable: filename, ttl_secs, optional version check"
+      - "litellm.rs uses DiskCache for read/write, keeps its own multi-source fetch logic"
+      - "exchange_rates.rs uses DiskCache for read/write, keeps its own fetch + global static"
+      - "At least 4 unit tests: TTL expired, TTL fresh, corrupt cache, version mismatch"
+      - "cargo test passes, cargo clippy clean"
+    decomposition:
+      features: [FEAT-011]
+
+features:
+  # ── T1 ──
+  - id: FEAT-001
+    name: "Create cursor_parser.rs"
+    parent: REQ-001
+    modules: [MOD-001]
+    dependencies: [FEAT-005]
+    complexity: large
+
+  - id: FEAT-002
+    name: "Update all external imports to cursor_parser path"
+    parent: REQ-001
+    modules: [MOD-002]
+    dependencies: [FEAT-001]
+    complexity: small
+
+  - id: FEAT-003
+    name: "Create codex_parser.rs"
+    parent: REQ-002
+    modules: [MOD-003]
+    dependencies: [FEAT-005]
+    complexity: medium
+
+  - id: FEAT-004
+    name: "Wire codex_parser into UsageParser wrappers"
+    parent: REQ-002
+    modules: [MOD-004]
+    dependencies: [FEAT-003]
+    complexity: small
+
+  - id: FEAT-005
+    name: "Prepare shared types: rename CodexParseResult, deduplicate count_diff_lines"
+    parent: REQ-003
+    modules: [MOD-005]
+    dependencies: []
+    complexity: trivial
+
+  - id: FEAT-006
+    name: "Migrate provider-specific tests to their parser files"
+    parent: REQ-004
+    modules: [MOD-006]
+    dependencies: [FEAT-001, FEAT-003]
+    complexity: medium
+
+  # ── T2 ──
+  - id: FEAT-007
+    name: "Create floatBallDragMachine.ts"
+    parent: REQ-005
+    modules: [MOD-007]
+    dependencies: []
+    complexity: medium
+
+  - id: FEAT-008
+    name: "Create floatBallMoveQueue.ts"
+    parent: REQ-006
+    modules: [MOD-008]
+    dependencies: []
+    complexity: small
+
+  # ── T3 ──
+  - id: FEAT-010
+    name: "Create lib/appEventListeners.ts"
+    parent: REQ-008
+    modules: [MOD-010]
+    dependencies: []
+    complexity: small
+
+  # ── T4 ──
+  - id: FEAT-011
+    name: "Create usage/disk_cache.rs"
+    parent: REQ-009
+    modules: [MOD-011]
+    dependencies: []
+    complexity: medium
+
+modules:
+  - id: MOD-001
+    name: "cursor_parser.rs"
+    parent: FEAT-001
+    file_path: "src-tauri/src/usage/cursor_parser.rs"
+    description: |
+      Move from parser.rs: CursorAuthStatus, CursorAuth, CursorAuthKind,
+      9 constants, 4 statics, 5 pub(crate) functions, 28 private functions.
+      Import shared types from super::parser.
+      Free functions receive integration config and file data as parameters
+      (not &self UsageParser).
+
+  - id: MOD-002
+    name: "External import updates for Cursor"
+    parent: FEAT-002
+    files:
+      - "src-tauri/src/commands/config.rs"
+      - "src-tauri/src/rate_limits/cursor.rs"
+      - "src-tauri/src/lib.rs"
+    description: "Change ~15 import paths from usage::parser to usage::cursor_parser"
+
+  - id: MOD-003
+    name: "codex_parser.rs"
+    parent: FEAT-003
+    file_path: "src-tauri/src/usage/codex_parser.rs"
+    description: |
+      Move from parser.rs: CodexJsonlEntry, CodexRawUsage, all codex_* functions,
+      extract_diff_paths, split_patch_by_file, read_codex_entries*.
+      Import SessionParseResult, count_diff_lines, ParsedEntry etc from super::parser.
+
+  - id: MOD-004
+    name: "UsageParser codex wrappers"
+    parent: FEAT-004
+    file_path: "src-tauri/src/usage/parser.rs"
+    description: "UsageParser::load_codex_entries_with_debug becomes thin wrapper calling codex_parser"
+
+  - id: MOD-005
+    name: "Shared type preparation"
+    parent: FEAT-005
+    file_path: "src-tauri/src/usage/parser.rs"
+    description: |
+      Rename CodexParseResult → SessionParseResult (pub(crate)).
+      Make count_diff_lines pub(crate) in parser.rs.
+      Remove duplicate from claude_parser.rs, update its import.
+
+  - id: MOD-006
+    name: "Test migration"
+    parent: FEAT-006
+    files:
+      - "src-tauri/src/usage/cursor_parser.rs"
+      - "src-tauri/src/usage/codex_parser.rs"
+      - "src-tauri/src/usage/parser.rs"
+    description: |
+      Cursor free-function tests + path_a_smoke → cursor_parser.rs.
+      Codex free-function tests → codex_parser.rs.
+      UsageParser integration tests + debug_compare + shared helpers stay in parser.rs.
+
+  - id: MOD-007
+    name: "floatBallDragMachine.ts"
+    parent: FEAT-007
+    file_path: "src/lib/components/floatBallDragMachine.ts"
+    description: |
+      Pure state machine: pointer classification, threshold detection,
+      coordinate computation. Returns typed command objects.
+      No Svelte imports, no invoke(), no $state.
+
+  - id: MOD-008
+    name: "floatBallMoveQueue.ts"
+    parent: FEAT-008
+    file_path: "src/lib/components/floatBallMoveQueue.ts"
+    description: |
+      MoveQueue class with injected deps (RAF, sendMove callback).
+      Methods: queue(), flush(), cancel(), destroy().
+      3+ unit tests for coalescing, in-flight guard, cleanup.
+
+  - id: MOD-010
+    name: "appEventListeners.ts"
+    parent: FEAT-010
+    file_path: "src/lib/appEventListeners.ts"
+    description: |
+      setupAppEventListeners(window, callbacks) → cleanup function.
+      Wires: resize, focus, blur, error, visibility, color-scheme.
+
+  - id: MOD-011
+    name: "disk_cache.rs"
+    parent: FEAT-011
+    file_path: "src-tauri/src/usage/disk_cache.rs"
+    description: |
+      DiskCache<T: Serialize + DeserializeOwned> struct with fields:
+      filename, ttl_secs, version (Option<u32>).
+      Methods: should_refresh(dir), load(dir), save(dir, data, fetched_at).
+      4+ unit tests.
+
+dependency_graph:
+  # T1 — sequential
+  FEAT-005: []                        # shared type prep first
+  FEAT-001: [FEAT-005]               # cursor_parser after shared types
+  FEAT-003: [FEAT-005]               # codex_parser after shared types (parallel with FEAT-001)
+  FEAT-002: [FEAT-001]               # import updates after cursor_parser
+  FEAT-004: [FEAT-003]               # codex wrappers after codex_parser
+  FEAT-006: [FEAT-001, FEAT-003]     # test migration after both parsers
+  # T2 — parallel
+  FEAT-007: []                        # drag machine independent
+  FEAT-008: []                        # move queue independent
+  # T3 — standalone
+  FEAT-010: []                        # event listeners independent
+  # T4 — standalone
+  FEAT-011: []                        # disk cache independent
+  # Cross-track: T1 || T2 || T3 || T4
+
+implementation_order:
+  phase_1:
+    features: [FEAT-005]
+    description: "Prepare shared types (rename CodexParseResult, dedup count_diff_lines)"
+    parallel: false
+  phase_2:
+    features: [FEAT-001, FEAT-003]
+    description: "Create cursor_parser.rs + codex_parser.rs (parallel)"
+    parallel: true
+  phase_3:
+    features: [FEAT-002, FEAT-004, FEAT-006]
+    description: "Wire imports + move tests"
+    parallel: false
+  phase_4:
+    features: [FEAT-007, FEAT-008, FEAT-010, FEAT-011]
+    description: "All remaining features (parallel — all independent)"
+    parallel: true
+
+estimated_scope:
+  total_features: 10
+  total_modules: 10
+  new_files: 6
+  modified_files: ~12
+  net_new_lines: ~50  # mostly moves, very few net new lines
+  risk: "Low — pure refactoring, comprehensive test suite, no behavior change"

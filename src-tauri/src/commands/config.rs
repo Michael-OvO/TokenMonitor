@@ -1,7 +1,9 @@
 use super::tray::{patch_tray_utilization, sync_tray_title, tray_utilization_from_rate_limits};
 use super::{AppState, UsageDebugReport};
 use crate::models::*;
-use tauri::State;
+use crate::secrets;
+use crate::usage::cursor_parser::CursorAuthStatus;
+use tauri::{AppHandle, State};
 
 /// Apply native window surface adjustments.
 /// On Windows: sets DWM rounded corners. On other platforms: noop.
@@ -32,13 +34,12 @@ pub async fn set_refresh_interval(interval: u64, state: State<'_, AppState>) -> 
     Ok(())
 }
 
-/// Enable or disable rate-limit fetching.
+/// Enable or disable live rate-limit fetching.
 ///
-/// Pre-rewrite this gated the macOS Keychain probe; post-rewrite the fetch
-/// only touches the statusline event file and the JSONL parser cache, so
-/// the toggle is effectively cosmetic — kept so existing settings.json
-/// files continue to round-trip and so users can hide the rate-limit row
-/// if they want.
+/// When disabled, the background loop skips `refresh_rate_limits`, so the app
+/// never touches the Claude OAuth token in the macOS Keychain. This lets us
+/// open the app without firing any Keychain prompt until the user explicitly
+/// opts in (via the welcome card or the rate-limits CTA).
 #[tauri::command]
 pub async fn set_rate_limits_enabled(
     enabled: bool,
@@ -64,6 +65,271 @@ pub async fn set_usage_access_enabled(
         .usage_access_enabled
         .store(enabled, std::sync::atomic::Ordering::SeqCst);
     Ok(())
+}
+
+/// Set or refresh the user's Cursor secret.
+///
+/// **Empty / `None` does NOT clear** persisted credentials — that's reserved
+/// for [`clear_cursor_auth_config`]. The reason is that frontend bootstrap
+/// passes whatever lives in `settings.json` on every launch (legacy migration
+/// path), and we don't want a stale-empty `cursorApiKey` to wipe a perfectly
+/// good keyring entry.
+///
+/// Behavior:
+/// - Non-empty input → persist to keyring (preferred) or 0600-perm file
+///   fallback, then update the in-memory cache and return the resulting
+///   status (with `storage_backend` populated).
+/// - Empty / `None` input → leave persisted state alone; if the keyring
+///   already has a secret, sync the in-memory cache from it and report
+///   that. This is the bootstrap-with-empty-settings.json path.
+#[tauri::command]
+pub async fn set_cursor_auth_config(
+    app: AppHandle,
+    api_key: Option<String>,
+) -> Result<CursorAuthStatus, String> {
+    let trimmed = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    if let Some(value) = trimmed {
+        let backend = secrets::cursor::store(&app, Some(&value))?;
+        Ok(crate::usage::cursor_parser::set_cursor_auth_config(
+            Some(value),
+            backend,
+        ))
+    } else if let Some((existing, backend)) = secrets::cursor::load(&app) {
+        Ok(crate::usage::cursor_parser::set_cursor_auth_config(
+            Some(existing),
+            backend,
+        ))
+    } else {
+        // No user-pasted secret in either layer. Refresh the IDE token
+        // cache; if the IDE provides one, the active credential becomes
+        // an `IdeBearer` with `StorageBackend::IdeAuto`. Otherwise the
+        // user is genuinely not connected.
+        let ide_present = crate::usage::cursor_parser::prime_ide_access_token();
+        let backend = if ide_present {
+            secrets::StorageBackend::IdeAuto
+        } else {
+            secrets::StorageBackend::None
+        };
+        Ok(crate::usage::cursor_parser::set_cursor_auth_config(
+            None, backend,
+        ))
+    }
+}
+
+/// Hard-clear the user-pasted Cursor secret. Wipes both the keyring entry
+/// and the file fallback (best-effort) and resets the override cache. Bound
+/// to the Settings UI's "Disconnect" button.
+///
+/// **The IDE auto-detected token is NOT cleared** — a Disconnect on the
+/// pasted-secret layer should fall through to the same zero-config state
+/// the user would have had if they'd never pasted anything. To genuinely
+/// stop reading from Cursor IDE, the user signs out of the IDE itself
+/// (which empties `cursorAuth/accessToken` in `state.vscdb`).
+#[tauri::command]
+pub async fn clear_cursor_auth_config(app: AppHandle) -> Result<CursorAuthStatus, String> {
+    secrets::cursor::store(&app, None)?;
+    let ide_present = crate::usage::cursor_parser::prime_ide_access_token();
+    let backend = if ide_present {
+        secrets::StorageBackend::IdeAuto
+    } else {
+        secrets::StorageBackend::None
+    };
+    Ok(crate::usage::cursor_parser::set_cursor_auth_config(
+        None, backend,
+    ))
+}
+
+#[tauri::command]
+pub async fn get_cursor_auth_status() -> Result<CursorAuthStatus, String> {
+    Ok(crate::usage::cursor_parser::cursor_auth_status())
+}
+
+#[tauri::command]
+pub async fn retry_cursor_auth() -> Result<CursorAuthStatus, String> {
+    let ide_present = crate::usage::cursor_parser::prime_ide_access_token();
+    let backend = if ide_present {
+        secrets::StorageBackend::IdeAuto
+    } else {
+        secrets::StorageBackend::None
+    };
+    Ok(crate::usage::cursor_parser::set_cursor_auth_config(
+        None, backend,
+    ))
+}
+
+#[tauri::command]
+pub async fn open_cursor_app() -> Result<(), String> {
+    launch_cursor().map_err(|e| format!("Failed to launch Cursor: {e}"))
+}
+
+fn launch_cursor() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-a", "Cursor"])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        // Try cursor.cmd on PATH first
+        if let Ok(_child) = std::process::Command::new("cursor.cmd")
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+        {
+            return Ok(());
+        }
+
+        // Fallback to known install location
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let exe = std::path::PathBuf::from(local_app_data)
+                .join("Programs")
+                .join("Cursor")
+                .join("Cursor.exe");
+            if exe.is_file() {
+                std::process::Command::new(&exe)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+        }
+
+        Err("Cursor not found on PATH or in default install location".into())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("cursor")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err("Unsupported platform".into())
+    }
+}
+
+/// Hydrate the in-memory Cursor secret state from disk so the very first
+/// usage refresh after launch can hit the remote API without waiting for
+/// the frontend bootstrap to round-trip an IPC call.
+///
+/// Two layers, both best-effort:
+///
+/// 1. **User-pasted secret** — keyring (preferred) or 0600-perm file
+///    fallback. If present, it's loaded into the override cache and the
+///    storage backend is reported as `Keyring` / `File`.
+/// 2. **Auto-detected IDE bearer** — Cursor IDE writes its current access
+///    token to `~/Library/Application Support/Cursor/.../state.vscdb` and
+///    rotates it on its own schedule. We populate the IDE token cache
+///    independently of the user-pasted layer; [`resolve_cursor_auth`]
+///    treats it as the lowest-priority fallback so an explicit user
+///    paste always wins. When this is the *only* credential available
+///    we additionally mark the storage backend as `IdeAuto` so the UI
+///    can surface "Connected via Cursor IDE" instead of "Not connected".
+///
+/// Failures are silent — a missing/locked keychain or absent Cursor IDE
+/// just leaves the corresponding layer empty.
+pub fn prime_cursor_auth_from_disk(app: &AppHandle) {
+    let user_secret_loaded = match secrets::cursor::load(app) {
+        Some((value, backend)) => {
+            let _ = crate::usage::cursor_parser::set_cursor_auth_config(Some(value), backend);
+            true
+        }
+        None => false,
+    };
+
+    // Always try priming the IDE token, even if a user secret was loaded:
+    // the user might later clear their pasted token via the Disconnect
+    // button, at which point we want to silently fall through to IDE auth
+    // without a restart.
+    let ide_token_present = crate::usage::cursor_parser::prime_ide_access_token();
+
+    if !user_secret_loaded && ide_token_present {
+        // No user-pasted secret, but the IDE has a token — surface the
+        // "auto-detected" backend so the Settings UI can render a
+        // "Connected via Cursor IDE" badge without persisting anything.
+        let _ = crate::usage::cursor_parser::set_cursor_auth_config(
+            None,
+            secrets::StorageBackend::IdeAuto,
+        );
+    }
+}
+
+/// Outcome of the one-time interactive Keychain prompt. Surfaced to the
+/// frontend so it can show appropriate copy after the user responds.
+///
+/// Each variant is constructed on a different OS path (Granted/Denied on
+/// macOS, NotApplicable everywhere else), so per-target dead-code analysis
+/// flags the ones not used on the current platform. Since the enum is the
+/// IPC contract — every variant is "live" from the frontend's perspective —
+/// suppress the lint at the enum level instead of per-variant.
+///
+/// `AlreadyRequested` is no longer returned by the backend (the frontend
+/// short-circuits via the `keychainAccessRequested` setting before invoking
+/// the IPC). It's kept on the type so older frontend builds that still pattern
+/// match on it continue to compile.
+#[derive(serde::Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case", tag = "status")]
+#[allow(dead_code)]
+pub enum KeychainAccessOutcome {
+    /// User granted access (or access was already silently available).
+    Granted,
+    /// User denied the prompt, the item is missing, or read failed.
+    Denied { reason: String },
+    /// Keychain isn't part of the credentials path on this platform.
+    NotApplicable,
+    /// Reserved for backwards compatibility with older frontend builds.
+    AlreadyRequested,
+}
+
+/// Trigger the interactive Keychain prompt for the Claude OAuth token.
+///
+/// This is the **only** code path that allows the macOS Keychain UI to
+/// appear — every other read is silent (`skip_authenticated_items` +
+/// `disable_user_interaction`). On a successful read the credentials JSON is
+/// also mirrored into TokenMonitor's owned Keychain item, so subsequent
+/// background refreshes can read silently from our own item without depending
+/// on Claude Code's ACL surviving its next token rotation.
+///
+/// The frontend dedupes concurrent calls via `keychainRequestInFlight` and
+/// gates auto-firing behind the `keychainAccessRequested` setting; the
+/// backend is intentionally re-callable so the user can re-grant on demand
+/// (e.g. via a "Re-grant Keychain access" button) after a token expiry has
+/// invalidated the owned item.
+#[tauri::command]
+pub async fn request_claude_keychain_access() -> Result<KeychainAccessOutcome, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Run the synchronous Keychain call on a blocking thread so we don't
+        // pin the Tauri async runtime while macOS shows the auth panel.
+        let outcome =
+            tokio::task::spawn_blocking(crate::rate_limits::request_claude_keychain_access)
+                .await
+                .map_err(|e| format!("Keychain access task failed: {e}"))?;
+
+        Ok(match outcome {
+            Ok(()) => KeychainAccessOutcome::Granted,
+            Err(reason) => KeychainAccessOutcome::Denied { reason },
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(KeychainAccessOutcome::NotApplicable)
+    }
 }
 
 /// Result of an App Data TCC probe. We can't query macOS directly for
@@ -204,6 +470,45 @@ pub async fn open_app_data_settings() -> Result<(), String> {
     }
 }
 
+/// Probe whether TokenMonitor's silent Keychain read currently succeeds.
+/// True means we hold a usable Claude OAuth token — either via our own
+/// mirror item or via a Claude Code-credentials ACL grant that hasn't yet
+/// been wiped by a token rotation. Used by the onboarding wizard so
+/// "Authorized" is shown without requiring a click.
+#[tauri::command]
+pub async fn check_claude_keychain_access() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(
+            tokio::task::spawn_blocking(crate::rate_limits::has_silent_claude_token)
+                .await
+                .unwrap_or(false),
+        )
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Test-only IPC that runs the OAuth refresh-grant flow against the owned
+/// mirror right now. Used to exercise the refresh path live (and confirm
+/// it works against Anthropic's endpoint) without waiting for a natural
+/// 401. Returns a short status string.
+#[tauri::command]
+pub async fn debug_force_oauth_refresh() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(crate::rate_limits::debug_force_refresh().await)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("not_applicable".to_string())
+    }
+}
+
 /// Set Dock icon visibility (macOS only). Noop on other platforms.
 #[tauri::command]
 pub async fn set_dock_icon_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
@@ -238,6 +543,9 @@ pub async fn set_dock_icon_visible(app: tauri::AppHandle, visible: bool) -> Resu
 #[tauri::command]
 pub async fn clear_cache(state: State<'_, AppState>) -> Result<(), String> {
     state.parser.clear_cache();
+    if let Some(ssh_cache) = state.ssh_cache.read().await.as_ref() {
+        ssh_cache.reset_all_caches();
+    }
     *state.cached_rate_limits.write().await = None;
     *state.last_usage_debug.write().await = None;
     Ok(())
@@ -330,6 +638,22 @@ pub async fn set_window_size_and_align(
 }
 
 #[tauri::command]
+pub async fn get_window_anchor_edge() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if crate::platform::windows::window::is_anchor_bottom() {
+            "bottom".to_string()
+        } else {
+            "top".to_string()
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "bottom".to_string()
+    }
+}
+
+#[tauri::command]
 pub async fn get_rate_limits(
     provider: Option<String>,
     app: tauri::AppHandle,
@@ -339,6 +663,7 @@ pub async fn get_rate_limits(
         None | Some("all") => crate::rate_limits::RateLimitSelection::All,
         Some("claude") => crate::rate_limits::RateLimitSelection::Claude,
         Some("codex") => crate::rate_limits::RateLimitSelection::Codex,
+        Some("cursor") => crate::rate_limits::RateLimitSelection::Cursor,
         Some(other) => return Err(format!("Invalid provider for rate limits: {other}")),
     };
 
@@ -354,20 +679,15 @@ pub async fn get_rate_limits(
             .unwrap_or(RateLimitsPayload {
                 claude: None,
                 codex: None,
+                cursor: None,
             }));
     }
 
     let codex_dir = state.parser.codex_dir().to_path_buf();
-    let plan = *state.claude_plan_tier.read().await;
     let cached = state.cached_rate_limits.read().await.clone();
-    let fresh = crate::rate_limits::fetch_selected_rate_limits(
-        std::sync::Arc::clone(&state.parser),
-        codex_dir,
-        plan,
-        selection,
-        cached.as_ref(),
-    )
-    .await;
+    let fresh =
+        crate::rate_limits::fetch_selected_rate_limits(&codex_dir, selection, cached.as_ref())
+            .await;
 
     let merged = crate::rate_limits::merge_rate_limits(fresh, cached.as_ref());
 
@@ -384,4 +704,15 @@ pub async fn get_last_usage_debug(
     state: State<'_, AppState>,
 ) -> Result<Option<UsageDebugReport>, String> {
     Ok(state.last_usage_debug.read().await.clone())
+}
+
+#[tauri::command]
+pub async fn get_exchange_rates() -> Result<std::collections::HashMap<String, f64>, String> {
+    Ok(crate::usage::exchange_rates::get_all_rates())
+}
+
+#[tauri::command]
+pub async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
 }

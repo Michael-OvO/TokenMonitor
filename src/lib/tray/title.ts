@@ -16,7 +16,8 @@ function formatPercentages(
 ): string | null {
   if (!config.showPercentages) return null;
 
-  const entries = RATE_LIMIT_PROVIDER_ORDER
+  const providers = config.barProviders?.length ? config.barProviders : RATE_LIMIT_PROVIDER_ORDER;
+  const entries = providers
     .map((provider) => ({
       label: getUsageProviderTitle(provider),
       pct: primaryPct(rateLimits, provider),

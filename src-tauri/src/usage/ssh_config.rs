@@ -47,6 +47,7 @@ pub fn discover_ssh_hosts() -> Vec<SshHostEntry> {
         return Vec::new();
     }
 
+    tracing::debug!(path = %config_path.display(), "reading file (ssh config)");
     let content = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(e) => {

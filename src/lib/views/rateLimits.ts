@@ -117,5 +117,9 @@ export function rateLimitWindowResetLabel(
     return "Awaiting refresh";
   }
 
+  if (rateLimits?.stale && resetMs > now) {
+    return `${formatResetsIn(resetsAt)} (stale)`;
+  }
+
   return formatResetsIn(resetsAt);
 }

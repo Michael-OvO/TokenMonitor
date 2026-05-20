@@ -1,19 +1,30 @@
 use crate::models::{
     ActiveBlock, ChartBucket, ChartSegment, ModelSummary, UsagePayload, UsageSource,
 };
+use crate::stats::change::ParsedChangeEvent;
 #[cfg(test)]
-use crate::stats::change::FileCategory;
-use crate::stats::change::{classify_file, ChangeEventKind, ParsedChangeEvent};
-use crate::usage::integrations::{UsageIntegrationId, UsageIntegrationSelection};
+use crate::stats::change::{ChangeEventKind, FileCategory};
+use crate::usage::integrations::{
+    provider_matches_model, UsageIntegrationId, UsageIntegrationSelection,
+};
 use chrono::{DateTime, Local, NaiveDate, Timelike};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
+
+#[cfg(test)]
+use super::claude_parser::read_claude_entries;
+use super::claude_parser::{
+    parse_claude_session_file, upsert_claude_change_event, upsert_claude_entry, ClaudeDedupeAction,
+};
+use super::codex_parser::parse_codex_session_file;
+use super::cursor_parser::{
+    cursor_last_warning, fetch_cursor_remote_entries, glob_cursor_chat_session_files,
+    load_cursor_local_entries, parse_cursor_session_file, set_cursor_warning,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Parsed entry (shared between Claude and Codex)
@@ -110,6 +121,7 @@ struct CachedFileEntries {
 enum ProviderFileKind {
     Claude,
     Codex,
+    Cursor,
 }
 
 #[derive(Clone)]
@@ -127,6 +139,7 @@ impl UsageIntegrationConfig {
         match self.id {
             UsageIntegrationId::Claude => ProviderFileKind::Claude,
             UsageIntegrationId::Codex => ProviderFileKind::Codex,
+            UsageIntegrationId::Cursor => ProviderFileKind::Cursor,
         }
     }
 
@@ -138,11 +151,15 @@ impl UsageIntegrationConfig {
             UsageIntegrationId::Codex => {
                 "recursive-jsonl-glob+root-file-list-cache+parsed-file-cache+token-delta"
             }
+            UsageIntegrationId::Cursor => "workspace-chat-json+token-field-probe+cursor-remote-api",
         }
     }
 
     fn dedupe_entry_hashes(&self) -> bool {
-        matches!(self.id, UsageIntegrationId::Claude)
+        matches!(
+            self.id,
+            UsageIntegrationId::Claude | UsageIntegrationId::Cursor
+        )
     }
 
     fn dedupe_change_events(&self) -> bool {
@@ -166,126 +183,6 @@ struct PayloadCacheEntry {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Claude JSONL serde types
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct ClaudeJsonlEntry {
-    #[serde(rename = "type", default)]
-    entry_type: String,
-    #[serde(default)]
-    timestamp: String,
-    #[serde(rename = "requestId")]
-    request_id: Option<String>,
-    #[serde(rename = "toolUseResult")]
-    tool_use_result: Option<ClaudeToolUseResult>,
-    message: Option<ClaudeJsonlMessage>,
-    #[serde(rename = "isSidechain", default)]
-    is_sidechain: Option<bool>,
-    #[serde(rename = "sessionId", default)]
-    session_id: Option<String>,
-    #[serde(rename = "agentId", default)]
-    agent_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ClaudeJsonlMessage {
-    model: Option<String>,
-    usage: Option<ClaudeJsonlUsage>,
-    id: Option<String>,
-    #[serde(default)]
-    content: Vec<ClaudeContentBlock>,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum ClaudeContentBlock {
-    #[serde(rename = "tool_use")]
-    ToolUse {
-        id: Option<String>,
-        name: String,
-        input: serde_json::Value,
-    },
-    #[serde(rename = "tool_result")]
-    ToolResult {
-        #[serde(rename = "tool_use_id")]
-        tool_use_id: String,
-    },
-    #[serde(other)]
-    Other,
-}
-
-/// Input fields for the Edit tool_use.
-#[derive(Deserialize)]
-struct EditToolInput {
-    file_path: String,
-    old_string: String,
-    new_string: String,
-}
-
-/// Input fields for the Write tool_use.
-#[derive(Deserialize)]
-struct WriteToolInput {
-    file_path: String,
-}
-
-#[derive(Deserialize, Default)]
-struct ClaudeToolUseResult {
-    #[serde(rename = "filePath")]
-    file_path: Option<String>,
-    #[serde(rename = "oldString")]
-    old_string: Option<String>,
-    #[serde(rename = "newString")]
-    new_string: Option<String>,
-    #[serde(rename = "originalFile")]
-    original_file: Option<String>,
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(rename = "structuredPatch", default)]
-    structured_patch: Vec<ClaudeStructuredPatchChunk>,
-}
-
-#[derive(Deserialize, Default)]
-struct ClaudeStructuredPatchChunk {
-    #[serde(default)]
-    lines: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct ClaudeJsonlUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    cache_creation: Option<CacheCreationBreakdown>,
-    server_tool_use: Option<ServerToolUse>,
-    speed: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ServerToolUse {
-    web_search_requests: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct CacheCreationBreakdown {
-    ephemeral_5m_input_tokens: Option<u64>,
-    ephemeral_1h_input_tokens: Option<u64>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Codex JSONL serde types
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct CodexJsonlEntry {
-    #[serde(rename = "type", default)]
-    entry_type: String,
-    timestamp: Option<String>,
-    payload: Option<Value>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // File scanning helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -296,14 +193,18 @@ struct CodexJsonlEntry {
 /// prompt the user for access they never asked for. Regular files reached via
 /// symlink are still accepted (reading a symlinked JSONL doesn't recurse), but
 /// symlinked directories are skipped.
-pub fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
     let mut results = Vec::new();
     if !dir.exists() {
         return results;
     }
+    tracing::debug!(path = %dir.display(), "read_dir (glob_jsonl_files)");
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,
-        Err(_) => return results,
+        Err(e) => {
+            tracing::debug!(path = %dir.display(), error = %e, "read_dir failed");
+            return results;
+        }
     };
     for entry in rd.flatten() {
         let Ok(file_type) = entry.file_type() else {
@@ -311,6 +212,7 @@ pub fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
         };
         let path = entry.path();
         if file_type.is_symlink() {
+            tracing::debug!(path = %path.display(), "skipping symlink");
             continue;
         }
         if file_type.is_dir() {
@@ -325,15 +227,15 @@ pub fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Parse a `since` string in `YYYYMMDD` format into a `NaiveDate`.
-pub fn parse_since_date(since: &str) -> Option<NaiveDate> {
+pub(crate) fn parse_since_date(since: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(since, "%Y%m%d").ok()
 }
 
-fn path_to_string(path: &Path) -> String {
+pub(crate) fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn push_sample_path(sample_paths: &mut Vec<String>, path: &Path) {
+pub(crate) fn push_sample_path(sample_paths: &mut Vec<String>, path: &Path) {
     if sample_paths.len() < 5 {
         sample_paths.push(path_to_string(path));
     }
@@ -348,9 +250,13 @@ fn scan_jsonl_tree_into(
     // them so the walker stays on the volume the user originally opted into.
     let metadata = match fs::symlink_metadata(dir) {
         Ok(metadata) => metadata,
-        Err(_) => return,
+        Err(e) => {
+            tracing::debug!(path = %dir.display(), error = %e, "symlink_metadata failed");
+            return;
+        }
     };
     if metadata.file_type().is_symlink() {
+        tracing::debug!(path = %dir.display(), "skipping symlink dir");
         return;
     }
     let modified = match metadata.modified() {
@@ -362,9 +268,13 @@ fn scan_jsonl_tree_into(
         modified,
     });
 
+    tracing::debug!(path = %dir.display(), "read_dir (scan_jsonl_tree)");
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,
-        Err(_) => return,
+        Err(e) => {
+            tracing::debug!(path = %dir.display(), error = %e, "read_dir failed");
+            return;
+        }
     };
     for entry in rd.flatten() {
         let Ok(file_type) = entry.file_type() else {
@@ -372,6 +282,7 @@ fn scan_jsonl_tree_into(
         };
         let path = entry.path();
         if file_type.is_symlink() {
+            tracing::debug!(path = %path.display(), "skipping symlink");
             continue;
         }
         if file_type.is_dir() {
@@ -408,250 +319,6 @@ fn earliest_entry_date(entries: &[ParsedEntry]) -> Option<NaiveDate> {
         .min()
 }
 
-fn create_claude_unique_hash(entry: &ClaudeJsonlEntry) -> Option<String> {
-    let message_id = entry.message.as_ref()?.id.as_ref()?;
-    let request_id = entry.request_id.as_ref()?;
-    Some(format!("{message_id}:{request_id}"))
-}
-
-fn claude_scope_priority(scope: crate::stats::subagent::AgentScope) -> u8 {
-    match scope {
-        crate::stats::subagent::AgentScope::Main => 0,
-        crate::stats::subagent::AgentScope::Subagent => 1,
-    }
-}
-
-fn should_prefer_claude_entry(candidate: &ParsedEntry, existing: &ParsedEntry) -> bool {
-    if candidate.output_tokens != existing.output_tokens {
-        return candidate.output_tokens > existing.output_tokens;
-    }
-
-    let candidate_scope = claude_scope_priority(candidate.agent_scope);
-    let existing_scope = claude_scope_priority(existing.agent_scope);
-    if candidate_scope != existing_scope {
-        return candidate_scope > existing_scope;
-    }
-
-    if candidate.timestamp != existing.timestamp {
-        return candidate.timestamp > existing.timestamp;
-    }
-
-    if candidate.session_key != existing.session_key {
-        return candidate.session_key < existing.session_key;
-    }
-
-    if candidate.model != existing.model {
-        return candidate.model < existing.model;
-    }
-
-    false
-}
-
-fn should_prefer_claude_change_event(
-    candidate: &ParsedChangeEvent,
-    existing: &ParsedChangeEvent,
-) -> bool {
-    let candidate_lines = candidate.added_lines + candidate.removed_lines;
-    let existing_lines = existing.added_lines + existing.removed_lines;
-    if candidate_lines != existing_lines {
-        return candidate_lines > existing_lines;
-    }
-
-    let candidate_scope = claude_scope_priority(candidate.agent_scope);
-    let existing_scope = claude_scope_priority(existing.agent_scope);
-    if candidate_scope != existing_scope {
-        return candidate_scope > existing_scope;
-    }
-
-    if candidate.timestamp != existing.timestamp {
-        return candidate.timestamp > existing.timestamp;
-    }
-
-    if candidate.path != existing.path {
-        return candidate.path < existing.path;
-    }
-
-    if candidate.model != existing.model {
-        return candidate.model < existing.model;
-    }
-
-    false
-}
-
-fn create_claude_tool_dedupe_key(
-    unique_hash: Option<&String>,
-    tool_id: Option<&String>,
-    block_index: usize,
-) -> Option<String> {
-    let hash = unique_hash?;
-    let suffix = tool_id.as_ref().map(|id| id.as_str()).unwrap_or_else(|| "");
-    if suffix.is_empty() {
-        Some(format!("{hash}:{block_index}"))
-    } else {
-        Some(format!("{hash}:{suffix}"))
-    }
-}
-
-struct PendingClaudeTool {
-    model_key: String,
-    timestamp: DateTime<Local>,
-    path: String,
-    kind: ChangeEventKind,
-    fallback_added_lines: u64,
-    fallback_removed_lines: u64,
-    dedupe_key: Option<String>,
-    agent_scope: crate::stats::subagent::AgentScope,
-}
-
-#[derive(Clone, Copy, Default, PartialEq)]
-struct CodexRawUsage {
-    input_tokens: u64,
-    cached_input_tokens: u64,
-    output_tokens: u64,
-    reasoning_output_tokens: u64,
-    total_tokens: u64,
-}
-
-fn codex_usage_is_zero(usage: CodexRawUsage) -> bool {
-    usage == CodexRawUsage::default()
-}
-
-fn ensure_u64(value: Option<&Value>) -> u64 {
-    value.and_then(Value::as_u64).unwrap_or(0)
-}
-
-fn normalize_codex_raw_usage(value: Option<&Value>) -> Option<CodexRawUsage> {
-    let record = value?.as_object()?;
-
-    let input_tokens = ensure_u64(record.get("input_tokens"));
-    let cached_input_tokens = ensure_u64(
-        record
-            .get("cached_input_tokens")
-            .or_else(|| record.get("cache_read_input_tokens")),
-    );
-    let output_tokens = ensure_u64(record.get("output_tokens"));
-    let reasoning_output_tokens = ensure_u64(record.get("reasoning_output_tokens"));
-    let total_tokens = ensure_u64(record.get("total_tokens"));
-
-    Some(CodexRawUsage {
-        input_tokens,
-        cached_input_tokens,
-        output_tokens,
-        reasoning_output_tokens,
-        total_tokens: if total_tokens > 0 {
-            total_tokens
-        } else {
-            input_tokens + output_tokens
-        },
-    })
-}
-
-fn subtract_codex_raw_usage(
-    current: CodexRawUsage,
-    previous: Option<CodexRawUsage>,
-) -> CodexRawUsage {
-    let previous = previous.unwrap_or_default();
-
-    CodexRawUsage {
-        input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
-        cached_input_tokens: current
-            .cached_input_tokens
-            .saturating_sub(previous.cached_input_tokens),
-        output_tokens: current.output_tokens.saturating_sub(previous.output_tokens),
-        reasoning_output_tokens: current
-            .reasoning_output_tokens
-            .saturating_sub(previous.reasoning_output_tokens),
-        total_tokens: current.total_tokens.saturating_sub(previous.total_tokens),
-    }
-}
-
-fn value_as_non_empty_string(value: Option<&Value>) -> Option<String> {
-    let raw = value?.as_str()?.trim();
-    if raw.is_empty() {
-        None
-    } else {
-        Some(raw.to_string())
-    }
-}
-
-fn extract_codex_model(value: &Value) -> Option<String> {
-    if let Some(info) = value.get("info") {
-        if let Some(model) = value_as_non_empty_string(info.get("model")) {
-            return Some(model);
-        }
-        if let Some(model) = value_as_non_empty_string(info.get("model_name")) {
-            return Some(model);
-        }
-        if let Some(model) = info
-            .get("metadata")
-            .and_then(|metadata| value_as_non_empty_string(metadata.get("model")))
-        {
-            return Some(model);
-        }
-    }
-
-    if let Some(model) = value_as_non_empty_string(value.get("model")) {
-        return Some(model);
-    }
-
-    value
-        .get("metadata")
-        .and_then(|metadata| value_as_non_empty_string(metadata.get("model")))
-}
-
-fn assign_pending_codex_models(
-    model_raw: &str,
-    entries: &mut [ParsedEntry],
-    pending_entry_indices: &mut Vec<usize>,
-    change_events: &mut [ParsedChangeEvent],
-    pending_change_indices: &mut Vec<usize>,
-) {
-    let model_raw = model_raw.to_string();
-    let model_key = crate::models::normalized_model_key(&model_raw);
-
-    for idx in pending_entry_indices.drain(..) {
-        if let Some(entry) = entries.get_mut(idx) {
-            entry.model = model_raw.clone();
-        }
-    }
-
-    for idx in pending_change_indices.drain(..) {
-        if let Some(event) = change_events.get_mut(idx) {
-            event.model = model_key.clone();
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_codex_change_event(
-    change_events: &mut Vec<ParsedChangeEvent>,
-    pending_model_indices: &mut Vec<usize>,
-    model_key: Option<&str>,
-    timestamp: DateTime<Local>,
-    path: String,
-    kind: ChangeEventKind,
-    added_lines: u64,
-    removed_lines: u64,
-    agent_scope: crate::stats::subagent::AgentScope,
-) {
-    change_events.push(ParsedChangeEvent {
-        timestamp,
-        model: model_key.unwrap_or("").to_string(),
-        provider: "codex".to_string(),
-        category: classify_file(&path),
-        path,
-        kind,
-        added_lines,
-        removed_lines,
-        dedupe_key: None,
-        agent_scope,
-    });
-
-    if model_key.is_none() {
-        pending_model_indices.push(change_events.len() - 1);
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Model normalisation helper
 // ─────────────────────────────────────────────────────────────────────────────
@@ -666,7 +333,7 @@ fn normalize_model(raw: &str) -> (String, String) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Check if a file was modified on or after the given date.
-fn modified_since(path: &Path, since: NaiveDate) -> bool {
+pub(crate) fn modified_since(path: &Path, since: NaiveDate) -> bool {
     fs::metadata(path)
         .and_then(|m| m.modified())
         .map(|t| {
@@ -676,444 +343,10 @@ fn modified_since(path: &Path, since: NaiveDate) -> bool {
         .unwrap_or(true) // if we can't read metadata, include the file
 }
 
-/// Count lines in a string (an empty string has 0 lines).
-fn count_lines(s: &str) -> u64 {
-    if s.is_empty() {
-        0
-    } else {
-        s.lines().count() as u64
-    }
-}
-
-/// Returns true for provider-internal paths that should not be counted as user edits.
-fn is_provider_internal_path(path: &str) -> bool {
-    path.contains("/.claude/plans/")
-}
-
-fn count_claude_structured_patch_lines(
-    chunks: &[ClaudeStructuredPatchChunk],
-) -> Option<(u64, u64)> {
-    if chunks.is_empty() {
-        return None;
-    }
-
-    let patch = chunks
-        .iter()
-        .flat_map(|chunk| chunk.lines.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let (added, removed) = count_diff_lines(&patch);
-    Some((added, removed))
-}
-
-fn extract_claude_tool_result_counts(
-    tool_result: &ClaudeToolUseResult,
-    pending: &PendingClaudeTool,
-) -> (u64, u64) {
-    if let Some(counts) = count_claude_structured_patch_lines(&tool_result.structured_patch) {
-        return counts;
-    }
-
-    if let (Some(old), Some(new)) = (
-        tool_result.old_string.as_deref(),
-        tool_result.new_string.as_deref(),
-    ) {
-        return (count_lines(new), count_lines(old));
-    }
-
-    if let (Some(old), Some(new)) = (
-        tool_result.original_file.as_deref(),
-        tool_result.content.as_deref(),
-    ) {
-        return (count_lines(new), count_lines(old));
-    }
-
-    if pending.kind == ChangeEventKind::FullWrite {
-        if let Some(content) = tool_result.content.as_deref() {
-            return (count_lines(content), 0);
-        }
-    }
-
-    (pending.fallback_added_lines, pending.fallback_removed_lines)
-}
-
-pub type ClaudeParseResult = (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, usize, bool);
-
-pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) => {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("Failed to open session file {}: {e}", path.display());
-            }
-            return (Vec::new(), Vec::new(), 0, false);
-        }
-    };
-
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-    let mut change_events = Vec::new();
-    let mut pending_tools: Vec<Option<PendingClaudeTool>> = Vec::new();
-    let mut pending_tool_indices: HashMap<String, usize> = HashMap::new();
-    let mut lines_read = 0;
-    let mut parse_failures = 0_usize;
-
-    for line in reader.lines() {
-        lines_read += 1;
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-
-        // Fast pre-filter: skip lines that can't contain assistant/tool_result data
-        if !line.contains("\"assistant\"") && !line.contains("\"tool_result\"") {
-            continue;
-        }
-
-        let entry: ClaudeJsonlEntry = match serde_json::from_str(&line) {
-            Ok(entry) => entry,
-            Err(_) => {
-                parse_failures += 1;
-                continue;
-            }
-        };
-        let ts = match chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
-            Ok(ts) => ts.with_timezone(&Local),
-            Err(_) => continue,
-        };
-
-        match entry.entry_type.as_str() {
-            "assistant" => {
-                let msg = match &entry.message {
-                    Some(message) => message,
-                    None => continue,
-                };
-                let model = match &msg.model {
-                    Some(model) if !model.starts_with('<') => model.clone(), // skip <synthetic> etc.
-                    _ => continue,
-                };
-
-                let agent_scope = if entry.is_sidechain == Some(true) {
-                    crate::stats::subagent::AgentScope::Subagent
-                } else {
-                    crate::stats::subagent::AgentScope::Main
-                };
-                let session_key = match (&entry.session_id, &entry.agent_id, entry.is_sidechain) {
-                    (Some(sid), Some(aid), Some(true)) => format!("claude:{sid}:subagent:{aid}"),
-                    (Some(sid), _, _) => format!("claude:{sid}:main"),
-                    _ => format!("claude:file:{}", path_to_string(path)),
-                };
-
-                let model_key = crate::models::normalized_model_key(&model);
-                let unique_hash = create_claude_unique_hash(&entry);
-                for (block_index, block) in msg.content.iter().enumerate() {
-                    let pending = match block {
-                        ClaudeContentBlock::ToolUse { id, name, input } if name == "Edit" => {
-                            serde_json::from_value::<EditToolInput>(input.clone())
-                                .ok()
-                                .and_then(|edit| {
-                                    if is_provider_internal_path(&edit.file_path) {
-                                        return None;
-                                    }
-                                    Some((
-                                        id.clone(),
-                                        PendingClaudeTool {
-                                            model_key: model_key.clone(),
-                                            timestamp: ts,
-                                            path: edit.file_path.clone(),
-                                            kind: ChangeEventKind::PatchEdit,
-                                            fallback_added_lines: count_lines(&edit.new_string),
-                                            fallback_removed_lines: count_lines(&edit.old_string),
-                                            dedupe_key: create_claude_tool_dedupe_key(
-                                                unique_hash.as_ref(),
-                                                id.as_ref(),
-                                                block_index,
-                                            ),
-                                            agent_scope,
-                                        },
-                                    ))
-                                })
-                        }
-                        ClaudeContentBlock::ToolUse { id, name, input } if name == "Write" => {
-                            serde_json::from_value::<WriteToolInput>(input.clone())
-                                .ok()
-                                .and_then(|write| {
-                                    if is_provider_internal_path(&write.file_path) {
-                                        return None;
-                                    }
-                                    Some((
-                                        id.clone(),
-                                        PendingClaudeTool {
-                                            model_key: model_key.clone(),
-                                            timestamp: ts,
-                                            path: write.file_path.clone(),
-                                            kind: ChangeEventKind::FullWrite,
-                                            fallback_added_lines: 0,
-                                            fallback_removed_lines: 0,
-                                            dedupe_key: create_claude_tool_dedupe_key(
-                                                unique_hash.as_ref(),
-                                                id.as_ref(),
-                                                block_index,
-                                            ),
-                                            agent_scope,
-                                        },
-                                    ))
-                                })
-                        }
-                        _ => None,
-                    };
-
-                    if let Some((tool_id, pending)) = pending {
-                        let idx = pending_tools.len();
-                        pending_tools.push(Some(pending));
-                        if let Some(tool_id) = tool_id {
-                            pending_tool_indices.insert(tool_id, idx);
-                        }
-                    }
-                }
-
-                if let Some(usage) = msg.usage.as_ref() {
-                    // Append "-fast" to the raw model name when speed is "fast"
-                    // so it gets a distinct model key and pricing.
-                    let effective_model = if usage.speed.as_deref() == Some("fast") {
-                        format!("{model}-fast")
-                    } else {
-                        model
-                    };
-
-                    // Split cache creation into 5m and 1h tiers.
-                    // If the breakdown sub-object exists, use it directly.
-                    // Otherwise default all cache creation to 1h (Claude Code's default).
-                    let total_cw = usage.cache_creation_input_tokens.unwrap_or(0);
-                    let (cw_5m, cw_1h) = match &usage.cache_creation {
-                        Some(bd) => (
-                            bd.ephemeral_5m_input_tokens.unwrap_or(0),
-                            bd.ephemeral_1h_input_tokens.unwrap_or(0),
-                        ),
-                        None => (0, total_cw),
-                    };
-
-                    let web_search_requests = usage
-                        .server_tool_use
-                        .as_ref()
-                        .and_then(|s| s.web_search_requests)
-                        .unwrap_or(0);
-
-                    entries.push(ParsedEntry {
-                        timestamp: ts,
-                        model: effective_model,
-                        input_tokens: usage.input_tokens.unwrap_or(0),
-                        output_tokens: usage.output_tokens.unwrap_or(0),
-                        cache_creation_5m_tokens: cw_5m,
-                        cache_creation_1h_tokens: cw_1h,
-                        cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
-                        web_search_requests,
-                        unique_hash,
-                        session_key: session_key.clone(),
-                        agent_scope,
-                    });
-                }
-            }
-            "user" => {
-                let Some(tool_result) = entry.tool_use_result.as_ref() else {
-                    continue;
-                };
-                let Some(msg) = entry.message.as_ref() else {
-                    continue;
-                };
-
-                for block in &msg.content {
-                    let ClaudeContentBlock::ToolResult { tool_use_id } = block else {
-                        continue;
-                    };
-                    let Some(idx) = pending_tool_indices.remove(tool_use_id) else {
-                        continue;
-                    };
-                    let Some(pending) = pending_tools.get_mut(idx).and_then(Option::take) else {
-                        continue;
-                    };
-
-                    let path = tool_result
-                        .file_path
-                        .clone()
-                        .filter(|path| !is_provider_internal_path(path))
-                        .unwrap_or_else(|| pending.path.clone());
-                    let (added_lines, removed_lines) =
-                        extract_claude_tool_result_counts(tool_result, &pending);
-
-                    change_events.push(ParsedChangeEvent {
-                        timestamp: ts,
-                        model: pending.model_key,
-                        provider: "claude".to_string(),
-                        path: path.clone(),
-                        kind: pending.kind,
-                        added_lines,
-                        removed_lines,
-                        category: classify_file(&path),
-                        dedupe_key: pending.dedupe_key,
-                        agent_scope: pending.agent_scope,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for pending in pending_tools.into_iter().flatten() {
-        let path = pending.path.clone();
-        change_events.push(ParsedChangeEvent {
-            timestamp: pending.timestamp,
-            model: pending.model_key,
-            provider: "claude".to_string(),
-            path: path.clone(),
-            kind: pending.kind,
-            added_lines: pending.fallback_added_lines,
-            removed_lines: pending.fallback_removed_lines,
-            category: classify_file(&path),
-            dedupe_key: pending.dedupe_key,
-            agent_scope: pending.agent_scope,
-        });
-    }
-
-    // Warn when a high proportion of candidate lines fail to parse,
-    // which may indicate a schema change in the JSONL format.
-    if parse_failures > 0 && entries.is_empty() && lines_read > 10 {
-        tracing::warn!(
-            "All {} candidate lines failed to parse in {}; JSONL schema may have changed",
-            parse_failures,
-            path.display()
-        );
-    }
-
-    (entries, change_events, lines_read, true)
-}
-
-enum ClaudeDedupeAction {
-    Inserted,
-    Replaced(usize),
-    Skipped,
-}
-
-fn upsert_claude_entry(
-    entries: &mut Vec<ParsedEntry>,
-    processed_hashes: &mut HashMap<String, usize>,
-    entry: ParsedEntry,
-) -> ClaudeDedupeAction {
-    let Some(unique_hash) = entry.unique_hash.clone() else {
-        entries.push(entry);
-        return ClaudeDedupeAction::Inserted;
-    };
-
-    if let Some(existing_idx) = processed_hashes.get(&unique_hash).copied() {
-        if should_prefer_claude_entry(&entry, &entries[existing_idx]) {
-            entries[existing_idx] = entry;
-            ClaudeDedupeAction::Replaced(existing_idx)
-        } else {
-            ClaudeDedupeAction::Skipped
-        }
-    } else {
-        let idx = entries.len();
-        entries.push(entry);
-        processed_hashes.insert(unique_hash, idx);
-        ClaudeDedupeAction::Inserted
-    }
-}
-
-fn upsert_claude_change_event(
-    change_events: &mut Vec<ParsedChangeEvent>,
-    processed_change_keys: &mut HashMap<String, usize>,
-    change_event: ParsedChangeEvent,
-) -> ClaudeDedupeAction {
-    let Some(dedupe_key) = change_event.dedupe_key.clone() else {
-        change_events.push(change_event);
-        return ClaudeDedupeAction::Inserted;
-    };
-
-    if let Some(existing_idx) = processed_change_keys.get(&dedupe_key).copied() {
-        if should_prefer_claude_change_event(&change_event, &change_events[existing_idx]) {
-            change_events[existing_idx] = change_event;
-            ClaudeDedupeAction::Replaced(existing_idx)
-        } else {
-            ClaudeDedupeAction::Skipped
-        }
-    } else {
-        let idx = change_events.len();
-        change_events.push(change_event);
-        processed_change_keys.insert(dedupe_key, idx);
-        ClaudeDedupeAction::Inserted
-    }
-}
-
-/// Read all Claude assistant entries from JSONL files under `projects_dir`,
-/// optionally filtering to entries on or after `since`.
-fn read_claude_entries_with_debug(
-    projects_dir: &Path,
-    since: Option<NaiveDate>,
-) -> (Vec<ParsedEntry>, ProviderReadDebug) {
-    let mut entries = Vec::new();
-    let mut processed_hashes = HashMap::new();
-    let files = glob_jsonl_files(projects_dir);
-    let mut report = ProviderReadDebug {
-        provider: String::from("claude"),
-        root_dir: path_to_string(projects_dir),
-        root_exists: projects_dir.exists(),
-        since: since.map(|date| date.format("%Y-%m-%d").to_string()),
-        strategy: String::from("recursive-jsonl-glob"),
-        discovered_paths: files.len(),
-        ..ProviderReadDebug::default()
-    };
-
-    for path in files {
-        // Skip files that haven't been modified since the since date.
-        // This avoids reading hundreds of old files for short time periods.
-        if let Some(since_date) = since {
-            if !modified_since(&path, since_date) {
-                report.skipped_paths += 1;
-                report.skipped_by_mtime += 1;
-                push_sample_path(&mut report.sample_skipped_paths, &path);
-                continue;
-            }
-        }
-        report.attempted_paths += 1;
-        push_sample_path(&mut report.sample_paths, &path);
-
-        let (parsed_entries, _change_events, lines_read, opened) = parse_claude_session_file(&path);
-        report.lines_read += lines_read;
-        if opened {
-            report.opened_paths += 1;
-        } else {
-            report.failed_paths += 1;
-            continue;
-        }
-
-        for entry in parsed_entries {
-            if since.is_some_and(|since_date| entry.timestamp.date_naive() < since_date) {
-                continue;
-            }
-            let _ = upsert_claude_entry(&mut entries, &mut processed_hashes, entry);
-        }
-    }
-    report.emitted_entries = entries.len();
-    (entries, report)
-}
-
-#[allow(dead_code)]
-pub fn read_claude_entries(projects_dir: &Path, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
-    read_claude_entries_with_debug(projects_dir, since).0
-}
-
-/// Parse a single Codex session JSONL file.
-/// Codex `event_msg` / `token_count` events may include either per-turn
-/// `last_token_usage` or cumulative `total_token_usage`. We normalize both
-/// forms into per-event deltas and track model context via `turn_context`.
-///
-/// In current Codex logs, `input_tokens` already includes cached input.
-/// Normalize it to billable uncached input here so downstream pricing and
-/// token totals do not count cached input twice.
 /// Count added and removed lines in a unified diff.
 /// Lines starting with `+` (but not `+++`) are additions.
 /// Lines starting with `-` (but not `---`) are removals.
-fn count_diff_lines(patch: &str) -> (u64, u64) {
+pub(crate) fn count_diff_lines(patch: &str) -> (u64, u64) {
     let mut added: u64 = 0;
     let mut removed: u64 = 0;
     for line in patch.lines() {
@@ -1126,437 +359,7 @@ fn count_diff_lines(patch: &str) -> (u64, u64) {
     (added, removed)
 }
 
-/// Extract file paths from unified diff headers.
-/// Looks for `+++ b/path` lines and strips the `b/` prefix.
-/// Falls back to `diff --git a/path b/path` headers.
-fn extract_diff_paths(patch: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    for line in patch.lines() {
-        if let Some(rest) = line.strip_prefix("+++ b/") {
-            let path = rest.trim();
-            if !path.is_empty() {
-                paths.push(path.to_string());
-            }
-        } else if let Some(rest) = line.strip_prefix("+++ ") {
-            // Handle `+++ path` without `b/` prefix (but skip `+++ /dev/null`)
-            let path = rest.trim();
-            if !path.is_empty() && path != "/dev/null" {
-                paths.push(path.to_string());
-            }
-        }
-    }
-    // Fall back to diff --git headers if no +++ lines found
-    if paths.is_empty() {
-        for line in patch.lines() {
-            if let Some(rest) = line.strip_prefix("diff --git ") {
-                // Format: "a/path b/path"
-                if let Some(b_idx) = rest.find(" b/") {
-                    let path = &rest[b_idx + 3..];
-                    let path = path.trim();
-                    if !path.is_empty() {
-                        paths.push(path.to_string());
-                    }
-                }
-            }
-        }
-    }
-    // Fall back to Codex *** Add/Update File: headers
-    if paths.is_empty() {
-        for line in patch.lines() {
-            let rest = line
-                .strip_prefix("*** Add File: ")
-                .or_else(|| line.strip_prefix("*** Update File: "))
-                .or_else(|| line.strip_prefix("*** Delete File: "));
-            if let Some(file_path) = rest {
-                let file_path = file_path.trim();
-                if !file_path.is_empty() {
-                    paths.push(file_path.to_string());
-                }
-            }
-        }
-    }
-    paths
-}
-
-/// Split a multi-file unified diff into per-file (path, added, removed) tuples.
-fn split_patch_by_file(patch: &str, paths: &[String]) -> Vec<(String, u64, u64)> {
-    // Split on `diff --git` boundaries or `--- a/` boundaries
-    let mut results = Vec::new();
-    let mut current_path_idx: Option<usize> = None;
-    let mut current_added: u64 = 0;
-    let mut current_removed: u64 = 0;
-
-    for line in patch.lines() {
-        if line.starts_with("diff --git ")
-            || line.starts_with("--- a/")
-            || line.starts_with("--- ")
-            || line.starts_with("*** Add File: ")
-            || line.starts_with("*** Update File: ")
-            || line.starts_with("*** Delete File: ")
-        {
-            // Check if this starts a new file section
-            if let Some(new_idx) = paths.iter().position(|p| line.contains(p)) {
-                // Flush previous file
-                if let Some(idx) = current_path_idx {
-                    results.push((paths[idx].clone(), current_added, current_removed));
-                }
-                current_path_idx = Some(new_idx);
-                current_added = 0;
-                current_removed = 0;
-                continue;
-            }
-        }
-        if current_path_idx.is_some() {
-            if line.starts_with('+') && !line.starts_with("+++") {
-                current_added += 1;
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                current_removed += 1;
-            }
-        }
-    }
-    // Flush last file
-    if let Some(idx) = current_path_idx {
-        results.push((paths[idx].clone(), current_added, current_removed));
-    }
-
-    // If splitting failed, fall back to one entry per path with even distribution
-    if results.is_empty() && !paths.is_empty() {
-        let (total_added, total_removed) = count_diff_lines(patch);
-        for path in paths {
-            results.push((
-                path.clone(),
-                total_added / paths.len() as u64,
-                total_removed / paths.len() as u64,
-            ));
-        }
-    }
-
-    results
-}
-
-type CodexParseResult = (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, usize, bool);
-
-fn parse_codex_session_file(path: &Path) -> CodexParseResult {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) => {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("Failed to open session file {}: {e}", path.display());
-            }
-            return (Vec::new(), Vec::new(), 0, false);
-        }
-    };
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-    let mut change_events = Vec::new();
-    let mut previous_totals: Option<CodexRawUsage> = None;
-    let mut current_model: Option<String> = None;
-    let mut pending_entry_model_indices = Vec::new();
-    let mut pending_change_model_indices = Vec::new();
-    let mut lines_read = 0;
-    let mut parse_failures = 0_usize;
-    let mut session_key = format!("codex-file:{}", path_to_string(path));
-    let mut agent_scope = crate::stats::subagent::AgentScope::Main;
-
-    for line in reader.lines() {
-        lines_read += 1;
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-
-        let entry: CodexJsonlEntry = match serde_json::from_str(&line) {
-            Ok(e) => e,
-            Err(_) => {
-                parse_failures += 1;
-                continue;
-            }
-        };
-
-        if entry.entry_type == "session_meta" {
-            if let Some(payload) = entry.payload.as_ref() {
-                if let Some(id) = payload.get("id").and_then(Value::as_str) {
-                    session_key = format!("codex:{id}");
-                }
-                if payload.pointer("/source/subagent").is_some() {
-                    agent_scope = crate::stats::subagent::AgentScope::Subagent;
-                }
-            }
-            continue;
-        }
-
-        if entry.entry_type == "turn_context" {
-            if let Some(payload) = entry.payload.as_ref() {
-                if let Some(model) = extract_codex_model(payload) {
-                    current_model = Some(model);
-                    assign_pending_codex_models(
-                        current_model.as_deref().unwrap_or("gpt-5"),
-                        &mut entries,
-                        &mut pending_entry_model_indices,
-                        &mut change_events,
-                        &mut pending_change_model_indices,
-                    );
-                }
-            }
-            continue;
-        }
-
-        // Accept both "event_msg" and "response_item" — newer Codex CLI versions
-        // emit apply_patch tool calls as "response_item" entries.
-        if entry.entry_type != "event_msg" && entry.entry_type != "response_item" {
-            continue;
-        }
-
-        let payload = match entry.payload.as_ref() {
-            Some(p) => p,
-            None => continue,
-        };
-        // Check for apply_patch tool calls (change events)
-        let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if payload_type == "function_call"
-            || payload_type == "custom_tool_call"
-            || payload_type == "tool_call"
-        {
-            let model_raw = extract_codex_model(payload).or_else(|| current_model.clone());
-            if let Some(model) = model_raw.as_ref() {
-                current_model = Some(model.clone());
-                assign_pending_codex_models(
-                    model,
-                    &mut entries,
-                    &mut pending_entry_model_indices,
-                    &mut change_events,
-                    &mut pending_change_model_indices,
-                );
-            }
-
-            let tool_name = payload
-                .get("name")
-                .or_else(|| payload.get("function"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if tool_name == "apply_patch" || tool_name.ends_with("apply_patch") {
-                let patch_content = payload
-                    .get("arguments")
-                    .or_else(|| payload.get("content"))
-                    .or_else(|| payload.get("input"))
-                    .and_then(|v| {
-                        // Could be a string directly or a JSON object with a "patch" key
-                        v.as_str()
-                            .map(String::from)
-                            .or_else(|| v.get("patch").and_then(Value::as_str).map(String::from))
-                    });
-
-                if let Some(patch) = patch_content {
-                    let ts_str = entry.timestamp.as_deref().unwrap_or("");
-                    if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str) {
-                        let ts = ts.with_timezone(&Local);
-                        let model_key = model_raw
-                            .as_deref()
-                            .map(crate::models::normalized_model_key);
-                        let paths = extract_diff_paths(&patch);
-                        let (total_added, total_removed) = count_diff_lines(&patch);
-
-                        if paths.is_empty() {
-                            // Single file or unparseable diff — emit one event
-                            if total_added > 0 || total_removed > 0 {
-                                push_codex_change_event(
-                                    &mut change_events,
-                                    &mut pending_change_model_indices,
-                                    model_key.as_deref(),
-                                    ts,
-                                    String::from("unknown"),
-                                    ChangeEventKind::PatchEdit,
-                                    total_added,
-                                    total_removed,
-                                    agent_scope,
-                                );
-                            }
-                        } else if paths.len() == 1 {
-                            push_codex_change_event(
-                                &mut change_events,
-                                &mut pending_change_model_indices,
-                                model_key.as_deref(),
-                                ts,
-                                paths[0].clone(),
-                                ChangeEventKind::PatchEdit,
-                                total_added,
-                                total_removed,
-                                agent_scope,
-                            );
-                        } else {
-                            // Multiple files in one patch — split by file
-                            // Re-parse per-file diffs using `diff --git` or `--- a/` separators
-                            let file_diffs = split_patch_by_file(&patch, &paths);
-                            for (file_path, file_added, file_removed) in file_diffs {
-                                push_codex_change_event(
-                                    &mut change_events,
-                                    &mut pending_change_model_indices,
-                                    model_key.as_deref(),
-                                    ts,
-                                    file_path,
-                                    ChangeEventKind::PatchEdit,
-                                    file_added,
-                                    file_removed,
-                                    agent_scope,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        if payload_type != "token_count" {
-            continue;
-        }
-
-        let info = payload.get("info");
-        let last_usage =
-            normalize_codex_raw_usage(info.and_then(|value| value.get("last_token_usage")));
-        let total_usage =
-            normalize_codex_raw_usage(info.and_then(|value| value.get("total_token_usage")));
-
-        let raw_usage = if let Some(total_usage) = total_usage {
-            subtract_codex_raw_usage(total_usage, previous_totals)
-        } else if let Some(last_usage) = last_usage {
-            last_usage
-        } else {
-            continue;
-        };
-
-        if let Some(total_usage) = total_usage {
-            previous_totals = Some(total_usage);
-        }
-
-        if codex_usage_is_zero(raw_usage) {
-            continue;
-        }
-
-        let timestamp = match entry.timestamp.as_deref() {
-            Some(timestamp) => timestamp,
-            None => continue,
-        };
-
-        let ts = match chrono::DateTime::parse_from_rfc3339(timestamp) {
-            Ok(dt) => dt.with_timezone(&Local),
-            Err(_) => continue,
-        };
-
-        let extracted_model = extract_codex_model(payload);
-        if let Some(model) = extracted_model.as_ref() {
-            current_model = Some(model.clone());
-            assign_pending_codex_models(
-                model,
-                &mut entries,
-                &mut pending_entry_model_indices,
-                &mut change_events,
-                &mut pending_change_model_indices,
-            );
-        }
-
-        let model = extracted_model.or_else(|| current_model.clone());
-
-        let uncached_input_tokens = raw_usage
-            .input_tokens
-            .saturating_sub(raw_usage.cached_input_tokens);
-
-        let entry_model = model.unwrap_or_default();
-        entries.push(ParsedEntry {
-            timestamp: ts,
-            model: entry_model,
-            input_tokens: uncached_input_tokens,
-            output_tokens: raw_usage.output_tokens,
-            cache_creation_5m_tokens: 0,
-            cache_creation_1h_tokens: 0,
-            cache_read_tokens: raw_usage.cached_input_tokens,
-            web_search_requests: 0,
-            unique_hash: None,
-            session_key: session_key.clone(),
-            agent_scope,
-        });
-        if entries.last().is_some_and(|entry| entry.model.is_empty()) {
-            pending_entry_model_indices.push(entries.len() - 1);
-        }
-    }
-
-    assign_pending_codex_models(
-        "gpt-5",
-        &mut entries,
-        &mut pending_entry_model_indices,
-        &mut change_events,
-        &mut pending_change_model_indices,
-    );
-
-    entries.sort_by_key(|a| a.timestamp);
-
-    if parse_failures > 0 && entries.is_empty() && lines_read > 10 {
-        tracing::warn!(
-            "All {} lines failed to parse in {}; JSONL schema may have changed",
-            parse_failures,
-            path.display()
-        );
-    }
-
-    (entries, change_events, lines_read, true)
-}
-
-/// Read all Codex session entries from `sessions_dir`, recursively scanning
-/// all JSONL session files under the directory.
-fn read_codex_entries_with_debug(
-    sessions_dir: &Path,
-    since: Option<NaiveDate>,
-) -> (Vec<ParsedEntry>, ProviderReadDebug) {
-    let mut entries = Vec::new();
-    let files = glob_jsonl_files(sessions_dir);
-    let mut report = ProviderReadDebug {
-        provider: String::from("codex"),
-        root_dir: path_to_string(sessions_dir),
-        root_exists: sessions_dir.exists(),
-        since: since.map(|date| date.format("%Y-%m-%d").to_string()),
-        strategy: String::from("recursive-jsonl-glob"),
-        discovered_paths: files.len(),
-        ..ProviderReadDebug::default()
-    };
-
-    for path in files {
-        if let Some(since_date) = since {
-            if !modified_since(&path, since_date) {
-                report.skipped_paths += 1;
-                report.skipped_by_mtime += 1;
-                push_sample_path(&mut report.sample_skipped_paths, &path);
-                continue;
-            }
-        }
-
-        report.attempted_paths += 1;
-        push_sample_path(&mut report.sample_paths, &path);
-        let (parsed_entries, _change_events, lines_read, opened) = parse_codex_session_file(&path);
-        report.lines_read += lines_read;
-        if opened {
-            report.opened_paths += 1;
-        } else {
-            report.failed_paths += 1;
-            continue;
-        }
-
-        for parsed in parsed_entries {
-            if since.is_some_and(|since_date| parsed.timestamp.date_naive() < since_date) {
-                continue;
-            }
-            entries.push(parsed);
-        }
-    }
-
-    entries.sort_by_key(|a| a.timestamp);
-    report.emitted_entries = entries.len();
-    (entries, report)
-}
-
-#[allow(dead_code)]
-pub fn read_codex_entries(sessions_dir: &Path, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
-    read_codex_entries_with_debug(sessions_dir, since).0
-}
+pub(crate) type SessionParseResult = (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, usize, bool);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hour label helper
@@ -1716,12 +519,17 @@ fn default_usage_integration_configs() -> Vec<UsageIntegrationConfig> {
             UsageIntegrationId::Codex,
             UsageIntegrationId::Codex.detect_roots(),
         ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Cursor,
+            UsageIntegrationId::Cursor.detect_roots(),
+        ),
     ]
 }
 
 fn usage_integration_configs_with_overrides(
     claude_roots: Option<Vec<PathBuf>>,
     codex_roots: Option<Vec<PathBuf>>,
+    cursor_roots: Option<Vec<PathBuf>>,
 ) -> Vec<UsageIntegrationConfig> {
     vec![
         UsageIntegrationConfig::new(
@@ -1731,6 +539,10 @@ fn usage_integration_configs_with_overrides(
         UsageIntegrationConfig::new(
             UsageIntegrationId::Codex,
             codex_roots.unwrap_or_else(|| UsageIntegrationId::Codex.detect_roots()),
+        ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Cursor,
+            cursor_roots.unwrap_or_else(|| UsageIntegrationId::Cursor.detect_roots()),
         ),
     ]
 }
@@ -1776,6 +588,7 @@ impl UsageParser {
         Self::from_integrations(usage_integration_configs_with_overrides(
             Some(claude_dirs),
             None,
+            None,
         ))
     }
 
@@ -1785,6 +598,7 @@ impl UsageParser {
         Self::from_integrations(usage_integration_configs_with_overrides(
             None,
             Some(vec![codex_dir]),
+            None,
         ))
     }
 
@@ -1806,6 +620,7 @@ impl UsageParser {
         Self::from_integrations(usage_integration_configs_with_overrides(
             Some(vec![claude_dir]),
             Some(vec![codex_dir]),
+            None,
         ))
     }
 
@@ -1814,6 +629,7 @@ impl UsageParser {
     #[allow(dead_code)]
     pub fn clear_cache(&self) {
         self.clear_payload_cache();
+        set_cursor_warning(None);
         if let Ok(mut c) = self.file_cache.lock() {
             c.clear();
         }
@@ -1822,6 +638,11 @@ impl UsageParser {
         }
         if let Ok(mut current) = self.last_query_debug.lock() {
             *current = None;
+        }
+        if let Ok(guard) = self.archive.lock() {
+            if let Some(archive) = guard.as_ref() {
+                archive.reset();
+            }
         }
     }
 
@@ -2006,6 +827,7 @@ impl UsageParser {
                 let (e, ce, lr, op) = parse_codex_session_file(path);
                 (e, ce, lr, op)
             }
+            ProviderFileKind::Cursor => parse_cursor_session_file(path),
         };
         let earliest_date = earliest_entry_date(&entries);
         let entries: Arc<[ParsedEntry]> = entries.into();
@@ -2197,6 +1019,63 @@ impl UsageParser {
         (entries, change_events, report)
     }
 
+    fn load_cursor_local_entries_with_debug(
+        &self,
+        since: Option<NaiveDate>,
+    ) -> (Vec<ParsedEntry>, ProviderReadDebug) {
+        let config = self
+            .integration_config(UsageIntegrationId::Cursor)
+            .expect("cursor integration should be configured");
+        let root_dir = config.roots.first().cloned().unwrap_or_default();
+        load_cursor_local_entries(&root_dir, since)
+    }
+
+    fn load_cursor_entries_with_debug(
+        &self,
+        since: Option<NaiveDate>,
+    ) -> (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, ProviderReadDebug) {
+        let (local_entries, mut report) = self.load_cursor_local_entries_with_debug(since);
+        if !local_entries.is_empty() {
+            set_cursor_warning(None);
+            return (local_entries, Vec::new(), report);
+        }
+
+        match fetch_cursor_remote_entries(since) {
+            Ok(Some(entries)) => {
+                report.strategy = format!("{}+cursor-remote-api", report.strategy);
+                report.emitted_entries = entries.len();
+                if entries.is_empty() {
+                    tracing::info!(
+                        "Cursor remote API returned no usage entries for the selected period"
+                    );
+                }
+                set_cursor_warning(None);
+                (entries, Vec::new(), report)
+            }
+            Ok(None) => {
+                report.strategy = format!("{}+cursor-remote-api-not-configured", report.strategy);
+                let warning = String::from(
+                    "Cursor remote auth is not configured. Paste a `WorkosCursorSessionToken` from cursor.com cookies (recommended for Pro/Pro+/Ultra) — or, for Enterprise admins, paste a `key_…` Admin API Key from Cursor Dashboard → Settings → Advanced.",
+                );
+                set_cursor_warning(Some(warning));
+                (Vec::new(), Vec::new(), report)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Cursor remote API source failed"
+                );
+                push_sample_path(
+                    &mut report.sample_skipped_paths,
+                    Path::new(&format!("cursor-remote-api: {error}")),
+                );
+                report.strategy = format!("{}+cursor-remote-api-failed", report.strategy);
+                set_cursor_warning(None);
+                (Vec::new(), Vec::new(), report)
+            }
+        }
+    }
+
     // ── Internal: load entries for a provider/since combination ──
 
     pub(crate) fn load_entries(
@@ -2261,8 +1140,29 @@ impl UsageParser {
                     change_events.extend(next_change_events);
                     reports.push(next_report);
                 }
+                UsageIntegrationId::Cursor => {
+                    let (next_entries, next_change_events, next_report) =
+                        self.load_cursor_entries_with_debug(since);
+
+                    if let Some(ref f) = frontier {
+                        entries.extend(next_entries.into_iter().filter(|e| {
+                            !f.covers(e.timestamp.date_naive(), e.timestamp.hour() as u8)
+                        }));
+                    } else {
+                        entries.extend(next_entries);
+                    }
+                    change_events.extend(next_change_events);
+                    reports.push(next_report);
+                }
             }
         }
+
+        // Drop rows whose model doesn't belong to the selected provider tab.
+        // A third-party model logged through any CLI (e.g. GLM-5 via a Claude
+        // Code proxy) should not show up in the Claude tab; otherwise the
+        // main dashboard total diverges from the Per-Device breakdown, which
+        // applies the same predicate to remote SSH rows.
+        entries.retain(|e| provider_matches_model(provider, &e.model));
 
         (entries, change_events, reports)
     }
@@ -2281,6 +1181,7 @@ impl UsageParser {
             .any(|integration_id| match integration_id {
                 UsageIntegrationId::Claude => self.has_claude_entries_before(before_date),
                 UsageIntegrationId::Codex => self.has_codex_entries_before(before_date),
+                UsageIntegrationId::Cursor => self.has_cursor_entries_before(before_date),
             })
     }
 
@@ -2332,6 +1233,24 @@ impl UsageParser {
         self.has_integration_entries_before(config, before_date)
     }
 
+    fn has_cursor_entries_before(&self, before_date: NaiveDate) -> bool {
+        let config = self
+            .integration_config(UsageIntegrationId::Cursor)
+            .expect("cursor integration should be configured");
+        for root_dir in &config.roots {
+            for path in glob_cursor_chat_session_files(root_dir) {
+                let (entries, _changes, _lines_read, _opened) = parse_cursor_session_file(&path);
+                if entries
+                    .iter()
+                    .any(|entry| entry.timestamp.date_naive() < before_date)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // ── Internal: build model_breakdown across all entries ──
 
     #[allow(dead_code)]
@@ -2339,6 +1258,14 @@ impl UsageParser {
         let refs: Vec<&ParsedEntry> = entries.iter().collect();
         let map = build_segment_map(&refs);
         segment_map_to_model_summaries(&map)
+    }
+
+    fn provider_usage_warning(provider: &str) -> Option<String> {
+        if provider == UsageIntegrationId::Cursor.as_str() {
+            cursor_last_warning()
+        } else {
+            None
+        }
     }
 
     // ── Aggregation: daily ──
@@ -2422,13 +1349,14 @@ impl UsageParser {
             last_updated: Local::now().to_rfc3339(),
             from_cache: false,
             usage_source: UsageSource::Parser,
-            usage_warning: None,
+            usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
             device_breakdown: None,
             device_chart_buckets: None,
+            provider_detected: None,
         }
     }
 
@@ -2517,13 +1445,14 @@ impl UsageParser {
             last_updated: Local::now().to_rfc3339(),
             from_cache: false,
             usage_source: UsageSource::Parser,
-            usage_warning: None,
+            usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
             device_breakdown: None,
             device_chart_buckets: None,
+            provider_detected: None,
         }
     }
 
@@ -2625,13 +1554,14 @@ impl UsageParser {
             last_updated: Local::now().to_rfc3339(),
             from_cache: false,
             usage_source: UsageSource::Parser,
-            usage_warning: None,
+            usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
             device_breakdown: None,
             device_chart_buckets: None,
+            provider_detected: None,
         }
     }
 
@@ -2682,8 +1612,6 @@ impl UsageParser {
         let mut chart_buckets: Vec<ChartBucket> = Vec::new();
         let mut total_cost = 0.0f64;
         let mut total_tokens = 0u64;
-        let mut total_input = 0u64;
-        let mut total_output = 0u64;
         let mut global_model_map: HashMap<String, (String, f64, u64)> = HashMap::new();
         let mut active_block: Option<ActiveBlock> = None;
         let mut five_hour_cost = 0.0f64;
@@ -2695,11 +1623,6 @@ impl UsageParser {
 
             total_cost += block_cost;
             total_tokens += block_tokens;
-
-            for e in block.iter() {
-                total_input += e.input_tokens;
-                total_output += e.output_tokens;
-            }
 
             for (key, (name, cost, tokens)) in &seg_map {
                 let gm = global_model_map
@@ -2761,8 +1684,8 @@ impl UsageParser {
             total_cost,
             total_tokens,
             session_count,
-            input_tokens: total_input,
-            output_tokens: total_output,
+            input_tokens: 0,
+            output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_5m_tokens: 0,
             cache_write_1h_tokens: 0,
@@ -2774,13 +1697,14 @@ impl UsageParser {
             last_updated: Local::now().to_rfc3339(),
             from_cache: false,
             usage_source: UsageSource::Parser,
-            usage_warning: None,
+            usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
             device_breakdown: None,
             device_chart_buckets: None,
+            provider_detected: None,
         }
     }
 }
@@ -2792,6 +1716,8 @@ impl UsageParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::codex_parser::*;
+    use crate::usage::cursor_parser::*;
     use std::fs;
     use tempfile::TempDir;
 
@@ -2846,6 +1772,327 @@ mod tests {
         assert!(files[0].ends_with("session.jsonl"));
         // The symlinked dir also must not appear in the directory-stamp list.
         assert!(!dirs.iter().any(|d| d.path.ends_with("link")));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cursor parsing
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn classify_cursor_secret_recognizes_admin_prefix() {
+        assert_eq!(
+            classify_cursor_secret("key_abc123"),
+            Some(CursorAuth::Admin(String::from("key_abc123")))
+        );
+        // Whitespace stripped.
+        assert_eq!(
+            classify_cursor_secret("  key_xyz  "),
+            Some(CursorAuth::Admin(String::from("key_xyz")))
+        );
+    }
+
+    #[test]
+    fn classify_cursor_secret_falls_back_to_dashboard() {
+        let workos = "user_01ABCD::eyJhbGciOiJIUzI1NiJ9.payload.sig";
+        assert_eq!(
+            classify_cursor_secret(workos),
+            Some(CursorAuth::Dashboard(workos.to_string()))
+        );
+    }
+
+    #[test]
+    fn classify_cursor_secret_rejects_blank() {
+        assert_eq!(classify_cursor_secret(""), None);
+        assert_eq!(classify_cursor_secret("   "), None);
+        assert_eq!(classify_cursor_secret("\n\t"), None);
+    }
+
+    #[test]
+    fn choose_cursor_auth_prefers_secret_override() {
+        // Override beats every other source.
+        let override_token = "user_01ABCD::session-token";
+        let auth = choose_cursor_auth(
+            Some("key_legacy_admin"),
+            Some("user_99XYZ::other-session"),
+            Some(override_token),
+            Some("ide_token_should_lose"),
+        )
+        .expect("override should produce a credential");
+        assert_eq!(auth, CursorAuth::Dashboard(override_token.to_string()));
+    }
+
+    #[test]
+    fn choose_cursor_auth_session_token_env_beats_api_key_env() {
+        // No override: CURSOR_SESSION_TOKEN wins over CURSOR_API_KEY because
+        // users typically only set the session-token var explicitly when
+        // they've deliberately switched to the dashboard path.
+        let auth = choose_cursor_auth(
+            Some("key_legacy_admin"),
+            Some("user_01ABCD::dashboard-session"),
+            None,
+            None,
+        )
+        .expect("env-supplied session token should produce a credential");
+        assert_eq!(
+            auth,
+            CursorAuth::Dashboard(String::from("user_01ABCD::dashboard-session"))
+        );
+    }
+
+    #[test]
+    fn choose_cursor_auth_falls_back_to_api_key_env() {
+        let auth = choose_cursor_auth(Some("key_admin_only"), None, None, None)
+            .expect("api-key env should produce a credential");
+        assert_eq!(auth, CursorAuth::Admin(String::from("key_admin_only")));
+    }
+
+    #[test]
+    fn choose_cursor_auth_falls_back_to_ide_token_when_nothing_else_set() {
+        let ide_token = "eyJhbGciOiJIUzI1NiJ9.payload.sig";
+        let auth = choose_cursor_auth(None, None, None, Some(ide_token))
+            .expect("ide token should produce a credential at the lowest tier");
+        assert_eq!(auth, CursorAuth::IdeBearer(ide_token.to_string()));
+    }
+
+    #[test]
+    fn choose_cursor_auth_user_secret_beats_ide_token() {
+        // Even an explicit but "weak" secret (no `key_` prefix → Dashboard)
+        // should win over the auto-detected IDE token. Users may have
+        // deliberately pasted a different account's session.
+        let pasted = "user_99ZZZ::pasted-by-hand";
+        let ide_token = "eyJhbGciOiJIUzI1NiJ9.different.user";
+        let auth = choose_cursor_auth(None, None, Some(pasted), Some(ide_token))
+            .expect("user paste should beat IDE auto-detect");
+        assert_eq!(auth, CursorAuth::Dashboard(pasted.to_string()));
+    }
+
+    #[test]
+    fn choose_cursor_auth_returns_none_when_all_blank() {
+        assert!(choose_cursor_auth(None, None, None, None).is_none());
+        assert!(choose_cursor_auth(Some(""), Some("   "), Some("\n"), Some("\t")).is_none());
+    }
+
+    #[test]
+    fn cursor_request_url_branches_by_auth_kind() {
+        assert!(
+            cursor_request_url(&CursorAuth::Admin(String::from("key_x")))
+                .contains("api.cursor.com/teams/filtered-usage-events")
+        );
+        assert!(
+            cursor_request_url(&CursorAuth::Dashboard(String::from("session")))
+                .contains("cursor.com/api/dashboard/get-filtered-usage-events")
+        );
+        assert!(
+            cursor_request_url(&CursorAuth::IdeBearer(String::from("eyJ.bearer.jwt")))
+                .contains("api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents")
+        );
+    }
+
+    #[test]
+    fn cursor_session_key_for_uses_distinct_prefixes_per_auth_kind() {
+        assert_eq!(
+            cursor_session_key_for(CursorAuthKind::Admin),
+            "cursor-admin"
+        );
+        assert_eq!(
+            cursor_session_key_for(CursorAuthKind::Dashboard),
+            "cursor-dashboard"
+        );
+        assert_eq!(
+            cursor_session_key_for(CursorAuthKind::IdeBearer),
+            "cursor-ide"
+        );
+    }
+
+    #[test]
+    fn parse_cursor_official_usage_events_extracts_token_usage_from_admin_payload() {
+        let data = serde_json::json!({
+            "usageEvents": [
+                {
+                    "timestamp": "1750979225854",
+                    "userEmail": "developer@example.com",
+                    "model": "claude-4.5-sonnet",
+                    "tokenUsage": {
+                        "inputTokens": 126,
+                        "outputTokens": 450,
+                        "cacheWriteTokens": 6112,
+                        "cacheReadTokens": 11964,
+                        "totalCents": 20.18232
+                    }
+                },
+                {
+                    "timestamp": "1750979173824",
+                    "model": "request-based",
+                    "isTokenBasedCall": false
+                }
+            ],
+            "pagination": { "hasNextPage": false }
+        });
+
+        let entries = parse_cursor_official_usage_events(&data, None, "cursor-admin").unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "claude-4.5-sonnet");
+        assert_eq!(entries[0].input_tokens, 126);
+        assert_eq!(entries[0].output_tokens, 450);
+        assert_eq!(entries[0].cache_creation_1h_tokens, 6112);
+        assert_eq!(entries[0].cache_read_tokens, 11964);
+        assert_eq!(entries[0].session_key, "cursor-admin");
+    }
+
+    #[test]
+    fn parse_cursor_official_usage_events_tags_dashboard_session_key() {
+        // Dashboard schema sample — same shape as admin, just tagged with a
+        // different session_key so downstream aggregation can disambiguate.
+        let data = serde_json::json!({
+            "usageEvents": [
+                {
+                    "timestamp": "1750979225854",
+                    "model": "gpt-5.4",
+                    "tokenUsage": {
+                        "inputTokens": 200,
+                        "outputTokens": 80,
+                        "cacheWriteTokens": 0,
+                        "cacheReadTokens": 50
+                    },
+                    "kind": "USAGE_EVENT_KIND_USAGE_BASED",
+                    "maxMode": false
+                }
+            ],
+            "pagination": { "hasNextPage": false }
+        });
+
+        let entries = parse_cursor_official_usage_events(&data, None, "cursor-dashboard").unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_key, "cursor-dashboard");
+        assert_eq!(entries[0].input_tokens, 200);
+        assert_eq!(entries[0].output_tokens, 80);
+        assert_eq!(entries[0].cache_read_tokens, 50);
+    }
+
+    #[test]
+    fn parse_cursor_official_usage_events_handles_ide_bearer_display_array() {
+        // The IDE-bearer Connect-Web endpoint uses `usageEventsDisplay`
+        // instead of `usageEvents`. Same per-row shape, with extra fields
+        // we ignore (kind, requestsCosts, chargedCents, owningUser, …).
+        // Pagination is communicated via `totalUsageEventsCount` (string-
+        // encoded int64 under Connect-Web's JSON convention).
+        let data = serde_json::json!({
+            "totalUsageEventsCount": "114",
+            "usageEventsDisplay": [
+                {
+                    "timestamp": "1777165184690",
+                    "model": "claude-opus-4-7-thinking-max",
+                    "kind": "USAGE_EVENT_KIND_INCLUDED_IN_PRO_PLUS",
+                    "maxMode": true,
+                    "requestsCosts": 133.7,
+                    "isTokenBasedCall": true,
+                    "tokenUsage": {
+                        "inputTokens": 22,
+                        "outputTokens": 20245,
+                        "cacheWriteTokens": 350245,
+                        "cacheReadTokens": 5301898,
+                        "totalCents": 534.6215249999999
+                    },
+                    "owningUser": "346002640",
+                    "chargedCents": 534.621525
+                }
+            ]
+        });
+
+        let entries = parse_cursor_official_usage_events(&data, None, "cursor-ide").unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_key, "cursor-ide");
+        assert_eq!(entries[0].model, "claude-opus-4-7-thinking-max");
+        assert_eq!(entries[0].input_tokens, 22);
+        assert_eq!(entries[0].output_tokens, 20245);
+        assert_eq!(entries[0].cache_creation_1h_tokens, 350245);
+        assert_eq!(entries[0].cache_read_tokens, 5301898);
+    }
+
+    #[test]
+    fn parse_cursor_official_usage_events_errors_when_neither_array_present() {
+        let data = serde_json::json!({"someOtherField": []});
+        match parse_cursor_official_usage_events(&data, None, "cursor-admin") {
+            Ok(_) => panic!("expected error when payload is missing the events array"),
+            Err(err) => assert!(
+                err.contains("usageEvents/usageEventsDisplay"),
+                "error should mention both array names so users can debug, got: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn cursor_response_has_next_page_uses_pagination_object_when_present() {
+        let with_more = serde_json::json!({"pagination": {"hasNextPage": true}});
+        let without_more = serde_json::json!({"pagination": {"hasNextPage": false}});
+        assert!(cursor_response_has_next_page(&with_more, 1, 100));
+        assert!(!cursor_response_has_next_page(&without_more, 1, 100));
+    }
+
+    #[test]
+    fn cursor_response_has_next_page_uses_total_count_for_ide_bearer_payloads() {
+        // 114 total, page 1 of 100 → still 14 more on page 2.
+        let p1 = serde_json::json!({"totalUsageEventsCount": "114"});
+        assert!(cursor_response_has_next_page(&p1, 1, 100));
+        // After page 2 we've covered 200 events, more than the total.
+        assert!(!cursor_response_has_next_page(&p1, 2, 100));
+        // Numeric encoding works too, in case a deployment stops string-
+        // encoding int64 fields.
+        let numeric = serde_json::json!({"totalUsageEventsCount": 250});
+        assert!(cursor_response_has_next_page(&numeric, 2, 100));
+        assert!(!cursor_response_has_next_page(&numeric, 3, 100));
+    }
+
+    #[test]
+    fn cursor_response_has_next_page_returns_false_with_no_pagination_info() {
+        let neither = serde_json::json!({"usageEvents": []});
+        assert!(!cursor_response_has_next_page(&neither, 1, 100));
+    }
+
+    #[test]
+    fn parse_cursor_session_file_extracts_token_usage() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.json");
+        write_file(
+            &path,
+            r#"{"messages":[{"id":"event-1","timestamp":"2026-03-15T12:00:00+00:00","model":"cursor-model","tokenUsage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":25,"cacheWriteTokens":10}}]}"#,
+        );
+
+        let (entries, _change_events, lines_read, opened) = parse_cursor_session_file(&path);
+
+        assert!(opened);
+        assert_eq!(lines_read, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].input_tokens, 100);
+        assert_eq!(entries[0].output_tokens, 50);
+        assert_eq!(entries[0].cache_read_tokens, 25);
+        assert_eq!(entries[0].cache_creation_1h_tokens, 10);
+    }
+
+    #[test]
+    fn cursor_local_debug_reports_readable_files_without_usage_entries() {
+        let root = TempDir::new().unwrap();
+        let chat_dir = root.path().join("workspace-a").join("chatSessions");
+        fs::create_dir_all(&chat_dir).unwrap();
+        write_file(
+            &chat_dir.join("session.json"),
+            r#"{"messages":[{"id":"event-1","text":"hello"}]}"#,
+        );
+        let parser = UsageParser::from_integrations(usage_integration_configs_with_overrides(
+            None,
+            None,
+            Some(vec![root.path().to_path_buf()]),
+        ));
+
+        let (entries, report) = parser.load_cursor_local_entries_with_debug(None);
+
+        assert!(entries.is_empty());
+        assert_eq!(report.discovered_paths, 1);
+        assert_eq!(report.opened_paths, 1);
+        assert_eq!(report.emitted_entries, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2920,6 +2167,35 @@ mod tests {
         assert_eq!(entries[0].cache_read_tokens, 30);
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].emitted_entries, 1);
+    }
+
+    #[test]
+    fn load_entries_drops_third_party_models_from_claude_tab() {
+        // Claude Code CLI logs can contain third-party models when proxied
+        // (e.g. GLM-5 via an Anthropic-compatible proxy). Those rows must
+        // NOT be counted in the "claude" tab, otherwise the main dashboard
+        // total diverges from the Per-Device breakdown (which filters by
+        // model family for remote SSH rows).
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2026-03-15T12:01:00+00:00","message":{"model":"glm-5","stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+
+        let (claude_entries, _, _) = parser.load_entries("claude", parse_since_date("20260301"));
+        assert_eq!(
+            claude_entries.len(),
+            1,
+            "GLM-5 row logged via Claude Code CLI should not count in the Claude tab"
+        );
+        assert_eq!(claude_entries[0].model, "claude-sonnet-4-6");
+
+        let (all_entries, _, _) = parser.load_entries("all", parse_since_date("20260301"));
+        assert!(
+            all_entries.iter().any(|e| e.model == "glm-5"),
+            "the 'all' tab should still include the GLM-5 row"
+        );
     }
 
     #[test]
@@ -3606,6 +2882,7 @@ mod tests {
 
     #[test]
     fn count_lines_helper() {
+        use crate::usage::claude_parser::test_count_lines as count_lines;
         assert_eq!(count_lines(""), 0);
         assert_eq!(count_lines("one"), 1);
         assert_eq!(count_lines("one\ntwo"), 2);
@@ -3818,6 +3095,7 @@ mod tests {
 
     #[test]
     fn is_provider_internal_path_detects_plans() {
+        use crate::usage::claude_parser::test_is_provider_internal_path as is_provider_internal_path;
         assert!(is_provider_internal_path(
             "/home/user/.claude/plans/plan_abc.md"
         ));
@@ -4260,5 +3538,395 @@ mod debug_compare {
         println!("\n=== CODEX: ccusage ===");
         println!("  gpt-5.4: inp=231,247 out=7,338 reasoning=5,997 total=238,585 cost=$0.277788");
         println!("  (reasoning is informational; both parsers bill against token_count usage)");
+    }
+}
+
+#[cfg(test)]
+mod path_a_smoke {
+    //! Manual smoke probe for "Path A" — can we authenticate against
+    //! Cursor's remote APIs using the access token that Cursor IDE itself
+    //! stores locally in `state.vscdb`, instead of asking the user to
+    //! manually copy `WorkosCursorSessionToken` out of cursor.com cookies?
+    //!
+    //! If the dashboard endpoint accepts `Authorization: Bearer <token>`
+    //! where `<token>` comes from `cursorAuth/accessToken`, we can offer
+    //! a zero-configuration Cursor integration: install TokenMonitor →
+    //! it picks up the IDE's session automatically. If not, we fall back
+    //! to "Path B" (in-app webview login).
+    //!
+    //! This test:
+    //!   • is `#[ignore]` because it requires a logged-in Cursor IDE on
+    //!     the host AND hits the real cursor.com / api.cursor.com servers;
+    //!   • never asserts (so all four probes run regardless of which one
+    //!     succeeds — useful for one-shot diagnosis);
+    //!   • redacts the access token before printing.
+    //!
+    //! Run with:
+    //! ```bash
+    //! cargo test --lib path_a_smoke -- --ignored --nocapture
+    //! ```
+
+    use super::*;
+    use crate::usage::cursor_parser::*;
+    use std::time::Duration;
+
+    fn redact(token: &str) -> String {
+        if token.len() <= 16 {
+            format!("[short, {} chars]", token.len())
+        } else {
+            format!(
+                "{}…{} ({} chars, {} JWT-style segments)",
+                &token[..8],
+                &token[token.len() - 8..],
+                token.len(),
+                token.matches('.').count() + 1,
+            )
+        }
+    }
+
+    fn print_response(label: &str, resp: reqwest::blocking::Response) {
+        let status = resp.status();
+        let headers_summary = format!(
+            "content-type={:?} content-length={:?}",
+            resp.headers().get("content-type"),
+            resp.headers().get("content-length"),
+        );
+        let body = resp
+            .text()
+            .unwrap_or_else(|e| format!("[body read error: {e}]"));
+        let preview_len = body.len().min(800);
+        eprintln!("\n=== {label} ===");
+        eprintln!("status:  {status}");
+        eprintln!("headers: {headers_summary}");
+        eprintln!("body (first {preview_len} chars):");
+        eprintln!("{}", &body[..preview_len]);
+        if body.len() > preview_len {
+            eprintln!("[... {} more chars omitted ...]", body.len() - preview_len);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual: requires a logged-in Cursor IDE on host + real network"]
+    fn probe_cursor_ide_access_token_against_remote_endpoints() {
+        let Some(db_path) = cursor_global_state_path_from_env()
+            .or_else(crate::paths::cursor_global_state_vscdb_default)
+        else {
+            eprintln!("Could not locate state.vscdb on this host. Is Cursor IDE installed?");
+            return;
+        };
+        eprintln!("state.vscdb: {}", db_path.display());
+
+        let access_token =
+            match read_cursor_state_value_from_sqlite3(&db_path, "cursorAuth/accessToken") {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    eprintln!(
+                        "cursorAuth/accessToken not present in {} — sign into Cursor IDE first.",
+                        db_path.display()
+                    );
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("sqlite3 read failed: {e}");
+                    return;
+                }
+            };
+        let refresh_token =
+            read_cursor_state_value_from_sqlite3(&db_path, "cursorAuth/refreshToken")
+                .ok()
+                .flatten();
+        let email = read_cursor_cached_email();
+        let subscription =
+            read_cursor_state_value_from_sqlite3(&db_path, "cursorAuth/stripeMembershipType")
+                .ok()
+                .flatten();
+
+        eprintln!("\n--- Local Cursor IDE state ---");
+        eprintln!("email:                {email:?}");
+        eprintln!("subscription:         {subscription:?}");
+        eprintln!("access_token:         {}", redact(&access_token));
+        eprintln!("refresh_token found:  {}", refresh_token.is_some());
+
+        let payload = serde_json::json!({
+            "page": 1,
+            "pageSize": 5,
+            "startDate": 0_i64,
+            "endDate": chrono::Local::now().timestamp_millis(),
+        });
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("client build");
+
+        // Common browser-ish headers added on every probe so we don't
+        // accidentally fail Origin/Referer-style WAF checks.
+        let with_browser_headers = |req: reqwest::blocking::RequestBuilder| {
+            req.header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .header("User-Agent", "TokenMonitor/smoke-test")
+        };
+
+        // Probe 1: THE big question — Bearer auth against the dashboard
+        // endpoint that powers cursor.com/dashboard/usage in the browser.
+        let resp = with_browser_headers(
+            client
+                .post("https://cursor.com/api/dashboard/get-filtered-usage-events")
+                .bearer_auth(&access_token)
+                .header("Origin", "https://cursor.com")
+                .header("Referer", "https://cursor.com/dashboard"),
+        )
+        .json(&payload)
+        .send();
+        match resp {
+            Ok(r) => print_response("Probe 1: Bearer @ cursor.com dashboard endpoint", r),
+            Err(e) => eprintln!("\n=== Probe 1 ===\nERROR: {e}"),
+        }
+
+        // Probe 2: same endpoint but the access token in the
+        // WorkosCursorSessionToken cookie slot. The expected cookie
+        // format is `<userId>::<JWT>`, so this almost certainly fails;
+        // included to rule out a permissive server-side parser.
+        let resp = with_browser_headers(
+            client
+                .post("https://cursor.com/api/dashboard/get-filtered-usage-events")
+                .header(
+                    reqwest::header::COOKIE,
+                    format!("WorkosCursorSessionToken={access_token}"),
+                )
+                .header("Origin", "https://cursor.com")
+                .header("Referer", "https://cursor.com/dashboard"),
+        )
+        .json(&payload)
+        .send();
+        match resp {
+            Ok(r) => print_response(
+                "Probe 2: Cookie WorkosCursorSessionToken=<accessToken> @ dashboard endpoint",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 2 ===\nERROR: {e}"),
+        }
+
+        // Probe 3: Enterprise admin endpoint with Bearer. Almost certainly
+        // 401/403 for non-Enterprise users (they don't have admin scope),
+        // but useful as a control: confirms the token isn't *accidentally*
+        // a valid admin key.
+        let resp = with_browser_headers(
+            client
+                .post("https://api.cursor.com/teams/filtered-usage-events")
+                .bearer_auth(&access_token),
+        )
+        .json(&payload)
+        .send();
+        match resp {
+            Ok(r) => print_response("Probe 3: Bearer @ api.cursor.com admin endpoint", r),
+            Err(e) => eprintln!("\n=== Probe 3 ===\nERROR: {e}"),
+        }
+
+        // Probe 4: sanity check — does the access token authenticate at
+        // all? `/api/auth/me` is a generic user-info endpoint the IDE
+        // itself calls. If THIS returns 200 but Probe 1 doesn't, the
+        // dashboard endpoint specifically locks to cookie auth and we
+        // need Path B. If THIS also 401s, the token might be stale or
+        // the path/header convention is wrong on this account.
+        let resp = with_browser_headers(
+            client
+                .get("https://cursor.com/api/auth/me")
+                .bearer_auth(&access_token),
+        )
+        .send();
+        match resp {
+            Ok(r) => print_response("Probe 4: GET /api/auth/me with Bearer (sanity)", r),
+            Err(e) => eprintln!("\n=== Probe 4 ===\nERROR: {e}"),
+        }
+
+        // ── Path A' probes — find IDE-Bearer-friendly usage endpoints ────
+        //
+        // The dashboard endpoint above forces WorkOS cookie auth, but Cursor
+        // IDE itself displays in-app token counts and subscription state, so
+        // *some* Bearer-friendly endpoint must exist. The four below are the
+        // most likely candidates per community reverse-engineering of the
+        // IDE's network traffic. If any returns 200 with usable data, we can
+        // drop the cookie requirement entirely.
+
+        // Probe 5: `auth/full_stripe_profile` is what the Cursor IDE
+        // settings panel calls to render "Pro+ — $X used this month". If
+        // it includes a per-event breakdown, we can use it as the primary
+        // usage source for detailed view.
+        let resp = with_browser_headers(
+            client
+                .get("https://api2.cursor.sh/auth/full_stripe_profile")
+                .bearer_auth(&access_token),
+        )
+        .send();
+        match resp {
+            Ok(r) => print_response(
+                "Probe 5: GET api2.cursor.sh/auth/full_stripe_profile with Bearer",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 5 ===\nERROR: {e}"),
+        }
+
+        // Probes 6-9 below target the *real* Connect-Web service the IDE
+        // uses, recovered by grepping the bundled Cursor IDE JS:
+        //   • Service:  `aiserver.v1.DashboardService`  (NOT UsageService)
+        //   • Methods:  `GetCurrentPeriodUsage`, `GetFilteredUsageEvents`,
+        //               `GetTokenUsage`, `GetUsageBasedPremiumRequests`,
+        //               `GetPlanInfo`, `GetAggregatedUsageEvents`, …
+        //   • Host:     `api2.cursor.sh` (Probe 5 confirmed Bearer-friendly)
+        //               with `api3.cursor.sh` as a fallback host the bundle
+        //               also references.
+        // The Connect-Web HTTP/JSON dialect accepts plain JSON request
+        // bodies; for messages with no required fields, `{}` is valid.
+
+        let connect_post = |url: &str, body: &str| {
+            client
+                .post(url)
+                .bearer_auth(&access_token)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .header("Connect-Protocol-Version", "1")
+                .header("User-Agent", "TokenMonitor/smoke-test")
+                .body(body.to_string())
+                .send()
+        };
+
+        // Probe 6: GetCurrentPeriodUsage — the call the IDE makes on
+        // every prefetch. Returns aggregate spend + plan info for the
+        // current billing period, NOT per-event detail.
+        match connect_post(
+            "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+            "{}",
+        ) {
+            Ok(r) => print_response(
+                "Probe 6: POST api2 DashboardService.GetCurrentPeriodUsage (Bearer)",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 6 ===\nERROR: {e}"),
+        }
+
+        // Probe 7: THE BIG ONE — GetFilteredUsageEvents over Bearer.
+        // Same method name as the cookie endpoint but reached via the
+        // IDE's Connect-Web RPC layer. If this returns 200 with detailed
+        // events, we have a fully zero-config integration path.
+        let detailed_body = serde_json::json!({
+            "pageSize": 5,
+            "page": 1,
+            "startDate": "0",
+            "endDate": chrono::Local::now().timestamp_millis().to_string(),
+        })
+        .to_string();
+        match connect_post(
+            "https://api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents",
+            &detailed_body,
+        ) {
+            Ok(r) => print_response(
+                "Probe 7: POST api2 DashboardService.GetFilteredUsageEvents (Bearer)",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 7 ===\nERROR: {e}"),
+        }
+
+        // Probe 8: GetTokenUsage — per-token breakdown candidate.
+        match connect_post(
+            "https://api2.cursor.sh/aiserver.v1.DashboardService/GetTokenUsage",
+            "{}",
+        ) {
+            Ok(r) => print_response(
+                "Probe 8: POST api2 DashboardService.GetTokenUsage (Bearer)",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 8 ===\nERROR: {e}"),
+        }
+
+        // Probe 9: same big endpoint but on the api3 host the bundle
+        // also references. If api2 is locked down but api3 isn't (or
+        // vice versa), this catches it cheaply.
+        match connect_post(
+            "https://api3.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents",
+            &detailed_body,
+        ) {
+            Ok(r) => print_response(
+                "Probe 9: POST api3 DashboardService.GetFilteredUsageEvents (Bearer)",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 9 ===\nERROR: {e}"),
+        }
+
+        eprintln!(
+            "\n--- Interpretation guide ---\n\
+             Probe 1 → 200 with `usageEvents`: GREAT. Path A works as-is. Wire up\n  \
+                       a `CursorAuth::IdeBearer` variant and prime it from state.vscdb.\n\
+             Probe 1 → 401/403 BUT Probe 4 → 200: token is valid but dashboard locks\n  \
+                       to cookie auth. Path A blocked → fall back to Path B (webview).\n\
+             Probe 1 → 401/403 AND Probe 4 → 401: token may be expired. Re-sign-in to\n  \
+                       Cursor IDE (which forces a refresh) and re-run.\n\
+             Probe 2 → 200: surprising; would mean the cookie value doesn't need the\n  \
+                       `<userId>::<JWT>` format. Sanity-double-check before relying on it.\n\
+             Probe 3 → 401/403: expected for non-Enterprise users.\n\
+             ── Path A' (DashboardService over Bearer) ─────────────────────────────\n\
+             Probe 5 → 200 with subscription JSON: confirmed Bearer works on api2.\n\
+             Probe 6 → 200 with current-period usage: aggregate-only fallback, but\n  \
+                       enough to render the existing TM 'monthly spend' UI silently.\n\
+             Probe 7 → 200 with `usageEvents`: JACKPOT — silent zero-config detailed\n  \
+                       events. Drop the cookie requirement, prime auth from state.vscdb.\n\
+             Probe 7 → 401/403 BUT Probe 6 → 200: same service, different ACL. Detailed\n  \
+                       events lock to admin/cookie auth. Use aggregate as 'better than\n  \
+                       nothing' fallback when the user hasn't pasted a cookie.\n\
+             Probe 8 → 200: token-level breakdown — could complement detailed events.\n\
+             Probe 9 → 200: api3 is the real host (api2 redirects?) — pivot accordingly.\n"
+        );
+    }
+
+    /// End-to-end smoke test of the production Path A integration: prime
+    /// the IDE token from `state.vscdb`, then go through the same
+    /// `fetch_cursor_remote_entries` code path that the live usage refresh
+    /// uses. If this returns parsed entries, the integration is healthy
+    /// from `state.vscdb` all the way through to `ParsedEntry`.
+    #[test]
+    #[ignore = "manual: requires logged-in Cursor IDE + real network"]
+    fn ide_bearer_end_to_end_through_production_pipeline() {
+        if !prime_ide_access_token() {
+            eprintln!(
+                "Could not prime IDE access token — Cursor IDE may not be installed/logged-in."
+            );
+            return;
+        }
+
+        let auth = resolve_cursor_auth().expect("resolve_cursor_auth should return IdeBearer");
+        eprintln!("Resolved auth kind: {:?}", auth.kind());
+        assert_eq!(
+            auth.kind(),
+            CursorAuthKind::IdeBearer,
+            "no user-pasted secret should be present in this test run"
+        );
+
+        let result = fetch_cursor_remote_entries(None);
+        match result {
+            Ok(Some(entries)) => {
+                eprintln!(
+                    "Got {} parsed entries from production pipeline",
+                    entries.len()
+                );
+                if let Some(first) = entries.first() {
+                    eprintln!("First entry:");
+                    eprintln!("  timestamp:    {}", first.timestamp);
+                    eprintln!("  model:        {}", first.model);
+                    eprintln!("  input:        {}", first.input_tokens);
+                    eprintln!("  output:       {}", first.output_tokens);
+                    eprintln!("  cache_read:   {}", first.cache_read_tokens);
+                    eprintln!("  cache_write:  {}", first.cache_creation_1h_tokens);
+                    eprintln!("  session_key:  {}", first.session_key);
+                    assert_eq!(
+                        first.session_key, "cursor-ide",
+                        "entries should be tagged with the IDE-bearer session key"
+                    );
+                } else {
+                    eprintln!("No entries — billing cycle may be empty.");
+                }
+            }
+            Ok(None) => eprintln!("fetch_cursor_remote_entries returned Ok(None) — auth missing?"),
+            Err(e) => eprintln!("ERROR: {e}"),
+        }
     }
 }

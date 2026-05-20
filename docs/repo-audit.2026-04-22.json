@@ -1,0 +1,478 @@
+{
+  "audit_metadata": {
+    "version": "1.2",
+    "timestamp": "2026-04-22T18:00:00+08:00",
+    "project": "TokenMonitor",
+    "scope": {
+      "total_files": 125,
+      "analyzed_files": 125,
+      "coverage_pct": 100,
+      "rust_lines": 62228,
+      "frontend_lines": 27943
+    }
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "priority": 1,
+      "category": "structure",
+      "severity": "high",
+      "location": "src-tauri/src/usage/parser.rs",
+      "description": "4,198 lines in a single file. Contains Claude parsing, Codex parsing, file caching, change tracking, archive integration, and debug reporting.",
+      "suggestion": "Split into claude_parser.rs, codex_parser.rs, and cache.rs (target <1,500 lines each).",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-002",
+      "priority": 1,
+      "category": "structure",
+      "severity": "medium",
+      "location": "src-tauri/src/commands/float_ball.rs",
+      "description": "1,818 lines for float ball commands, including complex platform-specific window management.",
+      "suggestion": "Extract platform-specific positioning into platform/ modules.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-003",
+      "priority": 1,
+      "category": "structure",
+      "severity": "medium",
+      "location": "src-tauri/src/commands/ssh.rs",
+      "description": "1,536 lines mixing IPC commands with data aggregation logic.",
+      "suggestion": "Extract data aggregation into usage/ssh_aggregation.rs.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-004",
+      "priority": 1,
+      "category": "structure",
+      "severity": "low",
+      "location": "src/lib/components/FloatBall.svelte",
+      "description": "1,063 lines — largest Svelte component with embedded drag interaction and platform logic.",
+      "suggestion": "Extract drag interaction and platform logic into separate modules.",
+      "confidence": 0.75,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-005",
+      "priority": 1,
+      "category": "structure",
+      "severity": "info",
+      "location": "src-tauri/src/usage/ccusage.rs",
+      "description": "994 lines of legacy fallback parser, marked #[allow(dead_code)].",
+      "suggestion": "Confirm if still needed. If not, move to archive/.",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": true,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-006",
+      "priority": 2,
+      "category": "logic",
+      "severity": "critical",
+      "location": "src-tauri/src/usage/parser.rs:~375",
+      "description": "FIXED: Dedup hash now uses only message_id:request_id. Test: claude_dedupe_collapses_root_and_sidechain_and_prefers_subagent_scope.",
+      "suggestion": "No action needed.",
+      "confidence": 0.95,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-007",
+      "priority": 2,
+      "category": "logic",
+      "severity": "critical",
+      "location": "src-tauri/src/usage/parser.rs:~1872",
+      "description": "FIXED: upsert_claude_entry() + should_prefer_claude_entry() keeps entry with highest output_tokens. Test: parse_claude_dedupe_keeps_latest_output_tokens.",
+      "suggestion": "No action needed.",
+      "confidence": 0.95,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-008",
+      "priority": 2,
+      "category": "logic",
+      "severity": "medium",
+      "location": "src/lib/resizeOrchestrator.ts:48-573",
+      "description": "525-line factory closure with 19 internal state variables and 11 methods. High cognitive complexity.",
+      "suggestion": "Break into smaller composable functions or a class.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-009",
+      "priority": 2,
+      "category": "logic",
+      "severity": "low",
+      "location": "src-tauri/src/lib.rs:77-85",
+      "description": "catch_unwind() for window positioning fallback masks panics without logging the cause.",
+      "suggestion": "Log the panic cause before falling back.",
+      "confidence": 0.75,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-010",
+      "priority": 2,
+      "category": "logic",
+      "severity": "info",
+      "location": "6 frontend files",
+      "description": "6 empty catch blocks, all intentionally documented with comments.",
+      "suggestion": "No action needed.",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-011",
+      "priority": 3,
+      "category": "duplication",
+      "severity": "medium",
+      "location": "src-tauri/src/lib.rs:158-228",
+      "description": "Tray icon click handler and menu Show handler contain nearly identical platform-dispatch positioning code (3 duplicated blocks).",
+      "suggestion": "Extract show_and_position_window(window, tray_rect?) helper.",
+      "confidence": 0.85,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-012",
+      "priority": 3,
+      "category": "duplication",
+      "severity": "low",
+      "location": "src-tauri/src/commands/ssh.rs + usage_query.rs",
+      "description": "Similar timestamp parsing with multiple fallback formats duplicated across both files.",
+      "suggestion": "Centralize timestamp parsing into a shared util.",
+      "confidence": 0.70,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-013",
+      "priority": 4,
+      "category": "config",
+      "severity": "medium",
+      "location": "src/lib/utils/format.ts:1-8",
+      "description": "Hardcoded exchange rates (EUR 0.92, GBP 0.79, JPY 149.5, CNY 7.24). Comment says 'updated 2025-03' — over a year stale.",
+      "suggestion": "Fetch rates from a public API or bump manually more often.",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-014",
+      "priority": 4,
+      "category": "config",
+      "severity": "low",
+      "location": "src-tauri/src/updater/scheduler.rs",
+      "description": "Hardcoded update check intervals (10s initial, 6h check, 12-24h backoff) without configuration.",
+      "suggestion": "Consider making configurable via settings.",
+      "confidence": 0.70,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-015",
+      "priority": 4,
+      "category": "config",
+      "severity": "low",
+      "location": "src-tauri/src/rate_limits/mod.rs:30",
+      "description": "CLAUDE_MIN_REFETCH_SECS = 300 (5 min) hardcoded.",
+      "suggestion": "Document the constant; consider making configurable if needed.",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": true
+    },
+    {
+      "id": "F-016",
+      "priority": 5,
+      "category": "dead_code",
+      "severity": "medium",
+      "location": "32 locations across 12 Rust files",
+      "description": "32 #[allow(dead_code)] annotations. Concentrated in parser.rs (8), updater/ (7), scheduler.rs (6).",
+      "suggestion": "Audit each: remove truly dead code, remove annotation for test-only or cfg-gated code.",
+      "confidence": 0.75,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-017",
+      "priority": 5,
+      "category": "dead_code",
+      "severity": "low",
+      "location": "src-tauri/src/usage/ccusage.rs",
+      "description": "Legacy parser module (994 lines) marked #[allow(dead_code)]. May be unreachable.",
+      "suggestion": "Confirm if any code path reaches it. If not, archive.",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": true,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-018",
+      "priority": 5,
+      "category": "dead_code",
+      "severity": "low",
+      "location": "src/lib/uiStability.ts:53",
+      "description": "captureResizeDebugSnapshot() returns empty object — stub from removed debug overlay.",
+      "suggestion": "Remove if debug overlay won't return.",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": true,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-019",
+      "priority": 6,
+      "category": "hardcoded",
+      "severity": "medium",
+      "location": "src-tauri/src/usage/litellm.rs:44",
+      "description": "Hardcoded URL: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+      "suggestion": "Add fallback URL or cache-on-failure behavior. No retry on failure.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-020",
+      "priority": 6,
+      "category": "hardcoded",
+      "severity": "medium",
+      "location": "src-tauri/src/usage/openrouter.rs:5",
+      "description": "Hardcoded URL: https://openrouter.ai/api/v1/models",
+      "suggestion": "Add fallback or cache-on-failure behavior.",
+      "confidence": 0.80,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-021",
+      "priority": 6,
+      "category": "hardcoded",
+      "severity": "medium",
+      "location": "src-tauri/src/rate_limits/claude.rs:265,271",
+      "description": "Hardcoded Anthropic API URLs for OAuth rate limit fetching.",
+      "suggestion": "Stable endpoints; acceptable but document in one central place.",
+      "confidence": 0.70,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-022",
+      "priority": 6,
+      "category": "hardcoded",
+      "severity": "low",
+      "location": "src-tauri/src/lib.rs:145",
+      "description": "Tray icon hardcoded at 44x44 pixels (appropriate for @2x retina).",
+      "suggestion": "Acceptable for current use.",
+      "confidence": 0.85,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-023",
+      "priority": 6,
+      "category": "hardcoded",
+      "severity": "low",
+      "location": "src/lib/providerMetadata.ts:52-98",
+      "description": "Plan tier costs hardcoded (Pro: $20, Max 5x: $100, etc.).",
+      "suggestion": "Anthropic/OpenAI public pricing — acceptable to hardcode.",
+      "confidence": 0.85,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-024",
+      "priority": 7,
+      "category": "dependency",
+      "severity": "low",
+      "location": "package.json",
+      "description": "All 7 runtime deps are @tauri-apps/* plugins, caret-pinned to ^2.x. Clean and focused.",
+      "suggestion": "No action needed.",
+      "confidence": 0.90,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-025",
+      "priority": 7,
+      "category": "dependency",
+      "severity": "low",
+      "location": "src-tauri/Cargo.toml",
+      "description": "3 platform-conditional dependency blocks (macOS: objc2/security-framework, Windows: windows 0.58, Linux: gtk/webkit2gtk/cairo). Appropriate for cross-platform.",
+      "suggestion": "No action needed.",
+      "confidence": 0.85,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-026",
+      "priority": 7,
+      "category": "dependency",
+      "severity": "info",
+      "location": "src-tauri/src/usage/ssh_remote.rs",
+      "description": "No explicit SSH connection timeout. ssh2 crate connections can hang indefinitely on network issues.",
+      "suggestion": "Add session.set_timeout(30_000) or equivalent.",
+      "confidence": 0.75,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    },
+    {
+      "id": "F-027",
+      "priority": 7,
+      "category": "dependency",
+      "severity": "info",
+      "location": "src-tauri/src/rate_limits/http.rs",
+      "description": "reqwest client created without explicit timeout.",
+      "suggestion": "Add .timeout(Duration::from_secs(15)) to client builder.",
+      "confidence": 0.70,
+      "status": "confirmed",
+      "actionable_by_tidy": false,
+      "actionable_by_optimize": false
+    }
+  ],
+  "tidy_recommendations": [
+    {
+      "finding_id": "F-005",
+      "action": "archive",
+      "target": "src-tauri/src/usage/ccusage.rs",
+      "description": "Move legacy parser to archive/ if confirmed dead"
+    },
+    {
+      "finding_id": "F-017",
+      "action": "archive",
+      "target": "src-tauri/src/usage/ccusage.rs",
+      "description": "Same as F-005 — legacy module removal"
+    },
+    {
+      "finding_id": "F-018",
+      "action": "remove_stub",
+      "target": "src/lib/uiStability.ts",
+      "description": "Remove captureResizeDebugSnapshot() stub if debug overlay won't return"
+    }
+  ],
+  "optimize_recommendations": {
+    "files_to_optimize": [
+      {
+        "finding_id": "F-001",
+        "file": "src-tauri/src/usage/parser.rs",
+        "dimension": "structure",
+        "description": "Split 4,198-line monolith into provider-specific parsers + cache layer",
+        "line_range": "1-4198"
+      },
+      {
+        "finding_id": "F-008",
+        "file": "src/lib/resizeOrchestrator.ts",
+        "dimension": "complexity",
+        "description": "Break 525-line factory closure into smaller composable functions",
+        "line_range": "48-573"
+      },
+      {
+        "finding_id": "F-009",
+        "file": "src-tauri/src/lib.rs",
+        "dimension": "error_handling",
+        "description": "Log panic cause in catch_unwind before fallback",
+        "line_range": "77-85"
+      },
+      {
+        "finding_id": "F-013",
+        "file": "src/lib/utils/format.ts",
+        "dimension": "config",
+        "description": "Update or auto-fetch stale exchange rates",
+        "line_range": "1-8"
+      }
+    ],
+    "duplication_groups": [
+      {
+        "finding_id": "F-011",
+        "files": ["src-tauri/src/lib.rs"],
+        "description": "Tray click and menu Show handlers duplicate platform positioning code",
+        "merge_suggestion": "Extract show_and_position_window() helper"
+      },
+      {
+        "finding_id": "F-012",
+        "files": ["src-tauri/src/commands/ssh.rs", "src-tauri/src/commands/usage_query.rs"],
+        "description": "Timestamp parsing with multiple fallback formats duplicated",
+        "merge_suggestion": "Create shared timestamp parsing utility"
+      }
+    ],
+    "structure_splits": [
+      {
+        "finding_id": "F-002",
+        "file": "src-tauri/src/commands/float_ball.rs",
+        "description": "Extract platform-specific positioning into platform/ modules",
+        "target_files": ["src-tauri/src/platform/*/float_ball.rs"]
+      },
+      {
+        "finding_id": "F-003",
+        "file": "src-tauri/src/commands/ssh.rs",
+        "description": "Extract data aggregation into usage/ssh_aggregation.rs",
+        "target_files": ["src-tauri/src/usage/ssh_aggregation.rs"]
+      },
+      {
+        "finding_id": "F-004",
+        "file": "src/lib/components/FloatBall.svelte",
+        "description": "Extract drag interaction and platform logic into separate modules",
+        "target_files": ["src/lib/components/floatBallDrag.ts"]
+      }
+    ]
+  },
+  "questions": {
+    "resolved": [
+      {
+        "finding_id": "F-005",
+        "question": "Is ccusage.rs still a live fallback path?",
+        "answer": "Dead code, archive it"
+      },
+      {
+        "finding_id": "F-015",
+        "question": "Is the 5-minute refetch constant intentionally non-configurable?",
+        "answer": "Should be configurable"
+      },
+      {
+        "finding_id": "F-017",
+        "question": "Does any runtime code path still invoke ccusage.rs?",
+        "answer": "No, archive it"
+      },
+      {
+        "finding_id": "F-018",
+        "question": "Will the resize debug overlay be restored?",
+        "answer": "No, remove the stub"
+      }
+    ],
+    "unresolved": []
+  }
+}

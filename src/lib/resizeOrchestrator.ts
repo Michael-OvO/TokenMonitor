@@ -26,6 +26,8 @@ export interface ResizeOrchestratorDeps {
   captureDebugSnapshot: (reason: string) => Record<string, unknown>;
   formatDebugError: (error: unknown) => { message: string };
   isDebugEnabled: () => boolean;
+  /** Reported whenever a setSize request succeeds; lets callers persist the last applied height. */
+  onHeightApplied?: (height: number) => void;
 }
 
 export interface ResizeOrchestrator {
@@ -39,6 +41,9 @@ export interface ResizeOrchestrator {
   resizeToContent: (source?: string) => void;
   handleBreakdownAccordionToggle: (detail: AccordionToggleDetail) => void;
   refreshWindowMetrics: () => Promise<void>;
+  setChartHoverActive: (active: boolean) => void;
+  /** Release the "no shrink before first data" gate; shrink requests were buffered until now. */
+  markInitialContentReady: () => void;
   destroy: () => void;
   getMaxWindowH: () => number;
   getScrollThresholdH: () => number;
@@ -62,6 +67,7 @@ export function createResizeOrchestrator(
   let isWindowHeightAnimating = false;
   let observerResizeRaf = 0;
   let pendingObserverSource = "observer";
+  let chartHoverActive = false;
 
   // Resize throttle: max 3 operations per 500ms window
   const ANIMATED_RESIZE_FRAME_INTERVAL_MS = 32;
@@ -71,6 +77,10 @@ export function createResizeOrchestrator(
   let maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
   let scrollThresholdH = DEFAULT_MAX_WINDOW_HEIGHT;
   let isScrollLocked = false;
+  // Until the first data payload lands, the DOM is smaller than it will be
+  // once the bar chart renders. Suppress shrink requests during that window
+  // to avoid a visible pop-out after content arrives.
+  let initialContentReady = false;
 
   // ── Internal helpers ──
 
@@ -209,6 +219,7 @@ export function createResizeOrchestrator(
           nextHeight: request.height,
           ...captureDebugSnapshot(`set-size-resolved-${request.source}`),
         });
+        deps.onHeightApplied?.(request.height);
       })
       .catch((error) => {
         deps.logDebug("resize:set-size-rejected", {
@@ -272,6 +283,22 @@ export function createResizeOrchestrator(
       ...captureDebugSnapshot(`apply-${source}`),
     });
     if (disposition === "skip") return;
+    if (!initialContentReady && disposition === "shrink") {
+      deps.logDebug("resize:shrink-blocked-initial", {
+        source,
+        nextHeight,
+        lastWindowH,
+      });
+      return;
+    }
+    if (chartHoverActive && nextHeight < lastWindowH) {
+      deps.logDebug("resize:shrink-blocked-chart-hover", {
+        source,
+        nextHeight,
+        lastWindowH,
+      });
+      return;
+    }
     lastWindowH = nextHeight;
     pendingWindowHeightRequest = {
       height: nextHeight,
@@ -544,6 +571,18 @@ export function createResizeOrchestrator(
     applyWindowHeight(measurement.nextHeight, `${source}:target`);
   }
 
+  function setChartHoverActive(active: boolean): void {
+    chartHoverActive = active;
+    deps.logDebug("resize:chart-hover-active", { active });
+    if (active) {
+      // Apply one deterministic resize when detail panel appears,
+      // then block observer-driven feedback while hover stays active.
+      syncSizeAndVerify("chart-hover-start");
+    } else {
+      resizeToContent("chart-hover-end");
+    }
+  }
+
   function destroy(): void {
     if (resizeTimer) clearTimeout(resizeTimer);
     cancelAnimationFrame(resizeRaf);
@@ -554,9 +593,19 @@ export function createResizeOrchestrator(
     observerResizeRaf = 0;
   }
 
-  // Keep syncSize accessible internally for scheduleSettledResize;
-  // it's not exposed publicly because syncSizeAndVerify is the intended API.
   void syncSize;
+  void scheduleSettledResize;
+
+  function markInitialContentReady(): void {
+    if (initialContentReady) return;
+    initialContentReady = true;
+    deps.logDebug("resize:initial-content-ready", {
+      lastWindowH,
+    });
+    // Now that shrinks are unblocked, run one sync pass in case the final
+    // content is shorter than the primed height we started with.
+    syncSizeAndVerify("initial-content-ready");
+  }
 
   return {
     syncSizeAndVerify,
@@ -565,6 +614,8 @@ export function createResizeOrchestrator(
     resizeToContent,
     handleBreakdownAccordionToggle,
     refreshWindowMetrics,
+    setChartHoverActive,
+    markInitialContentReady,
     destroy,
     getMaxWindowH: () => maxWindowH,
     getScrollThresholdH: () => scrollThresholdH,

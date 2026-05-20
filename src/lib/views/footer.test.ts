@@ -11,6 +11,7 @@ function providerRateLimits(
     planTier: null,
     windows,
     extraUsage: null,
+    credits: null,
     stale: false,
     error: null,
     retryAfterSeconds: null,

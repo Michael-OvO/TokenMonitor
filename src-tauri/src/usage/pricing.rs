@@ -260,6 +260,7 @@ fn get_fallback_rates(model: &str) -> ModelRates {
         | ModelFamily::Qwen
         | ModelFamily::Glm
         | ModelFamily::DeepSeek
+        | ModelFamily::Cursor
         | ModelFamily::Unknown => zero_rates(),
     }
 }

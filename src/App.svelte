@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { get } from "svelte/store";
   import { listen } from "@tauri-apps/api/event";
   import { invoke } from "@tauri-apps/api/core";
@@ -11,9 +11,11 @@
     activeOffset,
     usageData,
     isLoading,
+    isPlaceholderLoading,
     fetchData,
     warmCache,
     warmAllPeriods,
+    clearUsageCache,
     clearUsageCacheForProviders,
     seedUsageCache,
   } from "./lib/stores/usage.js";
@@ -23,6 +25,7 @@
     getAdjacentWarmProviders,
     getRateLimitIdleSummary,
     getUsageProviderLabel,
+    getUsageProviderTitle,
     isRateLimitProvider,
     rateLimitProvidersForScope,
   } from "./lib/providerMetadata.js";
@@ -40,9 +43,11 @@
     DEFAULT_HEADER_TABS,
     areHeaderTabsEqual,
     applyProvider,
+    getLastWindowHeight,
     getVisibleHeaderProviders,
     loadSettings,
     resolveVisibleProvider,
+    setLastWindowHeight,
     settings,
     updateSetting,
   } from "./lib/stores/settings.js";
@@ -58,6 +63,12 @@
     isResizeDebugEnabled,
     logResizeDebug,
   } from "./lib/uiStability.js";
+  import { setupAppEventListeners } from "./lib/appEventListeners.js";
+  import { isMacOS, isWindows } from "./lib/utils/platform.js";
+  import {
+    markClaudeKeychainAccessHandled,
+    requestClaudeKeychainAccessOnce,
+  } from "./lib/permissions/keychain.js";
   import { installStatusline, checkStatusline, type InstalledState } from "./lib/permissions/statusline.js";
 
   import Toggle from "./lib/components/Toggle.svelte";
@@ -90,6 +101,7 @@
   let offset = $state(0);
   let data = $state($usageData);
   let loading = $state(false);
+  let placeholderLoading = $state(false);
   let showRefresh = $state(false);
   let rateLimits = $state<RateLimitsPayload | null>(null);
   let rateLimitsRequest = $state({
@@ -98,12 +110,10 @@
     error: null as string | null,
     deferredUntil: null as string | null,
   });
+  let showKeychainPermissionPanel = $state(false);
+  let keychainPermissionBusy = $state(false);
   let statuslineBusy = $state(false);
   let statuslineInstalled = $state<boolean | null>(null);
-  /** Granular probe result; mirrors `statuslineInstalled` but distinguishes
-   * `script_missing` from `not_installed` so the stale banner can tell the
-   * user "we'll auto-refresh on your next prompt" instead of pushing a
-   * reinstall when the install is actually fine. */
   let statuslineProbeStatus = $state<InstalledState["status"] | null>(null);
   /** Bartender-style onboarding wizard. Driven by the `hasSeenWelcome`
    * setting now that the test-only auto-open `$effect` has been removed
@@ -121,7 +131,6 @@
       logger.error("permissions", `Failed to enable usage access: ${err}`);
     });
     await loadInitialData();
-    void refreshStatuslineProbe();
     await updateSetting("hasSeenWelcome", true);
     await tick();
     syncSizeAndVerify("onboarding-finish");
@@ -132,10 +141,67 @@
   let popEl: HTMLDivElement | null = null;
   let resizeOrch: ResizeOrchestrator | null = null;
   let scrollThresholdH = $state(DEFAULT_MAX_WINDOW_HEIGHT);
+  // Written by orchestrator callback; read by future scroll-lock UI indicator.
+  // @ts-expect-error Assigned via callback, read access planned
   let isScrollLocked = $state(false);
+  let dismissedWarningText = $state<string | null>(null);
   let deviceToggleGuard = 0;
   let initialDataLoad: Promise<void> | null = null;
   const REMOTE_USAGE_CACHE_PROVIDERS: UsageProvider[] = [ALL_USAGE_PROVIDER_ID, "claude"];
+
+  // ── View transition logic ──
+  type ViewKey = 'splash' | 'welcome' | 'setup' | 'settings' | 'calendar' | 'single-device' | 'devices' | 'main' | 'loading';
+  const DRILL_VIEWS: ViewKey[] = ['settings', 'calendar', 'devices', 'single-device'];
+
+  let viewKey = $derived.by<ViewKey>(() => {
+    if (showSplash) return 'splash';
+    if (!$settings.hasSeenWelcome) return 'welcome';
+    if (appReady && !data) return 'setup';
+    if (showSettings) return 'settings';
+    if (showCalendar) return 'calendar';
+    if (selectedDevice) return 'single-device';
+    if (showDevices) return 'devices';
+    if (data) return 'main';
+    return 'loading';
+  });
+
+  let prevViewKey: ViewKey = 'splash';
+  let viewTransitionClass = $state('');
+
+  const NO_TRANSITION_VIEWS: ViewKey[] = ['splash', 'loading'];
+
+  $effect(() => {
+    const current = viewKey;
+    const prev = untrack(() => prevViewKey);
+    if (current === prev) return;
+
+    if (NO_TRANSITION_VIEWS.includes(current) || NO_TRANSITION_VIEWS.includes(prev)) {
+      viewTransitionClass = '';
+    } else {
+      const isDrillIn = DRILL_VIEWS.includes(current) && !DRILL_VIEWS.includes(prev);
+      const isDrillOut = !DRILL_VIEWS.includes(current) && DRILL_VIEWS.includes(prev);
+      const isDeeper = DRILL_VIEWS.indexOf(current) > DRILL_VIEWS.indexOf(prev) && DRILL_VIEWS.includes(current) && DRILL_VIEWS.includes(prev);
+
+      if (isDrillIn || isDeeper) {
+        viewTransitionClass = 'view-enter-right';
+      } else if (isDrillOut) {
+        viewTransitionClass = 'view-enter-left';
+      } else {
+        viewTransitionClass = 'view-enter-fade';
+      }
+      resizeOrch?.followContentDuringTransition(200, `view-transition-${current}`);
+    }
+    prevViewKey = current;
+  });
+
+  // ── Data content fade on provider/period/offset switch ──
+  let dataKey = $derived(`${provider}-${period}-${offset}`);
+  let dataTransitionCounter = $state(0);
+
+  $effect(() => {
+    void dataKey;
+    dataTransitionCounter = untrack(() => dataTransitionCounter) + 1;
+  });
 
   let headerToggleOptions = $derived.by(() =>
     getVisibleHeaderProviders(headerTabs).map((value) => ({
@@ -148,22 +214,11 @@
       hasRateLimitWindows(providerPayload(rateLimits, candidate)),
     ),
   );
-  let hasFiveHourUsageData = $derived.by(() =>
-    Boolean(data && (
-      data.total_tokens > 0
-      || data.total_cost > 0
-      || data.five_hour_cost > 0
-      || data.chart_buckets.length > 0
-    )),
-  );
-  let shouldShowFiveHourUsageFallback = $derived.by(() =>
-    period === "5h" && hasFiveHourUsageData,
-  );
-
   // Subscribe to stores
   $effect(() => {
     const unsub1 = usageData.subscribe((v) => { if (deviceToggleGuard === 0) data = v; });
     const unsub2 = isLoading.subscribe((v) => (loading = v));
+    const unsubPL = isPlaceholderLoading.subscribe((v) => (placeholderLoading = v));
     const unsub3 = settings.subscribe((s) => {
       brandTheming = s.brandTheming;
       if (!areHeaderTabsEqual(headerTabs, s.headerTabs)) {
@@ -172,25 +227,7 @@
     });
     const unsub4 = rateLimitsData.subscribe((v) => (rateLimits = v));
     const unsub5 = rateLimitsRequestState.subscribe((v) => (rateLimitsRequest = v));
-    return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); };
-  });
-
-  // Re-probe statusline whenever a rate-limit payload turns stale. This
-  // keeps `statuslineProbeStatus` truthful at the moment the stale banner
-  // mounts, so the banner can choose between "Reinstall" (script genuinely
-  // missing) and the gentler "we'll auto-refresh" message without the user
-  // ever seeing a reinstall CTA on a healthy install.
-  let anyPayloadStale = $derived.by(() => {
-    if (!rateLimits) return false;
-    return rateLimitProvidersForScope(provider).some((p) => {
-      const payload = providerPayload(rateLimits, p);
-      return Boolean(payload && (payload.error || payload.stale));
-    });
-  });
-  $effect(() => {
-    if (anyPayloadStale && period === "5h") {
-      void refreshStatuslineProbe();
-    }
+    return () => { unsub1(); unsub2(); unsubPL(); unsub3(); unsub4(); unsub5(); };
   });
 
   // Apply/remove data-provider attribute reactively
@@ -227,6 +264,17 @@
     return "No usage data for this period";
   }
 
+  function providerNotInstalledTitle(p: UsageProvider): string {
+    return `${getUsageProviderTitle(p)} not installed`;
+  }
+
+  function providerNotInstalledHint(p: UsageProvider): string {
+    if (p === "claude") return "Install Claude Code CLI to start tracking usage.";
+    if (p === "codex") return "Install Codex CLI to start tracking usage.";
+    if (p === "cursor") return "Install Cursor IDE to start tracking usage.";
+    return "Install the provider to start tracking usage.";
+  }
+
   async function loadInitialData() {
     if (initialDataLoad) return initialDataLoad;
 
@@ -240,7 +288,7 @@
         await hydrateRateLimits();
       }
 
-      await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch(() => {});
+      await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch((e) => logger.debug("tray", `syncTrayConfig failed: ${e}`));
       warmAllPeriods(provider, period);
       for (const warmProvider of getAdjacentWarmProviders(provider)) {
         warmAllPeriods(warmProvider);
@@ -251,34 +299,66 @@
   }
 
   async function enableRateLimits() {
+    showKeychainPermissionPanel = false;
     await updateSetting("rateLimitsEnabled", true);
     await invoke("set_rate_limits_enabled", { enabled: true });
+    // Force the fetch — the cached payload may carry a cooldownUntil from a
+    // previous CLI rejection that the user has just resolved by re-granting,
+    // and the normal eligibility filter would otherwise skip the call.
     await fetchRateLimits(provider, { force: true });
     await tick();
     syncSizeAndVerify("rate-limits-enabled");
   }
 
   async function handleEnableRateLimits() {
-    if (statuslineBusy) return;
-    statuslineBusy = true;
+    if (keychainPermissionBusy) return;
+    keychainPermissionBusy = true;
     try {
       await enableRateLimits();
     } finally {
-      statuslineBusy = false;
+      keychainPermissionBusy = false;
     }
   }
 
-  /** Single CTA for the rate-limit empty state: install the statusline
-   * (idempotent) and turn on rate-limit fetching. No OS prompts. */
+  async function handleShowKeychainFallback() {
+    if (keychainPermissionBusy) return;
+    showKeychainPermissionPanel = true;
+    await tick();
+    syncSizeAndVerify("keychain-permission-open");
+  }
+
+  async function handleAllowKeychainForRateLimits() {
+    if (keychainPermissionBusy) return;
+    keychainPermissionBusy = true;
+    try {
+      await requestClaudeKeychainAccessOnce("rate-limits");
+      await enableRateLimits();
+    } finally {
+      keychainPermissionBusy = false;
+    }
+  }
+
+  async function handleSkipKeychainForRateLimits() {
+    if (keychainPermissionBusy) return;
+    keychainPermissionBusy = true;
+    try {
+      await markClaudeKeychainAccessHandled();
+      await enableRateLimits();
+    } finally {
+      keychainPermissionBusy = false;
+    }
+  }
+
   async function handleInstallStatusline() {
     if (statuslineBusy) return;
     statuslineBusy = true;
     try {
-      await installStatusline("rate-limits");
+      await installStatusline();
       statuslineInstalled = true;
-      await enableRateLimits();
-    } catch (err) {
-      logger.error("permissions", `Statusline install failed: ${err}`);
+      statuslineProbeStatus = "installed";
+      await updateSetting("statuslineInstalled", true);
+    } catch (e) {
+      console.error("Statusline install failed:", e);
     } finally {
       statuslineBusy = false;
     }
@@ -286,12 +366,14 @@
 
   async function refreshStatuslineProbe() {
     try {
-      const probe = await checkStatusline();
-      statuslineProbeStatus = probe.status;
-      statuslineInstalled = probe.status === "installed";
+      const state = await checkStatusline();
+      statuslineInstalled = state.status === "installed";
+      statuslineProbeStatus = state.status;
+      if (statuslineInstalled !== $settings.statuslineInstalled) {
+        await updateSetting("statuslineInstalled", statuslineInstalled);
+      }
     } catch {
-      statuslineProbeStatus = null;
-      statuslineInstalled = null;
+      // non-critical
     }
   }
 
@@ -480,9 +562,20 @@
     let observer: ResizeObserver | undefined;
     let unlisten: (() => void) | undefined;
     let unlistenWindowResize: (() => void) | undefined;
-    const colorScheme = window.matchMedia("(prefers-color-scheme: light)");
 
     // Create the resize orchestrator (all resize state lives in its closure)
+    let persistedWindowHeight = 0;
+    let persistWindowHeightTimer: ReturnType<typeof setTimeout> | null = null;
+    const persistWindowHeight = (height: number) => {
+      if (height <= 0 || height === persistedWindowHeight) return;
+      persistedWindowHeight = height;
+      if (persistWindowHeightTimer) clearTimeout(persistWindowHeightTimer);
+      persistWindowHeightTimer = setTimeout(() => {
+        persistWindowHeightTimer = null;
+        void setLastWindowHeight(height);
+      }, 400);
+    };
+
     resizeOrch = createResizeOrchestrator({
       getPopEl: () => popEl,
       invoke: (cmd, args) => invoke(cmd, args),
@@ -499,6 +592,7 @@
         }),
       formatDebugError,
       isDebugEnabled: isResizeDebugEnabled,
+      onHeightApplied: persistWindowHeight,
     });
 
     /** Local snapshot helper for event handlers that need debug snapshots. */
@@ -511,53 +605,59 @@
           })
         : {};
 
-    const handleColorSchemeChange = () => {
-      const followsSystemTheme = !document.documentElement.hasAttribute("data-theme");
-      logResizeDebug("theme:system-change", {
-        matchesLight: colorScheme.matches,
-        followsSystemTheme,
-      });
-
-      const updates: Promise<unknown>[] = [syncTrayConfig(get(settings).trayConfig, null)];
-      if (followsSystemTheme) {
-        updates.push(syncNativeWindowSurface(undefined, get(settings).glassEffect));
-      }
-
-      void Promise.allSettled(updates);
-    };
-    const handleBrowserResize = () => {
-      logResizeDebug("browser:resize", captureSnapshot("browser-resize"));
-    };
-    const handleWindowFocus = () => {
-      logResizeDebug("window:focus", captureSnapshot("window-focus"));
-      void syncNativeWindowSurface(undefined, get(settings).glassEffect).catch(() => {});
-      syncSizeAndVerify("window-focus");
-    };
-    const handleWindowBlur = () => {
-      logResizeDebug("window:blur", captureSnapshot("window-blur"));
-    };
-    const handleVisibilityChange = () => {
-      logResizeDebug("document:visibility-change", {
-        hidden: document.hidden,
-        visibilityState: document.visibilityState,
-        ...captureSnapshot("document-visibility-change"),
-      });
-    };
-    const handleWindowError = (event: ErrorEvent) => {
-      logResizeDebug("window:error", {
-        message: event.message,
-        filename: event.filename || null,
-        lineno: event.lineno || null,
-        colno: event.colno || null,
-        error: formatDebugError(event.error),
-      });
-    };
-    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
-      logResizeDebug("window:unhandledrejection", {
-        reason: formatDebugError(event.reason),
-      });
-    };
     initResizeDebug();
+
+    const cleanupListeners = setupAppEventListeners({
+      onResize: () => {
+        logResizeDebug("browser:resize", captureSnapshot("browser-resize"));
+      },
+      onFocus: () => {
+        logResizeDebug("window:focus", captureSnapshot("window-focus"));
+        void syncNativeWindowSurface(undefined, get(settings).glassEffect).catch((e) => logger.debug("appearance", `syncNativeWindowSurface failed: ${e}`));
+        syncSizeAndVerify("window-focus");
+        clearUsageCache();
+        fetchData(provider, period, offset);
+        if (period === "5h") fetchRateLimits(provider);
+      },
+      onBlur: () => {
+        logResizeDebug("window:blur", captureSnapshot("window-blur"));
+      },
+      onError: (event) => {
+        logResizeDebug("window:error", {
+          message: event.message,
+          filename: event.filename || null,
+          lineno: event.lineno || null,
+          colno: event.colno || null,
+          error: formatDebugError(event.error),
+        });
+      },
+      onUnhandledRejection: (event) => {
+        logResizeDebug("window:unhandledrejection", {
+          reason: formatDebugError(event.reason),
+        });
+      },
+      onVisibilityChange: () => {
+        logResizeDebug("document:visibility-change", {
+          hidden: document.hidden,
+          visibilityState: document.visibilityState,
+          ...captureSnapshot("document-visibility-change"),
+        });
+      },
+      onColorSchemeChange: (matchesLight) => {
+        const followsSystemTheme = !document.documentElement.hasAttribute("data-theme");
+        logResizeDebug("theme:system-change", {
+          matchesLight,
+          followsSystemTheme,
+        });
+
+        const updates: Promise<unknown>[] = [syncTrayConfig(get(settings).trayConfig, null)];
+        if (followsSystemTheme) {
+          updates.push(syncNativeWindowSurface(undefined, get(settings).glassEffect));
+        }
+
+        void Promise.allSettled(updates);
+      },
+    });
     logResizeDebug("app:mount", captureSnapshot("mount"));
 
     const init = async () => {
@@ -581,10 +681,36 @@
         logResizeDebug("app:settings-load-failed", {});
       }
 
+      // Restore the window to its last-known height before the chart renders.
+      // Combined with the orchestrator's initial-content gate, this hides the
+      // "small → big" pop-out users were seeing on cold launch.
+      const restoredHeight = await getLastWindowHeight();
+      if (!cancelled && restoredHeight) {
+        try {
+          await invoke("set_window_size_and_align", {
+            width: 340,
+            height: restoredHeight,
+          });
+          persistedWindowHeight = restoredHeight;
+          logResizeDebug("app:window-height-restored", { height: restoredHeight });
+        } catch (e) {
+          logResizeDebug("app:window-height-restore-failed", {
+            error: formatDebugError(e),
+          });
+        }
+      }
+
       if (get(settings).hasSeenWelcome) {
         await loadInitialData();
         if (cancelled) return;
       }
+      if (isWindows()) {
+        try {
+          const edge = await invoke<string>("get_window_anchor_edge");
+          document.documentElement.setAttribute("data-anchor", edge);
+        } catch { /* non-critical */ }
+      }
+
       void refreshStatuslineProbe();
       appReady = true;
 
@@ -601,6 +727,12 @@
         });
         observer.observe(popEl);
         syncSizeAndVerify("initial-mount");
+        // Wait one frame so the Chart finishes its first paint, then allow
+        // shrink-direction resizes. Until now the orchestrator has buffered
+        // shrinks so the window doesn't collapse between "data arrived" and
+        // "chart rendered".
+        await tick();
+        resizeOrch?.markInitialContentReady();
       }
 
       unlisten = await listen("data-updated", () => {
@@ -609,18 +741,7 @@
           period,
           offset,
         });
-        // Do **not** call clearUsageCache() here. `fetchData` already
-        // does stale-while-revalidate: a cache hit returns the previous
-        // payload instantly and fires a silent background refresh that
-        // atomically swaps in the new data when it lands. Wiping the
-        // cache forces the cold path (`usageData.set(emptyPayload())`
-        // + `isLoading=true`), which at the 2s fast-poll cadence during
-        // streaming produces a visible flicker every couple of seconds —
-        // the dashboard briefly renders zeroed metrics + a loading bar
-        // before snapping back to real values. Other callers
-        // (`SshHostsSettings`, `Settings`) still wipe the cache because
-        // their changes are semantic; this listener fires on data
-        // *value* changes where the SWR path is exactly what we want.
+        clearUsageCache();
         fetchData(provider, period, offset);
         if (period === "5h") fetchRateLimits(provider);
       });
@@ -641,38 +762,23 @@
       }
     };
 
-    init();
-    window.addEventListener("resize", handleBrowserResize);
-    window.addEventListener("focus", handleWindowFocus);
-    window.addEventListener("blur", handleWindowBlur);
-    window.addEventListener("error", handleWindowError);
-    window.addEventListener("unhandledrejection", handleUnhandledRejection);
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
-    if (typeof colorScheme.addEventListener === "function") {
-      colorScheme.addEventListener("change", handleColorSchemeChange);
-    } else {
-      colorScheme.addListener(handleColorSchemeChange);
+    function onChartHover(e: Event) {
+      const active = (e as CustomEvent<{ active: boolean }>).detail.active;
+      resizeOrch?.setChartHoverActive(active);
     }
+    window.addEventListener("chart-hover", onChartHover);
+
+    init();
 
     return () => {
       cancelled = true;
       unlisten?.();
       unlistenWindowResize?.();
       observer?.disconnect();
+      window.removeEventListener("chart-hover", onChartHover);
       resizeOrch?.destroy();
       resizeOrch = null;
-      window.removeEventListener("resize", handleBrowserResize);
-      window.removeEventListener("focus", handleWindowFocus);
-      window.removeEventListener("blur", handleWindowBlur);
-      window.removeEventListener("error", handleWindowError);
-      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      if (typeof colorScheme.removeEventListener === "function") {
-        colorScheme.removeEventListener("change", handleColorSchemeChange);
-      } else {
-        colorScheme.removeListener(handleColorSchemeChange);
-      }
+      cleanupListeners();
     };
   });
 </script>
@@ -684,7 +790,7 @@
     style:max-height="{scrollThresholdH}px"
     style:overflow-y={scrollThresholdH < DEFAULT_MAX_WINDOW_HEIGHT ? 'auto' : 'visible'}
   >
-    <UpdateBanner />
+    {#if !showSettings}<UpdateBanner />{/if}
     {#if showSplash}
       <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
     {:else if showPermissionsOnboarding}
@@ -692,16 +798,17 @@
         onFinish={handleOnboardingFinish}
       />
     {:else if appReady && !data}
-      <SetupScreen />
+      <div class={viewTransitionClass}><SetupScreen /></div>
     {:else if showSettings}
-      <Settings onBack={handleSettingsClose} />
+      <div class={viewTransitionClass}><Settings onBack={handleSettingsClose} /></div>
     {:else if showCalendar}
-      <Calendar onBack={handleCalendarClose} />
+      <div class={viewTransitionClass}><Calendar onBack={handleCalendarClose} /></div>
     {:else if selectedDevice}
-      <SingleDeviceView device={selectedDevice} onBack={handleDeviceBack} />
+      <div class={viewTransitionClass}><SingleDeviceView device={selectedDevice} onBack={handleDeviceBack} /></div>
     {:else if showDevices}
-      <DevicesView onBack={() => { showDevices = false; }} onDeviceSelect={handleDeviceSelect} onSettings={handleSettingsOpen} />
+      <div class={viewTransitionClass}><DevicesView onBack={() => { showDevices = false; }} onDeviceSelect={handleDeviceSelect} onSettings={handleSettingsOpen} /></div>
     {:else if data}
+      <div class={viewTransitionClass}>
       {#if showRefresh}<div class="refresh-bar" aria-hidden="true"></div>{/if}
       <Toggle
         active={provider}
@@ -720,150 +827,188 @@
           onReset={handleOffsetReset}
         />
       {/if}
-      <MetricsRow {data} />
-      <div class="hr"></div>
-
-      {#if period === "5h" && $settings.rateLimitsEnabled && statuslineInstalled === false}
-        <div class="rate-limit-empty" role="dialog" aria-labelledby="rate-limit-statusline-title">
-          <div class="rate-limit-empty-title" id="rate-limit-statusline-title">
-            Set up live rate limits
-          </div>
-          <div class="rate-limit-empty-text">
-            TokenMonitor reads live 5-hour and weekly utilization from a tiny
-            statusline script Claude Code calls on every prompt. Installing it
-            adds one entry to <code>~/.claude/settings.json</code> — no
-            Keychain prompt, no network request.
-          </div>
-          <PermissionDisclosure mode="rate-limit" />
-          <button
-            type="button"
-            class="rate-limit-cta"
-            onclick={handleInstallStatusline}
-            disabled={statuslineBusy}
-          >
-            {statuslineBusy ? "Installing…" : "Install statusline"}
-          </button>
+      {#if placeholderLoading}
+        <div class="loading">
+          <div class="spinner"></div>
+          <div class="loading-text">Loading data...</div>
         </div>
-      {:else if period === "5h" && $settings.rateLimitsEnabled && visibleUsableRateLimitProviders.length > 0}
-        {#each visibleUsableRateLimitProviders as rateLimitProvider, index}
-          <UsageBars
-            providerLabel={provider === ALL_USAGE_PROVIDER_ID ? getUsageProviderLabel(rateLimitProvider) : undefined}
-            rateLimits={providerPayload(rateLimits, rateLimitProvider)!}
-          />
-          {#if index < visibleUsableRateLimitProviders.length - 1}
-            <div class="hr"></div>
-          {/if}
-        {/each}
-        {#if visibleUsableRateLimitProviders.some((p) => {
-          const payload = providerPayload(rateLimits, p);
-          return Boolean(payload && (payload.error || payload.stale));
-        })}
-          <!-- Two distinct states share this banner. The "stale-but-healthy"
-               case (CC simply hasn't fired in a while) needs a calm,
-               ambient note — pushing reinstall here was the source of the
-               earlier churn. The "actually broken" case (script_missing
-               or not_installed) is the only state that warrants an
-               action button. Visual treatment mirrors the redesigned
-               PermissionSettings: a small status dot carries the color,
-               text stays neutral, the CTA only appears when needed. -->
-          {@const probeBroken =
-            statuslineProbeStatus === "script_missing" ||
-            statuslineProbeStatus === "not_installed"}
-          <div class="rate-limit-stale-banner" data-state={probeBroken ? "warn" : "idle"}>
-            <div class="rl-stale-row">
-              <span class="rl-stale-dot" aria-hidden="true"></span>
-              <span class="rl-stale-headline">
-                {probeBroken
-                  ? "Statusline needs attention"
-                  : "No recent Claude Code activity"}
-              </span>
+      {:else}
+        <div class="data-content" style:animation-name={dataTransitionCounter > 1 ? 'contentFade' : 'none'}>
+        <MetricsRow {data} />
+        {#if data.usage_warning && data.usage_warning !== dismissedWarningText}
+          <div class="usage-warning">
+            <div class="usage-warning-header">
+              <div class="usage-warning-title">Usage warning</div>
+              <button
+                class="usage-warning-dismiss"
+                onclick={() => { dismissedWarningText = data?.usage_warning ?? null; }}
+                aria-label="Dismiss warning"
+              >&times;</button>
             </div>
-            <div class="rl-stale-body">
-              {#if probeBroken}
-                Reinstall the statusline to restore live updates.
-              {:else}
-                Numbers refresh automatically on your next prompt.
+            <div class="usage-warning-text">{data.usage_warning}</div>
+          </div>
+        {/if}
+        <div class="hr"></div>
+
+        {#if period === "5h"}
+          {#if showKeychainPermissionPanel && isMacOS() && !$settings.keychainAccessRequested}
+            <div class="rate-limit-permission" role="dialog" aria-labelledby="rate-limit-permission-title">
+              <div class="rate-limit-empty-title" id="rate-limit-permission-title">
+                Keychain fallback for live limits
+              </div>
+              <div class="rate-limit-empty-text">
+                TokenMonitor normally reads Claude live limits from your Claude
+                credentials file without any macOS prompt. If that file is missing
+                or unreadable, you can allow a one-time Keychain fallback.
+              </div>
+              <PermissionDisclosure mode="rate-limit" />
+              <div class="rate-limit-empty-text">
+                macOS may show a Keychain window after you continue. Choose
+                <strong>Always Allow</strong> if you want future fallback checks to stay silent.
+              </div>
+              <div class="rate-limit-actions">
+                <button
+                  type="button"
+                  class="rate-limit-secondary"
+                  onclick={handleSkipKeychainForRateLimits}
+                  disabled={keychainPermissionBusy}
+                >
+                  Do not use Keychain
+                </button>
+                <button
+                  type="button"
+                  class="rate-limit-cta"
+                  onclick={handleAllowKeychainForRateLimits}
+                  disabled={keychainPermissionBusy}
+                >
+                  Allow Keychain access
+                </button>
+              </div>
+            </div>
+          {:else if $settings.rateLimitsEnabled && visibleUsableRateLimitProviders.length > 0}
+            {#each visibleUsableRateLimitProviders as rateLimitProvider, index}
+              <UsageBars
+                providerLabel={provider === ALL_USAGE_PROVIDER_ID ? getUsageProviderLabel(rateLimitProvider) : undefined}
+                rateLimits={providerPayload(rateLimits, rateLimitProvider)!}
+              />
+              {#if index < visibleUsableRateLimitProviders.length - 1}
+                <div class="hr"></div>
               {/if}
-            </div>
-            {#if probeBroken}
+            {/each}
+            {#if statuslineProbeStatus === "script_missing" || statuslineProbeStatus === "not_installed"}
+              <div class="rate-limit-stale-banner" data-state="warn">
+                <div class="rl-stale-row">
+                  <span class="rl-stale-dot" aria-hidden="true"></span>
+                  <span class="rl-stale-headline">Statusline needs attention</span>
+                </div>
+                <div class="rl-stale-body">
+                  Reinstall the statusline to restore live updates.
+                </div>
+                <button
+                  type="button"
+                  class="rate-limit-cta"
+                  onclick={handleInstallStatusline}
+                  disabled={statuslineBusy}
+                >
+                  {statuslineBusy ? "Reinstalling…" : "Reinstall statusline"}
+                </button>
+              </div>
+            {/if}
+          {:else if !$settings.rateLimitsEnabled}
+            <div class="rate-limit-empty">
+              <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+              </svg>
+              <div class="rate-limit-empty-title">Live rate limits are off</div>
+              <div class="rate-limit-empty-text">
+                Turn this on to see live rate-limit percentages.
+                TokenMonitor uses your Claude credentials file first and does not open Keychain from this button.
+              </div>
               <button
                 type="button"
-                class="kc-cta"
-                onclick={handleInstallStatusline}
-                disabled={statuslineBusy}
+                class="rate-limit-cta"
+                onclick={handleEnableRateLimits}
+                disabled={keychainPermissionBusy}
               >
-                {statuslineBusy ? "Reinstalling…" : "Reinstall statusline"}
+                Enable rate limits
               </button>
-            {/if}
-          </div>
-        {/if}
-      {:else if period === "5h" && shouldShowFiveHourUsageFallback}
-        {#if !$settings.rateLimitsEnabled}
-          <div class="rate-limit-note">
-            Live rate-limit percentages are off. Showing local 5h usage.
-          </div>
-        {:else if rateLimitsRequest.error}
-          <div class="rate-limit-note">
-            Live rate-limit percentages unavailable: {rateLimitsRequest.error} Showing local 5h usage.
-          </div>
-        {/if}
-        <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} />
-      {:else if period === "5h" && !$settings.rateLimitsEnabled}
-        <div class="rate-limit-empty">
-          <div class="rate-limit-empty-title">Live rate limits are off</div>
-          <div class="rate-limit-empty-text">
-            Turn this on to see live 5h and weekly rate-limit percentages
-            computed from local data only.
-          </div>
-          <button
-            type="button"
-            class="rate-limit-cta"
-            onclick={handleEnableRateLimits}
-            disabled={statuslineBusy}
-          >
-            Enable rate limits
-          </button>
-        </div>
-      {:else if period === "5h" && rateLimitsRequest.loading}
-        <div class="loading-bars"><div class="spinner"></div></div>
-      {:else if period === "5h"}
-        <div class="rate-limit-empty">
-          <div class="rate-limit-empty-title">Rate limits unavailable</div>
-          <div class="rate-limit-empty-text">
-            {#if isRateLimitProvider(provider) && (data.total_tokens > 0 || data.total_cost > 0)}
-              {getRateLimitIdleSummary(provider)}
+            </div>
+          {:else if rateLimitsRequest.loading}
+            <div class="rate-limit-skeleton" aria-busy="true">
+              {#each [1, 2] as _}
+                <div class="rate-limit-skeleton-row">
+                  <div class="skeleton" style="width: 50px; height: 8px"></div>
+                  <div class="skeleton" style="width: 100%; height: 14px; border-radius: 7px"></div>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="rate-limit-empty">
+              <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+              </svg>
+              <div class="rate-limit-empty-title">Rate limits unavailable</div>
+              <div class="rate-limit-empty-text">
+                {#if isRateLimitProvider(provider) && (data.total_tokens > 0 || data.total_cost > 0)}
+                  {getRateLimitIdleSummary(provider)}
+                {:else}
+                  {rateLimitsRequest.error ?? "Unable to load rate limit data right now."}
+                {/if}
+              </div>
+              {#if isMacOS() && !$settings.keychainAccessRequested}
+                <button
+                  type="button"
+                  class="rate-limit-secondary"
+                  onclick={handleShowKeychainFallback}
+                  disabled={keychainPermissionBusy}
+                >
+                  Review Keychain fallback
+                </button>
+              {/if}
+            </div>
+          {/if}
+        {:else if data.total_cost === 0 && data.total_tokens === 0}
+          <div class="empty-period">
+            {#if data.provider_detected === false}
+              <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span class="empty-title">{providerNotInstalledTitle(provider)}</span>
+              <span class="empty-subtitle">{providerNotInstalledHint(provider)}</span>
             {:else}
-              {rateLimitsRequest.error ?? "Unable to load rate limit data right now."}
+              <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                <path d="M2 17l10 5 10-5"></path>
+                <path d="M2 12l10 5 10-5"></path>
+              </svg>
+              <span>{emptyPeriodLabel(period, offset)}</span>
             {/if}
           </div>
-          <button
-            type="button"
-            class="rate-limit-cta"
-            onclick={handleInstallStatusline}
-            disabled={statuslineBusy}
-          >
-            {statuslineBusy ? "Installing…" : "Reinstall statusline"}
-          </button>
-        </div>
-      {:else if data.total_cost === 0 && data.total_tokens === 0}
-        <div class="empty-period">{emptyPeriodLabel(period, offset)}</div>
-      {:else}
-        <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} />
-      {/if}
+        {:else}
+          <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} />
+        {/if}
 
-      {#if (period !== "5h" && data.model_breakdown.length > 0) || data.subagent_stats || (data.device_breakdown && data.device_breakdown.length > 0)}
-        <div class="hr"></div>
-        <Breakdown
-          models={period !== "5h" ? data.model_breakdown : []}
-          onAccordionToggle={(detail) => resizeOrch?.handleBreakdownAccordionToggle(detail)}
-          subagentStats={data.subagent_stats}
-          deviceBreakdown={data.device_breakdown}
-          onDeviceSelect={handleDeviceSelect}
-          onShowAllDevices={() => { showDevices = true; }}
-          onToggleDeviceStats={handleToggleDeviceStats}
-        />
+        {#if (period !== "5h" && data.model_breakdown.length > 0) || data.subagent_stats || (data.device_breakdown && data.device_breakdown.length > 0)}
+          <div class="hr"></div>
+          <Breakdown
+            models={period !== "5h" ? data.model_breakdown : []}
+            onAccordionToggle={(detail) => resizeOrch?.handleBreakdownAccordionToggle(detail)}
+            subagentStats={data.subagent_stats}
+            deviceBreakdown={data.device_breakdown}
+            onDeviceSelect={handleDeviceSelect}
+            onShowAllDevices={() => { showDevices = true; }}
+            onToggleDeviceStats={handleToggleDeviceStats}
+          />
+        {/if}
+      </div>
       {/if}
       <Footer {data} {provider} {period} {rateLimits} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} onDevices={() => { showDevices = true; }} />
+      </div>
     {:else}
       <div class="loading">
         <div class="spinner"></div>
@@ -912,6 +1057,7 @@
     padding: 24px 0;
   }
   .rate-limit-empty,
+  .rate-limit-permission,
   .rate-limit-stale-banner {
     display: flex;
     flex-direction: column;
@@ -921,48 +1067,33 @@
   }
   .rate-limit-stale-banner {
     padding-top: 8px;
-    gap: 6px;
   }
-  /* Status dot + headline row. Dot color is driven by data-state on the
-     parent so the markup stays declarative. The dot picks up a soft halo
-     using a wide low-alpha box-shadow so the indicator reads as alive
-     without shouting — same pattern as PermissionSettings. */
   .rl-stale-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
   .rl-stale-dot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
+    background: var(--t4);
     flex-shrink: 0;
-    transition: background var(--t-fast, 120ms) ease;
-  }
-  .rate-limit-stale-banner[data-state="idle"] .rl-stale-dot {
-    background: var(--t3);
-    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.04);
-  }
-  :global([data-theme="light"]) .rate-limit-stale-banner[data-state="idle"] .rl-stale-dot {
-    box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.05);
   }
   .rate-limit-stale-banner[data-state="warn"] .rl-stale-dot {
-    background: #E8A060;
-    box-shadow: 0 0 0 3px rgba(232, 160, 96, 0.14);
+    background: #d88d31;
   }
   .rl-stale-headline {
-    font: 500 11px/1.2 'Inter', sans-serif;
-    color: var(--t1);
-    letter-spacing: -0.05px;
-  }
-  .rate-limit-stale-banner[data-state="warn"] .rl-stale-headline {
-    color: #E8A060;
+    font: 500 10px/1 'Inter', sans-serif;
+    color: var(--t2);
   }
   .rl-stale-body {
-    font: 400 10px/1.45 'Inter', sans-serif;
+    font: 400 9px/1.4 'Inter', sans-serif;
     color: var(--t3);
-    letter-spacing: -0.02px;
-    margin-left: 13px; /* aligns with the headline text under the dot */
+    padding-left: 12px;
+  }
+  .rate-limit-permission {
+    gap: 7px;
   }
   .rate-limit-empty-title {
     font: 500 11px/1 'Inter', sans-serif;
@@ -977,6 +1108,50 @@
     font: 400 9px/1.35 'Inter', sans-serif;
     color: var(--t3);
   }
+  .usage-warning {
+    margin: 8px 14px 0;
+    padding: 8px 9px;
+    border-radius: 8px;
+    background: color-mix(in srgb, #d88d31 12%, transparent);
+    border: 1px solid color-mix(in srgb, #d88d31 30%, transparent);
+  }
+  .usage-warning-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 3px;
+  }
+  .usage-warning-header .usage-warning-title {
+    margin-bottom: 0;
+  }
+  .usage-warning-title {
+    font: 600 9px/1.2 'Inter', sans-serif;
+    color: var(--t1);
+  }
+  .usage-warning-dismiss {
+    background: none;
+    border: none;
+    padding: 0;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--t3);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .usage-warning-dismiss:hover {
+    color: var(--t1);
+    background: var(--surface-hover);
+  }
+  .usage-warning-text {
+    font: 400 8.5px/1.35 'Inter', sans-serif;
+    color: var(--t2);
+  }
   .rate-limit-cta {
     margin-top: 10px;
     align-self: flex-start;
@@ -990,7 +1165,8 @@
     transition: filter var(--t-fast) ease;
   }
   .rate-limit-cta:hover:not(:disabled) { filter: brightness(1.08); }
-  .rate-limit-cta:disabled {
+  .rate-limit-cta:disabled,
+  .rate-limit-secondary:disabled {
     cursor: default;
     opacity: .55;
   }
@@ -1026,6 +1202,37 @@
     opacity: 0.5;
     cursor: default;
   }
+  .kc-cta-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px; height: 16px;
+    color: var(--accent, var(--t1));
+    opacity: 0.85;
+  }
+  .rate-limit-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 7px;
+  }
+  .rate-limit-actions .rate-limit-cta {
+    margin-top: 0;
+  }
+  .rate-limit-secondary {
+    padding: 6px 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--t2);
+    font: 500 10px/1 'Inter', sans-serif;
+    cursor: pointer;
+    transition: background var(--t-fast) ease, color var(--t-fast) ease;
+  }
+  .rate-limit-secondary:hover:not(:disabled) {
+    background: var(--surface-hover);
+    color: var(--t1);
+  }
   .refresh-bar {
     position: absolute;
     top: 0;
@@ -1044,9 +1251,63 @@
     100% { background-position: -200% 0; }
   }
   .empty-period {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
     text-align: center;
     color: var(--t3);
     font: 400 10px/1 'Inter', sans-serif;
     padding: 32px 0;
+  }
+
+  /* ── View entrance transitions ── */
+  .view-enter-fade {
+    animation: viewFadeIn var(--t-normal) var(--ease-out) both;
+  }
+  .view-enter-right {
+    animation: viewSlideInRight var(--t-normal) var(--ease-out) both;
+  }
+  .view-enter-left {
+    animation: viewSlideInLeft var(--t-normal) var(--ease-out) both;
+  }
+
+  /* ── Data content fade on provider/period switch ── */
+  .data-content {
+    animation-duration: var(--t-normal);
+    animation-timing-function: var(--ease-out);
+    animation-fill-mode: both;
+  }
+
+  /* ── Empty state icons ── */
+  .empty-icon {
+    display: block;
+    margin-bottom: 2px;
+    opacity: 0.6;
+  }
+  .rate-limit-empty .empty-icon {
+    margin-bottom: 6px;
+  }
+  .empty-title {
+    font: 600 11px/1 'Inter', sans-serif;
+    color: var(--t2);
+  }
+  .empty-subtitle {
+    font: 400 10px/1.4 'Inter', sans-serif;
+    color: var(--t3);
+    max-width: 220px;
+  }
+
+  /* ── Rate limit skeleton loading ── */
+  .rate-limit-skeleton {
+    padding: 14px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .rate-limit-skeleton-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
 </style>

@@ -41,7 +41,7 @@ export async function runBuild(options) {
 
   await runTauriBuild(context);
   const copiedArtifacts = await collectArtifacts(context);
-  const checksumFile = await writeChecksums(copiedArtifacts, context.outputDir);
+  const checksumFile = await writeChecksums(copiedArtifacts, context.outputDir, platform.id);
 
   return {
     artifacts: copiedArtifacts.map((artifactPath) => path.basename(artifactPath)),
@@ -116,15 +116,15 @@ async function runTauriBuild(context) {
 }
 
 function shouldDisableSigning(platformId) {
-  if (platformId !== "macos") {
-    return false;
+  if (platformId === "macos") {
+    return !(
+      process.env.APPLE_SIGNING_IDENTITY
+      || process.env.APPLE_API_KEY
+      || process.env.APPLE_API_KEY_PATH
+    );
   }
 
-  return !(
-    process.env.APPLE_SIGNING_IDENTITY
-    || process.env.APPLE_API_KEY
-    || process.env.APPLE_API_KEY_PATH
-  );
+  return !process.env.TAURI_SIGNING_PRIVATE_KEY;
 }
 
 async function collectArtifacts(context) {
@@ -188,8 +188,8 @@ async function collectArtifacts(context) {
   return copiedArtifacts;
 }
 
-async function writeChecksums(artifactPaths, outputDir) {
-  const checksumPath = path.join(outputDir, "SHA256SUMS.txt");
+async function writeChecksums(artifactPaths, outputDir, platformId) {
+  const checksumPath = path.join(outputDir, `SHA256SUMS-${platformId}.txt`);
   const lines = [];
 
   for (const artifactPath of artifactPaths) {

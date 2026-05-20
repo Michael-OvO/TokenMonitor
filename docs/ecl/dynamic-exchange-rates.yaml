@@ -1,0 +1,59 @@
+ecl_version: "1.0"
+feature: "dynamic-exchange-rates"
+status: completed
+created: 2026-04-23
+updated: 2026-04-23
+
+prompt_calibration:
+  raw_input: "我记得还有一个是让汇率和LiteLLM一样通过API实时调用。"
+  tracks:
+    T1:
+      calibrated_scenario: |
+        Replace hardcoded exchange rates in format.ts with dynamic rates
+        fetched from frankfurter.dev API, cached locally with 24h TTL,
+        following the established LiteLLM pattern. Keep 5 currencies
+        (USD/EUR/GBP/JPY/CNY). Fallback to hardcoded rates on failure.
+
+decisions:
+  - id: DEC-001
+    decision: "Use frankfurter.dev (ECB data, free, no API key)"
+    date: 2026-04-23
+  - id: DEC-002
+    decision: "Keep 5 currencies (USD/EUR/GBP/JPY/CNY)"
+    date: 2026-04-23
+  - id: DEC-003
+    decision: "Follow LiteLLM cache pattern: Rust fetch → disk → OnceLock → IPC"
+    date: 2026-04-23
+
+implementation:
+  files_created:
+    - src-tauri/src/usage/exchange_rates.rs
+  files_modified:
+    - src-tauri/src/usage/mod.rs
+    - src-tauri/src/commands/config.rs
+    - src-tauri/src/lib.rs
+    - src/lib/utils/format.ts
+    - src/lib/bootstrap.ts
+  tests:
+    rust: 5 new tests (cache round-trip, stale cache, corrupt cache, global rates, get_all_rates)
+    frontend: 45 existing tests pass unchanged
+
+feature_guard:
+  generated: "2026-04-23"
+  guards:
+    - id: GUARD-001
+      feature: "Dynamic exchange rate fetching"
+      description: "Exchange rates fetched from frankfurter.dev, cached 24h, fallback to hardcoded"
+      key_files:
+        - "src-tauri/src/usage/exchange_rates.rs"
+        - "src/lib/utils/format.ts"
+        - "src/lib/bootstrap.ts"
+      invariants:
+        - "App starts successfully with no internet (hardcoded fallback rates used)"
+        - "Exchange rates are cached to disk and loaded on next startup without network"
+        - "Frontend formatCost/convertCost correctly applies dynamic rates when available"
+        - "Existing 5 currencies (USD/EUR/GBP/JPY/CNY) all work with both dynamic and fallback rates"
+      verification:
+        command: "cd src-tauri && cargo test exchange_rates && cd .. && npx vitest run src/lib/utils/format.test.ts"
+        expected: "all pass"
+      status: active
