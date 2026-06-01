@@ -57,7 +57,15 @@ jobs:
 
       - name: Rust tests
         working-directory: src-tauri
-        run: cargo test
+        # All unit tests live in the lib (main.rs has none; no integration
+        # tests). TM_EMBED_TEST_MANIFEST makes the Windows test binary embed the
+        # Common-Controls v6 manifest it needs to load (wry/tao import comctl32
+        # v6 — see build.rs); it is a no-op on Linux/macOS. `--lib` avoids
+        # building the app bin under test, which already carries that manifest
+        # from tauri_build (a second one -> CVT1100 "duplicate resource").
+        env:
+          TM_EMBED_TEST_MANIFEST: "1"
+        run: cargo test --lib
 
   # Summary job for branch protection — required status check "ci-complete"
   ci-complete:
