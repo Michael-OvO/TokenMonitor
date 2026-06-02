@@ -1,19 +1,31 @@
 use crate::models::{
     ActiveBlock, ChartBucket, ChartSegment, ModelSummary, UsagePayload, UsageSource,
 };
+use crate::stats::change::ParsedChangeEvent;
 #[cfg(test)]
-use crate::stats::change::FileCategory;
-use crate::stats::change::{classify_file, ChangeEventKind, ParsedChangeEvent};
-use crate::usage::integrations::{UsageIntegrationId, UsageIntegrationSelection};
+use crate::stats::change::{ChangeEventKind, FileCategory};
+use crate::usage::integrations::{
+    provider_matches_model, UsageIntegrationId, UsageIntegrationSelection,
+};
 use chrono::{DateTime, Local, NaiveDate, Timelike};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use rayon::prelude::*;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
+
+#[cfg(test)]
+use super::claude_parser::read_claude_entries;
+use super::claude_parser::{
+    parse_claude_session_file, upsert_claude_change_event, upsert_claude_entry, ClaudeDedupeAction,
+};
+use super::codex_parser::parse_codex_session_file;
+use super::cursor_parser::{
+    cursor_last_warning, glob_cursor_chat_session_files, load_cursor_local_entries,
+    parse_cursor_session_file, set_cursor_warning,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Parsed entry (shared between Claude and Codex)
@@ -110,6 +122,7 @@ struct CachedFileEntries {
 enum ProviderFileKind {
     Claude,
     Codex,
+    Cursor,
 }
 
 #[derive(Clone)]
@@ -127,6 +140,7 @@ impl UsageIntegrationConfig {
         match self.id {
             UsageIntegrationId::Claude => ProviderFileKind::Claude,
             UsageIntegrationId::Codex => ProviderFileKind::Codex,
+            UsageIntegrationId::Cursor => ProviderFileKind::Cursor,
         }
     }
 
@@ -138,11 +152,15 @@ impl UsageIntegrationConfig {
             UsageIntegrationId::Codex => {
                 "recursive-jsonl-glob+root-file-list-cache+parsed-file-cache+token-delta"
             }
+            UsageIntegrationId::Cursor => "workspace-chat-json+token-field-probe+cursor-remote-api",
         }
     }
 
     fn dedupe_entry_hashes(&self) -> bool {
-        matches!(self.id, UsageIntegrationId::Claude)
+        matches!(
+            self.id,
+            UsageIntegrationId::Claude | UsageIntegrationId::Cursor
+        )
     }
 
     fn dedupe_change_events(&self) -> bool {
@@ -159,130 +177,20 @@ struct CachedFileLoad {
     from_cache: bool,
 }
 
+/// Shared result of a single `load_entries` call, cached for reuse within
+/// the same IPC request scope.
+#[derive(Clone)]
+pub(crate) struct LoadedEntries {
+    pub entries: Vec<ParsedEntry>,
+    pub change_events: Vec<ParsedChangeEvent>,
+    #[allow(dead_code)]
+    pub reports: Vec<ProviderReadDebug>,
+}
+
 struct PayloadCacheEntry {
     payload: UsagePayload,
     stored_at: Instant,
     last_accessed_at: Instant,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Claude JSONL serde types
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct ClaudeJsonlEntry {
-    #[serde(rename = "type", default)]
-    entry_type: String,
-    #[serde(default)]
-    timestamp: String,
-    #[serde(rename = "requestId")]
-    request_id: Option<String>,
-    #[serde(rename = "toolUseResult")]
-    tool_use_result: Option<ClaudeToolUseResult>,
-    message: Option<ClaudeJsonlMessage>,
-    #[serde(rename = "isSidechain", default)]
-    is_sidechain: Option<bool>,
-    #[serde(rename = "sessionId", default)]
-    session_id: Option<String>,
-    #[serde(rename = "agentId", default)]
-    agent_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ClaudeJsonlMessage {
-    model: Option<String>,
-    usage: Option<ClaudeJsonlUsage>,
-    id: Option<String>,
-    #[serde(default)]
-    content: Vec<ClaudeContentBlock>,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum ClaudeContentBlock {
-    #[serde(rename = "tool_use")]
-    ToolUse {
-        id: Option<String>,
-        name: String,
-        input: serde_json::Value,
-    },
-    #[serde(rename = "tool_result")]
-    ToolResult {
-        #[serde(rename = "tool_use_id")]
-        tool_use_id: String,
-    },
-    #[serde(other)]
-    Other,
-}
-
-/// Input fields for the Edit tool_use.
-#[derive(Deserialize)]
-struct EditToolInput {
-    file_path: String,
-    old_string: String,
-    new_string: String,
-}
-
-/// Input fields for the Write tool_use.
-#[derive(Deserialize)]
-struct WriteToolInput {
-    file_path: String,
-}
-
-#[derive(Deserialize, Default)]
-struct ClaudeToolUseResult {
-    #[serde(rename = "filePath")]
-    file_path: Option<String>,
-    #[serde(rename = "oldString")]
-    old_string: Option<String>,
-    #[serde(rename = "newString")]
-    new_string: Option<String>,
-    #[serde(rename = "originalFile")]
-    original_file: Option<String>,
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(rename = "structuredPatch", default)]
-    structured_patch: Vec<ClaudeStructuredPatchChunk>,
-}
-
-#[derive(Deserialize, Default)]
-struct ClaudeStructuredPatchChunk {
-    #[serde(default)]
-    lines: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct ClaudeJsonlUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    cache_creation: Option<CacheCreationBreakdown>,
-    server_tool_use: Option<ServerToolUse>,
-    speed: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ServerToolUse {
-    web_search_requests: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct CacheCreationBreakdown {
-    ephemeral_5m_input_tokens: Option<u64>,
-    ephemeral_1h_input_tokens: Option<u64>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Codex JSONL serde types
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct CodexJsonlEntry {
-    #[serde(rename = "type", default)]
-    entry_type: String,
-    timestamp: Option<String>,
-    payload: Option<Value>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -296,14 +204,18 @@ struct CodexJsonlEntry {
 /// prompt the user for access they never asked for. Regular files reached via
 /// symlink are still accepted (reading a symlinked JSONL doesn't recurse), but
 /// symlinked directories are skipped.
-pub fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
     let mut results = Vec::new();
     if !dir.exists() {
         return results;
     }
+    tracing::debug!(path = %dir.display(), "read_dir (glob_jsonl_files)");
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,
-        Err(_) => return results,
+        Err(e) => {
+            tracing::debug!(path = %dir.display(), error = %e, "read_dir failed");
+            return results;
+        }
     };
     for entry in rd.flatten() {
         let Ok(file_type) = entry.file_type() else {
@@ -311,6 +223,7 @@ pub fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
         };
         let path = entry.path();
         if file_type.is_symlink() {
+            tracing::debug!(path = %path.display(), "skipping symlink");
             continue;
         }
         if file_type.is_dir() {
@@ -325,15 +238,15 @@ pub fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Parse a `since` string in `YYYYMMDD` format into a `NaiveDate`.
-pub fn parse_since_date(since: &str) -> Option<NaiveDate> {
+pub(crate) fn parse_since_date(since: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(since, "%Y%m%d").ok()
 }
 
-fn path_to_string(path: &Path) -> String {
+pub(crate) fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
-fn push_sample_path(sample_paths: &mut Vec<String>, path: &Path) {
+pub(crate) fn push_sample_path(sample_paths: &mut Vec<String>, path: &Path) {
     if sample_paths.len() < 5 {
         sample_paths.push(path_to_string(path));
     }
@@ -348,9 +261,13 @@ fn scan_jsonl_tree_into(
     // them so the walker stays on the volume the user originally opted into.
     let metadata = match fs::symlink_metadata(dir) {
         Ok(metadata) => metadata,
-        Err(_) => return,
+        Err(e) => {
+            tracing::debug!(path = %dir.display(), error = %e, "symlink_metadata failed");
+            return;
+        }
     };
     if metadata.file_type().is_symlink() {
+        tracing::debug!(path = %dir.display(), "skipping symlink dir");
         return;
     }
     let modified = match metadata.modified() {
@@ -362,9 +279,13 @@ fn scan_jsonl_tree_into(
         modified,
     });
 
+    tracing::debug!(path = %dir.display(), "read_dir (scan_jsonl_tree)");
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,
-        Err(_) => return,
+        Err(e) => {
+            tracing::debug!(path = %dir.display(), error = %e, "read_dir failed");
+            return;
+        }
     };
     for entry in rd.flatten() {
         let Ok(file_type) = entry.file_type() else {
@@ -372,6 +293,7 @@ fn scan_jsonl_tree_into(
         };
         let path = entry.path();
         if file_type.is_symlink() {
+            tracing::debug!(path = %path.display(), "skipping symlink");
             continue;
         }
         if file_type.is_dir() {
@@ -408,250 +330,6 @@ fn earliest_entry_date(entries: &[ParsedEntry]) -> Option<NaiveDate> {
         .min()
 }
 
-fn create_claude_unique_hash(entry: &ClaudeJsonlEntry) -> Option<String> {
-    let message_id = entry.message.as_ref()?.id.as_ref()?;
-    let request_id = entry.request_id.as_ref()?;
-    Some(format!("{message_id}:{request_id}"))
-}
-
-fn claude_scope_priority(scope: crate::stats::subagent::AgentScope) -> u8 {
-    match scope {
-        crate::stats::subagent::AgentScope::Main => 0,
-        crate::stats::subagent::AgentScope::Subagent => 1,
-    }
-}
-
-fn should_prefer_claude_entry(candidate: &ParsedEntry, existing: &ParsedEntry) -> bool {
-    if candidate.output_tokens != existing.output_tokens {
-        return candidate.output_tokens > existing.output_tokens;
-    }
-
-    let candidate_scope = claude_scope_priority(candidate.agent_scope);
-    let existing_scope = claude_scope_priority(existing.agent_scope);
-    if candidate_scope != existing_scope {
-        return candidate_scope > existing_scope;
-    }
-
-    if candidate.timestamp != existing.timestamp {
-        return candidate.timestamp > existing.timestamp;
-    }
-
-    if candidate.session_key != existing.session_key {
-        return candidate.session_key < existing.session_key;
-    }
-
-    if candidate.model != existing.model {
-        return candidate.model < existing.model;
-    }
-
-    false
-}
-
-fn should_prefer_claude_change_event(
-    candidate: &ParsedChangeEvent,
-    existing: &ParsedChangeEvent,
-) -> bool {
-    let candidate_lines = candidate.added_lines + candidate.removed_lines;
-    let existing_lines = existing.added_lines + existing.removed_lines;
-    if candidate_lines != existing_lines {
-        return candidate_lines > existing_lines;
-    }
-
-    let candidate_scope = claude_scope_priority(candidate.agent_scope);
-    let existing_scope = claude_scope_priority(existing.agent_scope);
-    if candidate_scope != existing_scope {
-        return candidate_scope > existing_scope;
-    }
-
-    if candidate.timestamp != existing.timestamp {
-        return candidate.timestamp > existing.timestamp;
-    }
-
-    if candidate.path != existing.path {
-        return candidate.path < existing.path;
-    }
-
-    if candidate.model != existing.model {
-        return candidate.model < existing.model;
-    }
-
-    false
-}
-
-fn create_claude_tool_dedupe_key(
-    unique_hash: Option<&String>,
-    tool_id: Option<&String>,
-    block_index: usize,
-) -> Option<String> {
-    let hash = unique_hash?;
-    let suffix = tool_id.as_ref().map(|id| id.as_str()).unwrap_or_else(|| "");
-    if suffix.is_empty() {
-        Some(format!("{hash}:{block_index}"))
-    } else {
-        Some(format!("{hash}:{suffix}"))
-    }
-}
-
-struct PendingClaudeTool {
-    model_key: String,
-    timestamp: DateTime<Local>,
-    path: String,
-    kind: ChangeEventKind,
-    fallback_added_lines: u64,
-    fallback_removed_lines: u64,
-    dedupe_key: Option<String>,
-    agent_scope: crate::stats::subagent::AgentScope,
-}
-
-#[derive(Clone, Copy, Default, PartialEq)]
-struct CodexRawUsage {
-    input_tokens: u64,
-    cached_input_tokens: u64,
-    output_tokens: u64,
-    reasoning_output_tokens: u64,
-    total_tokens: u64,
-}
-
-fn codex_usage_is_zero(usage: CodexRawUsage) -> bool {
-    usage == CodexRawUsage::default()
-}
-
-fn ensure_u64(value: Option<&Value>) -> u64 {
-    value.and_then(Value::as_u64).unwrap_or(0)
-}
-
-fn normalize_codex_raw_usage(value: Option<&Value>) -> Option<CodexRawUsage> {
-    let record = value?.as_object()?;
-
-    let input_tokens = ensure_u64(record.get("input_tokens"));
-    let cached_input_tokens = ensure_u64(
-        record
-            .get("cached_input_tokens")
-            .or_else(|| record.get("cache_read_input_tokens")),
-    );
-    let output_tokens = ensure_u64(record.get("output_tokens"));
-    let reasoning_output_tokens = ensure_u64(record.get("reasoning_output_tokens"));
-    let total_tokens = ensure_u64(record.get("total_tokens"));
-
-    Some(CodexRawUsage {
-        input_tokens,
-        cached_input_tokens,
-        output_tokens,
-        reasoning_output_tokens,
-        total_tokens: if total_tokens > 0 {
-            total_tokens
-        } else {
-            input_tokens + output_tokens
-        },
-    })
-}
-
-fn subtract_codex_raw_usage(
-    current: CodexRawUsage,
-    previous: Option<CodexRawUsage>,
-) -> CodexRawUsage {
-    let previous = previous.unwrap_or_default();
-
-    CodexRawUsage {
-        input_tokens: current.input_tokens.saturating_sub(previous.input_tokens),
-        cached_input_tokens: current
-            .cached_input_tokens
-            .saturating_sub(previous.cached_input_tokens),
-        output_tokens: current.output_tokens.saturating_sub(previous.output_tokens),
-        reasoning_output_tokens: current
-            .reasoning_output_tokens
-            .saturating_sub(previous.reasoning_output_tokens),
-        total_tokens: current.total_tokens.saturating_sub(previous.total_tokens),
-    }
-}
-
-fn value_as_non_empty_string(value: Option<&Value>) -> Option<String> {
-    let raw = value?.as_str()?.trim();
-    if raw.is_empty() {
-        None
-    } else {
-        Some(raw.to_string())
-    }
-}
-
-fn extract_codex_model(value: &Value) -> Option<String> {
-    if let Some(info) = value.get("info") {
-        if let Some(model) = value_as_non_empty_string(info.get("model")) {
-            return Some(model);
-        }
-        if let Some(model) = value_as_non_empty_string(info.get("model_name")) {
-            return Some(model);
-        }
-        if let Some(model) = info
-            .get("metadata")
-            .and_then(|metadata| value_as_non_empty_string(metadata.get("model")))
-        {
-            return Some(model);
-        }
-    }
-
-    if let Some(model) = value_as_non_empty_string(value.get("model")) {
-        return Some(model);
-    }
-
-    value
-        .get("metadata")
-        .and_then(|metadata| value_as_non_empty_string(metadata.get("model")))
-}
-
-fn assign_pending_codex_models(
-    model_raw: &str,
-    entries: &mut [ParsedEntry],
-    pending_entry_indices: &mut Vec<usize>,
-    change_events: &mut [ParsedChangeEvent],
-    pending_change_indices: &mut Vec<usize>,
-) {
-    let model_raw = model_raw.to_string();
-    let model_key = crate::models::normalized_model_key(&model_raw);
-
-    for idx in pending_entry_indices.drain(..) {
-        if let Some(entry) = entries.get_mut(idx) {
-            entry.model = model_raw.clone();
-        }
-    }
-
-    for idx in pending_change_indices.drain(..) {
-        if let Some(event) = change_events.get_mut(idx) {
-            event.model = model_key.clone();
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_codex_change_event(
-    change_events: &mut Vec<ParsedChangeEvent>,
-    pending_model_indices: &mut Vec<usize>,
-    model_key: Option<&str>,
-    timestamp: DateTime<Local>,
-    path: String,
-    kind: ChangeEventKind,
-    added_lines: u64,
-    removed_lines: u64,
-    agent_scope: crate::stats::subagent::AgentScope,
-) {
-    change_events.push(ParsedChangeEvent {
-        timestamp,
-        model: model_key.unwrap_or("").to_string(),
-        provider: "codex".to_string(),
-        category: classify_file(&path),
-        path,
-        kind,
-        added_lines,
-        removed_lines,
-        dedupe_key: None,
-        agent_scope,
-    });
-
-    if model_key.is_none() {
-        pending_model_indices.push(change_events.len() - 1);
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Model normalisation helper
 // ─────────────────────────────────────────────────────────────────────────────
@@ -666,7 +344,7 @@ fn normalize_model(raw: &str) -> (String, String) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Check if a file was modified on or after the given date.
-fn modified_since(path: &Path, since: NaiveDate) -> bool {
+pub(crate) fn modified_since(path: &Path, since: NaiveDate) -> bool {
     fs::metadata(path)
         .and_then(|m| m.modified())
         .map(|t| {
@@ -676,444 +354,10 @@ fn modified_since(path: &Path, since: NaiveDate) -> bool {
         .unwrap_or(true) // if we can't read metadata, include the file
 }
 
-/// Count lines in a string (an empty string has 0 lines).
-fn count_lines(s: &str) -> u64 {
-    if s.is_empty() {
-        0
-    } else {
-        s.lines().count() as u64
-    }
-}
-
-/// Returns true for provider-internal paths that should not be counted as user edits.
-fn is_provider_internal_path(path: &str) -> bool {
-    path.contains("/.claude/plans/")
-}
-
-fn count_claude_structured_patch_lines(
-    chunks: &[ClaudeStructuredPatchChunk],
-) -> Option<(u64, u64)> {
-    if chunks.is_empty() {
-        return None;
-    }
-
-    let patch = chunks
-        .iter()
-        .flat_map(|chunk| chunk.lines.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let (added, removed) = count_diff_lines(&patch);
-    Some((added, removed))
-}
-
-fn extract_claude_tool_result_counts(
-    tool_result: &ClaudeToolUseResult,
-    pending: &PendingClaudeTool,
-) -> (u64, u64) {
-    if let Some(counts) = count_claude_structured_patch_lines(&tool_result.structured_patch) {
-        return counts;
-    }
-
-    if let (Some(old), Some(new)) = (
-        tool_result.old_string.as_deref(),
-        tool_result.new_string.as_deref(),
-    ) {
-        return (count_lines(new), count_lines(old));
-    }
-
-    if let (Some(old), Some(new)) = (
-        tool_result.original_file.as_deref(),
-        tool_result.content.as_deref(),
-    ) {
-        return (count_lines(new), count_lines(old));
-    }
-
-    if pending.kind == ChangeEventKind::FullWrite {
-        if let Some(content) = tool_result.content.as_deref() {
-            return (count_lines(content), 0);
-        }
-    }
-
-    (pending.fallback_added_lines, pending.fallback_removed_lines)
-}
-
-pub type ClaudeParseResult = (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, usize, bool);
-
-pub fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) => {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("Failed to open session file {}: {e}", path.display());
-            }
-            return (Vec::new(), Vec::new(), 0, false);
-        }
-    };
-
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-    let mut change_events = Vec::new();
-    let mut pending_tools: Vec<Option<PendingClaudeTool>> = Vec::new();
-    let mut pending_tool_indices: HashMap<String, usize> = HashMap::new();
-    let mut lines_read = 0;
-    let mut parse_failures = 0_usize;
-
-    for line in reader.lines() {
-        lines_read += 1;
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-
-        // Fast pre-filter: skip lines that can't contain assistant/tool_result data
-        if !line.contains("\"assistant\"") && !line.contains("\"tool_result\"") {
-            continue;
-        }
-
-        let entry: ClaudeJsonlEntry = match serde_json::from_str(&line) {
-            Ok(entry) => entry,
-            Err(_) => {
-                parse_failures += 1;
-                continue;
-            }
-        };
-        let ts = match chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
-            Ok(ts) => ts.with_timezone(&Local),
-            Err(_) => continue,
-        };
-
-        match entry.entry_type.as_str() {
-            "assistant" => {
-                let msg = match &entry.message {
-                    Some(message) => message,
-                    None => continue,
-                };
-                let model = match &msg.model {
-                    Some(model) if !model.starts_with('<') => model.clone(), // skip <synthetic> etc.
-                    _ => continue,
-                };
-
-                let agent_scope = if entry.is_sidechain == Some(true) {
-                    crate::stats::subagent::AgentScope::Subagent
-                } else {
-                    crate::stats::subagent::AgentScope::Main
-                };
-                let session_key = match (&entry.session_id, &entry.agent_id, entry.is_sidechain) {
-                    (Some(sid), Some(aid), Some(true)) => format!("claude:{sid}:subagent:{aid}"),
-                    (Some(sid), _, _) => format!("claude:{sid}:main"),
-                    _ => format!("claude:file:{}", path_to_string(path)),
-                };
-
-                let model_key = crate::models::normalized_model_key(&model);
-                let unique_hash = create_claude_unique_hash(&entry);
-                for (block_index, block) in msg.content.iter().enumerate() {
-                    let pending = match block {
-                        ClaudeContentBlock::ToolUse { id, name, input } if name == "Edit" => {
-                            serde_json::from_value::<EditToolInput>(input.clone())
-                                .ok()
-                                .and_then(|edit| {
-                                    if is_provider_internal_path(&edit.file_path) {
-                                        return None;
-                                    }
-                                    Some((
-                                        id.clone(),
-                                        PendingClaudeTool {
-                                            model_key: model_key.clone(),
-                                            timestamp: ts,
-                                            path: edit.file_path.clone(),
-                                            kind: ChangeEventKind::PatchEdit,
-                                            fallback_added_lines: count_lines(&edit.new_string),
-                                            fallback_removed_lines: count_lines(&edit.old_string),
-                                            dedupe_key: create_claude_tool_dedupe_key(
-                                                unique_hash.as_ref(),
-                                                id.as_ref(),
-                                                block_index,
-                                            ),
-                                            agent_scope,
-                                        },
-                                    ))
-                                })
-                        }
-                        ClaudeContentBlock::ToolUse { id, name, input } if name == "Write" => {
-                            serde_json::from_value::<WriteToolInput>(input.clone())
-                                .ok()
-                                .and_then(|write| {
-                                    if is_provider_internal_path(&write.file_path) {
-                                        return None;
-                                    }
-                                    Some((
-                                        id.clone(),
-                                        PendingClaudeTool {
-                                            model_key: model_key.clone(),
-                                            timestamp: ts,
-                                            path: write.file_path.clone(),
-                                            kind: ChangeEventKind::FullWrite,
-                                            fallback_added_lines: 0,
-                                            fallback_removed_lines: 0,
-                                            dedupe_key: create_claude_tool_dedupe_key(
-                                                unique_hash.as_ref(),
-                                                id.as_ref(),
-                                                block_index,
-                                            ),
-                                            agent_scope,
-                                        },
-                                    ))
-                                })
-                        }
-                        _ => None,
-                    };
-
-                    if let Some((tool_id, pending)) = pending {
-                        let idx = pending_tools.len();
-                        pending_tools.push(Some(pending));
-                        if let Some(tool_id) = tool_id {
-                            pending_tool_indices.insert(tool_id, idx);
-                        }
-                    }
-                }
-
-                if let Some(usage) = msg.usage.as_ref() {
-                    // Append "-fast" to the raw model name when speed is "fast"
-                    // so it gets a distinct model key and pricing.
-                    let effective_model = if usage.speed.as_deref() == Some("fast") {
-                        format!("{model}-fast")
-                    } else {
-                        model
-                    };
-
-                    // Split cache creation into 5m and 1h tiers.
-                    // If the breakdown sub-object exists, use it directly.
-                    // Otherwise default all cache creation to 1h (Claude Code's default).
-                    let total_cw = usage.cache_creation_input_tokens.unwrap_or(0);
-                    let (cw_5m, cw_1h) = match &usage.cache_creation {
-                        Some(bd) => (
-                            bd.ephemeral_5m_input_tokens.unwrap_or(0),
-                            bd.ephemeral_1h_input_tokens.unwrap_or(0),
-                        ),
-                        None => (0, total_cw),
-                    };
-
-                    let web_search_requests = usage
-                        .server_tool_use
-                        .as_ref()
-                        .and_then(|s| s.web_search_requests)
-                        .unwrap_or(0);
-
-                    entries.push(ParsedEntry {
-                        timestamp: ts,
-                        model: effective_model,
-                        input_tokens: usage.input_tokens.unwrap_or(0),
-                        output_tokens: usage.output_tokens.unwrap_or(0),
-                        cache_creation_5m_tokens: cw_5m,
-                        cache_creation_1h_tokens: cw_1h,
-                        cache_read_tokens: usage.cache_read_input_tokens.unwrap_or(0),
-                        web_search_requests,
-                        unique_hash,
-                        session_key: session_key.clone(),
-                        agent_scope,
-                    });
-                }
-            }
-            "user" => {
-                let Some(tool_result) = entry.tool_use_result.as_ref() else {
-                    continue;
-                };
-                let Some(msg) = entry.message.as_ref() else {
-                    continue;
-                };
-
-                for block in &msg.content {
-                    let ClaudeContentBlock::ToolResult { tool_use_id } = block else {
-                        continue;
-                    };
-                    let Some(idx) = pending_tool_indices.remove(tool_use_id) else {
-                        continue;
-                    };
-                    let Some(pending) = pending_tools.get_mut(idx).and_then(Option::take) else {
-                        continue;
-                    };
-
-                    let path = tool_result
-                        .file_path
-                        .clone()
-                        .filter(|path| !is_provider_internal_path(path))
-                        .unwrap_or_else(|| pending.path.clone());
-                    let (added_lines, removed_lines) =
-                        extract_claude_tool_result_counts(tool_result, &pending);
-
-                    change_events.push(ParsedChangeEvent {
-                        timestamp: ts,
-                        model: pending.model_key,
-                        provider: "claude".to_string(),
-                        path: path.clone(),
-                        kind: pending.kind,
-                        added_lines,
-                        removed_lines,
-                        category: classify_file(&path),
-                        dedupe_key: pending.dedupe_key,
-                        agent_scope: pending.agent_scope,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for pending in pending_tools.into_iter().flatten() {
-        let path = pending.path.clone();
-        change_events.push(ParsedChangeEvent {
-            timestamp: pending.timestamp,
-            model: pending.model_key,
-            provider: "claude".to_string(),
-            path: path.clone(),
-            kind: pending.kind,
-            added_lines: pending.fallback_added_lines,
-            removed_lines: pending.fallback_removed_lines,
-            category: classify_file(&path),
-            dedupe_key: pending.dedupe_key,
-            agent_scope: pending.agent_scope,
-        });
-    }
-
-    // Warn when a high proportion of candidate lines fail to parse,
-    // which may indicate a schema change in the JSONL format.
-    if parse_failures > 0 && entries.is_empty() && lines_read > 10 {
-        tracing::warn!(
-            "All {} candidate lines failed to parse in {}; JSONL schema may have changed",
-            parse_failures,
-            path.display()
-        );
-    }
-
-    (entries, change_events, lines_read, true)
-}
-
-enum ClaudeDedupeAction {
-    Inserted,
-    Replaced(usize),
-    Skipped,
-}
-
-fn upsert_claude_entry(
-    entries: &mut Vec<ParsedEntry>,
-    processed_hashes: &mut HashMap<String, usize>,
-    entry: ParsedEntry,
-) -> ClaudeDedupeAction {
-    let Some(unique_hash) = entry.unique_hash.clone() else {
-        entries.push(entry);
-        return ClaudeDedupeAction::Inserted;
-    };
-
-    if let Some(existing_idx) = processed_hashes.get(&unique_hash).copied() {
-        if should_prefer_claude_entry(&entry, &entries[existing_idx]) {
-            entries[existing_idx] = entry;
-            ClaudeDedupeAction::Replaced(existing_idx)
-        } else {
-            ClaudeDedupeAction::Skipped
-        }
-    } else {
-        let idx = entries.len();
-        entries.push(entry);
-        processed_hashes.insert(unique_hash, idx);
-        ClaudeDedupeAction::Inserted
-    }
-}
-
-fn upsert_claude_change_event(
-    change_events: &mut Vec<ParsedChangeEvent>,
-    processed_change_keys: &mut HashMap<String, usize>,
-    change_event: ParsedChangeEvent,
-) -> ClaudeDedupeAction {
-    let Some(dedupe_key) = change_event.dedupe_key.clone() else {
-        change_events.push(change_event);
-        return ClaudeDedupeAction::Inserted;
-    };
-
-    if let Some(existing_idx) = processed_change_keys.get(&dedupe_key).copied() {
-        if should_prefer_claude_change_event(&change_event, &change_events[existing_idx]) {
-            change_events[existing_idx] = change_event;
-            ClaudeDedupeAction::Replaced(existing_idx)
-        } else {
-            ClaudeDedupeAction::Skipped
-        }
-    } else {
-        let idx = change_events.len();
-        change_events.push(change_event);
-        processed_change_keys.insert(dedupe_key, idx);
-        ClaudeDedupeAction::Inserted
-    }
-}
-
-/// Read all Claude assistant entries from JSONL files under `projects_dir`,
-/// optionally filtering to entries on or after `since`.
-fn read_claude_entries_with_debug(
-    projects_dir: &Path,
-    since: Option<NaiveDate>,
-) -> (Vec<ParsedEntry>, ProviderReadDebug) {
-    let mut entries = Vec::new();
-    let mut processed_hashes = HashMap::new();
-    let files = glob_jsonl_files(projects_dir);
-    let mut report = ProviderReadDebug {
-        provider: String::from("claude"),
-        root_dir: path_to_string(projects_dir),
-        root_exists: projects_dir.exists(),
-        since: since.map(|date| date.format("%Y-%m-%d").to_string()),
-        strategy: String::from("recursive-jsonl-glob"),
-        discovered_paths: files.len(),
-        ..ProviderReadDebug::default()
-    };
-
-    for path in files {
-        // Skip files that haven't been modified since the since date.
-        // This avoids reading hundreds of old files for short time periods.
-        if let Some(since_date) = since {
-            if !modified_since(&path, since_date) {
-                report.skipped_paths += 1;
-                report.skipped_by_mtime += 1;
-                push_sample_path(&mut report.sample_skipped_paths, &path);
-                continue;
-            }
-        }
-        report.attempted_paths += 1;
-        push_sample_path(&mut report.sample_paths, &path);
-
-        let (parsed_entries, _change_events, lines_read, opened) = parse_claude_session_file(&path);
-        report.lines_read += lines_read;
-        if opened {
-            report.opened_paths += 1;
-        } else {
-            report.failed_paths += 1;
-            continue;
-        }
-
-        for entry in parsed_entries {
-            if since.is_some_and(|since_date| entry.timestamp.date_naive() < since_date) {
-                continue;
-            }
-            let _ = upsert_claude_entry(&mut entries, &mut processed_hashes, entry);
-        }
-    }
-    report.emitted_entries = entries.len();
-    (entries, report)
-}
-
-#[allow(dead_code)]
-pub fn read_claude_entries(projects_dir: &Path, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
-    read_claude_entries_with_debug(projects_dir, since).0
-}
-
-/// Parse a single Codex session JSONL file.
-/// Codex `event_msg` / `token_count` events may include either per-turn
-/// `last_token_usage` or cumulative `total_token_usage`. We normalize both
-/// forms into per-event deltas and track model context via `turn_context`.
-///
-/// In current Codex logs, `input_tokens` already includes cached input.
-/// Normalize it to billable uncached input here so downstream pricing and
-/// token totals do not count cached input twice.
 /// Count added and removed lines in a unified diff.
 /// Lines starting with `+` (but not `+++`) are additions.
 /// Lines starting with `-` (but not `---`) are removals.
-fn count_diff_lines(patch: &str) -> (u64, u64) {
+pub(crate) fn count_diff_lines(patch: &str) -> (u64, u64) {
     let mut added: u64 = 0;
     let mut removed: u64 = 0;
     for line in patch.lines() {
@@ -1126,437 +370,7 @@ fn count_diff_lines(patch: &str) -> (u64, u64) {
     (added, removed)
 }
 
-/// Extract file paths from unified diff headers.
-/// Looks for `+++ b/path` lines and strips the `b/` prefix.
-/// Falls back to `diff --git a/path b/path` headers.
-fn extract_diff_paths(patch: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    for line in patch.lines() {
-        if let Some(rest) = line.strip_prefix("+++ b/") {
-            let path = rest.trim();
-            if !path.is_empty() {
-                paths.push(path.to_string());
-            }
-        } else if let Some(rest) = line.strip_prefix("+++ ") {
-            // Handle `+++ path` without `b/` prefix (but skip `+++ /dev/null`)
-            let path = rest.trim();
-            if !path.is_empty() && path != "/dev/null" {
-                paths.push(path.to_string());
-            }
-        }
-    }
-    // Fall back to diff --git headers if no +++ lines found
-    if paths.is_empty() {
-        for line in patch.lines() {
-            if let Some(rest) = line.strip_prefix("diff --git ") {
-                // Format: "a/path b/path"
-                if let Some(b_idx) = rest.find(" b/") {
-                    let path = &rest[b_idx + 3..];
-                    let path = path.trim();
-                    if !path.is_empty() {
-                        paths.push(path.to_string());
-                    }
-                }
-            }
-        }
-    }
-    // Fall back to Codex *** Add/Update File: headers
-    if paths.is_empty() {
-        for line in patch.lines() {
-            let rest = line
-                .strip_prefix("*** Add File: ")
-                .or_else(|| line.strip_prefix("*** Update File: "))
-                .or_else(|| line.strip_prefix("*** Delete File: "));
-            if let Some(file_path) = rest {
-                let file_path = file_path.trim();
-                if !file_path.is_empty() {
-                    paths.push(file_path.to_string());
-                }
-            }
-        }
-    }
-    paths
-}
-
-/// Split a multi-file unified diff into per-file (path, added, removed) tuples.
-fn split_patch_by_file(patch: &str, paths: &[String]) -> Vec<(String, u64, u64)> {
-    // Split on `diff --git` boundaries or `--- a/` boundaries
-    let mut results = Vec::new();
-    let mut current_path_idx: Option<usize> = None;
-    let mut current_added: u64 = 0;
-    let mut current_removed: u64 = 0;
-
-    for line in patch.lines() {
-        if line.starts_with("diff --git ")
-            || line.starts_with("--- a/")
-            || line.starts_with("--- ")
-            || line.starts_with("*** Add File: ")
-            || line.starts_with("*** Update File: ")
-            || line.starts_with("*** Delete File: ")
-        {
-            // Check if this starts a new file section
-            if let Some(new_idx) = paths.iter().position(|p| line.contains(p)) {
-                // Flush previous file
-                if let Some(idx) = current_path_idx {
-                    results.push((paths[idx].clone(), current_added, current_removed));
-                }
-                current_path_idx = Some(new_idx);
-                current_added = 0;
-                current_removed = 0;
-                continue;
-            }
-        }
-        if current_path_idx.is_some() {
-            if line.starts_with('+') && !line.starts_with("+++") {
-                current_added += 1;
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                current_removed += 1;
-            }
-        }
-    }
-    // Flush last file
-    if let Some(idx) = current_path_idx {
-        results.push((paths[idx].clone(), current_added, current_removed));
-    }
-
-    // If splitting failed, fall back to one entry per path with even distribution
-    if results.is_empty() && !paths.is_empty() {
-        let (total_added, total_removed) = count_diff_lines(patch);
-        for path in paths {
-            results.push((
-                path.clone(),
-                total_added / paths.len() as u64,
-                total_removed / paths.len() as u64,
-            ));
-        }
-    }
-
-    results
-}
-
-type CodexParseResult = (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, usize, bool);
-
-fn parse_codex_session_file(path: &Path) -> CodexParseResult {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) => {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!("Failed to open session file {}: {e}", path.display());
-            }
-            return (Vec::new(), Vec::new(), 0, false);
-        }
-    };
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-    let mut change_events = Vec::new();
-    let mut previous_totals: Option<CodexRawUsage> = None;
-    let mut current_model: Option<String> = None;
-    let mut pending_entry_model_indices = Vec::new();
-    let mut pending_change_model_indices = Vec::new();
-    let mut lines_read = 0;
-    let mut parse_failures = 0_usize;
-    let mut session_key = format!("codex-file:{}", path_to_string(path));
-    let mut agent_scope = crate::stats::subagent::AgentScope::Main;
-
-    for line in reader.lines() {
-        lines_read += 1;
-        let line = match line {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-
-        let entry: CodexJsonlEntry = match serde_json::from_str(&line) {
-            Ok(e) => e,
-            Err(_) => {
-                parse_failures += 1;
-                continue;
-            }
-        };
-
-        if entry.entry_type == "session_meta" {
-            if let Some(payload) = entry.payload.as_ref() {
-                if let Some(id) = payload.get("id").and_then(Value::as_str) {
-                    session_key = format!("codex:{id}");
-                }
-                if payload.pointer("/source/subagent").is_some() {
-                    agent_scope = crate::stats::subagent::AgentScope::Subagent;
-                }
-            }
-            continue;
-        }
-
-        if entry.entry_type == "turn_context" {
-            if let Some(payload) = entry.payload.as_ref() {
-                if let Some(model) = extract_codex_model(payload) {
-                    current_model = Some(model);
-                    assign_pending_codex_models(
-                        current_model.as_deref().unwrap_or("gpt-5"),
-                        &mut entries,
-                        &mut pending_entry_model_indices,
-                        &mut change_events,
-                        &mut pending_change_model_indices,
-                    );
-                }
-            }
-            continue;
-        }
-
-        // Accept both "event_msg" and "response_item" — newer Codex CLI versions
-        // emit apply_patch tool calls as "response_item" entries.
-        if entry.entry_type != "event_msg" && entry.entry_type != "response_item" {
-            continue;
-        }
-
-        let payload = match entry.payload.as_ref() {
-            Some(p) => p,
-            None => continue,
-        };
-        // Check for apply_patch tool calls (change events)
-        let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
-        if payload_type == "function_call"
-            || payload_type == "custom_tool_call"
-            || payload_type == "tool_call"
-        {
-            let model_raw = extract_codex_model(payload).or_else(|| current_model.clone());
-            if let Some(model) = model_raw.as_ref() {
-                current_model = Some(model.clone());
-                assign_pending_codex_models(
-                    model,
-                    &mut entries,
-                    &mut pending_entry_model_indices,
-                    &mut change_events,
-                    &mut pending_change_model_indices,
-                );
-            }
-
-            let tool_name = payload
-                .get("name")
-                .or_else(|| payload.get("function"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if tool_name == "apply_patch" || tool_name.ends_with("apply_patch") {
-                let patch_content = payload
-                    .get("arguments")
-                    .or_else(|| payload.get("content"))
-                    .or_else(|| payload.get("input"))
-                    .and_then(|v| {
-                        // Could be a string directly or a JSON object with a "patch" key
-                        v.as_str()
-                            .map(String::from)
-                            .or_else(|| v.get("patch").and_then(Value::as_str).map(String::from))
-                    });
-
-                if let Some(patch) = patch_content {
-                    let ts_str = entry.timestamp.as_deref().unwrap_or("");
-                    if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str) {
-                        let ts = ts.with_timezone(&Local);
-                        let model_key = model_raw
-                            .as_deref()
-                            .map(crate::models::normalized_model_key);
-                        let paths = extract_diff_paths(&patch);
-                        let (total_added, total_removed) = count_diff_lines(&patch);
-
-                        if paths.is_empty() {
-                            // Single file or unparseable diff — emit one event
-                            if total_added > 0 || total_removed > 0 {
-                                push_codex_change_event(
-                                    &mut change_events,
-                                    &mut pending_change_model_indices,
-                                    model_key.as_deref(),
-                                    ts,
-                                    String::from("unknown"),
-                                    ChangeEventKind::PatchEdit,
-                                    total_added,
-                                    total_removed,
-                                    agent_scope,
-                                );
-                            }
-                        } else if paths.len() == 1 {
-                            push_codex_change_event(
-                                &mut change_events,
-                                &mut pending_change_model_indices,
-                                model_key.as_deref(),
-                                ts,
-                                paths[0].clone(),
-                                ChangeEventKind::PatchEdit,
-                                total_added,
-                                total_removed,
-                                agent_scope,
-                            );
-                        } else {
-                            // Multiple files in one patch — split by file
-                            // Re-parse per-file diffs using `diff --git` or `--- a/` separators
-                            let file_diffs = split_patch_by_file(&patch, &paths);
-                            for (file_path, file_added, file_removed) in file_diffs {
-                                push_codex_change_event(
-                                    &mut change_events,
-                                    &mut pending_change_model_indices,
-                                    model_key.as_deref(),
-                                    ts,
-                                    file_path,
-                                    ChangeEventKind::PatchEdit,
-                                    file_added,
-                                    file_removed,
-                                    agent_scope,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        if payload_type != "token_count" {
-            continue;
-        }
-
-        let info = payload.get("info");
-        let last_usage =
-            normalize_codex_raw_usage(info.and_then(|value| value.get("last_token_usage")));
-        let total_usage =
-            normalize_codex_raw_usage(info.and_then(|value| value.get("total_token_usage")));
-
-        let raw_usage = if let Some(total_usage) = total_usage {
-            subtract_codex_raw_usage(total_usage, previous_totals)
-        } else if let Some(last_usage) = last_usage {
-            last_usage
-        } else {
-            continue;
-        };
-
-        if let Some(total_usage) = total_usage {
-            previous_totals = Some(total_usage);
-        }
-
-        if codex_usage_is_zero(raw_usage) {
-            continue;
-        }
-
-        let timestamp = match entry.timestamp.as_deref() {
-            Some(timestamp) => timestamp,
-            None => continue,
-        };
-
-        let ts = match chrono::DateTime::parse_from_rfc3339(timestamp) {
-            Ok(dt) => dt.with_timezone(&Local),
-            Err(_) => continue,
-        };
-
-        let extracted_model = extract_codex_model(payload);
-        if let Some(model) = extracted_model.as_ref() {
-            current_model = Some(model.clone());
-            assign_pending_codex_models(
-                model,
-                &mut entries,
-                &mut pending_entry_model_indices,
-                &mut change_events,
-                &mut pending_change_model_indices,
-            );
-        }
-
-        let model = extracted_model.or_else(|| current_model.clone());
-
-        let uncached_input_tokens = raw_usage
-            .input_tokens
-            .saturating_sub(raw_usage.cached_input_tokens);
-
-        let entry_model = model.unwrap_or_default();
-        entries.push(ParsedEntry {
-            timestamp: ts,
-            model: entry_model,
-            input_tokens: uncached_input_tokens,
-            output_tokens: raw_usage.output_tokens,
-            cache_creation_5m_tokens: 0,
-            cache_creation_1h_tokens: 0,
-            cache_read_tokens: raw_usage.cached_input_tokens,
-            web_search_requests: 0,
-            unique_hash: None,
-            session_key: session_key.clone(),
-            agent_scope,
-        });
-        if entries.last().is_some_and(|entry| entry.model.is_empty()) {
-            pending_entry_model_indices.push(entries.len() - 1);
-        }
-    }
-
-    assign_pending_codex_models(
-        "gpt-5",
-        &mut entries,
-        &mut pending_entry_model_indices,
-        &mut change_events,
-        &mut pending_change_model_indices,
-    );
-
-    entries.sort_by_key(|a| a.timestamp);
-
-    if parse_failures > 0 && entries.is_empty() && lines_read > 10 {
-        tracing::warn!(
-            "All {} lines failed to parse in {}; JSONL schema may have changed",
-            parse_failures,
-            path.display()
-        );
-    }
-
-    (entries, change_events, lines_read, true)
-}
-
-/// Read all Codex session entries from `sessions_dir`, recursively scanning
-/// all JSONL session files under the directory.
-fn read_codex_entries_with_debug(
-    sessions_dir: &Path,
-    since: Option<NaiveDate>,
-) -> (Vec<ParsedEntry>, ProviderReadDebug) {
-    let mut entries = Vec::new();
-    let files = glob_jsonl_files(sessions_dir);
-    let mut report = ProviderReadDebug {
-        provider: String::from("codex"),
-        root_dir: path_to_string(sessions_dir),
-        root_exists: sessions_dir.exists(),
-        since: since.map(|date| date.format("%Y-%m-%d").to_string()),
-        strategy: String::from("recursive-jsonl-glob"),
-        discovered_paths: files.len(),
-        ..ProviderReadDebug::default()
-    };
-
-    for path in files {
-        if let Some(since_date) = since {
-            if !modified_since(&path, since_date) {
-                report.skipped_paths += 1;
-                report.skipped_by_mtime += 1;
-                push_sample_path(&mut report.sample_skipped_paths, &path);
-                continue;
-            }
-        }
-
-        report.attempted_paths += 1;
-        push_sample_path(&mut report.sample_paths, &path);
-        let (parsed_entries, _change_events, lines_read, opened) = parse_codex_session_file(&path);
-        report.lines_read += lines_read;
-        if opened {
-            report.opened_paths += 1;
-        } else {
-            report.failed_paths += 1;
-            continue;
-        }
-
-        for parsed in parsed_entries {
-            if since.is_some_and(|since_date| parsed.timestamp.date_naive() < since_date) {
-                continue;
-            }
-            entries.push(parsed);
-        }
-    }
-
-    entries.sort_by_key(|a| a.timestamp);
-    report.emitted_entries = entries.len();
-    (entries, report)
-}
-
-#[allow(dead_code)]
-pub fn read_codex_entries(sessions_dir: &Path, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
-    read_codex_entries_with_debug(sessions_dir, since).0
-}
+pub(crate) type SessionParseResult = (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, usize, bool);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hour label helper
@@ -1588,7 +402,7 @@ fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, (String, f64, 
             e.cache_creation_1h_tokens,
             e.cache_read_tokens,
             e.web_search_requests,
-        );
+        ) * crate::usage::pricing::provider_multiplier(&e.model);
         let entry = map.entry(key).or_insert((name, 0.0, 0));
         entry.1 += cost;
         entry.2 += entry_total_tokens(e);
@@ -1642,6 +456,45 @@ pub struct UsageParser {
     root_file_lists: Mutex<HashMap<String, CachedRootFileList>>,
     last_query_debug: Mutex<Option<UsageQueryDebugReport>>,
     archive: Mutex<Option<super::archive::ArchiveManager>>,
+    entries_cache: Mutex<HashMap<String, (Instant, Arc<LoadedEntries>)>>,
+    cursor_remote_cache: Mutex<Option<CachedCursorRemote>>,
+    /// Earliest entry date per provider string, cached so `has_entries_before`
+    /// answers in O(1) instead of re-scanning every session file per query.
+    /// Invalidated on source change (`invalidate_if_changed`) and `clear_cache`.
+    earliest_date_cache: Mutex<HashMap<String, Option<NaiveDate>>>,
+}
+
+/// Cached result of a background Cursor remote API fetch.
+///
+/// Non-consuming and range-tagged: one fetch of the widest opened range serves
+/// every period view by filtering on the request's `since`. `covered_since` is
+/// the `since` the fetch used (`None` = all time); the cache satisfies any
+/// request whose `since >= covered_since`.
+#[derive(Clone)]
+pub(crate) struct CachedCursorRemote {
+    pub entries: Vec<ParsedEntry>,
+    pub stored_at: Instant,
+    pub covered_since: Option<NaiveDate>,
+}
+
+/// True when a cache covering `[covered_since, now]` satisfies a request for
+/// `[req_since, now]` (the request is a subset). `None` = all time (widest).
+fn cursor_range_covers(covered_since: Option<NaiveDate>, req_since: Option<NaiveDate>) -> bool {
+    match (covered_since, req_since) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(covered), Some(req)) => req >= covered,
+    }
+}
+
+/// True when `candidate` covers at least as much history as `current` — used to
+/// keep the widest fresh cache when concurrent fetches (e.g. warmup) race.
+fn cursor_range_at_least_as_wide(candidate: Option<NaiveDate>, current: Option<NaiveDate>) -> bool {
+    match (candidate, current) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(candidate), Some(current)) => candidate <= current,
+    }
 }
 
 fn prune_payload_cache(cache: &mut HashMap<String, PayloadCacheEntry>) {
@@ -1716,12 +569,17 @@ fn default_usage_integration_configs() -> Vec<UsageIntegrationConfig> {
             UsageIntegrationId::Codex,
             UsageIntegrationId::Codex.detect_roots(),
         ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Cursor,
+            UsageIntegrationId::Cursor.detect_roots(),
+        ),
     ]
 }
 
 fn usage_integration_configs_with_overrides(
     claude_roots: Option<Vec<PathBuf>>,
     codex_roots: Option<Vec<PathBuf>>,
+    cursor_roots: Option<Vec<PathBuf>>,
 ) -> Vec<UsageIntegrationConfig> {
     vec![
         UsageIntegrationConfig::new(
@@ -1731,6 +589,10 @@ fn usage_integration_configs_with_overrides(
         UsageIntegrationConfig::new(
             UsageIntegrationId::Codex,
             codex_roots.unwrap_or_else(|| UsageIntegrationId::Codex.detect_roots()),
+        ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Cursor,
+            cursor_roots.unwrap_or_else(|| UsageIntegrationId::Cursor.detect_roots()),
         ),
     ]
 }
@@ -1744,6 +606,9 @@ impl UsageParser {
             root_file_lists: Mutex::new(HashMap::new()),
             last_query_debug: Mutex::new(None),
             archive: Mutex::new(None),
+            entries_cache: Mutex::new(HashMap::new()),
+            cursor_remote_cache: Mutex::new(None),
+            earliest_date_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1756,6 +621,61 @@ impl UsageParser {
     /// Access the archive manager (if set).
     pub fn archive(&self) -> Option<super::archive::ArchiveManager> {
         self.archive.lock().unwrap().clone()
+    }
+
+    /// Store cursor remote entries fetched by the background task, tagged with
+    /// the `covered_since` range the fetch used. Keeps the widest fresh dataset
+    /// so a late narrow fetch (e.g. a warmup day-range) can't clobber a wider
+    /// one stored by a concurrent fetch.
+    pub(crate) fn store_cursor_remote(
+        &self,
+        entries: Vec<ParsedEntry>,
+        covered_since: Option<NaiveDate>,
+    ) {
+        let mut guard = self.cursor_remote_cache.lock().unwrap();
+        let replace = match guard.as_ref() {
+            None => true,
+            Some(existing) => {
+                existing.stored_at.elapsed().as_secs() >= CACHE_TTL_SECS
+                    || cursor_range_at_least_as_wide(covered_since, existing.covered_since)
+            }
+        };
+        if replace {
+            *guard = Some(CachedCursorRemote {
+                entries,
+                stored_at: Instant::now(),
+                covered_since,
+            });
+        }
+    }
+
+    /// Non-consuming read of the cursor remote cache for a requested `since`.
+    /// Returns `None` when there is no fresh cache covering the request (the
+    /// caller then triggers a background fetch); otherwise returns the cached
+    /// entries filtered to `timestamp.date_naive() >= since`. Because it does
+    /// not consume the cache, every period view can serve from one fetch.
+    pub(crate) fn cursor_remote_for(
+        &self,
+        req_since: Option<NaiveDate>,
+    ) -> Option<Vec<ParsedEntry>> {
+        let guard = self.cursor_remote_cache.lock().unwrap();
+        let cache = guard.as_ref()?;
+        if cache.stored_at.elapsed().as_secs() >= CACHE_TTL_SECS {
+            return None;
+        }
+        if !cursor_range_covers(cache.covered_since, req_since) {
+            return None;
+        }
+        let entries = match req_since {
+            Some(since) => cache
+                .entries
+                .iter()
+                .filter(|e| e.timestamp.date_naive() >= since)
+                .cloned()
+                .collect(),
+            None => cache.entries.clone(),
+        };
+        Some(entries)
     }
 
     /// Create with default home-directory paths.
@@ -1776,6 +696,7 @@ impl UsageParser {
         Self::from_integrations(usage_integration_configs_with_overrides(
             Some(claude_dirs),
             None,
+            None,
         ))
     }
 
@@ -1785,6 +706,7 @@ impl UsageParser {
         Self::from_integrations(usage_integration_configs_with_overrides(
             None,
             Some(vec![codex_dir]),
+            None,
         ))
     }
 
@@ -1806,6 +728,7 @@ impl UsageParser {
         Self::from_integrations(usage_integration_configs_with_overrides(
             Some(vec![claude_dir]),
             Some(vec![codex_dir]),
+            None,
         ))
     }
 
@@ -1814,7 +737,11 @@ impl UsageParser {
     #[allow(dead_code)]
     pub fn clear_cache(&self) {
         self.clear_payload_cache();
+        set_cursor_warning(None);
         if let Ok(mut c) = self.file_cache.lock() {
+            c.clear();
+        }
+        if let Ok(mut c) = self.earliest_date_cache.lock() {
             c.clear();
         }
         if let Ok(mut c) = self.root_file_lists.lock() {
@@ -1823,14 +750,62 @@ impl UsageParser {
         if let Ok(mut current) = self.last_query_debug.lock() {
             *current = None;
         }
+        if let Ok(guard) = self.archive.lock() {
+            if let Some(archive) = guard.as_ref() {
+                archive.reset();
+            }
+        }
+        if let Ok(mut c) = self.entries_cache.lock() {
+            c.clear();
+        }
     }
 
     pub fn clear_payload_cache(&self) {
         if let Ok(mut c) = self.cache.lock() {
             c.clear();
         }
+        self.clear_entries_cache();
     }
 
+    pub(crate) fn load_entries_cached(
+        &self,
+        provider: &str,
+        since: Option<NaiveDate>,
+    ) -> Arc<LoadedEntries> {
+        let key = format!(
+            "{}:{}",
+            provider,
+            since.map(|d| d.to_string()).unwrap_or_default()
+        );
+
+        // Note: do NOT call have_sources_changed() here — it stats all files
+        // and defeats the warm-path optimization. The background loop calls
+        // invalidate_if_changed() which clears entries_cache when sources change.
+
+        {
+            let cache = self.entries_cache.lock().unwrap();
+            if let Some((_stored_at, cached)) = cache.get(&key) {
+                return cached.clone();
+            }
+        }
+        let (entries, change_events, reports) = self.load_entries(provider, since);
+        let loaded = Arc::new(LoadedEntries {
+            entries,
+            change_events,
+            reports,
+        });
+        {
+            let mut cache = self.entries_cache.lock().unwrap();
+            cache.insert(key, (Instant::now(), loaded.clone()));
+        }
+        loaded
+    }
+
+    pub(crate) fn clear_entries_cache(&self) {
+        if let Ok(mut c) = self.entries_cache.lock() {
+            c.clear();
+        }
+    }
     pub fn clear_payload_cache_prefix(&self, prefix: &str) {
         if let Ok(mut c) = self.cache.lock() {
             c.retain(|key, _| !key.starts_with(prefix));
@@ -1853,6 +828,11 @@ impl UsageParser {
             if !Self::root_listing_is_fresh(entry) {
                 return true;
             }
+            // Also check a sample of file stamps for content changes
+            // (directory mtime only detects add/remove, not in-place edits).
+            if Self::any_file_stamp_changed(entry) {
+                return true;
+            }
         }
 
         false
@@ -1863,6 +843,16 @@ impl UsageParser {
     pub fn invalidate_if_changed(&self) -> bool {
         if self.have_sources_changed() {
             self.clear_payload_cache();
+            self.clear_entries_cache();
+            // Clear root_file_lists so next query does a fresh scan
+            // (listing_cache_hit will be false, forcing fresh stat).
+            if let Ok(mut c) = self.root_file_lists.lock() {
+                c.clear();
+            }
+            // Source files changed → the cached earliest date may be stale.
+            if let Ok(mut c) = self.earliest_date_cache.lock() {
+                c.clear();
+            }
             true
         } else {
             false
@@ -1923,15 +913,26 @@ impl UsageParser {
             return false;
         }
 
+        // Directory mtime changes whenever files are added/removed/renamed inside it.
+        // If all directory mtimes match, the file listing is still valid — no need
+        // to re-stat every individual file (which costs ~0.4ms × 14K files on Windows).
+        true
+    }
+
+    fn any_file_stamp_changed(entry: &CachedRootFileList) -> bool {
         entry
             .file_stamps
             .iter()
-            .all(|file| file_stamp(&file.path).is_some_and(|stamp| stamp == file.stamp))
+            .any(|file| file_stamp(&file.path).is_some_and(|stamp| stamp != file.stamp))
     }
 
-    fn cached_jsonl_files(&self, dir: &Path) -> (Arc<[PathBuf]>, bool) {
+    #[allow(clippy::type_complexity)]
+    fn cached_jsonl_files(
+        &self,
+        dir: &Path,
+    ) -> (Arc<[PathBuf]>, Option<Arc<[FileListStamp]>>, bool) {
         if !dir.exists() {
-            return (Arc::from(Vec::<PathBuf>::new()), false);
+            return (Arc::from(Vec::<PathBuf>::new()), None, false);
         }
 
         let cache_key = path_to_string(dir);
@@ -1939,7 +940,7 @@ impl UsageParser {
             if let Some(entry) = cache.get_mut(&cache_key) {
                 if Self::root_listing_is_fresh(entry) {
                     entry.last_accessed_at = Instant::now();
-                    return (entry.files.clone(), true);
+                    return (entry.files.clone(), Some(entry.file_stamps.clone()), true);
                 }
                 cache.remove(&cache_key);
             }
@@ -1967,7 +968,7 @@ impl UsageParser {
                     CachedRootFileList {
                         files: files.clone(),
                         directories,
-                        file_stamps,
+                        file_stamps: file_stamps.clone(),
                         last_accessed_at: now,
                     },
                 );
@@ -1975,73 +976,7 @@ impl UsageParser {
             }
         }
 
-        (files, false)
-    }
-
-    fn load_cached_file(&self, path: &Path, kind: ProviderFileKind) -> CachedFileLoad {
-        let cache_key = path_to_string(path);
-        let stamp = file_stamp(path);
-
-        if let Some(stamp) = stamp.as_ref() {
-            if let Ok(mut cache) = self.file_cache.lock() {
-                if let Some(cached) = cache.get_mut(&cache_key) {
-                    if &cached.stamp == stamp {
-                        cached.last_accessed_at = Instant::now();
-                        return CachedFileLoad {
-                            entries: cached.entries.clone(),
-                            change_events: cached.change_events.clone(),
-                            earliest_date: cached.earliest_date,
-                            lines_read: 0,
-                            opened: false,
-                            from_cache: true,
-                        };
-                    }
-                }
-            }
-        }
-
-        let (entries, change_events, lines_read, opened) = match kind {
-            ProviderFileKind::Claude => parse_claude_session_file(path),
-            ProviderFileKind::Codex => {
-                let (e, ce, lr, op) = parse_codex_session_file(path);
-                (e, ce, lr, op)
-            }
-        };
-        let earliest_date = earliest_entry_date(&entries);
-        let entries: Arc<[ParsedEntry]> = entries.into();
-        let change_events: Arc<[ParsedChangeEvent]> = change_events.into();
-
-        if let Ok(mut cache) = self.file_cache.lock() {
-            if opened {
-                if let Some(stamp) = stamp {
-                    let now = Instant::now();
-                    cache.insert(
-                        cache_key,
-                        CachedFileEntries {
-                            stamp,
-                            entries: entries.clone(),
-                            change_events: change_events.clone(),
-                            earliest_date,
-                            last_accessed_at: now,
-                        },
-                    );
-                    prune_file_cache(&mut cache);
-                } else {
-                    cache.remove(&cache_key);
-                }
-            } else {
-                cache.remove(&cache_key);
-            }
-        }
-
-        CachedFileLoad {
-            entries,
-            change_events,
-            earliest_date,
-            lines_read,
-            opened,
-            from_cache: false,
-        }
+        (files, Some(file_stamps), false)
     }
 
     fn load_integration_entries_with_debug(
@@ -2059,9 +994,12 @@ impl UsageParser {
         let mut entry_report_indices = Vec::new();
         let mut processed_hashes = HashMap::new();
         let mut processed_change_keys = HashMap::new();
+        let kind = config.file_kind();
+        let _prof_t0 = std::time::Instant::now();
 
         for root_dir in &config.roots {
-            let (files, listing_cache_hit) = self.cached_jsonl_files(root_dir);
+            let _t_scan = std::time::Instant::now();
+            let (files, cached_stamps, listing_cache_hit) = self.cached_jsonl_files(root_dir);
             reports.push(ProviderReadDebug {
                 provider: String::from(config.id.as_str()),
                 root_dir: path_to_string(root_dir),
@@ -2074,47 +1012,214 @@ impl UsageParser {
             });
             let report_idx = reports.len() - 1;
 
-            for path in files.iter() {
+            // Phase 1: Build mtime-filter stamps from cache (fast, no stat) and
+            // prepare to get fresh stamps only for files that pass the filter.
+            let cached_stamp_map: Option<HashMap<&Path, &FileStamp>> = cached_stamps
+                .as_ref()
+                .map(|cs| cs.iter().map(|fs| (fs.path.as_path(), &fs.stamp)).collect());
+
+            // Phase 2a: Mtime filter using cached stamps (zero stat cost).
+            let mut candidate_indices: Vec<usize> = Vec::new();
+            for (i, path) in files.iter().enumerate() {
                 if let Some(since_date) = since {
-                    if !modified_since(path, since_date) {
-                        let report = reports
-                            .get_mut(report_idx)
-                            .expect("report should exist for current root");
+                    let cached_stamp = cached_stamp_map
+                        .as_ref()
+                        .and_then(|m| m.get(path.as_path()).copied());
+                    let dominated = cached_stamp.is_some_and(|s| {
+                        let dt: DateTime<Local> = s.modified.into();
+                        dt.date_naive() < since_date
+                    });
+                    if dominated {
+                        let report = &mut reports[report_idx];
                         report.skipped_paths += 1;
                         report.skipped_by_mtime += 1;
                         push_sample_path(&mut report.sample_skipped_paths, path);
                         continue;
                     }
                 }
+                candidate_indices.push(i);
+            }
+            tracing::info!(
+                "[PROFILE] {}: Phase1+2a scan+mtime_filter={:?} files={} candidates={} listing_cache={}",
+                config.id.as_str(),
+                _t_scan.elapsed(),
+                files.len(),
+                candidate_indices.len(),
+                listing_cache_hit,
+            );
 
-                {
-                    let report = reports
-                        .get_mut(report_idx)
-                        .expect("report should exist for current root");
-                    report.attempted_paths += 1;
-                    push_sample_path(&mut report.sample_paths, path);
-                }
+            // Phase 2b: Classify into cache-hit vs needs-parse (single lock).
+            // When listing_cache_hit is true AND file_cache has the entry, trust it
+            // without fresh stat — the background loop (have_sources_changed) handles
+            // in-place edit detection and clears caches when files change.
+            let mut cache_hits: Vec<CachedFileLoad> = Vec::new();
+            let mut to_parse: Vec<(usize, PathBuf, Option<FileStamp>)> = Vec::new();
+            let mut needs_stat_indices: Vec<usize> = Vec::new();
+            {
+                let cache = self.file_cache.lock().unwrap();
+                for &i in &candidate_indices {
+                    let path = &files[i];
+                    reports[report_idx].attempted_paths += 1;
+                    push_sample_path(&mut reports[report_idx].sample_paths, path);
 
-                let loaded = self.load_cached_file(path, config.file_kind());
-                {
-                    let report = reports
-                        .get_mut(report_idx)
-                        .expect("report should exist for current root");
-                    report.lines_read += loaded.lines_read;
-                    if loaded.from_cache {
-                        report.cache_hits += 1;
-                    } else {
-                        report.cache_misses += 1;
-                        if loaded.opened {
-                            report.opened_paths += 1;
-                        } else {
-                            report.failed_paths += 1;
+                    let cache_key = path_to_string(path);
+                    if listing_cache_hit {
+                        if let Some(cached) = cache.get(&cache_key) {
+                            reports[report_idx].cache_hits += 1;
+                            cache_hits.push(CachedFileLoad {
+                                entries: cached.entries.clone(),
+                                change_events: cached.change_events.clone(),
+                                earliest_date: cached.earliest_date,
+                                lines_read: 0,
+                                opened: false,
+                                from_cache: true,
+                            });
                             continue;
                         }
                     }
+                    needs_stat_indices.push(i);
+                }
+            }
+            tracing::info!(
+                "[PROFILE] {}: Phase2b classify elapsed={:?} cache_hits={} needs_stat={}",
+                config.id.as_str(),
+                _t_scan.elapsed(),
+                cache_hits.len(),
+                needs_stat_indices.len(),
+            );
+
+            // Phase 2c: Parallel stat only files not found in file_cache.
+            let fresh_stamps: Vec<(usize, Option<FileStamp>)> = needs_stat_indices
+                .par_iter()
+                .map(|&i| (i, file_stamp(&files[i])))
+                .collect();
+            {
+                let cache = self.file_cache.lock().unwrap();
+                for (i, stamp) in &fresh_stamps {
+                    let path = &files[*i];
+                    let cache_key = path_to_string(path);
+                    let hit = stamp.as_ref().and_then(|s| {
+                        cache.get(&cache_key).and_then(|cached| {
+                            if &cached.stamp == s {
+                                Some(CachedFileLoad {
+                                    entries: cached.entries.clone(),
+                                    change_events: cached.change_events.clone(),
+                                    earliest_date: cached.earliest_date,
+                                    lines_read: 0,
+                                    opened: false,
+                                    from_cache: true,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                    });
+
+                    match hit {
+                        Some(loaded) => {
+                            reports[report_idx].cache_hits += 1;
+                            cache_hits.push(loaded);
+                        }
+                        None => {
+                            to_parse.push((*i, path.clone(), stamp.clone()));
+                        }
+                    }
+                }
+            }
+            tracing::info!(
+                "[PROFILE] {}: Phase2c parallel_stat elapsed={:?} to_parse={}",
+                config.id.as_str(),
+                _t_scan.elapsed(),
+                to_parse.len(),
+            );
+
+            // Phase 3: Parallel parse of cache-miss files.
+            let parsed: Vec<(PathBuf, Option<FileStamp>, CachedFileLoad)> = to_parse
+                .par_iter()
+                .map(|(_i, path, stamp)| {
+                    let (raw_entries, raw_change_events, lines_read, opened) = match kind {
+                        ProviderFileKind::Claude => parse_claude_session_file(path),
+                        ProviderFileKind::Codex => parse_codex_session_file(path),
+                        ProviderFileKind::Cursor => parse_cursor_session_file(path),
+                    };
+                    let earliest_date = earliest_entry_date(&raw_entries);
+                    let loaded = CachedFileLoad {
+                        entries: raw_entries.into(),
+                        change_events: raw_change_events.into(),
+                        earliest_date,
+                        lines_read,
+                        opened,
+                        from_cache: false,
+                    };
+                    (path.clone(), stamp.clone(), loaded)
+                })
+                .collect();
+            tracing::info!(
+                "[PROFILE] {}: Phase3 parallel_parse elapsed={:?} parsed_files={}",
+                config.id.as_str(),
+                _t_scan.elapsed(),
+                parsed.len(),
+            );
+
+            // Phase 4: Batch update file_cache (single lock).
+            {
+                let mut cache = self.file_cache.lock().unwrap();
+                for (path, stamp, loaded) in &parsed {
+                    let cache_key = path_to_string(path);
+                    if loaded.opened {
+                        if let Some(stamp) = stamp {
+                            let now = Instant::now();
+                            cache.insert(
+                                cache_key,
+                                CachedFileEntries {
+                                    stamp: stamp.clone(),
+                                    entries: loaded.entries.clone(),
+                                    change_events: loaded.change_events.clone(),
+                                    earliest_date: loaded.earliest_date,
+                                    last_accessed_at: now,
+                                },
+                            );
+                        } else {
+                            cache.remove(&cache_key);
+                        }
+                    } else {
+                        cache.remove(&cache_key);
+                    }
+                }
+                prune_file_cache(&mut cache);
+            }
+
+            // If files were re-parsed, entries_cache is stale.
+            if !parsed.is_empty() {
+                self.clear_entries_cache();
+            }
+
+            // Phase 5: Update parse reports.
+            for (_path, _stamp, loaded) in &parsed {
+                let report = &mut reports[report_idx];
+                report.lines_read += loaded.lines_read;
+                if loaded.from_cache {
+                    report.cache_hits += 1;
+                } else {
+                    report.cache_misses += 1;
+                    if loaded.opened {
+                        report.opened_paths += 1;
+                    } else {
+                        report.failed_paths += 1;
+                    }
+                }
+            }
+
+            // Phase 6: Merge entries + dedup (sequential, CPU-bound).
+            let all_loaded = cache_hits
+                .iter()
+                .chain(parsed.iter().map(|(_, _, loaded)| loaded));
+
+            for loaded in all_loaded {
+                if !loaded.opened && !loaded.from_cache {
+                    continue;
                 }
 
-                // Collect change events (filtered by since date)
                 for cev in loaded.change_events.iter() {
                     if since.is_some_and(|since_date| cev.timestamp.date_naive() < since_date) {
                         continue;
@@ -2166,6 +1271,13 @@ impl UsageParser {
                 }
             }
         }
+        tracing::info!(
+            "[PROFILE] {}: TOTAL={:?} entries={} change_events={}",
+            config.id.as_str(),
+            _prof_t0.elapsed(),
+            entries.len(),
+            change_events.len(),
+        );
 
         (entries, change_events, reports)
     }
@@ -2195,6 +1307,60 @@ impl UsageParser {
             self.load_integration_entries_with_debug(config, since);
         let report = reports.pop().unwrap_or_default();
         (entries, change_events, report)
+    }
+
+    fn load_cursor_local_entries_with_debug(
+        &self,
+        since: Option<NaiveDate>,
+    ) -> (Vec<ParsedEntry>, ProviderReadDebug) {
+        let config = self
+            .integration_config(UsageIntegrationId::Cursor)
+            .expect("cursor integration should be configured");
+        let root_dir = config.roots.first().cloned().unwrap_or_default();
+        load_cursor_local_entries(&root_dir, since)
+    }
+
+    fn load_cursor_entries_with_debug(
+        &self,
+        since: Option<NaiveDate>,
+    ) -> (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, ProviderReadDebug) {
+        let (local_entries, mut report) = self.load_cursor_local_entries_with_debug(since);
+        if !local_entries.is_empty() {
+            set_cursor_warning(None);
+            return (local_entries, Vec::new(), report);
+        }
+
+        // Serve from the non-consuming, range-tagged remote cache when it covers
+        // the requested range (entries are filtered to `since`).
+        if let Some(entries) = self.cursor_remote_for(since) {
+            report.strategy = format!("{}+cursor-remote-cache", report.strategy);
+            report.emitted_entries = entries.len();
+            set_cursor_warning(None);
+            return (entries, Vec::new(), report);
+        }
+
+        // No local entries and no cache — signal that async fetch is needed.
+        // The caller (usage_query) will spawn a background task.
+        report.strategy = format!("{}+cursor-remote-pending", report.strategy);
+        (Vec::new(), Vec::new(), report)
+    }
+
+    /// Returns `true` when Cursor remote auth is configured and the cache does
+    /// not already cover the requested `since` range — indicating a background
+    /// fetch should be spawned (adaptive widening: only fetch the part we lack).
+    pub(crate) fn needs_cursor_remote_fetch(&self, req_since: Option<NaiveDate>) -> bool {
+        use super::cursor_parser::resolve_cursor_auth;
+        if resolve_cursor_auth().is_none() {
+            return false;
+        }
+        let guard = self.cursor_remote_cache.lock().unwrap();
+        match guard.as_ref() {
+            None => true,
+            Some(cache) => {
+                cache.stored_at.elapsed().as_secs() >= CACHE_TTL_SECS
+                    || !cursor_range_covers(cache.covered_since, req_since)
+            }
+        }
     }
 
     // ── Internal: load entries for a provider/since combination ──
@@ -2261,7 +1427,49 @@ impl UsageParser {
                     change_events.extend(next_change_events);
                     reports.push(next_report);
                 }
+                UsageIntegrationId::Cursor => {
+                    let (next_entries, next_change_events, next_report) =
+                        self.load_cursor_entries_with_debug(since);
+
+                    if let Some(ref f) = frontier {
+                        entries.extend(next_entries.into_iter().filter(|e| {
+                            !f.covers(e.timestamp.date_naive(), e.timestamp.hour() as u8)
+                        }));
+                    } else {
+                        entries.extend(next_entries);
+                    }
+                    change_events.extend(next_change_events);
+                    reports.push(next_report);
+                }
             }
+        }
+
+        // Drop rows whose model doesn't belong to the selected provider tab.
+        // A third-party model logged through any CLI (e.g. GLM-5 via a Claude
+        // Code proxy) should not show up in the Claude tab; otherwise the
+        // main dashboard total diverges from the Per-Device breakdown, which
+        // applies the same predicate to remote SSH rows.
+        entries.retain(|e| provider_matches_model(provider, &e.model));
+
+        // Write-through: populate entries_cache so subsequent load_entries_cached
+        // calls within the same request hit the cache instead of re-scanning.
+        let cache_key = format!(
+            "{}:{}",
+            provider,
+            since.map(|d| d.to_string()).unwrap_or_default()
+        );
+        {
+            let mut cache = self.entries_cache.lock().unwrap();
+            cache.entry(cache_key).or_insert_with(|| {
+                (
+                    Instant::now(),
+                    Arc::new(LoadedEntries {
+                        entries: entries.clone(),
+                        change_events: change_events.clone(),
+                        reports: reports.clone(),
+                    }),
+                )
+            });
         }
 
         (entries, change_events, reports)
@@ -2270,66 +1478,89 @@ impl UsageParser {
     // ── has_entries_before: check if data exists before a given date ──
 
     pub fn has_entries_before(&self, provider: &str, before_date: NaiveDate) -> bool {
-        let Some(selection) = UsageIntegrationSelection::parse(provider) else {
-            return false;
-        };
+        self.provider_earliest_date(provider)
+            .is_some_and(|earliest| earliest < before_date)
+    }
 
+    /// Earliest entry date across all of a provider's data, cached per epoch.
+    ///
+    /// The first call scans the provider's session files once (parsing
+    /// uncached ones in parallel); every later call — including each period
+    /// switch and the background warmup's per-offset probing — is O(1). The
+    /// cache is cleared by `clear_cache` and `invalidate_if_changed`.
+    fn provider_earliest_date(&self, provider: &str) -> Option<NaiveDate> {
+        if let Ok(cache) = self.earliest_date_cache.lock() {
+            if let Some(cached) = cache.get(provider) {
+                return *cached;
+            }
+        }
+        let computed = self.compute_provider_earliest_date(provider);
+        if let Ok(mut cache) = self.earliest_date_cache.lock() {
+            cache.insert(provider.to_string(), computed);
+        }
+        computed
+    }
+
+    fn compute_provider_earliest_date(&self, provider: &str) -> Option<NaiveDate> {
+        let selection = UsageIntegrationSelection::parse(provider)?;
         selection
             .integration_ids()
             .iter()
             .copied()
-            .any(|integration_id| match integration_id {
-                UsageIntegrationId::Claude => self.has_claude_entries_before(before_date),
-                UsageIntegrationId::Codex => self.has_codex_entries_before(before_date),
+            .filter_map(|integration_id| match integration_id {
+                UsageIntegrationId::Cursor => self.cursor_earliest_date(),
+                _ => self
+                    .integration_config(integration_id)
+                    .and_then(|config| self.integration_earliest_date(config)),
             })
+            .min()
     }
 
-    fn has_integration_entries_before(
-        &self,
-        config: &UsageIntegrationConfig,
-        before_date: NaiveDate,
-    ) -> bool {
-        for root_dir in &config.roots {
-            let (files, _) = self.cached_jsonl_files(root_dir);
-            let mut files: Vec<PathBuf> = files.iter().cloned().collect();
-            files.sort_by_key(|path| {
-                fs::metadata(path)
-                    .and_then(|meta| meta.modified())
-                    .ok()
-                    .map(|modified| {
-                        let modified: chrono::DateTime<Local> = modified.into();
-                        let modified_date = modified.date_naive();
-                        (modified_date >= before_date, modified_date)
+    /// Minimum earliest-entry-date across a provider's session files.
+    ///
+    /// Parses files directly in parallel and keeps only each file's earliest
+    /// date — it deliberately does NOT go through `load_cached_file`. With many
+    /// thousands of session files, inserting each into the `MAX_FILE_CACHE_ENTRIES`
+    /// (4096) capped `file_cache` would call `prune_file_cache` on every insert
+    /// past the cap (clone-all-keys + O(n log n) sort, under one Mutex shared by
+    /// the rayon workers) — that eviction churn, not parsing, was the multi-second
+    /// cost here. Raw parsing of the whole tree is sub-second.
+    fn integration_earliest_date(&self, config: &UsageIntegrationConfig) -> Option<NaiveDate> {
+        let kind = config.file_kind();
+        config
+            .roots
+            .iter()
+            .filter_map(|root_dir| {
+                let (files, _, _) = self.cached_jsonl_files(root_dir);
+                let files: Vec<PathBuf> = files.iter().cloned().collect();
+                files
+                    .par_iter()
+                    .filter_map(|path| {
+                        let entries = match kind {
+                            ProviderFileKind::Claude => parse_claude_session_file(path).0,
+                            ProviderFileKind::Codex => parse_codex_session_file(path).0,
+                            ProviderFileKind::Cursor => parse_cursor_session_file(path).0,
+                        };
+                        earliest_entry_date(&entries)
                     })
-                    .unwrap_or((true, Local::now().date_naive()))
-            });
+                    .min()
+            })
+            .min()
+    }
 
-            for path in files {
-                let loaded = self.load_cached_file(&path, config.file_kind());
-                if loaded
-                    .earliest_date
-                    .is_some_and(|entry_date| entry_date < before_date)
-                {
-                    return true;
+    fn cursor_earliest_date(&self) -> Option<NaiveDate> {
+        let config = self.integration_config(UsageIntegrationId::Cursor)?;
+        let mut earliest: Option<NaiveDate> = None;
+        for root_dir in &config.roots {
+            for path in glob_cursor_chat_session_files(root_dir) {
+                let (entries, _changes, _lines_read, _opened) = parse_cursor_session_file(&path);
+                for entry in &entries {
+                    let date = entry.timestamp.date_naive();
+                    earliest = Some(earliest.map_or(date, |cur| cur.min(date)));
                 }
             }
         }
-
-        false
-    }
-
-    fn has_claude_entries_before(&self, before_date: NaiveDate) -> bool {
-        let config = self
-            .integration_config(UsageIntegrationId::Claude)
-            .expect("claude integration should be configured");
-        self.has_integration_entries_before(config, before_date)
-    }
-
-    fn has_codex_entries_before(&self, before_date: NaiveDate) -> bool {
-        let config = self
-            .integration_config(UsageIntegrationId::Codex)
-            .expect("codex integration should be configured");
-        self.has_integration_entries_before(config, before_date)
+        earliest
     }
 
     // ── Internal: build model_breakdown across all entries ──
@@ -2341,12 +1572,21 @@ impl UsageParser {
         segment_map_to_model_summaries(&map)
     }
 
+    fn provider_usage_warning(provider: &str) -> Option<String> {
+        if provider == UsageIntegrationId::Cursor.as_str() {
+            cursor_last_warning()
+        } else {
+            None
+        }
+    }
+
     // ── Aggregation: daily ──
 
     pub fn get_daily(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("daily:{}:{}", provider, since);
         let since_date = parse_since_date(since);
-        let (entries, _change_events, sources) = self.load_entries(provider, since_date);
+        let loaded = self.load_entries_cached(provider, since_date);
+        let entries = &loaded.entries;
         self.set_last_query_debug(UsageQueryDebugReport {
             provider: provider.to_string(),
             aggregation: String::from("daily"),
@@ -2354,13 +1594,13 @@ impl UsageParser {
             cache_key: cache_key.clone(),
             from_cache: false,
             entry_count: entries.len(),
-            sources,
+            sources: loaded.reports.clone(),
         });
 
         // Group by NaiveDate using a BTreeMap so dates are ordered
         let mut day_map: std::collections::BTreeMap<NaiveDate, Vec<&ParsedEntry>> =
             std::collections::BTreeMap::new();
-        for e in &entries {
+        for e in entries {
             day_map.entry(e.timestamp.date_naive()).or_default().push(e);
         }
 
@@ -2422,13 +1662,15 @@ impl UsageParser {
             last_updated: Local::now().to_rfc3339(),
             from_cache: false,
             usage_source: UsageSource::Parser,
-            usage_warning: None,
+            usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
             device_breakdown: None,
             device_chart_buckets: None,
+            provider_detected: None,
+            cursor_loading: false,
         }
     }
 
@@ -2437,7 +1679,8 @@ impl UsageParser {
     pub fn get_monthly(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("monthly:{}:{}", provider, since);
         let since_date = parse_since_date(since);
-        let (entries, _change_events, sources) = self.load_entries(provider, since_date);
+        let loaded = self.load_entries_cached(provider, since_date);
+        let entries = &loaded.entries;
         self.set_last_query_debug(UsageQueryDebugReport {
             provider: provider.to_string(),
             aggregation: String::from("monthly"),
@@ -2445,13 +1688,13 @@ impl UsageParser {
             cache_key: cache_key.clone(),
             from_cache: false,
             entry_count: entries.len(),
-            sources,
+            sources: loaded.reports.clone(),
         });
 
         // Group by YYYY-MM string using a BTreeMap for order
         let mut month_map: std::collections::BTreeMap<String, Vec<&ParsedEntry>> =
             std::collections::BTreeMap::new();
-        for e in &entries {
+        for e in entries {
             let key = e.timestamp.format("%Y-%m").to_string();
             month_map.entry(key).or_default().push(e);
         }
@@ -2517,13 +1760,15 @@ impl UsageParser {
             last_updated: Local::now().to_rfc3339(),
             from_cache: false,
             usage_source: UsageSource::Parser,
-            usage_warning: None,
+            usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
             device_breakdown: None,
             device_chart_buckets: None,
+            provider_detected: None,
+            cursor_loading: false,
         }
     }
 
@@ -2533,9 +1778,10 @@ impl UsageParser {
         let cache_key = format!("hourly:{}:{}", provider, since);
         let since_date = parse_since_date(since);
         let end_date = since_date.map(|date| date + chrono::Duration::days(1));
-        let (entries, _change_events, sources) = self.load_entries(provider, since_date);
-        let entries: Vec<ParsedEntry> = entries
-            .into_iter()
+        let loaded = self.load_entries_cached(provider, since_date);
+        let entries: Vec<&ParsedEntry> = loaded
+            .entries
+            .iter()
             .filter(|entry| end_date.is_none_or(|end| entry.timestamp.date_naive() < end))
             .collect();
         self.set_last_query_debug(UsageQueryDebugReport {
@@ -2545,13 +1791,13 @@ impl UsageParser {
             cache_key: cache_key.clone(),
             from_cache: false,
             entry_count: entries.len(),
-            sources,
+            sources: loaded.reports.clone(),
         });
 
         // Group by hour (0-23)
         let mut hour_map: HashMap<u32, Vec<&ParsedEntry>> = HashMap::new();
         for e in &entries {
-            hour_map.entry(e.timestamp.hour()).or_default().push(e);
+            hour_map.entry(e.timestamp.hour()).or_default().push(*e);
         }
 
         let now = Local::now();
@@ -2625,13 +1871,15 @@ impl UsageParser {
             last_updated: Local::now().to_rfc3339(),
             from_cache: false,
             usage_source: UsageSource::Parser,
-            usage_warning: None,
+            usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
             device_breakdown: None,
             device_chart_buckets: None,
+            provider_detected: None,
+            cursor_loading: false,
         }
     }
 
@@ -2640,7 +1888,8 @@ impl UsageParser {
     pub fn get_blocks(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("blocks:{}:{}", provider, since);
         let since_date = parse_since_date(since);
-        let (mut entries, _change_events, sources) = self.load_entries(provider, since_date);
+        let loaded = self.load_entries_cached(provider, since_date);
+        let mut entries: Vec<&ParsedEntry> = loaded.entries.iter().collect();
         self.set_last_query_debug(UsageQueryDebugReport {
             provider: provider.to_string(),
             aggregation: String::from("blocks"),
@@ -2648,7 +1897,7 @@ impl UsageParser {
             cache_key: cache_key.clone(),
             from_cache: false,
             entry_count: entries.len(),
-            sources,
+            sources: loaded.reports.clone(),
         });
 
         // Sort by timestamp ascending
@@ -2660,11 +1909,10 @@ impl UsageParser {
         // Split into blocks separated by gaps > 30 minutes
         let mut blocks: Vec<Vec<&ParsedEntry>> = Vec::new();
         {
-            let entry_refs: Vec<&ParsedEntry> = entries.iter().collect();
             let mut current_block: Vec<&ParsedEntry> = Vec::new();
             let mut prev_ts: Option<DateTime<Local>> = None;
 
-            for e in &entry_refs {
+            for &e in &entries {
                 if let Some(prev) = prev_ts {
                     if e.timestamp - prev > gap_threshold && !current_block.is_empty() {
                         blocks.push(std::mem::take(&mut current_block));
@@ -2682,8 +1930,6 @@ impl UsageParser {
         let mut chart_buckets: Vec<ChartBucket> = Vec::new();
         let mut total_cost = 0.0f64;
         let mut total_tokens = 0u64;
-        let mut total_input = 0u64;
-        let mut total_output = 0u64;
         let mut global_model_map: HashMap<String, (String, f64, u64)> = HashMap::new();
         let mut active_block: Option<ActiveBlock> = None;
         let mut five_hour_cost = 0.0f64;
@@ -2695,11 +1941,6 @@ impl UsageParser {
 
             total_cost += block_cost;
             total_tokens += block_tokens;
-
-            for e in block.iter() {
-                total_input += e.input_tokens;
-                total_output += e.output_tokens;
-            }
 
             for (key, (name, cost, tokens)) in &seg_map {
                 let gm = global_model_map
@@ -2761,8 +2002,8 @@ impl UsageParser {
             total_cost,
             total_tokens,
             session_count,
-            input_tokens: total_input,
-            output_tokens: total_output,
+            input_tokens: 0,
+            output_tokens: 0,
             cache_read_tokens: 0,
             cache_write_5m_tokens: 0,
             cache_write_1h_tokens: 0,
@@ -2774,13 +2015,15 @@ impl UsageParser {
             last_updated: Local::now().to_rfc3339(),
             from_cache: false,
             usage_source: UsageSource::Parser,
-            usage_warning: None,
+            usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
             device_breakdown: None,
             device_chart_buckets: None,
+            provider_detected: None,
+            cursor_loading: false,
         }
     }
 }
@@ -2792,6 +2035,8 @@ impl UsageParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::codex_parser::*;
+    use crate::usage::cursor_parser::*;
     use std::fs;
     use tempfile::TempDir;
 
@@ -2846,6 +2091,327 @@ mod tests {
         assert!(files[0].ends_with("session.jsonl"));
         // The symlinked dir also must not appear in the directory-stamp list.
         assert!(!dirs.iter().any(|d| d.path.ends_with("link")));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cursor parsing
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn classify_cursor_secret_recognizes_admin_prefix() {
+        assert_eq!(
+            classify_cursor_secret("key_abc123"),
+            Some(CursorAuth::Admin(String::from("key_abc123")))
+        );
+        // Whitespace stripped.
+        assert_eq!(
+            classify_cursor_secret("  key_xyz  "),
+            Some(CursorAuth::Admin(String::from("key_xyz")))
+        );
+    }
+
+    #[test]
+    fn classify_cursor_secret_falls_back_to_dashboard() {
+        let workos = "user_01ABCD::eyJhbGciOiJIUzI1NiJ9.payload.sig";
+        assert_eq!(
+            classify_cursor_secret(workos),
+            Some(CursorAuth::Dashboard(workos.to_string()))
+        );
+    }
+
+    #[test]
+    fn classify_cursor_secret_rejects_blank() {
+        assert_eq!(classify_cursor_secret(""), None);
+        assert_eq!(classify_cursor_secret("   "), None);
+        assert_eq!(classify_cursor_secret("\n\t"), None);
+    }
+
+    #[test]
+    fn choose_cursor_auth_prefers_secret_override() {
+        // Override beats every other source.
+        let override_token = "user_01ABCD::session-token";
+        let auth = choose_cursor_auth(
+            Some("key_legacy_admin"),
+            Some("user_99XYZ::other-session"),
+            Some(override_token),
+            Some("ide_token_should_lose"),
+        )
+        .expect("override should produce a credential");
+        assert_eq!(auth, CursorAuth::Dashboard(override_token.to_string()));
+    }
+
+    #[test]
+    fn choose_cursor_auth_session_token_env_beats_api_key_env() {
+        // No override: CURSOR_SESSION_TOKEN wins over CURSOR_API_KEY because
+        // users typically only set the session-token var explicitly when
+        // they've deliberately switched to the dashboard path.
+        let auth = choose_cursor_auth(
+            Some("key_legacy_admin"),
+            Some("user_01ABCD::dashboard-session"),
+            None,
+            None,
+        )
+        .expect("env-supplied session token should produce a credential");
+        assert_eq!(
+            auth,
+            CursorAuth::Dashboard(String::from("user_01ABCD::dashboard-session"))
+        );
+    }
+
+    #[test]
+    fn choose_cursor_auth_falls_back_to_api_key_env() {
+        let auth = choose_cursor_auth(Some("key_admin_only"), None, None, None)
+            .expect("api-key env should produce a credential");
+        assert_eq!(auth, CursorAuth::Admin(String::from("key_admin_only")));
+    }
+
+    #[test]
+    fn choose_cursor_auth_falls_back_to_ide_token_when_nothing_else_set() {
+        let ide_token = "eyJhbGciOiJIUzI1NiJ9.payload.sig";
+        let auth = choose_cursor_auth(None, None, None, Some(ide_token))
+            .expect("ide token should produce a credential at the lowest tier");
+        assert_eq!(auth, CursorAuth::IdeBearer(ide_token.to_string()));
+    }
+
+    #[test]
+    fn choose_cursor_auth_user_secret_beats_ide_token() {
+        // Even an explicit but "weak" secret (no `key_` prefix → Dashboard)
+        // should win over the auto-detected IDE token. Users may have
+        // deliberately pasted a different account's session.
+        let pasted = "user_99ZZZ::pasted-by-hand";
+        let ide_token = "eyJhbGciOiJIUzI1NiJ9.different.user";
+        let auth = choose_cursor_auth(None, None, Some(pasted), Some(ide_token))
+            .expect("user paste should beat IDE auto-detect");
+        assert_eq!(auth, CursorAuth::Dashboard(pasted.to_string()));
+    }
+
+    #[test]
+    fn choose_cursor_auth_returns_none_when_all_blank() {
+        assert!(choose_cursor_auth(None, None, None, None).is_none());
+        assert!(choose_cursor_auth(Some(""), Some("   "), Some("\n"), Some("\t")).is_none());
+    }
+
+    #[test]
+    fn cursor_request_url_branches_by_auth_kind() {
+        assert!(
+            cursor_request_url(&CursorAuth::Admin(String::from("key_x")))
+                .contains("api.cursor.com/teams/filtered-usage-events")
+        );
+        assert!(
+            cursor_request_url(&CursorAuth::Dashboard(String::from("session")))
+                .contains("cursor.com/api/dashboard/get-filtered-usage-events")
+        );
+        assert!(
+            cursor_request_url(&CursorAuth::IdeBearer(String::from("eyJ.bearer.jwt")))
+                .contains("api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents")
+        );
+    }
+
+    #[test]
+    fn cursor_session_key_for_uses_distinct_prefixes_per_auth_kind() {
+        assert_eq!(
+            cursor_session_key_for(CursorAuthKind::Admin),
+            "cursor-admin"
+        );
+        assert_eq!(
+            cursor_session_key_for(CursorAuthKind::Dashboard),
+            "cursor-dashboard"
+        );
+        assert_eq!(
+            cursor_session_key_for(CursorAuthKind::IdeBearer),
+            "cursor-ide"
+        );
+    }
+
+    #[test]
+    fn parse_cursor_official_usage_events_extracts_token_usage_from_admin_payload() {
+        let data = serde_json::json!({
+            "usageEvents": [
+                {
+                    "timestamp": "1750979225854",
+                    "userEmail": "developer@example.com",
+                    "model": "claude-4.5-sonnet",
+                    "tokenUsage": {
+                        "inputTokens": 126,
+                        "outputTokens": 450,
+                        "cacheWriteTokens": 6112,
+                        "cacheReadTokens": 11964,
+                        "totalCents": 20.18232
+                    }
+                },
+                {
+                    "timestamp": "1750979173824",
+                    "model": "request-based",
+                    "isTokenBasedCall": false
+                }
+            ],
+            "pagination": { "hasNextPage": false }
+        });
+
+        let entries = parse_cursor_official_usage_events(&data, None, "cursor-admin").unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model, "claude-4.5-sonnet");
+        assert_eq!(entries[0].input_tokens, 126);
+        assert_eq!(entries[0].output_tokens, 450);
+        assert_eq!(entries[0].cache_creation_1h_tokens, 6112);
+        assert_eq!(entries[0].cache_read_tokens, 11964);
+        assert_eq!(entries[0].session_key, "cursor-admin");
+    }
+
+    #[test]
+    fn parse_cursor_official_usage_events_tags_dashboard_session_key() {
+        // Dashboard schema sample — same shape as admin, just tagged with a
+        // different session_key so downstream aggregation can disambiguate.
+        let data = serde_json::json!({
+            "usageEvents": [
+                {
+                    "timestamp": "1750979225854",
+                    "model": "gpt-5.4",
+                    "tokenUsage": {
+                        "inputTokens": 200,
+                        "outputTokens": 80,
+                        "cacheWriteTokens": 0,
+                        "cacheReadTokens": 50
+                    },
+                    "kind": "USAGE_EVENT_KIND_USAGE_BASED",
+                    "maxMode": false
+                }
+            ],
+            "pagination": { "hasNextPage": false }
+        });
+
+        let entries = parse_cursor_official_usage_events(&data, None, "cursor-dashboard").unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_key, "cursor-dashboard");
+        assert_eq!(entries[0].input_tokens, 200);
+        assert_eq!(entries[0].output_tokens, 80);
+        assert_eq!(entries[0].cache_read_tokens, 50);
+    }
+
+    #[test]
+    fn parse_cursor_official_usage_events_handles_ide_bearer_display_array() {
+        // The IDE-bearer Connect-Web endpoint uses `usageEventsDisplay`
+        // instead of `usageEvents`. Same per-row shape, with extra fields
+        // we ignore (kind, requestsCosts, chargedCents, owningUser, …).
+        // Pagination is communicated via `totalUsageEventsCount` (string-
+        // encoded int64 under Connect-Web's JSON convention).
+        let data = serde_json::json!({
+            "totalUsageEventsCount": "114",
+            "usageEventsDisplay": [
+                {
+                    "timestamp": "1777165184690",
+                    "model": "claude-opus-4-7-thinking-max",
+                    "kind": "USAGE_EVENT_KIND_INCLUDED_IN_PRO_PLUS",
+                    "maxMode": true,
+                    "requestsCosts": 133.7,
+                    "isTokenBasedCall": true,
+                    "tokenUsage": {
+                        "inputTokens": 22,
+                        "outputTokens": 20245,
+                        "cacheWriteTokens": 350245,
+                        "cacheReadTokens": 5301898,
+                        "totalCents": 534.6215249999999
+                    },
+                    "owningUser": "346002640",
+                    "chargedCents": 534.621525
+                }
+            ]
+        });
+
+        let entries = parse_cursor_official_usage_events(&data, None, "cursor-ide").unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_key, "cursor-ide");
+        assert_eq!(entries[0].model, "claude-opus-4-7-thinking-max");
+        assert_eq!(entries[0].input_tokens, 22);
+        assert_eq!(entries[0].output_tokens, 20245);
+        assert_eq!(entries[0].cache_creation_1h_tokens, 350245);
+        assert_eq!(entries[0].cache_read_tokens, 5301898);
+    }
+
+    #[test]
+    fn parse_cursor_official_usage_events_errors_when_neither_array_present() {
+        let data = serde_json::json!({"someOtherField": []});
+        match parse_cursor_official_usage_events(&data, None, "cursor-admin") {
+            Ok(_) => panic!("expected error when payload is missing the events array"),
+            Err(err) => assert!(
+                err.contains("usageEvents/usageEventsDisplay"),
+                "error should mention both array names so users can debug, got: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn cursor_response_has_next_page_uses_pagination_object_when_present() {
+        let with_more = serde_json::json!({"pagination": {"hasNextPage": true}});
+        let without_more = serde_json::json!({"pagination": {"hasNextPage": false}});
+        assert!(cursor_response_has_next_page(&with_more, 1, 100));
+        assert!(!cursor_response_has_next_page(&without_more, 1, 100));
+    }
+
+    #[test]
+    fn cursor_response_has_next_page_uses_total_count_for_ide_bearer_payloads() {
+        // 114 total, page 1 of 100 → still 14 more on page 2.
+        let p1 = serde_json::json!({"totalUsageEventsCount": "114"});
+        assert!(cursor_response_has_next_page(&p1, 1, 100));
+        // After page 2 we've covered 200 events, more than the total.
+        assert!(!cursor_response_has_next_page(&p1, 2, 100));
+        // Numeric encoding works too, in case a deployment stops string-
+        // encoding int64 fields.
+        let numeric = serde_json::json!({"totalUsageEventsCount": 250});
+        assert!(cursor_response_has_next_page(&numeric, 2, 100));
+        assert!(!cursor_response_has_next_page(&numeric, 3, 100));
+    }
+
+    #[test]
+    fn cursor_response_has_next_page_returns_false_with_no_pagination_info() {
+        let neither = serde_json::json!({"usageEvents": []});
+        assert!(!cursor_response_has_next_page(&neither, 1, 100));
+    }
+
+    #[test]
+    fn parse_cursor_session_file_extracts_token_usage() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.json");
+        write_file(
+            &path,
+            r#"{"messages":[{"id":"event-1","timestamp":"2026-03-15T12:00:00+00:00","model":"cursor-model","tokenUsage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":25,"cacheWriteTokens":10}}]}"#,
+        );
+
+        let (entries, _change_events, lines_read, opened) = parse_cursor_session_file(&path);
+
+        assert!(opened);
+        assert_eq!(lines_read, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].input_tokens, 100);
+        assert_eq!(entries[0].output_tokens, 50);
+        assert_eq!(entries[0].cache_read_tokens, 25);
+        assert_eq!(entries[0].cache_creation_1h_tokens, 10);
+    }
+
+    #[test]
+    fn cursor_local_debug_reports_readable_files_without_usage_entries() {
+        let root = TempDir::new().unwrap();
+        let chat_dir = root.path().join("workspace-a").join("chatSessions");
+        fs::create_dir_all(&chat_dir).unwrap();
+        write_file(
+            &chat_dir.join("session.json"),
+            r#"{"messages":[{"id":"event-1","text":"hello"}]}"#,
+        );
+        let parser = UsageParser::from_integrations(usage_integration_configs_with_overrides(
+            None,
+            None,
+            Some(vec![root.path().to_path_buf()]),
+        ));
+
+        let (entries, report) = parser.load_cursor_local_entries_with_debug(None);
+
+        assert!(entries.is_empty());
+        assert_eq!(report.discovered_paths, 1);
+        assert_eq!(report.opened_paths, 1);
+        assert_eq!(report.emitted_entries, 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2920,6 +2486,35 @@ mod tests {
         assert_eq!(entries[0].cache_read_tokens, 30);
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].emitted_entries, 1);
+    }
+
+    #[test]
+    fn load_entries_drops_third_party_models_from_claude_tab() {
+        // Claude Code CLI logs can contain third-party models when proxied
+        // (e.g. GLM-5 via an Anthropic-compatible proxy). Those rows must
+        // NOT be counted in the "claude" tab, otherwise the main dashboard
+        // total diverges from the Per-Device breakdown (which filters by
+        // model family for remote SSH rows).
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"assistant","timestamp":"2026-03-15T12:01:00+00:00","message":{"model":"glm-5","stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":80}}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+
+        let (claude_entries, _, _) = parser.load_entries("claude", parse_since_date("20260301"));
+        assert_eq!(
+            claude_entries.len(),
+            1,
+            "GLM-5 row logged via Claude Code CLI should not count in the Claude tab"
+        );
+        assert_eq!(claude_entries[0].model, "claude-sonnet-4-6");
+
+        let (all_entries, _, _) = parser.load_entries("all", parse_since_date("20260301"));
+        assert!(
+            all_entries.iter().any(|e| e.model == "glm-5"),
+            "the 'all' tab should still include the GLM-5 row"
+        );
     }
 
     #[test]
@@ -3234,6 +2829,11 @@ mod tests {
         assert_eq!(first_debug.sources[0].cache_hits, 0);
         assert_eq!(first_debug.sources[0].cache_misses, 1);
 
+        // Production clears entries_cache after every top-level query
+        // (usage_query.rs:635); replicate that so this second aggregation
+        // re-runs and exercises the per-file parse cache instead of being
+        // short-circuited by the (provider:since) entries_cache.
+        parser.clear_entries_cache();
         let second = parser.get_daily("claude", "20260315");
         assert!(
             !second.from_cache,
@@ -3256,6 +2856,9 @@ mod tests {
         assert_eq!(first_source.cache_misses, 1);
         assert_eq!(first_source.opened_paths, 1);
 
+        // Cross-query reuse: production clears entries_cache per query, so the
+        // second aggregation must re-run and hit the parsed-file cache.
+        parser.clear_entries_cache();
         parser.get_monthly("claude", "20260101");
         let second_debug = parser.last_query_debug().unwrap();
         let second_source = &second_debug.sources[0];
@@ -3288,6 +2891,9 @@ mod tests {
                 r#"{"type":"assistant","timestamp":"2026-03-16T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":75}}}"#,
             ),
         );
+
+        // Simulate the background invalidation loop detecting file changes
+        parser.invalidate_if_changed();
 
         let second = parser.get_monthly("claude", "20260101");
         assert_eq!(second.input_tokens, 300);
@@ -3326,6 +2932,9 @@ mod tests {
         let first_debug = parser.last_query_debug().unwrap();
         assert!(!first_debug.sources[0].listing_cache_hit);
 
+        // Production clears entries_cache per query; replicate so the 2nd call
+        // re-runs and reuses the root-file-list (listing) cache.
+        parser.clear_entries_cache();
         parser.get_monthly("claude", "20260101");
         let second_debug = parser.last_query_debug().unwrap();
         assert!(second_debug.sources[0].listing_cache_hit);
@@ -3360,6 +2969,10 @@ mod tests {
         )
         .unwrap();
 
+        // entries_cache (keyed provider:since) would otherwise serve the stale
+        // pre-change entries; production clears it per query, so do the same and
+        // let the listing cache detect the bumped directory mtime.
+        parser.clear_entries_cache();
         let second = parser.get_daily("claude", "20260101");
         assert_eq!(second.input_tokens, 300);
         let second_debug = parser.last_query_debug().unwrap();
@@ -3606,6 +3219,7 @@ mod tests {
 
     #[test]
     fn count_lines_helper() {
+        use crate::usage::claude_parser::test_count_lines as count_lines;
         assert_eq!(count_lines(""), 0);
         assert_eq!(count_lines("one"), 1);
         assert_eq!(count_lines("one\ntwo"), 2);
@@ -3818,6 +3432,7 @@ mod tests {
 
     #[test]
     fn is_provider_internal_path_detects_plans() {
+        use crate::usage::claude_parser::test_is_provider_internal_path as is_provider_internal_path;
         assert!(is_provider_internal_path(
             "/home/user/.claude/plans/plan_abc.md"
         ));
@@ -4260,5 +3875,497 @@ mod debug_compare {
         println!("\n=== CODEX: ccusage ===");
         println!("  gpt-5.4: inp=231,247 out=7,338 reasoning=5,997 total=238,585 cost=$0.277788");
         println!("  (reasoning is informational; both parsers bill against token_count usage)");
+    }
+}
+
+#[cfg(test)]
+mod path_a_smoke {
+    //! Manual smoke probe for "Path A" — can we authenticate against
+    //! Cursor's remote APIs using the access token that Cursor IDE itself
+    //! stores locally in `state.vscdb`, instead of asking the user to
+    //! manually copy `WorkosCursorSessionToken` out of cursor.com cookies?
+    //!
+    //! If the dashboard endpoint accepts `Authorization: Bearer <token>`
+    //! where `<token>` comes from `cursorAuth/accessToken`, we can offer
+    //! a zero-configuration Cursor integration: install TokenMonitor →
+    //! it picks up the IDE's session automatically. If not, we fall back
+    //! to "Path B" (in-app webview login).
+    //!
+    //! This test:
+    //!   • is `#[ignore]` because it requires a logged-in Cursor IDE on
+    //!     the host AND hits the real cursor.com / api.cursor.com servers;
+    //!   • never asserts (so all four probes run regardless of which one
+    //!     succeeds — useful for one-shot diagnosis);
+    //!   • redacts the access token before printing.
+    //!
+    //! Run with:
+    //! ```bash
+    //! cargo test --lib path_a_smoke -- --ignored --nocapture
+    //! ```
+
+    use crate::usage::cursor_parser::*;
+    use std::time::Duration;
+
+    fn redact(token: &str) -> String {
+        if token.len() <= 16 {
+            format!("[short, {} chars]", token.len())
+        } else {
+            format!(
+                "{}…{} ({} chars, {} JWT-style segments)",
+                &token[..8],
+                &token[token.len() - 8..],
+                token.len(),
+                token.matches('.').count() + 1,
+            )
+        }
+    }
+
+    fn print_response(label: &str, resp: reqwest::blocking::Response) {
+        let status = resp.status();
+        let headers_summary = format!(
+            "content-type={:?} content-length={:?}",
+            resp.headers().get("content-type"),
+            resp.headers().get("content-length"),
+        );
+        let body = resp
+            .text()
+            .unwrap_or_else(|e| format!("[body read error: {e}]"));
+        let preview_len = body.len().min(800);
+        eprintln!("\n=== {label} ===");
+        eprintln!("status:  {status}");
+        eprintln!("headers: {headers_summary}");
+        eprintln!("body (first {preview_len} chars):");
+        eprintln!("{}", &body[..preview_len]);
+        if body.len() > preview_len {
+            eprintln!("[... {} more chars omitted ...]", body.len() - preview_len);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual: requires a logged-in Cursor IDE on host + real network"]
+    fn probe_cursor_ide_access_token_against_remote_endpoints() {
+        let Some(db_path) = cursor_global_state_path_from_env()
+            .or_else(crate::paths::cursor_global_state_vscdb_default)
+        else {
+            eprintln!("Could not locate state.vscdb on this host. Is Cursor IDE installed?");
+            return;
+        };
+        eprintln!("state.vscdb: {}", db_path.display());
+
+        let access_token =
+            match read_cursor_state_value_from_sqlite3(&db_path, "cursorAuth/accessToken") {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    eprintln!(
+                        "cursorAuth/accessToken not present in {} — sign into Cursor IDE first.",
+                        db_path.display()
+                    );
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("sqlite3 read failed: {e}");
+                    return;
+                }
+            };
+        let refresh_token =
+            read_cursor_state_value_from_sqlite3(&db_path, "cursorAuth/refreshToken")
+                .ok()
+                .flatten();
+        let email = read_cursor_cached_email();
+        let subscription =
+            read_cursor_state_value_from_sqlite3(&db_path, "cursorAuth/stripeMembershipType")
+                .ok()
+                .flatten();
+
+        eprintln!("\n--- Local Cursor IDE state ---");
+        eprintln!("email:                {email:?}");
+        eprintln!("subscription:         {subscription:?}");
+        eprintln!("access_token:         {}", redact(&access_token));
+        eprintln!("refresh_token found:  {}", refresh_token.is_some());
+
+        let payload = serde_json::json!({
+            "page": 1,
+            "pageSize": 5,
+            "startDate": 0_i64,
+            "endDate": chrono::Local::now().timestamp_millis(),
+        });
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("client build");
+
+        // Common browser-ish headers added on every probe so we don't
+        // accidentally fail Origin/Referer-style WAF checks.
+        let with_browser_headers = |req: reqwest::blocking::RequestBuilder| {
+            req.header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .header("User-Agent", "TokenMonitor/smoke-test")
+        };
+
+        // Probe 1: THE big question — Bearer auth against the dashboard
+        // endpoint that powers cursor.com/dashboard/usage in the browser.
+        let resp = with_browser_headers(
+            client
+                .post("https://cursor.com/api/dashboard/get-filtered-usage-events")
+                .bearer_auth(&access_token)
+                .header("Origin", "https://cursor.com")
+                .header("Referer", "https://cursor.com/dashboard"),
+        )
+        .json(&payload)
+        .send();
+        match resp {
+            Ok(r) => print_response("Probe 1: Bearer @ cursor.com dashboard endpoint", r),
+            Err(e) => eprintln!("\n=== Probe 1 ===\nERROR: {e}"),
+        }
+
+        // Probe 2: same endpoint but the access token in the
+        // WorkosCursorSessionToken cookie slot. The expected cookie
+        // format is `<userId>::<JWT>`, so this almost certainly fails;
+        // included to rule out a permissive server-side parser.
+        let resp = with_browser_headers(
+            client
+                .post("https://cursor.com/api/dashboard/get-filtered-usage-events")
+                .header(
+                    reqwest::header::COOKIE,
+                    format!("WorkosCursorSessionToken={access_token}"),
+                )
+                .header("Origin", "https://cursor.com")
+                .header("Referer", "https://cursor.com/dashboard"),
+        )
+        .json(&payload)
+        .send();
+        match resp {
+            Ok(r) => print_response(
+                "Probe 2: Cookie WorkosCursorSessionToken=<accessToken> @ dashboard endpoint",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 2 ===\nERROR: {e}"),
+        }
+
+        // Probe 3: Enterprise admin endpoint with Bearer. Almost certainly
+        // 401/403 for non-Enterprise users (they don't have admin scope),
+        // but useful as a control: confirms the token isn't *accidentally*
+        // a valid admin key.
+        let resp = with_browser_headers(
+            client
+                .post("https://api.cursor.com/teams/filtered-usage-events")
+                .bearer_auth(&access_token),
+        )
+        .json(&payload)
+        .send();
+        match resp {
+            Ok(r) => print_response("Probe 3: Bearer @ api.cursor.com admin endpoint", r),
+            Err(e) => eprintln!("\n=== Probe 3 ===\nERROR: {e}"),
+        }
+
+        // Probe 4: sanity check — does the access token authenticate at
+        // all? `/api/auth/me` is a generic user-info endpoint the IDE
+        // itself calls. If THIS returns 200 but Probe 1 doesn't, the
+        // dashboard endpoint specifically locks to cookie auth and we
+        // need Path B. If THIS also 401s, the token might be stale or
+        // the path/header convention is wrong on this account.
+        let resp = with_browser_headers(
+            client
+                .get("https://cursor.com/api/auth/me")
+                .bearer_auth(&access_token),
+        )
+        .send();
+        match resp {
+            Ok(r) => print_response("Probe 4: GET /api/auth/me with Bearer (sanity)", r),
+            Err(e) => eprintln!("\n=== Probe 4 ===\nERROR: {e}"),
+        }
+
+        // ── Path A' probes — find IDE-Bearer-friendly usage endpoints ────
+        //
+        // The dashboard endpoint above forces WorkOS cookie auth, but Cursor
+        // IDE itself displays in-app token counts and subscription state, so
+        // *some* Bearer-friendly endpoint must exist. The four below are the
+        // most likely candidates per community reverse-engineering of the
+        // IDE's network traffic. If any returns 200 with usable data, we can
+        // drop the cookie requirement entirely.
+
+        // Probe 5: `auth/full_stripe_profile` is what the Cursor IDE
+        // settings panel calls to render "Pro+ — $X used this month". If
+        // it includes a per-event breakdown, we can use it as the primary
+        // usage source for detailed view.
+        let resp = with_browser_headers(
+            client
+                .get("https://api2.cursor.sh/auth/full_stripe_profile")
+                .bearer_auth(&access_token),
+        )
+        .send();
+        match resp {
+            Ok(r) => print_response(
+                "Probe 5: GET api2.cursor.sh/auth/full_stripe_profile with Bearer",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 5 ===\nERROR: {e}"),
+        }
+
+        // Probes 6-9 below target the *real* Connect-Web service the IDE
+        // uses, recovered by grepping the bundled Cursor IDE JS:
+        //   • Service:  `aiserver.v1.DashboardService`  (NOT UsageService)
+        //   • Methods:  `GetCurrentPeriodUsage`, `GetFilteredUsageEvents`,
+        //               `GetTokenUsage`, `GetUsageBasedPremiumRequests`,
+        //               `GetPlanInfo`, `GetAggregatedUsageEvents`, …
+        //   • Host:     `api2.cursor.sh` (Probe 5 confirmed Bearer-friendly)
+        //               with `api3.cursor.sh` as a fallback host the bundle
+        //               also references.
+        // The Connect-Web HTTP/JSON dialect accepts plain JSON request
+        // bodies; for messages with no required fields, `{}` is valid.
+
+        let connect_post = |url: &str, body: &str| {
+            client
+                .post(url)
+                .bearer_auth(&access_token)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .header("Connect-Protocol-Version", "1")
+                .header("User-Agent", "TokenMonitor/smoke-test")
+                .body(body.to_string())
+                .send()
+        };
+
+        // Probe 6: GetCurrentPeriodUsage — the call the IDE makes on
+        // every prefetch. Returns aggregate spend + plan info for the
+        // current billing period, NOT per-event detail.
+        match connect_post(
+            "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+            "{}",
+        ) {
+            Ok(r) => print_response(
+                "Probe 6: POST api2 DashboardService.GetCurrentPeriodUsage (Bearer)",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 6 ===\nERROR: {e}"),
+        }
+
+        // Probe 7: THE BIG ONE — GetFilteredUsageEvents over Bearer.
+        // Same method name as the cookie endpoint but reached via the
+        // IDE's Connect-Web RPC layer. If this returns 200 with detailed
+        // events, we have a fully zero-config integration path.
+        let detailed_body = serde_json::json!({
+            "pageSize": 5,
+            "page": 1,
+            "startDate": "0",
+            "endDate": chrono::Local::now().timestamp_millis().to_string(),
+        })
+        .to_string();
+        match connect_post(
+            "https://api2.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents",
+            &detailed_body,
+        ) {
+            Ok(r) => print_response(
+                "Probe 7: POST api2 DashboardService.GetFilteredUsageEvents (Bearer)",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 7 ===\nERROR: {e}"),
+        }
+
+        // Probe 8: GetTokenUsage — per-token breakdown candidate.
+        match connect_post(
+            "https://api2.cursor.sh/aiserver.v1.DashboardService/GetTokenUsage",
+            "{}",
+        ) {
+            Ok(r) => print_response(
+                "Probe 8: POST api2 DashboardService.GetTokenUsage (Bearer)",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 8 ===\nERROR: {e}"),
+        }
+
+        // Probe 9: same big endpoint but on the api3 host the bundle
+        // also references. If api2 is locked down but api3 isn't (or
+        // vice versa), this catches it cheaply.
+        match connect_post(
+            "https://api3.cursor.sh/aiserver.v1.DashboardService/GetFilteredUsageEvents",
+            &detailed_body,
+        ) {
+            Ok(r) => print_response(
+                "Probe 9: POST api3 DashboardService.GetFilteredUsageEvents (Bearer)",
+                r,
+            ),
+            Err(e) => eprintln!("\n=== Probe 9 ===\nERROR: {e}"),
+        }
+
+        eprintln!(
+            "\n--- Interpretation guide ---\n\
+             Probe 1 → 200 with `usageEvents`: GREAT. Path A works as-is. Wire up\n  \
+                       a `CursorAuth::IdeBearer` variant and prime it from state.vscdb.\n\
+             Probe 1 → 401/403 BUT Probe 4 → 200: token is valid but dashboard locks\n  \
+                       to cookie auth. Path A blocked → fall back to Path B (webview).\n\
+             Probe 1 → 401/403 AND Probe 4 → 401: token may be expired. Re-sign-in to\n  \
+                       Cursor IDE (which forces a refresh) and re-run.\n\
+             Probe 2 → 200: surprising; would mean the cookie value doesn't need the\n  \
+                       `<userId>::<JWT>` format. Sanity-double-check before relying on it.\n\
+             Probe 3 → 401/403: expected for non-Enterprise users.\n\
+             ── Path A' (DashboardService over Bearer) ─────────────────────────────\n\
+             Probe 5 → 200 with subscription JSON: confirmed Bearer works on api2.\n\
+             Probe 6 → 200 with current-period usage: aggregate-only fallback, but\n  \
+                       enough to render the existing TM 'monthly spend' UI silently.\n\
+             Probe 7 → 200 with `usageEvents`: JACKPOT — silent zero-config detailed\n  \
+                       events. Drop the cookie requirement, prime auth from state.vscdb.\n\
+             Probe 7 → 401/403 BUT Probe 6 → 200: same service, different ACL. Detailed\n  \
+                       events lock to admin/cookie auth. Use aggregate as 'better than\n  \
+                       nothing' fallback when the user hasn't pasted a cookie.\n\
+             Probe 8 → 200: token-level breakdown — could complement detailed events.\n\
+             Probe 9 → 200: api3 is the real host (api2 redirects?) — pivot accordingly.\n"
+        );
+    }
+
+    /// End-to-end smoke test of the production Path A integration: prime
+    /// the IDE token from `state.vscdb`, then go through the same
+    /// `fetch_cursor_remote_entries` code path that the live usage refresh
+    /// uses. If this returns parsed entries, the integration is healthy
+    /// from `state.vscdb` all the way through to `ParsedEntry`.
+    #[test]
+    #[ignore = "manual: requires logged-in Cursor IDE + real network"]
+    fn ide_bearer_end_to_end_through_production_pipeline() {
+        if !prime_ide_access_token() {
+            eprintln!(
+                "Could not prime IDE access token — Cursor IDE may not be installed/logged-in."
+            );
+            return;
+        }
+
+        let auth = resolve_cursor_auth().expect("resolve_cursor_auth should return IdeBearer");
+        eprintln!("Resolved auth kind: {:?}", auth.kind());
+        assert_eq!(
+            auth.kind(),
+            CursorAuthKind::IdeBearer,
+            "no user-pasted secret should be present in this test run"
+        );
+
+        let result = fetch_cursor_remote_entries(None);
+        match result {
+            Ok(Some(entries)) => {
+                eprintln!(
+                    "Got {} parsed entries from production pipeline",
+                    entries.len()
+                );
+                if let Some(first) = entries.first() {
+                    eprintln!("First entry:");
+                    eprintln!("  timestamp:    {}", first.timestamp);
+                    eprintln!("  model:        {}", first.model);
+                    eprintln!("  input:        {}", first.input_tokens);
+                    eprintln!("  output:       {}", first.output_tokens);
+                    eprintln!("  cache_read:   {}", first.cache_read_tokens);
+                    eprintln!("  cache_write:  {}", first.cache_creation_1h_tokens);
+                    eprintln!("  session_key:  {}", first.session_key);
+                    assert_eq!(
+                        first.session_key, "cursor-ide",
+                        "entries should be tagged with the IDE-bearer session key"
+                    );
+                } else {
+                    eprintln!("No entries — billing cycle may be empty.");
+                }
+            }
+            Ok(None) => eprintln!("fetch_cursor_remote_entries returned Ok(None) — auth missing?"),
+            Err(e) => eprintln!("ERROR: {e}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod cursor_remote_cache_tests {
+    //! Range-aware, non-consuming Cursor remote cache (cursor-global-cache-reuse):
+    //! one fetch of the widest opened range serves every period view by filtering
+    //! on the request's `since`, killing the old consume-once + narrow->wide race.
+    use super::*;
+    use chrono::{Local, NaiveDate, NaiveTime, TimeZone};
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn make_cursor_entry(day: NaiveDate) -> ParsedEntry {
+        let naive_dt = day.and_time(NaiveTime::from_hms_opt(12, 0, 0).unwrap());
+        let timestamp = Local.from_local_datetime(&naive_dt).single().unwrap();
+        ParsedEntry {
+            timestamp,
+            model: "cursor-gpt".to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            cache_read_tokens: 0,
+            web_search_requests: 0,
+            unique_hash: None,
+            session_key: "test-cursor".to_string(),
+            agent_scope: crate::stats::subagent::AgentScope::Main,
+        }
+    }
+
+    #[test]
+    fn range_covers_only_when_request_is_a_subset() {
+        let jan1 = date(2026, 1, 1);
+        let jun1 = date(2026, 6, 1);
+        // A wide cache (since=Jan1) covers a narrower request (since=Jun1).
+        assert!(cursor_range_covers(Some(jan1), Some(jun1)));
+        assert!(cursor_range_covers(Some(jan1), Some(jan1)));
+        // A narrow cache (since=Jun1) cannot serve a wider request (since=Jan1).
+        assert!(!cursor_range_covers(Some(jun1), Some(jan1)));
+        // All-time cache covers anything; a bounded cache can't cover all-time.
+        assert!(cursor_range_covers(None, Some(jan1)));
+        assert!(!cursor_range_covers(Some(jan1), None));
+    }
+
+    #[test]
+    fn range_at_least_as_wide_prefers_earlier_start() {
+        let jan1 = date(2026, 1, 1);
+        let jun1 = date(2026, 6, 1);
+        assert!(cursor_range_at_least_as_wide(Some(jan1), Some(jun1)));
+        assert!(!cursor_range_at_least_as_wide(Some(jun1), Some(jan1)));
+        assert!(cursor_range_at_least_as_wide(None, Some(jan1)));
+        assert!(!cursor_range_at_least_as_wide(Some(jan1), None));
+    }
+
+    #[test]
+    fn cursor_remote_for_is_non_consuming_and_filters_by_since() {
+        let parser = UsageParser::new();
+        let jan1 = date(2026, 1, 1);
+        let mar1 = date(2026, 3, 1);
+        let jun1 = date(2026, 6, 1);
+        // One fetch covering [Jan1, now] with a Jan entry and a Jun entry.
+        let entries = vec![make_cursor_entry(jan1), make_cursor_entry(jun1)];
+        parser.store_cursor_remote(entries, Some(jan1));
+
+        // Year view (since=Jan1): covered, both entries.
+        assert_eq!(parser.cursor_remote_for(Some(jan1)).unwrap().len(), 2);
+        // Non-consuming: a second read still returns the data.
+        assert_eq!(parser.cursor_remote_for(Some(jan1)).unwrap().len(), 2);
+        // Narrower views filter to entries on/after `since`.
+        let recent = parser.cursor_remote_for(Some(jun1)).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].timestamp.date_naive(), jun1);
+        assert_eq!(parser.cursor_remote_for(Some(mar1)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cursor_remote_for_misses_when_request_is_wider_than_cache() {
+        let parser = UsageParser::new();
+        let jan1 = date(2026, 1, 1);
+        let jun1 = date(2026, 6, 1);
+        // Cache only covers [Jun1, now].
+        parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
+        // A year request wants older data we don't have -> miss (triggers fetch).
+        assert!(parser.cursor_remote_for(Some(jan1)).is_none());
+        // The narrow request it does cover is still served.
+        assert_eq!(parser.cursor_remote_for(Some(jun1)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn store_keeps_widest_fresh_cache_against_late_narrow_fetch() {
+        let parser = UsageParser::new();
+        let jan1 = date(2026, 1, 1);
+        let jun1 = date(2026, 6, 1);
+        // Wide fetch lands first.
+        let wide = vec![make_cursor_entry(jan1), make_cursor_entry(jun1)];
+        parser.store_cursor_remote(wide, Some(jan1));
+        // A later narrow (day-range) fetch must not clobber the wider dataset.
+        parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
+        // Year view still served fully from the retained wide cache.
+        assert_eq!(parser.cursor_remote_for(Some(jan1)).unwrap().len(), 2);
     }
 }

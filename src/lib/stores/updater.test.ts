@@ -33,6 +33,7 @@ beforeEach(() => {
     progress: null,
     currentVersion: "0.0.0",
     installMode: "auto",
+    updateChannel: "main",
   });
 });
 

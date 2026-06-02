@@ -61,10 +61,52 @@ pub fn spawn<R: Runtime>(app: AppHandle<R>) {
     });
 }
 
+/// Build the GitHub releases endpoint URL for a given channel.
+/// "main" → official repo; "owner/repo" → that fork's releases.
+pub fn channel_endpoint(channel: &str) -> String {
+    let repo = if channel == "main" || channel.is_empty() {
+        "Michael-OvO/TokenMonitor"
+    } else {
+        channel
+    };
+    format!(
+        "https://github.com/{}/releases/latest/download/latest.json",
+        repo
+    )
+}
+
+/// Build an updater configured for the given channel (endpoint + pubkey).
+pub fn build_updater_for_channel<R: Runtime>(
+    app: &AppHandle<R>,
+    channel: &str,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    let endpoint = channel_endpoint(channel);
+    let url: url::Url = endpoint
+        .parse()
+        .map_err(|e: url::ParseError| e.to_string())?;
+    let mut builder = app.updater_builder();
+    builder = builder.endpoints(vec![url]).map_err(|e| e.to_string())?;
+
+    if channel != "main" && !channel.is_empty() {
+        if let Ok(app_data) = app.path().app_data_dir() {
+            if let Some(pubkey) = super::channels::load_cached_pubkey(&app_data, channel) {
+                builder = builder.pubkey(pubkey);
+            }
+        }
+    }
+
+    builder.build().map_err(|e| e.to_string())
+}
+
 /// Execute a single update check and update state. Exposed for `check_now`.
 #[allow(dead_code)]
 pub async fn run_check<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    let channel = {
+        let state = app.state::<AppState>();
+        let guard = state.updater.read().await;
+        guard.update_channel.clone()
+    };
+    let updater = build_updater_for_channel(app, &channel)?;
     let check_result = updater.check().await;
 
     let state = app.state::<AppState>();

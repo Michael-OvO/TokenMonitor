@@ -3,8 +3,7 @@ use crate::updater::persistence;
 use crate::updater::scheduler;
 use crate::updater::state::{DownloadProgress, UpdaterState};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
-use tauri_plugin_updater::UpdaterExt;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +66,22 @@ pub async fn updater_set_auto_check(
 }
 
 #[tauri::command]
+pub async fn updater_set_channel(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    channel: String,
+) -> Result<(), String> {
+    {
+        let mut guard = state.updater.write().await;
+        guard.update_channel = channel;
+        guard.available = None;
+        persistence::save(&app, &guard)?;
+    }
+    let _ = app.emit("updater://status-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn updater_skip_version(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -93,7 +108,11 @@ pub async fn updater_dismiss(app: AppHandle, state: State<'_, AppState>) -> Resu
 
 #[tauri::command]
 pub async fn updater_install(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
+    let channel = {
+        let guard = state.updater.read().await;
+        guard.update_channel.clone()
+    };
+    let updater = scheduler::build_updater_for_channel(&app, &channel)?;
     let update = updater
         .check()
         .await
@@ -146,4 +165,26 @@ pub async fn updater_install(app: AppHandle, state: State<'_, AppState>) -> Resu
             Err(msg)
         }
     }
+}
+
+#[tauri::command]
+pub async fn updater_discover_channels(
+) -> Result<Vec<crate::updater::channels::ChannelInfo>, String> {
+    Ok(crate::updater::channels::discover_channels().await)
+}
+
+#[tauri::command]
+pub async fn updater_fetch_channel_pubkey(
+    app: AppHandle,
+    channel: String,
+) -> Result<String, String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+
+    if let Some(cached) = crate::updater::channels::load_cached_pubkey(&app_data, &channel) {
+        return Ok(cached);
+    }
+
+    let pubkey = crate::updater::channels::fetch_fork_pubkey(&channel).await?;
+    crate::updater::channels::save_cached_pubkey(&app_data, &channel, &pubkey)?;
+    Ok(pubkey)
 }

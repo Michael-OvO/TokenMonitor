@@ -1,3 +1,4 @@
+pub mod channels;
 pub mod persistence;
 pub mod scheduler;
 pub mod state;

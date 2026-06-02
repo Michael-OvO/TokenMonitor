@@ -225,7 +225,12 @@ pub fn init_taskbar_panel() -> Result<bool> {
         }
 
         // Store handle
-        panel_hwnd().lock().unwrap().0 = Some(hwnd);
+        if let Ok(mut guard) = panel_hwnd().lock() {
+            guard.0 = Some(hwnd);
+        } else {
+            let _ = DestroyWindow(hwnd);
+            return Ok(false);
+        }
 
         // Embed into taskbar
         if embed_in_taskbar(hwnd, taskbar).is_ok() {
@@ -234,7 +239,9 @@ pub fn init_taskbar_panel() -> Result<bool> {
             Ok(true)
         } else {
             let _ = DestroyWindow(hwnd);
-            panel_hwnd().lock().unwrap().0 = None;
+            if let Ok(mut guard) = panel_hwnd().lock() {
+                guard.0 = None;
+            }
             Ok(false)
         }
     }
@@ -340,7 +347,10 @@ unsafe fn embed_in_taskbar(panel: HWND, taskbar: HWND) -> Result<()> {
     let scale = dpi as f32 / 96.0;
 
     // Measure text to determine width
-    let flat_text = panel_metrics().lock().unwrap().flat_text();
+    let flat_text = panel_metrics()
+        .lock()
+        .map(|m| m.flat_text())
+        .unwrap_or_default();
     let panel_width = measure_text_width(&flat_text, dpi).min(PANEL_MAX_WIDTH);
     let panel_width = panel_width.max((PANEL_MIN_WIDTH as f32 * scale) as i32);
 
@@ -516,7 +526,13 @@ unsafe fn paint_panel(hwnd: HWND) {
     SetBkMode(hdc, TRANSPARENT);
 
     // Build colored segments from structured metrics
-    let metrics = panel_metrics().lock().unwrap().clone();
+    let metrics = match panel_metrics().lock() {
+        Ok(m) => m.clone(),
+        Err(_) => {
+            let _ = EndPaint(hwnd, &ps);
+            return;
+        }
+    };
     let segments = metrics.segments(is_dark);
 
     // Draw each segment left-to-right with its own color, vertically centered
@@ -544,7 +560,7 @@ unsafe fn paint_panel(hwnd: HWND) {
 fn re_embed_panel() -> Result<()> {
     let hwnd = panel_hwnd()
         .lock()
-        .unwrap()
+        .map_err(|_| Error::new(HRESULT(-1), "Panel HWND mutex poisoned"))?
         .0
         .ok_or_else(|| Error::new(HRESULT(-1), "No panel HWND to re-embed"))?;
 

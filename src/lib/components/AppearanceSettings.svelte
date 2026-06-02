@@ -3,7 +3,6 @@
   import {
     applyGlass,
     applyTheme,
-    getVisibleHeaderProviders,
     settings,
     updateSetting,
     type Settings as SettingsType,
@@ -20,13 +19,6 @@
   import ToggleSwitch from "./ToggleSwitch.svelte";
 
   let current = $derived($settings as SettingsType);
-
-  let defaultProviderOptions = $derived.by(() =>
-    getVisibleHeaderProviders(current.headerTabs).map((provider) => ({
-      value: provider,
-      label: current.headerTabs[provider].label,
-    })),
-  );
 
   function handleTheme(val: string) {
     logger.info("settings", `Theme applied: ${val}`);
@@ -52,28 +44,18 @@
     }
   }
 
-  function handleProvider(val: string) {
-    updateSetting("defaultProvider", val as SettingsType["defaultProvider"]);
-  }
-
   function handleBrandTheming(checked: boolean) {
     updateSetting("brandTheming", checked);
-  }
-
-  function handlePeriod(val: string) {
-    updateSetting("defaultPeriod", val as SettingsType["defaultPeriod"]);
-  }
-
-  function handleRefresh(val: string) {
-    const interval = parseInt(val, 10) || 0;
-    logger.info("settings", `Refresh interval IPC: ${interval}s`);
-    updateSetting("refreshInterval", interval);
-    invoke("set_refresh_interval", { interval }).catch(() => {});
   }
 </script>
 
 <div class="group">
-  <div class="group-label">General</div>
+  <div class="group-label">
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+    </svg>
+    Appearance
+  </div>
   <div class="card">
     <div class="row border">
       <span class="label">Theme</span>
@@ -85,40 +67,6 @@
         ]}
         value={current.theme}
         onChange={handleTheme}
-      />
-    </div>
-    <div class="row border">
-      <span class="label">Default Provider</span>
-      <SegmentedControl
-        options={defaultProviderOptions}
-        value={current.defaultProvider}
-        onChange={handleProvider}
-      />
-    </div>
-    <div class="row border">
-      <span class="label">Default Period</span>
-      <SegmentedControl
-        options={[
-          { value: "5h", label: "5H" },
-          { value: "day", label: "Day" },
-          { value: "week", label: "Week" },
-          { value: "month", label: "Mo" },
-        ]}
-        value={current.defaultPeriod}
-        onChange={handlePeriod}
-      />
-    </div>
-    <div class="row border">
-      <span class="label">Refresh</span>
-      <SegmentedControl
-        options={[
-          { value: "30", label: "30s" },
-          { value: "60", label: "1m" },
-          { value: "300", label: "5m" },
-          { value: "0", label: "Off" },
-        ]}
-        value={String(current.refreshInterval)}
-        onChange={handleRefresh}
       />
     </div>
     <div class="row border">

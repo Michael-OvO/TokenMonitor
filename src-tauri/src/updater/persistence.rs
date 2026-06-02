@@ -32,6 +32,9 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> UpdaterState {
             .ok()
             .map(|dt| dt.with_timezone(&chrono::Utc));
     }
+    if let Some(Value::String(ch)) = store.get("update_channel") {
+        state.update_channel = ch;
+    }
     state
 }
 
@@ -47,6 +50,7 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, state: &UpdaterState) -> Result<(), 
         "last_check_at",
         json!(state.last_check.map(|d| d.to_rfc3339())),
     );
+    store.set("update_channel", json!(state.update_channel));
     store.save().map_err(|e| e.to_string())?;
     Ok(())
 }

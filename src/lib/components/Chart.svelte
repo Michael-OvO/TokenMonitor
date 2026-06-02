@@ -1,16 +1,25 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { modelColor, formatCost, currencySymbol, convertCost, deviceColor } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
   import { activeOffset, activePeriod, chartMode, chartSegmentMode } from "../stores/usage.js";
-  import { isMacOS } from "../utils/platform.js";
   import { logger } from "../utils/logger.js";
   import type { ChartBucket } from "../types/index.js";
   import { filterVisibleChartBuckets, getXAxisLabels } from "./chartBuckets.js";
 
-  const detailAbove = false;
+  import { isWindows } from "../utils/platform.js";
+  import { invoke } from "@tauri-apps/api/core";
+
+  let detailAbove = $state(false);
+
+  if (isWindows()) {
+    invoke<string>("get_window_anchor_edge").then((edge) => {
+      detailAbove = edge === "bottom";
+    }).catch(() => {});
+  }
   const DETAIL_CONFIG = {
-    HOVER_DELAY_MS: 0,
-    LEAVE_DELAY_MS: 120,
+    HOVER_DELAY_MS: 50,
+    LEAVE_DELAY_MS: 300,
   } as const;
 
   interface Props {
@@ -59,28 +68,76 @@
 
   const CHART_H = 108;
   const CHART_W = 280; // SVG viewbox width (y-axis labels sit outside)
-  let maxCost = $derived(Math.max(...visibleBuckets.map((b) => b.total), 0.01));
+  let maxCostStacked = $derived(Math.max(...visibleBuckets.map((b) => b.total), 0.01));
+  let maxCostSingle = $derived(Math.max(
+    ...visibleBuckets.flatMap((b) => {
+      const merged = new Map<string, number>();
+      for (const s of b.segments) {
+        merged.set(s.model_key, (merged.get(s.model_key) ?? 0) + s.cost);
+      }
+      return Array.from(merged.values());
+    }),
+    0.01,
+  ));
+  let maxCost = $derived($chartMode === "line" ? maxCostSingle : maxCostStacked);
   let hoveredIdx = $state(-1);
 
   let displayedIdx = $state(-1);
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let leaveTimer: ReturnType<typeof setTimeout> | null = null;
   let previousDataKey = $state("");
+  let chartContainerEl: HTMLDivElement | null = null;
 
   let displayed = $derived(displayedIdx >= 0 ? visibleBuckets[displayedIdx] ?? null : null);
+
+  function isPointerInsideChartContainer(): boolean {
+    return Boolean(chartContainerEl?.matches(":hover"));
+  }
 
   function onEnter(i: number) {
     if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
     hoveredIdx = i;
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
-    displayedIdx = visibleBuckets[i]?.total > 0 ? i : -1;
+    const hasDetail = (visibleBuckets[i]?.total ?? 0) > 0;
+
+    if (DETAIL_CONFIG.HOVER_DELAY_MS > 0) {
+      hoverTimer = setTimeout(async () => {
+        if (hoveredIdx === i) {
+          displayedIdx = hasDetail ? i : -1;
+          if (hasDetail) {
+            await tick();
+            window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: true } }));
+          }
+        }
+      }, DETAIL_CONFIG.HOVER_DELAY_MS);
+    } else {
+      displayedIdx = hasDetail ? i : -1;
+      if (hasDetail) {
+        tick().then(() => {
+          window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: true } }));
+        });
+      }
+    }
   }
 
   function onLeave() {
     hoveredIdx = -1;
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
     if (leaveTimer) clearTimeout(leaveTimer);
-    leaveTimer = setTimeout(() => { displayedIdx = -1; }, DETAIL_CONFIG.LEAVE_DELAY_MS);
+    leaveTimer = setTimeout(() => {
+      if (hoveredIdx >= 0) return;
+      if (isPointerInsideChartContainer()) return;
+      displayedIdx = -1;
+      window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: false } }));
+    }, DETAIL_CONFIG.LEAVE_DELAY_MS);
+  }
+
+  function clearHoverAndDetailState() {
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+    if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
+    hoveredIdx = -1;
+    displayedIdx = -1;
+    window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: false } }));
   }
 
   // Reset on tab / provider / offset change.
@@ -88,15 +145,13 @@
     if (previousDataKey === "") { previousDataKey = dataKey; return; }
     if (dataKey === previousDataKey) return;
     previousDataKey = dataKey;
-    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
-    hoveredIdx = -1;
-    displayedIdx = -1;
+    clearHoverAndDetailState();
   });
 
   $effect(() => {
     const bucketCount = visibleBuckets.length;
-    if (hoveredIdx >= bucketCount) hoveredIdx = -1;
-    if (displayedIdx >= bucketCount) displayedIdx = -1;
+    const shouldClear = hoveredIdx >= bucketCount || displayedIdx >= bucketCount;
+    if (shouldClear) clearHoverAndDetailState();
   });
 
 
@@ -108,13 +163,20 @@
   });
 
   let legendModels = $derived(() => {
-    const seen = new Map<string, string>();
+    const agg = new Map<string, { key: string; name: string; cost: number }>();
     for (const b of visibleBuckets) {
       for (const s of b.segments) {
-        if (!seen.has(s.model_key)) seen.set(s.model_key, s.model);
+        const existing = agg.get(s.model_key);
+        if (existing) {
+          existing.cost += s.cost;
+        } else {
+          agg.set(s.model_key, { key: s.model_key, name: s.model, cost: s.cost });
+        }
       }
     }
-    return Array.from(seen.entries()).map(([key, name]) => ({ key, name }));
+    return Array.from(agg.values())
+      .sort((a, b) => b.cost - a.cost)
+      .map(({ key, name }) => ({ key, name }));
   });
 
   // Y-axis ticks (3 ticks: 0, mid, max)
@@ -128,16 +190,11 @@
   });
 
   function niceMax(v: number): number {
-    if (v <= 0.5) return 0.5;
-    if (v <= 1) return 1;
-    if (v <= 2) return 2;
-    if (v <= 5) return 5;
-    if (v <= 10) return 10;
-    if (v <= 20) return 20;
-    if (v <= 50) return 50;
-    if (v <= 100) return 100;
-    if (v <= 200) return 200;
-    return Math.ceil(v / 100) * 100;
+    const steps = [0.5, 1, 2, 5, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000];
+    for (const s of steps) {
+      if (v <= s) return s;
+    }
+    return Math.ceil(v / 500) * 500;
   }
 
   function yLabel(v: number): string {
@@ -272,8 +329,9 @@
 
     return models.map((m) => {
       const points = visibleBuckets.map((b, i) => {
-        const seg = b.segments.find((s) => s.model_key === m.key);
-        const cost = seg?.cost ?? 0;
+        const cost = b.segments
+          .filter((s) => s.model_key === m.key)
+          .reduce((sum, s) => sum + s.cost, 0);
         const x = visibleBuckets.length > 1 ? i * stepX : CHART_W / 2;
         const y = CHART_H - (cost / niceM) * CHART_H;
         return { x, y, cost };
@@ -307,9 +365,17 @@
   function bucketAriaLabel(bucket: ChartBucket): string {
     return `${bucket.label}: ${formatCost(bucket.total)}`;
   }
+
 </script>
 
-<div class="ch" class:detail-above={detailAbove}>
+<div
+  class="ch"
+  class:detail-above={detailAbove}
+  bind:this={chartContainerEl}
+  onmouseleave={onLeave}
+  role="region"
+  aria-label="Usage chart"
+>
   <div class="ch-top">
     <span class="ch-t">Cost by {$chartSegmentMode === "device" ? "device" : "model"}</span>
     <div class="ch-right">
@@ -363,22 +429,16 @@
     </div>
   </div>
 
-  {#if $chartMode !== "pie" && legendModels().length > 0}
-    <div class="leg" role="list" aria-label="Chart legend">
-      {#each legendModels() as lm}
-        <span class="leg-item" role="listitem" title={lm.name}>
-          <span class="leg-dot" style="background:{segmentColorFn(lm.key)}"></span>
-          <span class="leg-name">{lm.name}</span>
-        </span>
-      {/each}
-    </div>
-  {/if}
-
-  <div class="detail" class:visible={displayed != null}>
-    {#if displayed}
-      {@const segs = sortedSegments(displayed)}
-      <div class="detail-inner">
-        <div class="detail-head">
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="detail"
+    class:visible={displayed != null}
+  >
+    <div class="collapse-inner">
+      {#if displayed}
+        {@const segs = sortedSegments(displayed)}
+        <div class="detail-inner">
+          <div class="detail-head">
           <span class="detail-label">{displayed.label}</span>
           <span class="detail-total">{formatCost(displayed.total)}</span>
         </div>
@@ -395,6 +455,7 @@
         {/if}
       </div>
     {/if}
+    </div>
   </div>
 
   <div class="chart-body" class:pie-mode={$chartMode === "pie"}>
@@ -482,7 +543,6 @@
                 role="img"
                 aria-label={bucketAriaLabel(bucket)}
                 onmouseenter={() => onEnter(i)}
-                onmouseleave={onLeave}
                 style="cursor:pointer; --delay: {(i / Math.max(visibleBuckets.length - 1, 1)) * 0.35 + 0.04}s;"
               >
                 <!-- Invisible hit area -->
@@ -558,7 +618,6 @@
                 role="img"
                 aria-label={bucketAriaLabel(bucket)}
                 onmouseenter={() => onEnter(i)}
-                onmouseleave={onLeave}
                 style="cursor:pointer"
               >
                 <rect
@@ -603,53 +662,16 @@
     position: relative;
   }
   .ch-top { order: 1; }
-  .leg { order: 2; }
-  .chart-body { order: 3; }
-  .xa { order: 4; }
-  .detail { order: 5; }
+  .chart-body { order: 2; }
+  .xa { order: 3; }
+  .detail { order: 4; }
   .ch.detail-above .detail { order: 2; }
-  .ch.detail-above .leg { order: 3; }
-  .ch.detail-above .chart-body { order: 4; }
-  .ch.detail-above .xa { order: 5; }
+  .ch.detail-above .chart-body { order: 3; }
+  .ch.detail-above .xa { order: 4; }
 
   .ch-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 8px; }
   .ch-t { font: 500 8px/1 "Inter", sans-serif; color: var(--t3); flex-shrink: 0; }
   .ch-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-
-  /* Legend — its own row beneath the title so model names get real space.
-     Wraps gracefully when many models are present; ellipsis only kicks in
-     for unusually long names that wouldn't fit even on their own line. */
-  .leg {
-    display: flex;
-    flex-wrap: wrap;
-    column-gap: 10px;
-    row-gap: 4px;
-    margin-bottom: 10px;
-    padding: 0 1px;
-    animation: fadeUp var(--t-normal) var(--ease-out) both;
-  }
-  .leg-item {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    max-width: 100%;
-    min-width: 0;
-    font: 400 9px/1.25 "Inter", sans-serif;
-    color: var(--t2);
-    letter-spacing: 0.1px;
-  }
-  .leg-name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .leg-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 2px;
-    flex-shrink: 0;
-  }
 
   /* Mode toggle */
   .mode-toggle {
@@ -682,17 +704,18 @@
   }
 
   .detail {
-    background: var(--surface-2);
-    border-radius: 8px;
-    overflow: hidden;
+    display: grid;
+    grid-template-rows: 0fr;
     opacity: 0;
-    max-height: 0;
-    will-change: opacity;
-    transition: opacity 0.12s ease;
+    will-change: opacity, grid-template-rows;
+    transition: grid-template-rows 0.15s ease, opacity 0.15s ease;
   }
   .detail.visible {
     opacity: 1;
-    max-height: 200px;
+    grid-template-rows: 1fr;
+  }
+  .collapse-inner {
+    overflow: hidden;
   }
   .ch.detail-above .detail { margin-bottom: 10px; }
   .ch:not(.detail-above) .detail { margin-top: 10px; }
@@ -884,6 +907,8 @@
     padding: 8px 10px;
     min-height: 0;
     overflow: hidden;
+    background: var(--surface-2);
+    border-radius: 8px;
   }
   .detail-head {
     display: flex; justify-content: space-between; align-items: baseline;

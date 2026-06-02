@@ -14,6 +14,12 @@ pub struct UpdaterState {
     pub auto_check_enabled: bool,
     pub progress: Option<DownloadProgress>,
     pub dismissed_for_session: bool,
+    #[serde(default = "default_channel")]
+    pub update_channel: String,
+}
+
+fn default_channel() -> String {
+    String::from("main")
 }
 
 #[allow(dead_code)]
@@ -21,6 +27,7 @@ impl UpdaterState {
     pub fn new() -> Self {
         Self {
             auto_check_enabled: true,
+            update_channel: default_channel(),
             ..Default::default()
         }
     }

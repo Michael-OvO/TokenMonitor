@@ -1,10 +1,10 @@
 // src-tauri/src/change_stats.rs
 
 use chrono::{DateTime, Local};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileCategory {
     Code,
     Docs,
@@ -57,7 +57,7 @@ pub struct ParsedChangeEvent {
     pub agent_scope: crate::stats::subagent::AgentScope,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChangeStats {
     pub added_lines: u64,
     pub removed_lines: u64,
@@ -77,7 +77,7 @@ pub struct ChangeStats {
     pub dominant_extension: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelChangeSummary {
     pub added_lines: u64,
     pub removed_lines: u64,

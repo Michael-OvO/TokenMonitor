@@ -1,6 +1,6 @@
 // src-tauri/src/subagent_stats.rs
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -12,7 +12,7 @@ pub enum AgentScope {
 
 // ── Public types ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeModelUsage {
     pub display_name: String,
     pub model_key: String,
@@ -24,7 +24,7 @@ pub struct ScopeModelUsage {
     pub cache_write_1h_tokens: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScopeUsageSummary {
     pub cost: f64,
     pub tokens: u64,
@@ -40,7 +40,7 @@ pub struct ScopeUsageSummary {
     pub removed_lines: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentStats {
     pub main: ScopeUsageSummary,
     pub subagents: ScopeUsageSummary,
@@ -97,7 +97,7 @@ impl ScopeSummaryBuilder {
             entry.cache_creation_1h_tokens,
             entry.cache_read_tokens,
             entry.web_search_requests,
-        );
+        ) * crate::usage::pricing::provider_multiplier(&entry.model);
         self.cost += entry_cost;
         self.input_tokens += entry.input_tokens;
         self.output_tokens += entry.output_tokens;

@@ -1,0 +1,85 @@
+ecl_version: "1.0"
+feature: "payload-disk-cache"
+status: completed
+created: 2026-05-21
+updated: 2026-05-21
+
+prompt_calibration:
+  raw_input: "持久化UsagePayload到磁盘，冷启动即显示，后台静默刷新"
+  intent_decomposition:
+    total_intents: 1
+    total_tracks: 1
+    tracks:
+      - track_id: T1
+        name: "Payload disk cache"
+        priority: 1
+        intents:
+          - raw: "持久化UsagePayload到磁盘，冷启动即显示，后台静默刷新"
+            type: performance
+
+requirements:
+  - id: REQ-T1-1
+    text: "UsagePayload persisted to disk after every successful IPC computation"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "store_cache writes to disk via PayloadDiskCache::save"
+      - "Files stored as per-key JSON in app_data_dir/payload_cache/"
+      - "Atomic write via tmp+rename prevents corruption"
+      - "3 unit tests pass (round_trip, missing, key_sanitization)"
+
+  - id: REQ-T1-2
+    text: "Cold start loads cached payload instantly without re-parsing JSONL files"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "get_usage_data_inner checks disk cache when memory cache misses"
+      - "Disk-cached payload returned with from_cache=true"
+      - "Frontend shows cached data immediately, footer displays 'cached · X ago'"
+      - "Background refresh silently replaces stale data (existing stale-while-revalidate)"
+
+  - id: REQ-T1-3
+    text: "All payload types support deserialization"
+    status: verified
+    confidence: 1.0
+    acceptance_criteria:
+      - "UsagePayload and all nested types have Deserialize derive"
+      - "cargo check passes with no errors"
+
+decisions:
+  - id: DEC-001
+    date: 2026-05-21
+    decision: "Per-key JSON files in app_data_dir/payload_cache/"
+    rationale: "Simple, human-readable, no lock contention, incremental writes. ~20 files max."
+
+  - id: DEC-002
+    date: 2026-05-21
+    decision: "Stale data acceptable on cold start (show old, refresh in background)"
+    rationale: "User confirmed. Same behavior as existing frontend stale-while-revalidate pattern. New device data appears after background refresh completes (~2-5s)."
+
+  - id: DEC-003
+    date: 2026-05-21
+    decision: "Synchronous disk write in store_cache path (not spawned)"
+    rationale: "JSON serialization + write is <1ms for typical payloads (~20KB). No need for async complexity."
+
+feature_guard:
+  generated: "2026-05-21"
+  guards:
+    - id: GUARD-001
+      feature: "Payload disk cache"
+      description: "Persist UsagePayload to disk for instant cold start"
+      key_files:
+        - "src-tauri/src/usage/payload_disk_cache.rs"
+        - "src-tauri/src/commands/usage_query.rs"
+        - "src-tauri/src/commands.rs"
+        - "src-tauri/src/lib.rs"
+      invariants:
+        - "PayloadDiskCache::save writes JSON atomically (tmp+rename)"
+        - "PayloadDiskCache::load deserializes UsagePayload from disk"
+        - "get_usage_data_inner falls back to disk cache on memory miss"
+        - "store_cache path persists payload to disk after computation"
+        - "AppState.payload_disk_cache initialized in lib.rs setup"
+      verification:
+        command: "cd src-tauri && cargo test payload_disk_cache"
+        expected: "3 passed"
+      status: active

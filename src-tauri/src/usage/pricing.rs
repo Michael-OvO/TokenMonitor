@@ -87,6 +87,20 @@ pub fn calculate_cost_for_key(
     ) + web_search_requests as f64 * WEB_SEARCH_COST_PER_REQUEST
 }
 
+/// Returns a cost multiplier for cloud-provider endpoint surcharges.
+/// Bedrock geographic/regional endpoints (prefixed "us.", "eu.", "ap.")
+/// charge 10% over global endpoints per Anthropic's published pricing.
+pub fn provider_multiplier(raw_model: &str) -> f64 {
+    let b = raw_model.as_bytes();
+    if (b.starts_with(b"us.") || b.starts_with(b"eu.") || b.starts_with(b"ap."))
+        && raw_model.contains("anthropic")
+    {
+        1.1
+    } else {
+        1.0
+    }
+}
+
 fn apply_rates(
     rates: &ModelRates,
     input_tokens: u64,
@@ -260,6 +274,7 @@ fn get_fallback_rates(model: &str) -> ModelRates {
         | ModelFamily::Qwen
         | ModelFamily::Glm
         | ModelFamily::DeepSeek
+        | ModelFamily::Cursor
         | ModelFamily::Unknown => zero_rates(),
     }
 }
@@ -472,5 +487,49 @@ mod tests {
     #[test]
     fn pricing_version_is_set() {
         assert_eq!(PRICING_VERSION, "2026-03-15");
+    }
+
+    #[test]
+    fn provider_multiplier_bedrock_geo() {
+        assert!(approx_eq(
+            provider_multiplier("us.anthropic.claude-opus-4-6-v1") * 10.0,
+            11.0
+        ));
+        assert!(approx_eq(
+            provider_multiplier("eu.anthropic.claude-sonnet-4-5-20250929-v1:0") * 10.0,
+            11.0
+        ));
+        assert!(approx_eq(
+            provider_multiplier("ap.anthropic.claude-haiku-4-5-20251001-v1:0") * 10.0,
+            11.0
+        ));
+    }
+
+    #[test]
+    fn provider_multiplier_global_no_surcharge() {
+        assert!(approx_eq(
+            provider_multiplier("global.anthropic.claude-opus-4-6-v1") * 10.0,
+            10.0
+        ));
+    }
+
+    #[test]
+    fn provider_multiplier_direct_api_no_surcharge() {
+        assert!(approx_eq(
+            provider_multiplier("claude-opus-4-6") * 10.0,
+            10.0
+        ));
+        assert!(approx_eq(
+            provider_multiplier("claude-sonnet-4-5-20250929") * 10.0,
+            10.0
+        ));
+    }
+
+    #[test]
+    fn provider_multiplier_non_anthropic_prefix_ignored() {
+        assert!(approx_eq(
+            provider_multiplier("us.some-other-provider.model-v1") * 10.0,
+            10.0
+        ));
     }
 }

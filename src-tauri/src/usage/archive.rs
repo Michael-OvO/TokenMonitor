@@ -413,6 +413,14 @@ impl ArchiveManager {
     /// - `"local:claude"` → `usage-archive/local/claude/`
     /// - `"local:codex"` → `usage-archive/local/codex/`
     /// - `"device:{alias}"` → `usage-archive/devices/{alias}/`
+    pub fn reset(&self) {
+        if self.base_dir.exists() {
+            if let Err(e) = fs::remove_dir_all(&self.base_dir) {
+                tracing::warn!("Failed to remove archive dir {:?}: {e}", self.base_dir);
+            }
+        }
+    }
+
     fn source_dir(&self, source_key: &str) -> PathBuf {
         match source_key.split_once(':') {
             Some(("local", provider)) => self.base_dir.join("local").join(provider),

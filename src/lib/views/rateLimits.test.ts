@@ -23,6 +23,7 @@ function providerRateLimits(
       },
     ],
     extraUsage: null,
+    credits: null,
     stale: false,
     error: null,
     retryAfterSeconds: null,
@@ -248,5 +249,31 @@ describe("rateLimitWindowResetLabel", () => {
         Date.UTC(2026, 2, 17, 12, 1, 30),
       ),
     ).toBe("Awaiting refresh");
+  });
+
+  it("appends (stale) when data is stale but the window has not yet reset", () => {
+    expect(
+      rateLimitWindowResetLabel(
+        providerRateLimits({
+          provider: "codex",
+          stale: true,
+        }),
+        "2026-03-17T14:00:00.000Z",
+        Date.UTC(2026, 2, 17, 11, 0, 0),
+      ),
+    ).toMatch(/\(stale\)$/);
+  });
+
+  it("does not append (stale) when data is fresh", () => {
+    expect(
+      rateLimitWindowResetLabel(
+        providerRateLimits({
+          provider: "codex",
+          stale: false,
+        }),
+        "2026-03-17T14:00:00.000Z",
+        Date.UTC(2026, 2, 17, 11, 0, 0),
+      ),
+    ).not.toMatch(/stale/);
   });
 });

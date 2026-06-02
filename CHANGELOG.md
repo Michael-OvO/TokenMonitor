@@ -1,5 +1,114 @@
 # CHANGELOG
 
+## v0.13.1 — Settings 重构 + SSH 搜索扩展 + FloatBall 修复
+
+### UI
+- **Settings → Visibility 卡片**：Header Tabs / Models / Remote Devices 合并为单张 `.card`，每项显示 "x of y" 计数，折叠展开
+- **Status Displays** 改用单 `.card`（移除 `.group`），预览图移至最顶端
+- **FloatBall 预览修复**：移除 `.fb-ball` 的渐变圆圈背景，改为透明（与真实 FloatBall 一致）
+- **Settings header** 添加 `box-shadow` 分隔头部与滚动内容
+- **SSH hosts** 全部使用 toggle 滑块（移除 Add 按钮），未注册 host 首次开启时自动注册
+- **Cost Alert / Model Change Stats** 放回 Display card
+
+### SSH
+- **远程搜索扩展**：Codex 搜索从固定 `~/.codex/sessions` 改为 glob `~/.codex*`，匹配所有 codex 变体目录
+- **Sync 进度反馈**：逐 host 显示 "x of y servers connected"，完成后显示 "Finished syncing in Xs"
+
+### 修复
+- `fix(floatball)`: 速率利用率回退逻辑——当主窗口过期时，回退到任意未过期窗口（与主窗口行为统一）
+
+## v0.12.3 — Visibility 合并 + 窗口尺寸记忆
+
+### UI
+- **Settings → Visibility 合并为单卡片**：`Provider` / `Model Visibility` / `SSH Hosts` 三个面板现在共享一张 card，视觉上与 `Display` 分组一致，行间用 `border-top` 分隔
+- 修复折叠面板（Cursor / Permissions）收起时会漏出内部内容的问题——`grid-template-rows: 0fr/1fr` 方案在嵌套子组件根节点时 `:global(*)` 作用域不稳，回退到显式 `max-height` + `overflow: hidden`
+
+### 启动体验
+- **窗口尺寸记忆**：新增 `window_state.height` 字段持久化到 `settings.json`，启动时在 `loadInitialData()` 之前立刻把窗口恢复到上次关闭时的高度，消除"先小后大"的跳变
+- **首帧 shrink 门控**：`resizeOrchestrator` 新增 `initialContentReady` 闸门，首次数据就绪前屏蔽所有 shrink 方向的 resize 请求；首帧渲染后再放闸并做一次同步修正
+- `resizeOrchestrator` 新增 `onHeightApplied` 回调，每次 `set_window_size_and_align` 成功后节流 400ms 写回磁盘
+
+## v0.12.2 — 模型家族过滤 + 图表排序
+
+- `fix(usage)`: 按 model family 过滤跨集成聚合行，避免 Claude/Codex/Cursor 计费交叉污染
+- `feat(ui)`: 统一模型名格式化并扩展品牌调色板
+- `feat(chart)`: 按使用成本对图例模型排序
+- `fix(ci)`: 移除 `config.rs` 中未用的 `AtomicBool/Ordering` 引用
+
+## v0.12.1 — 签名与 CI 修复
+
+- `fix(macos)`: 修复 Windows-only 代码路径中的 `SetWindowRgn` 导入路径
+- `fix(ci)`: 使用平台相关的 SHA256SUMS 文件名，避免 release 资产冲突
+- `fix(ci)`: 默认将 release 发布为非草稿
+- `fix(ci)`: `cargo fmt` 应用到 `window.rs`
+- `fix(ci)`: 移除 clippy 报出的多余 `return`
+
+## v0.12.0 — Codex 速率限制 + View Transitions + SSH 加固
+
+### 新功能
+- 新增 Codex CLI 速率限制面板（`rate_limits/codex.rs`）
+- 新增 View Transitions（`view-enter-right` / `view-enter-left` / `view-enter-fade`），在 settings / calendar / devices / single-device 之间切换时做滑入动画
+- 新增 Skeleton loading 骨架屏（`HiddenModelsSettings` 等）
+- 新增 `usage_access_enabled` 原子开关，首次启动通过 welcome card 显式授权后才开始解析本地日志
+
+### 安全与正确性
+- SSH alias 验证加固、缓存失效修正
+- Windows 空白时区 / SHA256 / 磁盘 I/O 错误路径强化
+- 应用内告警添加一键关闭按钮
+- SSH 缓存改为流式读取，降低 Windows 上的内存峰值
+
+## v0.11.1 — Cursor Rate Limits & Updater Signing Fixes
+
+- 新增 Cursor IDE 速率限制支持（`rate_limits/cursor.rs`），通过 Cursor API 获取计划用量和支出限额
+- 新增 `secrets/cursor.rs` 管理 Cursor access token（OS keyring 优先，文件回退）
+- 修复 Windows/Linux 上 updater 签名密钥缺失时跳过签名的问题
+- 修复 workflow 条件表达式中无效的 secrets 引用
+- 修复通过 `GITHUB_ENV` 设置 updater 签名密钥
+
+## v0.11.0 — Major Module Refactor & Dynamic Exchange Rates
+
+- 大模块拆分重构（`float_ball` → `float_ball/mod.rs` + `layout.rs`）
+- 新增动态汇率（`usage/exchange_rates.rs`，Frankfurter API，24h TTL 缓存）
+- 新增 `usage/device_aggregation.rs` 远程设备数据聚合
+- 新增 `usage/claude_parser.rs` Claude Code 专用深度解析器（含 change-event 分类和 subagent scope 检测）
+- 新增 `usage/archive.rs` 持久化每小时聚合存储，防止日志删除导致数据丢失
+- 新增 `usage/openrouter.rs` OpenRouter 动态定价
+
+## v0.10.x — Permissions, Keychain Hardening, SSH Fixes
+
+- 新增权限系统（`permissions/surfaces.ts`、`permissions/keychain.ts`、`PermissionDisclosure.svelte`）
+- 新增首次启动欢迎卡片（`WelcomeCard.svelte`），含速率限制和自启动的 opt-in 开关
+- macOS Keychain 读取切换到 Security.framework，避免旧版 Keychain 弹窗
+- 一次性交互式 Keychain 提示（`feat(macos): one-time interactive Keychain prompt`）
+- 硬化权限披露和 TCC 作用域修复
+- SSH 远程设备去重修复、jq 依赖移除
+- Claude 会话刷新和速率限制窗口修复
+
+## v0.9.0 — Pie Chart & Capitalization Cleanup
+
+- 新增饼图模式（`feat: add pie chart mode with model-share breakdown`）
+- 标准化 section label 大小写
+
+## v0.8.0 — Auto-Updater
+
+- 完整的应用内自动更新系统
+- 新增 `updater/` Rust 模块（state、persistence、scheduler）
+- 新增 `stores/updater.ts` 前端 store
+- 新增 `UpdateBanner.svelte` 应用内更新横幅
+- 托盘图标红色 badge dot（更新可用时显示）
+- OS 通知（每版本去重，6h 检查间隔，指数退避）
+- Skip / Later / Update Now 操作
+- CI/CD 更新：生成 `latest.json` manifest，构建 AppImage、NSIS updater 产物
+- 新增 `docs/testing/auto-update.md` 手动测试矩阵
+
+## v0.7.x — Cache Tiers, Fast Mode, SSH Archive
+
+- Claude fast mode 作为独立模型支持（单独定价）
+- 缓存层级数据管道暴露，统一缓存定价
+- Web search 追踪
+- SSH archive 更新
+- 速率限制百分比系统统一
+
 ## v0.6.0 — Cross-Platform Architecture Overhaul
 
 > 基准对比：[Michael-OvO/TokenMonitor](https://github.com/Michael-OvO/TokenMonitor) main 分支 (v0.5.0)

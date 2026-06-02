@@ -1,0 +1,92 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Read(D:\\Github/**)",
+      "Glob(D:\\Github/**)",
+      "Grep(D:\\Github/**)",
+      "Edit",
+      "Write",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git stash *)",
+      "Bash(git show *)",
+      "Bash(git blame *)",
+      "Bash(git fetch *)",
+      "Bash(git pull *)",
+      "Bash(git push)",
+      "Bash(git push -u *)",
+      "Bash(git push origin *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(node *)",
+      "Bash(python *)",
+      "Bash(pip *)",
+      "Bash(conda *)",
+      "Bash(tsc *)",
+      "Bash(tsx *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(xargs *)",
+      "Bash(echo *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(touch *)",
+      "Bash(pwd)",
+      "Bash(which *)",
+      "Bash(where *)",
+      "Bash(cd *)",
+      "Bash([ *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(rm -r *)",
+      "Bash(rmdir *)",
+      "Bash(del *)",
+      "Bash(rd *)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean -f *)",
+      "Bash(format *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"D:\\GitHub\\ai-companion\\packages\\hook\\dist\\index.js\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"D:\\GitHub\\ai-companion\\packages\\hook\\dist\\pre-tool-use.js\""
+          }
+        ]
+      }
+    ]
+  }
+}

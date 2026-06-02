@@ -11,6 +11,10 @@ import {
   measureTargetWindowHeight,
   resolveEffectiveWindowMaxHeight,
   resolveMonitorMaxWindowHeight,
+  resolveScrollThresholdHeight,
+  SCROLL_THRESHOLD_CAP,
+  resolveFixedWindowHeight,
+  FIXED_HEIGHT_CAP,
 } from "./windowSizing.js";
 
 describe("measureTargetWindowHeight", () => {
@@ -91,5 +95,60 @@ describe("resolveMonitorMaxWindowHeight", () => {
   it("honors the configured fallback cap after subtracting the monitor margin", () => {
     expect(resolveMonitorMaxWindowHeight(3000, 1)).toBe(DEFAULT_MAX_WINDOW_HEIGHT);
     expect(resolveMonitorMaxWindowHeight(1180, 1)).toBe(1180 - WINDOW_MONITOR_MARGIN);
+  });
+});
+
+describe("resolveScrollThresholdHeight", () => {
+  it("caps the threshold at SCROLL_THRESHOLD_CAP even on large monitors", () => {
+    expect(resolveScrollThresholdHeight(2160, 1)).toBe(SCROLL_THRESHOLD_CAP);
+  });
+
+  it("returns the ratio-based value when below the cap", () => {
+    expect(resolveScrollThresholdHeight(600, 1, 0.75)).toBe(450);
+  });
+
+  it("falls back to DEFAULT_MAX_WINDOW_HEIGHT for invalid inputs", () => {
+    expect(resolveScrollThresholdHeight(Number.NaN, 1)).toBe(DEFAULT_MAX_WINDOW_HEIGHT);
+    expect(resolveScrollThresholdHeight(1080, 0)).toBe(DEFAULT_MAX_WINDOW_HEIGHT);
+  });
+});
+
+describe("resolveFixedWindowHeight", () => {
+  it("returns cap when monitor width is invalid", () => {
+    expect(resolveFixedWindowHeight(NaN, 2)).toBe(FIXED_HEIGHT_CAP);
+    expect(resolveFixedWindowHeight(0, 2)).toBe(FIXED_HEIGHT_CAP);
+    expect(resolveFixedWindowHeight(-100, 2)).toBe(FIXED_HEIGHT_CAP);
+  });
+
+  it("returns cap when scale factor is invalid", () => {
+    expect(resolveFixedWindowHeight(2560, 0)).toBe(FIXED_HEIGHT_CAP);
+    expect(resolveFixedWindowHeight(2560, NaN)).toBe(FIXED_HEIGHT_CAP);
+    expect(resolveFixedWindowHeight(2560, -1)).toBe(FIXED_HEIGHT_CAP);
+  });
+
+  it("computes floor(logicalWidth * ratio) for normal inputs", () => {
+    // 2560 physical / 2 scale = 1280 logical * 0.392 = 501.76 → capped at 500
+    expect(resolveFixedWindowHeight(2560, 2)).toBe(FIXED_HEIGHT_CAP);
+  });
+
+  it("returns ratio-based value when below cap", () => {
+    // 1920 physical / 2 scale = 960 logical * 0.392 = 376.32 → floor = 376
+    expect(resolveFixedWindowHeight(1920, 2)).toBe(376);
+  });
+
+  it("respects custom cap and ratio", () => {
+    // 1920 / 1 = 1920 * 0.5 = 960 → capped at 400
+    expect(resolveFixedWindowHeight(1920, 1, 400, 0.5)).toBe(400);
+    // 800 / 1 = 800 * 0.5 = 400 → exactly at cap
+    expect(resolveFixedWindowHeight(800, 1, 400, 0.5)).toBe(400);
+    // 600 / 1 = 600 * 0.5 = 300 → below cap
+    expect(resolveFixedWindowHeight(600, 1, 400, 0.5)).toBe(300);
+  });
+
+  it("handles scale factor of 1 (non-retina)", () => {
+    // 1440 / 1 = 1440 * 0.392 = 564.48 → capped at 500
+    expect(resolveFixedWindowHeight(1440, 1)).toBe(FIXED_HEIGHT_CAP);
+    // 1000 / 1 = 1000 * 0.392 = 392 → below cap
+    expect(resolveFixedWindowHeight(1000, 1)).toBe(392);
   });
 });

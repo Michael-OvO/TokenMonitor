@@ -15,6 +15,7 @@ use crate::models::*;
 use crate::statusline::windows::ClaudePlanTier;
 use crate::usage::integrations::UsageIntegrationSelection;
 use crate::usage::parser::{UsageParser, UsageQueryDebugReport};
+use crate::usage::payload_disk_cache::PayloadDiskCache;
 use crate::usage::ssh_remote::{SshCacheManager, SshHostConfig};
 use serde::Serialize;
 use std::sync::atomic::AtomicBool;
@@ -50,6 +51,7 @@ pub struct AppState {
     /// Plan tier used to compute the rolling-window utilization percentages.
     /// Updated by `set_claude_plan_tier`; defaults to `Pro` for new installs.
     pub claude_plan_tier: Arc<RwLock<ClaudePlanTier>>,
+    pub payload_disk_cache: Arc<RwLock<Option<PayloadDiskCache>>>,
 }
 
 impl AppState {
@@ -70,6 +72,7 @@ impl AppState {
             rate_limits_enabled: Arc::new(AtomicBool::new(false)),
             usage_access_enabled: Arc::new(AtomicBool::new(false)),
             claude_plan_tier: Arc::new(RwLock::new(ClaudePlanTier::default())),
+            payload_disk_cache: Arc::new(RwLock::new(None)),
         }
     }
 }

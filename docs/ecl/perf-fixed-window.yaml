@@ -1,0 +1,185 @@
+ecl_version: "1.0"
+feature: "perf-parallel-io-and-fixed-window-height"
+status: completed
+created: 2026-05-20
+updated: 2026-05-20
+
+prompt_calibration:
+  raw_input: "性能优化（并行文件读取 + entries_cache）+ 固定窗口高度"
+  intent_decomposition:
+    total_intents: 2
+    total_tracks: 2
+    tracks:
+      - track_id: T1
+        name: "Parallel I/O + entries_cache"
+        priority: 1
+        intents:
+          - raw: "每一个文件最多读取一次，并且所有的文件可以并行读取"
+            type: performance
+        relationship_to_other_tracks:
+          T2: independent
+      - track_id: T2
+        name: "Fixed window height"
+        priority: 2
+        intents:
+          - raw: "统一窗口高度为 min(500, floor(monitorLogicalWidth × 0.392))，始终启用滚动"
+            type: feature
+        relationship_to_other_tracks:
+          T1: independent
+
+# ============================================================
+# REQUIREMENTS
+# ============================================================
+requirements:
+  # --- T1: Performance ---
+  - id: REQ-T1-1
+    text: "Each file stat'd at most once per IPC request via rayon par_iter"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "Phase 1 uses files.par_iter() for parallel stat"
+      - "Phase 2 classifies hits/misses with single file_cache lock"
+      - "Phase 3 uses to_parse.par_iter() for parallel file parse"
+      - "Phase 4 batch-updates file_cache in single lock"
+      - "All 449 Rust tests pass"
+
+  - id: REQ-T1-2
+    text: "Request-scoped entries_cache eliminates redundant load_entries calls within a single IPC request"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "load_entries() write-through populates entries_cache"
+      - "load_entries_cached() returns Arc<LoadedEntries> from cache"
+      - "entries_cache cleared after payload stored (end of request)"
+      - "have_sources_changed() invalidates stale cache"
+      - "Test: load_entries_populates_entries_cache_for_subsequent_cached_calls passes"
+
+  - id: REQ-T1-3
+    text: "Device aggregation functions run concurrently via tokio::join!"
+    status: verified
+    confidence: 0.90
+    acceptance_criteria:
+      - "build_device_breakdown, build_device_time_chart, build_included_devices run in tokio::join!"
+      - "Each uses load_entries_cached to avoid re-scanning"
+
+  # --- T2: Fixed window height ---
+  - id: REQ-T2-1
+    text: "Window height is fixed to min(500, floor(physicalWidth / scaleFactor * 0.392))"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "resolveFixedWindowHeight computes correct value"
+      - "Invalid inputs (NaN, 0, negative) return cap (500)"
+      - "6 unit tests in windowSizing.test.ts pass"
+
+  - id: REQ-T2-2
+    text: "Fixed height mode disables dynamic content-following resize"
+    status: verified
+    confidence: 0.90
+    acceptance_criteria:
+      - "syncSizeAndVerify applies fixedWindowH when > 0"
+      - "animateWindowHeight returns early when fixedWindowH > 0"
+      - "followContentDuringTransition returns early when fixedWindowH > 0"
+      - "resizeToContent returns early when fixedWindowH > 0"
+      - "handleBreakdownAccordionToggle returns early when fixedWindowH > 0"
+      - "Scroll lock enabled on fixed-height-init"
+
+# ============================================================
+# BUG FIXES (discovered post-implementation)
+# ============================================================
+bug_fixes:
+  - id: BUG-001
+    date: 2026-05-20
+    description: "load_entries() did not write-through to entries_cache"
+    root_cause: |
+      get_hourly/get_daily etc call self.load_entries() which populated
+      file_cache but NOT entries_cache. Subsequent load_entries_cached()
+      calls (from attach_local_stats, device_aggregation) missed the cache
+      and re-scanned all 14,733 files.
+    fix: |
+      Added write-through at end of load_entries(): populates entries_cache
+      via cache.entry(key).or_insert_with(). Uses same key format as
+      load_entries_cached so they share the cache transparently.
+    files_changed:
+      - "src-tauri/src/usage/parser.rs:1318-1332"
+    test: "cargo test load_entries_populates_entries_cache_for_subsequent_cached_calls"
+
+  - id: BUG-002
+    date: 2026-05-20
+    description: "Fixed window height blocked by initialContentReady shrink guard"
+    root_cause: |
+      applyWindowHeight() has a guard: if (!initialContentReady && disposition === "shrink") return.
+      When fixedWindowH < current window height (e.g. 376 < 500 at startup),
+      the disposition is "shrink" and gets blocked before initialContentReady
+      is set, so the window never reaches its fixed height.
+    fix: |
+      Changed condition to: if (fixedWindowH <= 0 && !initialContentReady && disposition === "shrink")
+      so that fixed-height mode bypasses the shrink protection entirely.
+    files_changed:
+      - "src/lib/resizeOrchestrator.ts:298"
+    test: "Visual verification: window stays at fixed height on cold launch"
+
+# ============================================================
+# FEATURE GUARD
+# ============================================================
+feature_guard:
+  generated: "2026-05-20"
+  guards:
+    - id: GUARD-001
+      feature: "T1 - Parallel I/O + entries_cache"
+      description: "Rayon parallel file stat/parse and write-through entries_cache"
+      key_files:
+        - "src-tauri/src/usage/parser.rs"
+        - "src-tauri/src/commands/usage_query.rs"
+        - "src-tauri/src/usage/device_aggregation.rs"
+      invariants:
+        - "load_integration_entries_with_debug uses par_iter for stat and parse phases"
+        - "load_entries() populates entries_cache via write-through (or_insert_with)"
+        - "load_entries_cached() returns Arc<LoadedEntries> from entries_cache"
+        - "finalize_usage_payload uses tokio::join! for 3 device functions"
+        - "entries_cache cleared after parser.store_cache() in get_usage_data_inner"
+      verification:
+        command: "cd src-tauri && cargo test load_entries_populates"
+        expected: "1 passed"
+      status: active
+
+    - id: GUARD-002
+      feature: "T2 - Fixed window height"
+      description: "Window height locked to min(500, logicalWidth*0.392) with scroll always on"
+      key_files:
+        - "src/lib/windowSizing.ts"
+        - "src/lib/resizeOrchestrator.ts"
+      invariants:
+        - "resolveFixedWindowHeight exported from windowSizing.ts"
+        - "refreshWindowMetrics computes fixedWindowH and calls applyWindowHeight + scroll lock"
+        - "fixedWindowH > 0 guards block animateWindowHeight, followContentDuringTransition, resizeToContent, handleBreakdownAccordionToggle"
+        - "applyWindowHeight does NOT block shrink when fixedWindowH > 0 (bypasses initialContentReady guard)"
+        - "syncSizeAndVerify re-applies fixedWindowH when > 0"
+      verification:
+        command: "npx vitest run src/lib/windowSizing.test.ts"
+        expected: "all pass"
+      status: active
+
+# ============================================================
+# DECISIONS LOG
+# ============================================================
+decisions:
+  - id: DEC-001
+    date: 2026-05-20
+    decision: "Use rayon par_iter for file I/O parallelism (not tokio::spawn_blocking)"
+    rationale: "File stat/parse is CPU-bound after the syscall. Rayon's work-stealing pool is ideal. Avoids async function coloring in parser.rs which is sync."
+
+  - id: DEC-002
+    date: 2026-05-20
+    decision: "Write-through cache (load_entries populates entries_cache) rather than read-through only in load_entries_cached"
+    rationale: "get_hourly/get_daily call load_entries directly (preserving test compatibility). Write-through ensures their results are available to subsequent load_entries_cached calls without architectural changes to the aggregation methods."
+
+  - id: DEC-003
+    date: 2026-05-20
+    decision: "Fixed height = min(500, floor(logicalWidth * 0.392)), scroll always on"
+    rationale: "User prefers predictable window size over content-adaptive height. 0.392 ratio tested on multiple monitor sizes. Cap at 500 prevents excessive height on ultra-wide displays."
+
+  - id: DEC-004
+    date: 2026-05-20
+    decision: "Bypass initialContentReady shrink guard for fixed height mode"
+    rationale: "The guard prevents premature shrinking before chart renders. But in fixed-height mode, the height IS the target — shrinking to it is intentional, not a premature collapse."

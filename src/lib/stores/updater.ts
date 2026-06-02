@@ -27,6 +27,7 @@ export type UpdaterSnapshot = {
   progress: DownloadProgress | null;
   currentVersion: string;
   installMode: InstallMode;
+  updateChannel: string;
 };
 
 const INITIAL: UpdaterSnapshot = {
@@ -39,6 +40,7 @@ const INITIAL: UpdaterSnapshot = {
   progress: null,
   currentVersion: "0.0.0",
   installMode: "auto",
+  updateChannel: "main",
 };
 
 export const updaterStore = writable<UpdaterSnapshot>(INITIAL);
@@ -52,6 +54,7 @@ type RustUpdaterState = {
   autoCheckEnabled: boolean;
   progress: DownloadProgress | null;
   dismissedForSession: boolean;
+  updateChannel: string;
 };
 
 type StatusPayload = {
@@ -71,6 +74,7 @@ function project(payload: StatusPayload): UpdaterSnapshot {
     progress: payload.state.progress,
     currentVersion: payload.currentVersion,
     installMode: payload.installMode,
+    updateChannel: payload.state.updateChannel ?? "main",
   };
 }
 
@@ -113,4 +117,24 @@ export async function dismissBanner(): Promise<void> {
 
 export async function setAutoCheck(enabled: boolean): Promise<void> {
   await invoke("updater_set_auto_check", { enabled });
+}
+
+export async function setChannel(channel: string): Promise<void> {
+  await invoke("updater_set_channel", { channel });
+}
+
+export type ChannelInfo = {
+  id: string;
+  label: string;
+  owner: string;
+  repo: string;
+  hasReleases: boolean;
+};
+
+export async function discoverChannels(): Promise<ChannelInfo[]> {
+  return invoke<ChannelInfo[]>("updater_discover_channels");
+}
+
+export async function fetchChannelPubkey(channel: string): Promise<string> {
+  return invoke<string>("updater_fetch_channel_pubkey", { channel });
 }

@@ -1,0 +1,209 @@
+ecl_version: "1.0"
+feature: "cursor-global-cache-reuse"
+status: phase-7-probe-complete
+created: 2026-05-31
+updated: 2026-06-01
+related_features:
+  - cursor-async-fetch.yaml
+  - cache-warmup.yaml
+  - payload-disk-cache.yaml
+owner: TzJ2006
+
+# ─── Conversation State ──────────────────────────────────────
+pending_input:
+  phase: 2
+  question: "Profiling (PROBE-001) is in. Confirm range strategy = adaptive-widening (best cold-start) and lock design to proceed to Phase 3+?"
+  context: "PROBE-001: single-page ~0.2s; year (2 pages, 138 ev) ~0.5s on this light account; ~0.25s/page, heavy ~5s at 20-page cap. Cold-start latency tracks the fetched range, so adaptive widening pays only for the opened period. TTL not perf-critical -> 120s default (DEC-002)."
+  type: approval
+  options: ["confirm adaptive-widening + proceed", "switch to always-widest", "adjust"]
+
+# ─── Prompt Calibration (Phase 0) ─────────────────────────────
+prompt_calibration:
+  raw_input: "如果cursor 的缓存是全局的话，那可以只缓存一次，然后后面直接调用缓存的结果修改即可。"
+  status: completed
+  intent_decomposition:
+    total_intents: 1
+    total_tracks: 1
+    tracks:
+      - track_id: T1
+        name: "Global cursor cache: fetch-once + per-period reuse"
+        priority: 1
+        intents:
+          - raw: "缓存一次，后续直接调用缓存结果过滤复用"
+            type: refactor
+  tracks:
+    T1:
+      calibrated_scenario: |
+        The Cursor remote-entries cache is currently a global single-slot
+        Option<CachedCursorRemote> that is (a) consumed on read via take(),
+        (b) carries NO since/range tag, and (c) gates re-fetch only on
+        "is there any cache?" (needs_cursor_remote_fetch = auth && !has_cache),
+        not "does the cache cover the requested range?". This causes a
+        narrow->wide data-loss bug (a day-range cache reused by a year view
+        shows only today) and forces redundant per-period API calls, and
+        interacts badly with cache warmup (which sweeps every period/offset).
+
+        Goal: fetch Cursor remote entries ONCE into a non-consuming, range-tagged
+        global cache, and serve every period view (5h/day/week/month/year and
+        historical offsets) by filtering the single cached dataset by the
+        request's since-bound — re-fetching only when the requested range is
+        not already covered.
+      intent_dimensions:
+        task: { status: present, value: "Make cursor remote cache fetch-once + non-consuming + range-aware; serve periods by filtering" }
+        input: { status: present, value: "Cursor API usage events (ParsedEntry) within a fetched [since,now] range" }
+        output: { status: present, value: "Per-period ParsedEntry subsets derived from the single cache" }
+        constraints: { status: enriched, value: "Cursor API None-since defaults to last 24h (not all-time); API capped at 20 pages x 100 = 2000 events; must not regress async cold-start behavior (cursor-async-fetch REQ-001/004)" }
+        context: { status: enriched, value: "parser.rs cursor_remote_cache (take/store/has), usage_query.rs async spawn, cache_warmup.rs full sweep, period.rs resolve_period_bounds" }
+        memory: { status: present, value: "Prior conversation established the narrow->wide data-loss race; daily since=today, yearly since=Jan1" }
+        success_criteria: { status: missing, resolved: "pending Phase 2 answers: range strategy + TTL" }
+        examples: { status: present, value: "Switch cursor tab day->year within 120s must show full-year data, not today-only" }
+  context_enrichment:
+    codebase: |
+      - parser.rs:460,595-619 cursor_remote_cache: Mutex<Option<CachedCursorRemote>>; take() consumes; has_cursor_remote_cache() = stored within 120s TTL.
+      - parser.rs:1323-1353 load_cursor_entries_with_debug returns cache entries WITHOUT re-filtering by current since; needs_cursor_remote_fetch ignores range.
+      - usage_query.rs:617-666 spawns background fetch(since=period.start); on done store_cursor_remote + clear_payload_cache + emit data-updated.
+      - cursor_parser.rs:603-613 cursor_api_time_range_ms(None) => start = now-24h (None != all-time).
+      - cache_warmup.rs:47-100 build_warmup_keys sweeps providers x [5h,day,week,month,year] x historical offsets, all calling get_usage_data_inner (shares the global cache).
+    git: "Recent commit 6d0e3e6 payload disk cache + window cap; cursor-async-fetch implemented 2026-05-22."
+    conversation: "This turn's prior analysis identified the global, untagged, consume-once cache and the narrow->wide reuse data loss."
+  questions_asked: 1
+  questions_skipped: "Consumption-model change (take->peek+filter) and disk-persistence are implementation details decided in plan, not user-facing."
+
+# ─── Original Context ──────────────────────────────────────────
+user_scenario: |
+  如果cursor 的缓存是全局的话，那可以只缓存一次，然后后面直接调用缓存的结果修改即可。
+
+# ─── Reuse Discovery (Phase 1) ─────────────────────────────────
+reuse_discovery:
+  scanned_ecls:
+    - cursor-async-fetch.yaml
+    - cache-warmup.yaml
+    - payload-disk-cache.yaml
+  matches:
+    - intent: "background cursor remote fetch + event-driven merge"
+      existing: { ecl: "cursor-async-fetch.yaml", item: "MOD-002", path: "src-tauri/src/commands/usage_query.rs" }
+      classification: reuse-adapt
+      action: "Keep async spawn + data-updated emit; change the cache it writes to (range-tagged, non-consuming) and the gate (needs_fetch becomes range-aware)."
+    - intent: "global cursor remote entries cache (store/take/has)"
+      existing: { ecl: "cursor-async-fetch.yaml", item: "MOD-001", path: "src-tauri/src/usage/parser.rs" }
+      classification: reuse-extend
+      action: "Extend CachedCursorRemote with a covered-range field; replace take() with non-consuming read + filter; make has/needs range-aware."
+    - intent: "full period/offset sweep reuses one cursor dataset"
+      existing: { ecl: "cache-warmup.yaml", item: "cache_warmup.rs", path: "src-tauri/src/usage/cache_warmup.rs" }
+      classification: reuse-direct
+      action: "No warmup code change needed if the cache becomes widest-range + non-consuming; warmup keys naturally hit the cache. Verify no per-period re-fetch storm."
+
+# ─── Requirements (Phase 2: hypotheses) ────────────────────────
+requirements:
+  - id: REQ-001
+    text: "Cursor remote entries are fetched once and cached non-destructively (read does not consume)."
+    status: hypothesis
+    confidence: 0.85
+    source: user-stated
+    priority: must
+    acceptance_criteria:
+      - "Reading the cache for one period does not empty it for the next period."
+    challenges:
+      - "Current take() is consume-once by design to 'merge once' — must ensure non-consuming read still merges correctly into payloads."
+
+  - id: REQ-002
+    text: "Cached entries are tagged with the time range (since..now) they cover."
+    status: hypothesis
+    confidence: 0.9
+    source: user-stated
+    priority: must
+    acceptance_criteria:
+      - "CachedCursorRemote records the covered_since (and fetched-at) used for the fetch."
+
+  - id: REQ-003
+    text: "Period views derive from the single cache by filtering on the request's since-bound; re-fetch only when the requested range is NOT covered."
+    status: hypothesis
+    confidence: 0.8
+    source: user-stated
+    priority: must
+    acceptance_criteria:
+      - "If requested since >= cached covered_since (request range is a subset), serve from cache with no API call."
+      - "Returned entries are filtered to entry.timestamp.date_naive() >= requested since."
+
+  - id: REQ-004
+    text: "The narrow->wide cross-period data-loss bug is eliminated."
+    status: hypothesis
+    confidence: 0.85
+    source: probe-result
+    priority: must
+    acceptance_criteria:
+      - "After viewing day (since=today), switching to year within TTL shows full-year cursor data, never today-only."
+
+  - id: REQ-005
+    text: "Cache warmup reuses the single cursor cache instead of triggering per-period re-fetch storms."
+    status: hypothesis
+    confidence: 0.7
+    source: inferred
+    priority: should
+    acceptance_criteria:
+      - "A full warmup sweep issues at most ~1 cursor API fetch (widest range), not one per period/offset."
+
+  - id: REQ-006
+    text: "Refresh cadence keeps cursor data acceptably fresh (cache is not stuck stale forever)."
+    status: hypothesis
+    confidence: 0.6
+    source: critic-proposed
+    priority: must
+    challenges:
+      - "TTL VALUE deferred to profiling (DEC-002); the mechanism (single tunable TTL + non-consuming read) is fixed. Must not be stuck-stale-forever."
+
+decisions:
+  - id: DEC-001
+    date: 2026-05-31
+    phase: 2
+    decision: "Corrected baseline: cursor remote fetch is period-scoped, not all-time."
+    rationale: |
+      usage_query.rs:636 passes since=resolve_period_bounds(period,offset).start;
+      period.rs day->today, year->Jan1; cursor_api_time_range_ms uses since as
+      startDate (None->now-24h only in tests). Each period view triggers its own
+      FULL re-fetch of its [since,now] range (no delta), so switching tabs =
+      repeated API calls. The global consume-once + untagged cache also yields a
+      TTL-race narrow->wide data-loss path. Caching one wide range + filtering
+      removes both the redundant per-period fetches and the data-loss race.
+    reversible: false
+  - id: DEC-002
+    date: 2026-05-31
+    phase: 2
+    decision: "Cache refresh cadence (TTL) deferred to profiling; not fixed at plan time."
+    rationale: "User: re-fetch interval should be decided by later profiling. Plan keeps TTL as a single tunable constant; Phase 7 adds a profiling probe to inform it."
+    reversible: true
+  - id: DEC-003
+    date: 2026-06-01
+    phase: 7
+    decision: "Range strategy = adaptive-widening, justified by PROBE-001."
+    rationale: "Cold-start latency tracks fetched range (page count). Adaptive widening pays only for the opened period (day ~0.2s) and widens lazily for year; always-widest would force full-year latency (~5s heavy) even when opening the day tab. Cache must be range-tagged (covered_since) regardless. TTL stays 120s (cheap fetches)."
+    reversible: true
+
+# ─── Probes (Phase 7: feasibility / profiling) ─────────────────
+probes:
+  - id: PROBE-001
+    target: REQ-003
+    type: profiling
+    question: "Cold-start cursor remote fetch latency for day/month/year (informs TTL + range strategy)."
+    method: |
+      Shell probe (no project-code change, no compile): read IDE bearer token from
+      state.vscdb via sqlite3, replicate fetch_cursor_usage_events — paginated POST
+      to api2.cursor.sh GetFilteredUsageEvents, Connect-Protocol-Version:1, bearer auth.
+      App pagination semantics matched: hasNextPage if present, else page*100<total, cap 20.
+      Per-page curl timing (time_total, time_appconnect); conn-reuse_est subtracts
+      redundant per-page TLS to approximate Rust reqwest connection pooling.
+    date: 2026-06-01
+    environment: "This machine, logged-in Cursor IDE (IdeBearer auth). LIGHT account: 138 events YTD."
+    result: |
+      Per-page round-trip ~0.16-0.30s (TLS+RTT dominates; server time small).
+      day:   1 page, 0 events (post-midnight rollover), ~0.19-0.24s
+      month: 1 page, 0 events,                          ~0.16-0.17s
+      year:  2 pages, 138 events (total=138),  raw ~0.58-0.60s, conn-reuse_est ~0.47-0.51s
+      Cost ~ ceil(events/100) pages x ~0.25s. Extrapolated heavy account:
+      500 ev -> 5 pages ~1.3s; 1000 -> ~2.5s; 2000 (20-page cap) ~5s
+      (consistent with the 8.4s figure in cursor-async-fetch.yaml under heavier load/network).
+    verdict: feasible
+    implications:
+      - "Fetches are cheap (light account); TTL is NOT performance-critical. 120s default justified; the real win is correctness (kill narrow->wide data-loss race) + removing redundant per-tab-switch re-fetches."
+      - "Cold-start latency scales with fetched RANGE (page count) -> adaptive-widening minimizes cold start (DEC-003)."
+      - "Pagination fidelity matters: must honor hasNextPage OR page*100<total, else multi-page ranges (year) silently truncate — a latent bug class to keep in mind for the filter/serve path."

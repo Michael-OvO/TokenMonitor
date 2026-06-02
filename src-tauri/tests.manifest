@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!--
+    Activates Common-Controls v6 for cargo-test binaries. wry/tao statically
+    import comctl32 v6 APIs (SetWindowSubclass, TaskDialogIndirect, ...) which
+    are absent from comctl32 v5; without this manifest the test harness fails to
+    load on Windows with 0xC0000139 STATUS_ENTRYPOINT_NOT_FOUND. tauri_build
+    embeds an equivalent manifest into the app binary, but not into test bins.
+  -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>
