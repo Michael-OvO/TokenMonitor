@@ -236,7 +236,7 @@ jobs:
             exit 1
           fi
 
-          base="https://github.com/Michael-OvO/TokenMonitor/releases/download/${TAG}"
+          base="https://github.com/${{ github.repository }}/releases/download/${TAG}"
 
           read_sig() {
             if [ -n "$1" ] && [ -f "$1" ]; then cat "$1"; else echo ""; fi
@@ -283,6 +283,11 @@ jobs:
 
           cat latest.json
 
+      # ── Emit updater-pubkey.txt so fork-channel clients can fetch this fork's key ─
+      - name: Write updater pubkey
+        if: vars.TAURI_SIGNING_PUBLIC_KEY != ''
+        run: printf '%s' "${{ vars.TAURI_SIGNING_PUBLIC_KEY }}" > updater-pubkey.txt
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -293,3 +298,4 @@ jobs:
             artifacts/installers-windows/*
             artifacts/installers-linux/*
             latest.json
+            updater-pubkey.txt
