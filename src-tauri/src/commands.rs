@@ -7,6 +7,7 @@ pub mod ssh;
 pub mod statusline;
 pub mod tray;
 pub mod updater;
+pub mod usage_io;
 pub mod usage_query;
 
 pub use tray::sync_tray_title;

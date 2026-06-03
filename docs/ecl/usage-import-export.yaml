@@ -1,0 +1,209 @@
+ecl_version: "1.0"
+feature: "usage-import-export"
+status: completed
+created: 2026-06-02
+updated: 2026-06-02
+
+prompt_calibration:
+  raw_input: "增加一个新功能，支持导入和导出AI用量。注意，在导入的时候，要注意去重。"
+  intent_decomposition:
+    total_intents: 2
+    total_tracks: 1
+    tracks:
+      - track_id: T1
+        name: "Usage import/export with dedup"
+        priority: 1
+        intents:
+          - raw: "导出 AI 用量到可移植文件"
+            type: feature
+          - raw: "导入 AI 用量并去重（不重复统计）"
+            type: feature
+  tracks:
+    T1:
+      calibrated_scenario: |
+        让用户把本地 + 远程归档的 token 用量导出成单个可移植 JSON 文件
+        （用于备份 / 迁移到新机器），并能在另一台机器或重装后导入合并。
+        导入必须幂等去重：重复导入同一文件不得造成重复统计。
+      intent_dimensions:
+        task: { status: present, value: "Export archive to JSON; import + merge with dedup" }
+        input: { status: enriched, value: "ArchivedHourly records from usage-archive/ (local + devices)" }
+        output: { status: enriched, value: "Portable versioned JSON file; merged archive on import" }
+        constraints: { status: validated, value: "Idempotent import (no double counting); preserve frontier invariant" }
+        context: { status: enriched, value: "Builds on usage-data-archive; no new Tauri plugins" }
+        success_criteria: { status: resolved, value: "Re-import = no-op; fresh-machine import surfaces data in UI" }
+
+decisions:
+  - id: DEC-001
+    date: 2026-06-02
+    decision: "Export/import operate on the ArchivedHourly aggregate layer, not raw JSONL"
+    rationale: |
+      The archive (usage-archive/) is already the durable, provider-agnostic,
+      cost-free record with a documented compact schema. Exporting raw provider
+      JSONL would be lossy/format-coupled and would re-introduce per-provider
+      parsing on import. Aggregates round-trip losslessly via existing serde.
+  - id: DEC-002
+    date: 2026-06-02
+    decision: "Dedup = field-wise MAX merge keyed by (source_key, d, h, mk, p)"
+    rationale: |
+      The bucket (source, date, hour, model_key, provider) is the natural identity
+      of an archived aggregate. Field-wise max makes import IDEMPOTENT: re-importing
+      the same export changes nothing (max(x,x)=x); importing a partial-hour backup
+      onto a machine that accumulated more keeps the larger (no loss, no double).
+      SUM was rejected: it would double-count on re-import, violating "去重".
+  - id: DEC-003
+    date: 2026-06-02
+    decision: "Import via HTML <input type=file>; Export via native Save dialog (tauri-plugin-dialog)"
+    rationale: |
+      Import uses an HTML <input type=file> + File.text() (native picker in webview,
+      reliable on all 3 platforms; no plugin needed). Export originally wrote to the
+      OS download dir, but the user wants a native chooser to pick the destination,
+      so tauri-plugin-dialog was added: the frontend calls save({defaultPath,filters})
+      to get a path (null = cancelled) and Rust writes the JSON there. Capability:
+      "dialog:allow-save". Note: revealItemInDir was dropped (it was never granted in
+      capabilities and is redundant once the user picks the location).
+  - id: DEC-004
+    date: 2026-06-02
+    decision: "Import advances each source frontier to max completed imported hour"
+    rationale: |
+      load_entries only reads the archive when a frontier exists and only for hours
+      <= frontier (live owns hours after). Imported historical hours are invisible
+      unless the frontier covers them. Advancing to the max COMPLETED (strictly
+      before current local hour) imported hour surfaces them without freezing the
+      live current hour. Local completed hours are flushed to the archive first
+      (reusing archive_local_usage) so advancing never hides un-archived live data.
+
+requirements:
+  - id: REQ-001
+    text: "Export produces a single versioned JSON file containing all archived sources"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "File has format='tokenmonitor-usage-export', format_version, exported_at, app_version"
+      - "One block per source (local:claude, local:codex, device:*) with raw ArchivedHourly records"
+      - "File written to OS download dir; path returned and revealed in file manager"
+
+  - id: REQ-002
+    text: "Import merges records into the archive with idempotent dedup"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "Records keyed by (source, d, h, mk, p); collisions resolved by field-wise max"
+      - "Re-importing the same file is a no-op (asserted by unit test)"
+      - "Source dirs rewritten atomically (temp+rename); existing duplicate lines collapsed"
+      - "Unknown/invalid source_key rejected (no path traversal)"
+
+  - id: REQ-003
+    text: "Imported historical data is visible in the UI without restart"
+    status: verified
+    confidence: 0.9
+    acceptance_criteria:
+      - "Frontier advanced to max completed imported hour per source"
+      - "Local completed hours flushed before merge (no live data hidden)"
+      - "Caches invalidated: parser payload+entries AND no-TTL disk payload cache"
+      - "data-updated emitted so stores refetch"
+
+  - id: REQ-004
+    text: "Updater Install prompt occupies a row inside the Updates card under Last Checked"
+    status: verified
+    confidence: 0.95
+    acceptance_criteria:
+      - "When an update is available, a row below Last Checked shows Install (or Download) + Cancel"
+      - "Row reflects installing/progress/error states; occupies layout space (not an overlay)"
+      - "Redundant .update-bottom banner removed from Settings; App top banner unchanged"
+
+feature_guard:
+  generated: "2026-06-02"
+  guards:
+    - id: GUARD-001
+      feature: "Usage import/export with dedup"
+      description: "Export archive to portable JSON; import + merge with idempotent dedup"
+      key_files:
+        - "src-tauri/src/usage/archive.rs"
+        - "src-tauri/src/commands/usage_io.rs"
+        - "src-tauri/src/lib.rs"
+        - "src/lib/components/Settings.svelte"
+        - "src/lib/stores/usageIo.ts"
+      invariants:
+        - "Import dedup is field-wise MAX keyed by (source_key, d, h, mk, p) — idempotent"
+        - "import_source rewrites monthly JSONL atomically (temp+rename)"
+        - "Imported source_key is validated against ^(local:(claude|codex)|device:[A-Za-z0-9._-]+)$"
+        - "Import advances frontier only to COMPLETED (strictly before current local hour) imported hours"
+        - "After import: parser.clear_payload_cache() AND AppState::clear_payload_disk_cache() are both called (see payload-disk-cache INV-006)"
+        - "Export/import never call ArchiveManager::reset() or parser.clear_cache() (would delete the archive)"
+      verification:
+        # On Windows hosts scope to --lib to avoid the bin-target manifest
+        # conflict (CVT1100) with TM_EMBED_TEST_MANIFEST=1.
+        command: "cd src-tauri && cargo test archive::tests"
+        expected: "all archive tests pass (incl. import idempotency + roundtrip)"
+      status: active
+
+dedup_strategy: |
+  Two complementary mechanisms (see [[usage-archive]] and DEC-002):
+  - Within-source identity: (date, hour, model_key, provider). Two records with
+    the same identity are the same bucket.
+  - Merge rule on collision: field-wise MAX of token counts. Idempotent — the
+    defining property the user asked for ("注意去重"). Re-import is a no-op.
+  - Frontier (time-boundary) still governs archive-vs-live disjointness at query
+    time; import advances it conservatively to completed hours only.
+
+confrontation:
+  red_team:
+    - id: ATK-001
+      scenario: "Re-importing the same export double counts usage"
+      severity: high
+    - id: ATK-002
+      scenario: "Importing advances frontier over the live current hour and freezes it"
+      severity: high
+    - id: ATK-003
+      scenario: "Malicious source_key (e.g. ../../) escapes the archive dir on rewrite"
+      severity: high
+    - id: ATK-004
+      scenario: "Two different active machines share source 'local:claude' for the same hour"
+      severity: medium
+    - id: ATK-005
+      scenario: "App crashes mid-rewrite leaving a partial monthly JSONL"
+      severity: medium
+    - id: ATK-006
+      scenario: "Imported data not reflected in UI because caches stayed warm"
+      severity: medium
+  blue_team:
+    - attack: ATK-001
+      verdict: defended
+      mitigation: "Field-wise max merge keyed by bucket identity → idempotent. Unit test asserts re-import is a no-op."
+    - attack: ATK-002
+      verdict: mitigated
+      mitigation: "Frontier advanced only to hours strictly before the current local hour; current hour never covered, live keeps updating."
+    - attack: ATK-003
+      verdict: defended
+      mitigation: "source_key validated by regex before any filesystem op; only local:claude|local:codex|device:<safe> accepted."
+    - attack: ATK-004
+      verdict: accepted
+      mitigation: |
+        Aggregate-level merge cannot distinguish same-bucket activity from two
+        machines; max under-counts rather than double-counts (safer, matches dedup
+        intent). Recommended path for combining two ACTIVE machines is SSH device
+        sync (device:* sources), not file import. Documented limitation."
+    - attack: ATK-005
+      verdict: mitigated
+      mitigation: "Per-month atomic write (temp file + rename); a crash leaves the previous file intact."
+    - attack: ATK-006
+      verdict: defended
+      mitigation: "Import clears parser payload+entries cache and the no-TTL disk payload cache, then emits data-updated."
+
+risk_register:
+  - risk: "Large archives produce a large export file"
+    severity: low
+    mitigation: "~100 bytes/record, hourly granularity. Years of data = single-digit MB."
+  - risk: "Export omits the current incomplete hour"
+    severity: low
+    mitigation: "By design — archive holds completed hours only; the current hour is transient live data."
+
+implementation_order:
+  - step: 1
+    description: "archive.rs: ArchivedHourly::merge_max_from, ImportSourceStats, list_sources, read_raw, import_source, advance_frontier, atomic jsonl rewrite + tests"
+  - step: 2
+    description: "commands/usage_io.rs: export_usage_data + import_usage_data; register in lib.rs; archive_local_usage -> pub(crate)"
+  - step: 3
+    description: "Frontend: stores/usageIo.ts + Settings.svelte Import/Export buttons"
+  - step: 4
+    description: "Updater in-card Install/Cancel row (REQ-004)"

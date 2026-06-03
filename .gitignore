@@ -48,3 +48,9 @@ src-tauri/clippy_errors.txt
 # User-specific Claude Code settings
 .claude/settings.local.json
 .devcompanion/
+
+# Profiler build cache & profiling scratch (fork-only)
+profiler/target/
+profiling/
+__pycache__/
+*.pyc

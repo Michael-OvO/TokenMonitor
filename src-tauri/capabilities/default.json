@@ -20,6 +20,7 @@
     "autostart:default",
     "updater:default",
     "notification:allow-is-permission-granted",
+    "dialog:allow-save",
     {
       "identifier": "opener:allow-open-url",
       "allow": [

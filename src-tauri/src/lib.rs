@@ -125,6 +125,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .setup(|app| {
             let setup_t0 = std::time::Instant::now();
@@ -454,6 +455,8 @@ pub fn run() {
             commands::config::start_cache_warmup,
             commands::config::cancel_cache_warmup,
             commands::config::get_warmup_status,
+            commands::usage_io::export_usage_data,
+            commands::usage_io::import_usage_data,
         ])
         .run(tauri::generate_context!())
         .expect("error running TokenMonitor");
@@ -683,7 +686,7 @@ async fn background_loop(app: tauri::AppHandle) {
 
 /// Archive completed hours for all local providers.
 /// Fast no-op when no new hours have completed since the last archive.
-fn archive_local_usage(state: &AppState) {
+pub(crate) fn archive_local_usage(state: &AppState) {
     let Some(archive) = state.parser.archive() else {
         return;
     };

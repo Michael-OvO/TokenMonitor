@@ -78,9 +78,9 @@
   {:else}
     <button class="warmup-btn" type="button" onclick={startWarmup}>
       {#if doneCount !== null}
-        Cached {doneCount} views
+        Reloaded {doneCount}
       {:else}
-        Rebuild Cache
+        Reload
       {/if}
     </button>
   {/if}
