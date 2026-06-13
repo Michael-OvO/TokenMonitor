@@ -764,6 +764,7 @@ pub(crate) fn archive_local_usage(state: &AppState) {
     for (provider, integration_id) in [
         ("claude", usage::integrations::UsageIntegrationId::Claude),
         ("codex", usage::integrations::UsageIntegrationId::Codex),
+        ("cursor", usage::integrations::UsageIntegrationId::Cursor),
     ] {
         let source_key = format!("local:{provider}");
 
@@ -796,7 +797,7 @@ pub(crate) fn archive_local_usage(state: &AppState) {
 }
 
 /// Archive SSH device usage data from remote-cache into hourly aggregates.
-async fn archive_ssh_device_usage(state: &AppState) {
+pub(crate) async fn archive_ssh_device_usage(state: &AppState) {
     let Some(archive) = state.parser.archive() else {
         return;
     };

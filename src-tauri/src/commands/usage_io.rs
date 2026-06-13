@@ -60,7 +60,7 @@ pub struct ImportResult {
 /// safe device aliases are accepted.
 fn is_valid_source_key(key: &str) -> bool {
     match key.split_once(':') {
-        Some(("local", "claude")) | Some(("local", "codex")) => true,
+        Some(("local", "claude")) | Some(("local", "codex")) | Some(("local", "cursor")) => true,
         Some(("device", alias)) => {
             !alias.is_empty()
                 && alias.len() <= 64
@@ -92,8 +92,11 @@ pub async fn export_usage_data(
         .archive()
         .ok_or_else(|| "Usage archive is not available".to_string())?;
 
-    // Flush completed local hours so the export reflects the latest data.
+    // Flush completed local + SSH-device hours so the export reflects the latest
+    // data. SSH devices are otherwise only archived on the background tick, so a
+    // just-synced host could lag without this explicit flush.
     crate::archive_local_usage(&state);
+    crate::archive_ssh_device_usage(&state).await;
 
     let sources: Vec<SourceBlock> = archive
         .list_sources()
@@ -221,13 +224,14 @@ mod tests {
     fn validates_known_source_keys() {
         assert!(is_valid_source_key("local:claude"));
         assert!(is_valid_source_key("local:codex"));
+        assert!(is_valid_source_key("local:cursor"));
         assert!(is_valid_source_key("device:my-server"));
         assert!(is_valid_source_key("device:laptop_2.local"));
     }
 
     #[test]
     fn rejects_unsafe_source_keys() {
-        assert!(!is_valid_source_key("local:cursor"));
+        assert!(!is_valid_source_key("local:unknown"));
         assert!(!is_valid_source_key("local:../../etc"));
         assert!(!is_valid_source_key("device:../escape"));
         assert!(!is_valid_source_key("device:a/b"));

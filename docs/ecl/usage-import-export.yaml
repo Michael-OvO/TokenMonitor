@@ -26,7 +26,7 @@ prompt_calibration:
         导入必须幂等去重：重复导入同一文件不得造成重复统计。
       intent_dimensions:
         task: { status: present, value: "Export archive to JSON; import + merge with dedup" }
-        input: { status: enriched, value: "ArchivedHourly records from usage-archive/ (local + devices)" }
+        input: { status: enriched, value: "ArchivedHourly records from usage-archive/ (local claude/codex/cursor + devices)" }
         output: { status: enriched, value: "Portable versioned JSON file; merged archive on import" }
         constraints: { status: validated, value: "Idempotent import (no double counting); preserve frontier invariant" }
         context: { status: enriched, value: "Builds on usage-data-archive; no new Tauri plugins" }
@@ -79,7 +79,7 @@ requirements:
     confidence: 0.95
     acceptance_criteria:
       - "File has format='tokenmonitor-usage-export', format_version, exported_at, app_version"
-      - "One block per source (local:claude, local:codex, device:*) with raw ArchivedHourly records"
+      - "One block per source (local:claude, local:codex, local:cursor, device:*) with raw ArchivedHourly records"
       - "File written to OS download dir; path returned and revealed in file manager"
 
   - id: REQ-002
@@ -126,7 +126,7 @@ feature_guard:
       invariants:
         - "Import dedup is field-wise MAX keyed by (source_key, d, h, mk, p) — idempotent"
         - "import_source rewrites monthly JSONL atomically (temp+rename)"
-        - "Imported source_key is validated against ^(local:(claude|codex)|device:[A-Za-z0-9._-]+)$"
+        - "Imported source_key is validated against ^(local:(claude|codex|cursor)|device:[A-Za-z0-9._-]+)$"
         - "Import advances frontier only to COMPLETED (strictly before current local hour) imported hours"
         - "After import: parser.clear_payload_cache() AND AppState::clear_payload_disk_cache() are both called (see payload-disk-cache INV-006)"
         - "Export/import never call ArchiveManager::reset() or parser.clear_cache() (would delete the archive)"
