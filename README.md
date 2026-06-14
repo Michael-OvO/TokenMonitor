@@ -220,6 +220,19 @@ Platform-specific bundle output:
 | Windows | `src-tauri/target/release/bundle/nsis/TokenMonitor_x.y.z_x64-setup.exe` |
 | Linux | `src-tauri/target/release/bundle/deb/token-monitor_x.y.z_amd64.deb` |
 
+> [!NOTE]
+> **macOS:** Builds you compile yourself (and fork CI builds without Apple signing
+> secrets) are **unsigned**, so on first launch Gatekeeper may report the app as
+> *"damaged and can't be opened"*. The file is fine — clear the quarantine flag once
+> after moving it to Applications:
+>
+> ```bash
+> xattr -cr /Applications/TokenMonitor.app
+> ```
+>
+> Official releases (the download links above) are signed and notarized, so they don't
+> need this step.
+
 ### Development
 
 ```bash
