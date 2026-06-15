@@ -9,7 +9,7 @@ function readRepoFile(path) {
 }
 
 describe("native permission surface", () => {
-  it("keeps the native permission surface minimal (no fs; dialog limited to Save)", () => {
+  it("keeps the native permission surface minimal (no fs; dialog limited to Save + folder Open)", () => {
     const capabilities = JSON.parse(
       readRepoFile("src-tauri/capabilities/default.json"),
     );
@@ -22,12 +22,14 @@ describe("native permission surface", () => {
 
     // Filesystem access stays fully closed.
     expect(flatPermissions.some((permission) => permission.startsWith("fs:"))).toBe(false);
-    // The ONLY dialog capability is the narrow Save dialog used by usage export
-    // (the import flow uses an in-webview <input type=file>, not a dialog).
+    // The only dialog capabilities are the narrow Save dialog used by usage
+    // export and the directory-only Open dialog used to pick the auto-export
+    // destination folder (the import flow uses an in-webview <input type=file>,
+    // not a dialog). No broad `dialog:default`.
     const dialogPermissions = flatPermissions.filter((permission) =>
       permission.startsWith("dialog:"),
     );
-    expect(dialogPermissions).toEqual(["dialog:allow-save"]);
+    expect(dialogPermissions).toEqual(["dialog:allow-save", "dialog:allow-open"]);
     expect(flatPermissions).not.toContain("dialog:default");
     expect(flatPermissions).not.toContain("notification:default");
     expect(flatPermissions).toContain("notification:allow-is-permission-granted");

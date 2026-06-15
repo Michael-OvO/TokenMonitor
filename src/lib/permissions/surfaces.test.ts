@@ -46,6 +46,8 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     claudePlanCustomFiveHourTokens: null,
     claudePlanCustomWeeklyTokens: null,
     usageAccessEnabled: true,
+    autoExportEnabled: false,
+    autoExportFolder: null,
     ...overrides,
   };
 }

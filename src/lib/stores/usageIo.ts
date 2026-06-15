@@ -19,6 +19,9 @@ export type ImportResult = {
   totalSeen: number;
   totalNew: number;
   totalDeduped: number;
+  /** Malformed/oversized lines skipped while parsing a JSONL file (e.g. a torn
+   * final append). 0 for a clean import or a single-document JSON snapshot. */
+  skipped: number;
 };
 
 /** Write the usage archive to a JSON file at the caller-chosen `path`. */
@@ -48,8 +51,13 @@ export function formatExportSummary(r: ExportResult): string {
 
 export function formatImportSummary(r: ImportResult): string {
   if (r.totalSeen === 0) {
-    return "No usage records found in that file";
+    return r.skipped > 0
+      ? `No usable records found · ${r.skipped.toLocaleString()} line${r.skipped === 1 ? "" : "s"} skipped`
+      : "No usage records found in that file";
   }
   const seen = r.totalSeen.toLocaleString();
-  return `Imported ${seen} records · ${r.totalNew.toLocaleString()} new · ${r.totalDeduped.toLocaleString()} deduplicated`;
+  const base = `Imported ${seen} records · ${r.totalNew.toLocaleString()} new · ${r.totalDeduped.toLocaleString()} deduplicated`;
+  return r.skipped > 0
+    ? `${base} · ${r.skipped.toLocaleString()} line${r.skipped === 1 ? "" : "s"} skipped`
+    : base;
 }

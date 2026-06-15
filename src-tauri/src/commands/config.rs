@@ -551,6 +551,37 @@ pub fn suppress_next_auto_hide(state: State<'_, AppState>) {
         .store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Update the background auto-export preferences. Mirrors the Settings toggle
+/// and the chosen destination folder; the refresh loop reads this each tick.
+/// The frontend is the source of truth and always passes the full state, so we
+/// overwrite both fields verbatim (a `None` folder simply clears it).
+///
+/// This command never touches the filesystem — it only flips prefs and, on a
+/// folder change, resets the auto-export runtime so the next tick writes a fresh
+/// full JSONL file to the new destination (the old cursors are meaningless for a
+/// different file). The runtime reset is the LAST mutation so the next tick
+/// observes the new folder and synced=false together.
+#[tauri::command]
+pub async fn set_auto_export_config(
+    enabled: bool,
+    folder: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let folder_changed = {
+        let mut cfg = state.auto_export.write().await;
+        let changed = cfg.folder != folder;
+        cfg.enabled = enabled;
+        cfg.folder = folder;
+        changed
+    };
+    if folder_changed {
+        let mut rt = state.auto_export_runtime.write().await;
+        rt.synced = false;
+        rt.cursors.clear();
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn clear_cache(state: State<'_, AppState>) -> Result<(), String> {
     state.parser.clear_cache();

@@ -425,6 +425,7 @@ pub fn run() {
             commands::config::set_glass_effect,
             commands::config::set_dock_icon_visible,
             commands::config::suppress_next_auto_hide,
+            commands::config::set_auto_export_config,
             commands::config::set_refresh_interval,
             commands::config::set_rate_limits_enabled,
             commands::config::set_usage_access_enabled,
@@ -642,6 +643,11 @@ async fn background_loop(app: tauri::AppHandle) {
         };
 
         if interval_secs == 0 {
+            // Auto-export has its own toggle independent of the refresh interval,
+            // so honor it even when periodic refresh is Off. It's a cheap no-op
+            // when nothing changed, but still lands the once-per-session full
+            // sync and any import-triggered reconciliation.
+            commands::usage_io::run_auto_export(&app, &state).await;
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
@@ -737,6 +743,11 @@ async fn background_loop(app: tauri::AppHandle) {
             // Archive SSH device data for data loss prevention.
             archive_ssh_device_usage(&state).await;
         }
+
+        // Mirror the latest archive to the user's auto-export folder if enabled.
+        // Runs on the refresh cadence like everything else in this loop; a fast
+        // no-op when disabled or no folder is configured.
+        commands::usage_io::run_auto_export(&app, &state).await;
 
         if changed {
             // Local source logs changed. `invalidate_if_changed()` above already

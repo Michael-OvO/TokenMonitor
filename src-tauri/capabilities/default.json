@@ -21,6 +21,7 @@
     "updater:default",
     "notification:allow-is-permission-granted",
     "dialog:allow-save",
+    "dialog:allow-open",
     {
       "identifier": "opener:allow-open-url",
       "allow": [

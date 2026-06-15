@@ -3,7 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { save } from "@tauri-apps/plugin-dialog";
+  import { open, save } from "@tauri-apps/plugin-dialog";
   import {
     getVisibleHeaderProviders,
     settings,
@@ -392,6 +392,53 @@
     }
   }
 
+  // ── Auto export ──
+  /** Last path segment of the chosen folder, or a prompt when none is set. */
+  function autoExportFolderLabel(path: string | null): string {
+    if (!path) return "Choose Folder…";
+    const parts = path.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] || path;
+  }
+
+  async function pushAutoExportConfig(enabled: boolean, folder: string | null) {
+    try {
+      await invoke("set_auto_export_config", { enabled, folder });
+    } catch (e) {
+      logger.debug("settings", `set_auto_export_config failed: ${e}`);
+    }
+  }
+
+  /** Open the native folder picker, returning the chosen path or null. */
+  async function pickAutoExportFolder(): Promise<string | null> {
+    // The native picker steals focus from the webview; suppress the resulting
+    // blur so the main window doesn't auto-hide while it's open.
+    await invoke("suppress_next_auto_hide");
+    const selected = await open({ directory: true, multiple: false });
+    return typeof selected === "string" ? selected : null;
+  }
+
+  async function changeAutoExportFolder() {
+    const folder = await pickAutoExportFolder();
+    if (!folder) return; // picker cancelled
+    updateSetting("autoExportFolder", folder);
+    await pushAutoExportConfig(current.autoExportEnabled, folder);
+  }
+
+  async function handleAutoExportToggle(checked: boolean) {
+    // Enabling without a destination: prompt for one first. If the user
+    // cancels, leave the toggle off (it's controlled, so it snaps back).
+    if (checked && !current.autoExportFolder) {
+      const folder = await pickAutoExportFolder();
+      if (!folder) return;
+      updateSetting("autoExportFolder", folder);
+      updateSetting("autoExportEnabled", true);
+      await pushAutoExportConfig(true, folder);
+      return;
+    }
+    updateSetting("autoExportEnabled", checked);
+    await pushAutoExportConfig(checked, current.autoExportFolder);
+  }
+
   // ── Update install prompt (inline row beneath "Last Checked") ──
   let updateInstalling = $state(false);
   let updateInstallError = $state<string | null>(null);
@@ -744,10 +791,25 @@
         <input
           bind:this={importInput}
           type="file"
-          accept="application/json,.json"
+          accept="application/json,.json,.jsonl"
           class="hidden-file-input"
           onchange={onImportFileSelected}
         />
+        <div class="row auto-export-row">
+          <span class="label">Auto Export</span>
+          <div class="auto-export-right">
+            <button
+              class="cache-btn auto-export-folder"
+              type="button"
+              title={current.autoExportFolder ?? "Choose a destination folder"}
+              onclick={changeAutoExportFolder}
+            >{autoExportFolderLabel(current.autoExportFolder)}</button>
+            <ToggleSwitch
+              checked={current.autoExportEnabled}
+              onChange={handleAutoExportToggle}
+            />
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1161,6 +1223,17 @@
     gap: 8px;
     flex-wrap: wrap;
     justify-content: flex-end;
+  }
+  .auto-export-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .auto-export-folder {
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .channel-select {
     max-width: 150px;

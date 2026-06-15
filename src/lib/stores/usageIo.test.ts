@@ -45,12 +45,31 @@ describe("formatImportSummary", () => {
       totalSeen: 1240,
       totalNew: 30,
       totalDeduped: 1210,
+      skipped: 0,
     };
     expect(formatImportSummary(r)).toBe("Imported 1,240 records · 30 new · 1,210 deduplicated");
   });
 
+  it("appends a skipped count when JSONL lines were dropped", () => {
+    const r: ImportResult = {
+      sources: [],
+      totalSeen: 1240,
+      totalNew: 30,
+      totalDeduped: 1210,
+      skipped: 3,
+    };
+    expect(formatImportSummary(r)).toBe(
+      "Imported 1,240 records · 30 new · 1,210 deduplicated · 3 lines skipped",
+    );
+  });
+
   it("handles an empty/foreign file", () => {
-    const r: ImportResult = { sources: [], totalSeen: 0, totalNew: 0, totalDeduped: 0 };
+    const r: ImportResult = { sources: [], totalSeen: 0, totalNew: 0, totalDeduped: 0, skipped: 0 };
     expect(formatImportSummary(r)).toBe("No usage records found in that file");
+  });
+
+  it("reports skipped-only when every line was corrupt", () => {
+    const r: ImportResult = { sources: [], totalSeen: 0, totalNew: 0, totalDeduped: 0, skipped: 2 };
+    expect(formatImportSummary(r)).toBe("No usable records found · 2 lines skipped");
   });
 });

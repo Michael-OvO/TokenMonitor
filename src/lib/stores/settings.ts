@@ -97,6 +97,14 @@ export interface Settings {
    * can disable tracking without resetting the welcome flow.
    */
   usageAccessEnabled: boolean;
+  /**
+   * When `true`, the backend refresh loop mirrors the usage archive to a
+   * rolling file inside `autoExportFolder` on every tick (same cadence as
+   * `refreshInterval`). Has no effect while a folder hasn't been chosen.
+   */
+  autoExportEnabled: boolean;
+  /** Destination folder for the auto-export file. `null` until the user picks one. */
+  autoExportFolder: string | null;
 }
 
 export const HEADER_TAB_ORDER: UsageProvider[] = [...USAGE_PROVIDER_ORDER];
@@ -158,6 +166,8 @@ const DEFAULTS: Settings = {
   claudePlanCustomFiveHourTokens: null,
   claudePlanCustomWeeklyTokens: null,
   usageAccessEnabled: true,
+  autoExportEnabled: false,
+  autoExportFolder: null,
 };
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
@@ -404,7 +414,13 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
       saved?.claudePlanCustomWeeklyTokens,
     ),
     usageAccessEnabled: normalizeBoolean(saved?.usageAccessEnabled, DEFAULTS.usageAccessEnabled),
+    autoExportEnabled: normalizeBoolean(saved?.autoExportEnabled, DEFAULTS.autoExportEnabled),
+    autoExportFolder: normalizeAutoExportFolder(saved?.autoExportFolder),
   };
+}
+
+function normalizeAutoExportFolder(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function normalizePositiveNumberOrNull(value: unknown): number | null {

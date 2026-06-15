@@ -118,6 +118,8 @@ describe("loadSettings", () => {
       claudePlanCustomFiveHourTokens: null,
       claudePlanCustomWeeklyTokens: null,
       usageAccessEnabled: true,
+      autoExportEnabled: false,
+      autoExportFolder: null,
     });
     expect(get(settings)).toEqual(loaded);
     expect(mockSetCurrency).toHaveBeenCalledWith("EUR");
@@ -179,6 +181,8 @@ describe("loadSettings", () => {
       claudePlanCustomFiveHourTokens: null,
       claudePlanCustomWeeklyTokens: null,
       usageAccessEnabled: true,
+      autoExportEnabled: false,
+      autoExportFolder: null,
     });
     expect(get(settings)).toEqual(fallback);
     expect(mockSetCurrency).toHaveBeenCalledWith("USD");

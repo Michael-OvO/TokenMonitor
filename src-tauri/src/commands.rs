@@ -53,6 +53,13 @@ pub struct AppState {
     /// Updated by `set_claude_plan_tier`; defaults to `Pro` for new installs.
     pub claude_plan_tier: Arc<RwLock<ClaudePlanTier>>,
     pub payload_disk_cache: Arc<RwLock<Option<PayloadDiskCache>>>,
+    /// Background auto-export preferences (enabled + destination folder),
+    /// mirrored from the frontend via `set_auto_export_config`. The refresh
+    /// loop appends new usage-archive records to the folder's JSONL file.
+    pub auto_export: Arc<RwLock<usage_io::AutoExportConfig>>,
+    /// Runtime state for the JSONL auto-export (once-per-session full-sync flag
+    /// + per-source append cursors). Not persisted; resets on launch.
+    pub auto_export_runtime: Arc<RwLock<usage_io::AutoExportRuntime>>,
 }
 
 impl AppState {
@@ -74,6 +81,8 @@ impl AppState {
             usage_access_enabled: Arc::new(AtomicBool::new(false)),
             claude_plan_tier: Arc::new(RwLock::new(ClaudePlanTier::default())),
             payload_disk_cache: Arc::new(RwLock::new(None)),
+            auto_export: Arc::new(RwLock::new(usage_io::AutoExportConfig::default())),
+            auto_export_runtime: Arc::new(RwLock::new(usage_io::AutoExportRuntime::default())),
         }
     }
 

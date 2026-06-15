@@ -128,6 +128,10 @@ export async function initializeRuntimeFromSettings(
       enabled: saved.hasSeenWelcome && saved.usageAccessEnabled,
     }),
     invokeFn("set_rate_limits_enabled", { enabled: saved.rateLimitsEnabled }),
+    invokeFn("set_auto_export_config", {
+      enabled: saved.autoExportEnabled,
+      folder: saved.autoExportFolder,
+    }),
     invokeFn("set_cursor_auth_config", {
       apiKey: saved.cursorApiKey,
     }),
