@@ -59,3 +59,13 @@ __pycache__/
 .claude/settings.json
 .claude/commands/cc*.md
 .claude/commands/idea.md
+
+# Local/internal development artifacts
+.claude/worktrees/
+scripts/tmp-merge-dedup-usage.mjs
+src-tauri/test_extra_fields.rs
+docs/ecl/*.yaml
+docs/repo-audit*.json
+docs/repo-audit*.md
+docs/debug/*.md
+docs/bug-report-dedup-overcounting.md
