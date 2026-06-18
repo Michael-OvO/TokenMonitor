@@ -45,6 +45,9 @@ pub enum Acquire {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Only the Windows fallback path constructs `Acquired`/`AlreadyRunning`; on
+// other platforms the lock is always `Unavailable`, so suppress dead-code there.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 enum FallbackLock {
     Acquired,
     AlreadyRunning,
