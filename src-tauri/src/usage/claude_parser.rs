@@ -456,6 +456,7 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                     entries.push(ParsedEntry {
                         timestamp: ts,
                         model: effective_model,
+                        model_display_name: None,
                         input_tokens: usage.input_tokens.unwrap_or(0),
                         output_tokens: usage.output_tokens.unwrap_or(0),
                         cache_creation_5m_tokens: cw_5m,

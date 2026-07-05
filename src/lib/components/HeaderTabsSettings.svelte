@@ -374,4 +374,14 @@
     --accent: #2E7EB5;
     --accent-soft: rgba(46, 126, 181, 0.14);
   }
+  .header-preview[data-provider="kimi"],
+  .chip[data-provider="kimi"] {
+    --accent: #8B6FD4;
+    --accent-soft: rgba(139, 111, 212, 0.14);
+  }
+  :global([data-theme="light"]) .header-preview[data-provider="kimi"],
+  :global([data-theme="light"]) .chip[data-provider="kimi"] {
+    --accent: #6B4FB0;
+    --accent-soft: rgba(107, 79, 176, 0.14);
+  }
 </style>

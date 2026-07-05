@@ -49,6 +49,18 @@ pub fn codex_sessions_default() -> Option<PathBuf> {
     home().map(|h| h.join(".codex").join("sessions"))
 }
 
+/// Default Kimi Code session-logs roots. May be overridden by `$KIMI_DATA_DIR`
+/// (comma-separated list of directories). The env-var branch is handled in
+/// `usage::integrations` to preserve existing caller semantics; this function
+/// returns the *default* roots only.
+pub fn kimi_sessions_roots_default() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(h) = home() {
+        roots.push(h.join(".kimi-code").join("sessions"));
+    }
+    roots
+}
+
 /// Default Cursor workspace storage root for local chat/session metadata.
 pub fn cursor_workspace_storage_default() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
@@ -156,6 +168,21 @@ pub fn claude_credentials_file() -> Option<PathBuf> {
         .map(|p| p.join(".credentials.json"))
 }
 
+/// Kimi Code CLI credentials JSON (`access_token`, `refresh_token`, `expires_at`).
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn kimi_credentials_file() -> Option<PathBuf> {
+    env::var("KIMI_DATA_DIR")
+        .ok()
+        .and_then(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .find(|entry| !entry.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| home().map(|h| h.join(".kimi-code")))
+        .map(|p| p.join("credentials").join("kimi-code.json"))
+}
+
 /// Enumerate every path the app *may* read, for audit and UI display.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn accessed_paths() -> Vec<AccessedPath> {
@@ -181,6 +208,13 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
             env_override: Some("CURSOR_USER_DIR"),
         });
     }
+    for p in kimi_sessions_roots_default() {
+        out.push(AccessedPath {
+            purpose: "Kimi Code CLI session logs",
+            path: p,
+            env_override: Some("KIMI_DATA_DIR"),
+        });
+    }
     if let Some(p) = cursor_global_state_vscdb_default() {
         out.push(AccessedPath {
             purpose: "Cursor IDE global auth/session state DB",
@@ -202,6 +236,13 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
             env_override: Some("CLAUDE_CONFIG_DIR"),
         });
     }
+    if let Some(p) = kimi_credentials_file() {
+        out.push(AccessedPath {
+            purpose: "Kimi Code CLI credentials for rate-limit reads",
+            path: p,
+            env_override: Some("KIMI_DATA_DIR"),
+        });
+    }
     out
 }
 
@@ -215,7 +256,9 @@ mod tests {
         assert!(set.iter().any(|p| p.contains("Claude Code")));
         assert!(set.iter().any(|p| p.contains("Codex")));
         assert!(set.iter().any(|p| p.contains("Cursor IDE")));
+        assert!(set.iter().any(|p| p.contains("Kimi Code")));
         assert!(set.iter().any(|p| p.contains("SSH")));
+        assert!(set.iter().any(|p| p.contains("Kimi Code CLI credentials")));
     }
 
     #[test]

@@ -206,6 +206,7 @@ mod tests {
         ParsedEntry {
             timestamp: when,
             model: "claude-sonnet-4-6".into(),
+            model_display_name: None,
             input_tokens: tokens / 2,
             output_tokens: tokens - tokens / 2,
             cache_creation_5m_tokens: 0,

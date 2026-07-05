@@ -317,6 +317,7 @@ fn collect_cursor_entries_from_value(
                     entries.push(ParsedEntry {
                         timestamp,
                         model,
+                        model_display_name: None,
                         input_tokens: input,
                         output_tokens: output,
                         cache_creation_5m_tokens: 0,
@@ -642,6 +643,7 @@ fn parsed_entry_from_cursor_event(
     Some(ParsedEntry {
         timestamp,
         model,
+        model_display_name: None,
         input_tokens: input,
         output_tokens: output,
         cache_creation_5m_tokens: 0,

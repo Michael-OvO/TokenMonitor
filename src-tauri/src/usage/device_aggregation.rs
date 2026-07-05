@@ -1349,6 +1349,7 @@ mod tests {
             ParsedEntry {
                 timestamp: row_ts,
                 model: String::from("claude-opus-4-6"),
+                model_display_name: None,
                 input_tokens: 1_000,
                 output_tokens: 1_000,
                 cache_creation_5m_tokens: 0,
@@ -1362,6 +1363,7 @@ mod tests {
             ParsedEntry {
                 timestamp: row_ts,
                 model: String::from("gpt-5.4"),
+                model_display_name: None,
                 input_tokens: 1_000,
                 output_tokens: 1_000,
                 cache_creation_5m_tokens: 0,
@@ -1454,6 +1456,7 @@ mod tests {
         let archived_rows = vec![ParsedEntry {
             timestamp: archived_ts,
             model: String::from("claude-sonnet-4-6"),
+            model_display_name: None,
             input_tokens: 1_000,
             output_tokens: 1_000,
             cache_creation_5m_tokens: 0,

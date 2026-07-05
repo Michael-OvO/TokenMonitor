@@ -207,6 +207,7 @@ pub struct RateLimitsPayload {
     pub claude: Option<ProviderRateLimits>,
     pub codex: Option<ProviderRateLimits>,
     pub cursor: Option<ProviderRateLimits>,
+    pub kimi: Option<ProviderRateLimits>,
 }
 
 // ── Helpers ──
@@ -507,7 +508,15 @@ fn normalize_prefixed_model(
 pub fn normalize_generic_model(raw: &str) -> (String, String) {
     match detect_model_family(raw) {
         ModelFamily::Google => normalize_prefixed_model(raw, "gemini", "Gemini"),
-        ModelFamily::Moonshot => normalize_prefixed_model(raw, "kimi", "Kimi"),
+        ModelFamily::Moonshot => {
+            // Kimi Code CLI logs its managed alias as `kimi-code/kimi-for-coding`.
+            // Strip the product namespace before normalizing so the fallback
+            // display is "Kimi for Coding" rather than "Kimi code/kimi for coding".
+            let stripped = raw
+                .strip_prefix("kimi-code/")
+                .or_else(|| raw.strip_prefix("kimi/"));
+            normalize_prefixed_model(stripped.unwrap_or(raw), "kimi", "Kimi")
+        }
         ModelFamily::Qwen => normalize_prefixed_model(raw, "qwen", "Qwen"),
         ModelFamily::Glm => normalize_prefixed_model(raw, "glm", "GLM"),
         ModelFamily::DeepSeek => normalize_prefixed_model(raw, "deepseek", "DeepSeek"),
@@ -992,6 +1001,14 @@ mod tests {
         assert_eq!(
             normalize_generic_model("kimi-k2"),
             ("Kimi k2".into(), "kimi-k2".into())
+        );
+    }
+
+    #[test]
+    fn generic_kimi_strips_code_product_namespace() {
+        assert_eq!(
+            normalize_generic_model("kimi-code/kimi-for-coding"),
+            ("Kimi for coding".into(), "kimi-for-coding".into())
         );
     }
 

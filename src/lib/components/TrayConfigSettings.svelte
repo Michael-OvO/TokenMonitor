@@ -51,6 +51,7 @@
     claude: "C",
     codex: "X",
     cursor: "Cr",
+    kimi: "K",
   };
 
   let titlePreview = $derived.by(() => {

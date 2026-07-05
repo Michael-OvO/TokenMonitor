@@ -176,6 +176,18 @@
   --provider-bg: rgba(77,94,190,0.06);
 }
 
+/* ── Provider: Kimi (purple) ── */
+[data-provider="kimi"] {
+  --accent: #8B6FD4;
+  --accent-soft: rgba(139,111,212,0.14);
+  --provider-bg: rgba(139,111,212,0.05);
+}
+[data-theme="light"][data-provider="kimi"] {
+  --accent: #6B4FB0;
+  --accent-soft: rgba(107,79,176,0.14);
+  --provider-bg: rgba(107,79,176,0.06);
+}
+
 /* ── System theme: follow OS preference ── */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {
@@ -222,6 +234,11 @@
     --accent: #4D5EBE;
     --accent-soft: rgba(77,94,190,0.14);
     --provider-bg: rgba(77,94,190,0.06);
+  }
+  :root:not([data-theme])[data-provider="kimi"] {
+    --accent: #6B4FB0;
+    --accent-soft: rgba(107,79,176,0.14);
+    --provider-bg: rgba(107,79,176,0.06);
   }
 }
 

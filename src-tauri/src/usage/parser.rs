@@ -26,6 +26,7 @@ use super::cursor_parser::{
     cursor_last_warning, glob_cursor_chat_session_files, load_cursor_local_entries,
     parse_cursor_session_file, set_cursor_warning,
 };
+use super::kimi_parser::parse_kimi_session_file;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Parsed entry (shared between Claude and Codex)
@@ -35,6 +36,11 @@ use super::cursor_parser::{
 pub struct ParsedEntry {
     pub timestamp: DateTime<Local>,
     pub model: String,
+    /// Optional display-name override for the model, e.g. from Kimi Code CLI's
+    /// `config.toml` `display_name` field. When present, the UI shows this
+    /// instead of the normalized raw model identifier, while `model` still
+    /// drives family detection and pricing.
+    pub model_display_name: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_5m_tokens: u64,
@@ -153,6 +159,7 @@ enum ProviderFileKind {
     Claude,
     Codex,
     Cursor,
+    Kimi,
 }
 
 #[derive(Clone)]
@@ -171,6 +178,7 @@ impl UsageIntegrationConfig {
             UsageIntegrationId::Claude => ProviderFileKind::Claude,
             UsageIntegrationId::Codex => ProviderFileKind::Codex,
             UsageIntegrationId::Cursor => ProviderFileKind::Cursor,
+            UsageIntegrationId::Kimi => ProviderFileKind::Kimi,
         }
     }
 
@@ -183,6 +191,9 @@ impl UsageIntegrationConfig {
                 "recursive-jsonl-glob+root-file-list-cache+parsed-file-cache+token-delta"
             }
             UsageIntegrationId::Cursor => "workspace-chat-json+token-field-probe+cursor-remote-api",
+            UsageIntegrationId::Kimi => {
+                "recursive-jsonl-glob+root-file-list-cache+parsed-file-cache+token-usage"
+            }
         }
     }
 
@@ -431,8 +442,23 @@ struct SegmentAgg {
 /// for a slice of entries.
 fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, SegmentAgg> {
     let mut map: HashMap<String, SegmentAgg> = HashMap::new();
+    // Display names can change over time (e.g., Kimi config.toml updates from
+    // "K2.7 Code" to "K2.7 Code High Speed"). If entries for the same model
+    // key carry different display_name values, prefer the most recent one so
+    // the UI stays consistent instead of depending on entry ordering.
+    let mut latest_name: HashMap<String, (DateTime<Local>, String)> = HashMap::new();
+
     for e in entries {
-        let (name, key) = normalize_model(&e.model);
+        let (normalized_name, key) = normalize_model(&e.model);
+        let name = e.model_display_name.clone().unwrap_or(normalized_name);
+        if let Some((prev_ts, _)) = latest_name.get(&key) {
+            if e.timestamp > *prev_ts {
+                latest_name.insert(key.clone(), (e.timestamp, name));
+            }
+        } else {
+            latest_name.insert(key.clone(), (e.timestamp, name));
+        }
+
         let pricing_available = crate::usage::pricing::pricing_available_for_key(&key);
         let cost = crate::usage::pricing::calculate_cost_for_key(
             &key,
@@ -444,7 +470,7 @@ fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, SegmentAgg> {
             e.web_search_requests,
         ) * crate::usage::pricing::provider_multiplier(&e.model);
         let entry = map.entry(key).or_insert(SegmentAgg {
-            display_name: name,
+            display_name: String::new(),
             cost: 0.0,
             tokens: 0,
             pricing_available: true,
@@ -452,6 +478,12 @@ fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, SegmentAgg> {
         entry.cost += cost;
         entry.tokens += entry_total_tokens(e);
         entry.pricing_available &= pricing_available;
+    }
+
+    for (key, agg) in map.iter_mut() {
+        if let Some((_, name)) = latest_name.get(key) {
+            agg.display_name = name.clone();
+        }
     }
     map
 }
@@ -672,6 +704,10 @@ fn default_usage_integration_configs() -> Vec<UsageIntegrationConfig> {
             UsageIntegrationId::Cursor,
             UsageIntegrationId::Cursor.detect_roots(),
         ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Kimi,
+            UsageIntegrationId::Kimi.detect_roots(),
+        ),
     ]
 }
 
@@ -679,6 +715,7 @@ fn usage_integration_configs_with_overrides(
     claude_roots: Option<Vec<PathBuf>>,
     codex_roots: Option<Vec<PathBuf>>,
     cursor_roots: Option<Vec<PathBuf>>,
+    kimi_roots: Option<Vec<PathBuf>>,
 ) -> Vec<UsageIntegrationConfig> {
     vec![
         UsageIntegrationConfig::new(
@@ -692,6 +729,10 @@ fn usage_integration_configs_with_overrides(
         UsageIntegrationConfig::new(
             UsageIntegrationId::Cursor,
             cursor_roots.unwrap_or_else(|| UsageIntegrationId::Cursor.detect_roots()),
+        ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Kimi,
+            kimi_roots.unwrap_or_else(|| UsageIntegrationId::Kimi.detect_roots()),
         ),
     ]
 }
@@ -796,6 +837,7 @@ impl UsageParser {
             Some(claude_dirs),
             None,
             None,
+            None,
         ))
     }
 
@@ -805,6 +847,7 @@ impl UsageParser {
         Self::from_integrations(usage_integration_configs_with_overrides(
             None,
             Some(vec![codex_dir]),
+            None,
             None,
         ))
     }
@@ -827,6 +870,7 @@ impl UsageParser {
         Self::from_integrations(usage_integration_configs_with_overrides(
             Some(vec![claude_dir]),
             Some(vec![codex_dir]),
+            None,
             None,
         ))
     }
@@ -1330,6 +1374,7 @@ impl UsageParser {
                         ProviderFileKind::Claude => parse_claude_session_file(path),
                         ProviderFileKind::Codex => parse_codex_session_file(path),
                         ProviderFileKind::Cursor => parse_cursor_session_file(path),
+                        ProviderFileKind::Kimi => parse_kimi_session_file(path, None),
                     };
                     let earliest_date = earliest_entry_date(&raw_entries);
                     let loaded = CachedFileLoad {
@@ -1534,6 +1579,19 @@ impl UsageParser {
         (Vec::new(), Vec::new(), report)
     }
 
+    fn load_kimi_entries_with_debug(
+        &self,
+        since: Option<NaiveDate>,
+    ) -> (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, ProviderReadDebug) {
+        let config = self
+            .integration_config(UsageIntegrationId::Kimi)
+            .expect("kimi integration should be configured");
+        let (entries, change_events, mut reports) =
+            self.load_integration_entries_with_debug(config, since);
+        let report = reports.pop().unwrap_or_default();
+        (entries, change_events, report)
+    }
+
     /// Returns `true` when Cursor remote auth is configured and the cache does
     /// not already cover the requested `since` range — indicating a background
     /// fetch should be spawned (adaptive widening: only fetch the part we lack).
@@ -1606,6 +1664,14 @@ impl UsageParser {
                 UsageIntegrationId::Cursor => {
                     let (next_entries, next_change_events, next_report) =
                         self.load_cursor_entries_with_debug(since);
+
+                    merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
+                    change_events.extend(next_change_events);
+                    reports.push(next_report);
+                }
+                UsageIntegrationId::Kimi => {
+                    let (next_entries, next_change_events, next_report) =
+                        self.load_kimi_entries_with_debug(since);
 
                     merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
                     change_events.extend(next_change_events);
@@ -1710,6 +1776,7 @@ impl UsageParser {
                             ProviderFileKind::Claude => parse_claude_session_file(path).0,
                             ProviderFileKind::Codex => parse_codex_session_file(path).0,
                             ProviderFileKind::Cursor => parse_cursor_session_file(path).0,
+                            ProviderFileKind::Kimi => parse_kimi_session_file(path, None).0,
                         };
                         earliest_entry_date(&entries)
                     })
@@ -2241,6 +2308,7 @@ mod tests {
                 .single()
                 .unwrap(),
             model: model.to_string(),
+            model_display_name: None,
             input_tokens: 100,
             output_tokens: 50,
             cache_creation_5m_tokens: 0,
@@ -2627,6 +2695,7 @@ mod tests {
             None,
             None,
             Some(vec![root.path().to_path_buf()]),
+            None,
         ));
 
         let (entries, report) = parser.load_cursor_local_entries_with_debug(None);
@@ -4642,6 +4711,7 @@ mod cursor_remote_cache_tests {
         ParsedEntry {
             timestamp,
             model: "cursor-gpt".to_string(),
+            model_display_name: None,
             input_tokens: 1,
             output_tokens: 1,
             cache_creation_5m_tokens: 0,

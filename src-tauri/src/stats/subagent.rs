@@ -256,6 +256,7 @@ mod tests {
         crate::usage::parser::ParsedEntry {
             timestamp: Local.with_ymd_and_hms(2026, 3, 21, 10, 0, 0).unwrap(),
             model: model.to_string(),
+            model_display_name: None,
             input_tokens: input,
             output_tokens: output,
             cache_creation_5m_tokens: 0,

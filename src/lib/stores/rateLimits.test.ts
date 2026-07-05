@@ -129,6 +129,7 @@ describe("hydrateRateLimits", () => {
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
     });
 
     const { hydrateRateLimits, rateLimitsData, rateLimitsMonitorState, rateLimitsRequestState } =
@@ -142,6 +143,7 @@ describe("hydrateRateLimits", () => {
         provider: "codex",
       }),
       cursor: null,
+      kimi: null,
     });
     expect(get(rateLimitsMonitorState).claude.lastSuccessAt).toBe("2026-03-17T12:00:00.000Z");
     expect(get(rateLimitsRequestState).deferredUntil).toBe("2026-03-17T12:05:00.000Z");
@@ -173,6 +175,7 @@ describe("fetchRateLimits", () => {
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
     });
 
     const request = deferred<RateLimitsPayload>();
@@ -225,6 +228,7 @@ describe("fetchRateLimits", () => {
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
     });
 
     const request = deferred<RateLimitsPayload>();
@@ -310,6 +314,7 @@ describe("fetchRateLimits", () => {
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
     });
 
     mockInvoke.mockResolvedValueOnce(
@@ -365,6 +370,7 @@ describe("fetchRateLimits", () => {
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
     });
 
     mockInvoke.mockResolvedValueOnce(
@@ -441,6 +447,7 @@ describe("fetchRateLimits", () => {
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
     });
 
     mockInvoke.mockImplementation(async (_cmd: string, args: Record<string, string>) => {
@@ -506,6 +513,7 @@ describe("fetchRateLimits", () => {
       "rate-limits-claude.json": claudeStore,
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
     });
 
     mockInvoke.mockRejectedValueOnce(new Error("backend unavailable"));

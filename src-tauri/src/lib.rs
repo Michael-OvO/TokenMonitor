@@ -829,6 +829,7 @@ pub(crate) fn archive_local_usage(state: &AppState) {
         ("claude", usage::integrations::UsageIntegrationId::Claude),
         ("codex", usage::integrations::UsageIntegrationId::Codex),
         ("cursor", usage::integrations::UsageIntegrationId::Cursor),
+        ("kimi", usage::integrations::UsageIntegrationId::Kimi),
     ] {
         let source_key = format!("local:{provider}");
 
@@ -925,6 +926,7 @@ pub(crate) async fn archive_ssh_device_usage(state: &AppState) {
                     } else {
                         r.model.clone()
                     },
+                    model_display_name: None,
                     input_tokens: r.input_tokens,
                     output_tokens: r.output_tokens,
                     cache_creation_5m_tokens: r.cache_5m,

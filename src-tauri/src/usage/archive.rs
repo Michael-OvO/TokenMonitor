@@ -123,7 +123,7 @@ pub struct ImportSourceStats {
 // Archive state — tracks last archived hour per source
 // ─────────────────────────────────────────────────────────────────────────────
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct ArchiveState {
@@ -139,6 +139,32 @@ impl Default for ArchiveState {
             version: STATE_VERSION,
             sources: HashMap::new(),
         }
+    }
+}
+
+impl ArchiveState {
+    /// Migrate from older versions. Returns true if the state changed.
+    ///
+    /// v2: Kimi display names are now sourced from `~/.kimi-code/config.toml`
+    /// (`K2.7 Code`) instead of the generic normalized fallback
+    /// (`Kimi for Coding`). Reset the Kimi local archive so completed hours
+    /// are re-archived with the correct display name on the next cycle.
+    fn migrate(&mut self) -> bool {
+        if self.version >= STATE_VERSION {
+            return false;
+        }
+
+        let mut changed = false;
+        if self.version < 2 {
+            // Remove any stored Kimi frontier. The archive files for
+            // `local:kimi` are deleted separately by ArchiveManager.
+            if self.sources.remove("local:kimi").is_some() {
+                changed = true;
+            }
+        }
+
+        self.version = STATE_VERSION;
+        changed
     }
 }
 
@@ -210,10 +236,32 @@ impl ArchiveManager {
     }
 
     fn load_state(&self) -> ArchiveState {
-        match fs::read_to_string(self.state_path()) {
+        let mut state = match fs::read_to_string(self.state_path()) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => ArchiveState::default(),
+        };
+
+        if state.migrate() {
+            // v2: delete old Kimi archive files so they are re-archived with
+            // the corrected display name from config.toml.
+            let kimi_dir = self.source_dir("local:kimi");
+            if kimi_dir.exists() {
+                if let Err(e) = fs::remove_dir_all(&kimi_dir) {
+                    tracing::warn!(
+                        "Failed to remove old Kimi archive dir {} during migration: {e}",
+                        kimi_dir.display()
+                    );
+                } else {
+                    tracing::info!(
+                        "Removed old Kimi archive dir {} for v2 migration",
+                        kimi_dir.display()
+                    );
+                }
+            }
+            self.save_state(&state);
         }
+
+        state
     }
 
     fn save_state(&self, state: &ArchiveState) {
@@ -275,11 +323,15 @@ impl ArchiveManager {
             let date_str = entry_date.format("%Y-%m-%d").to_string();
 
             let key = (date_str.clone(), entry_hour, known.model_key.clone());
+            let display_name = entry
+                .model_display_name
+                .clone()
+                .unwrap_or(known.display_name);
             let agg = aggregates.entry(key).or_insert(ArchivedHourly {
                 d: date_str,
                 h: entry_hour,
                 mk: known.model_key,
-                mn: known.display_name,
+                mn: display_name,
                 input_tokens: 0,
                 out: 0,
                 c5: 0,
@@ -473,7 +525,12 @@ impl ArchiveManager {
 
             entries.push(ParsedEntry {
                 timestamp,
-                model: record.mk,
+                model: record.mk.clone(),
+                model_display_name: if record.mn.is_empty() {
+                    None
+                } else {
+                    Some(record.mn.clone())
+                },
                 input_tokens: record.input_tokens,
                 output_tokens: record.out,
                 cache_creation_5m_tokens: record.c5,
@@ -745,9 +802,9 @@ impl ArchiveManager {
     /// neither is ever fully subsumed. `configured` SSH-host aliases are skipped
     /// outright as a second guard. Returns the removed source keys.
     pub fn remove_self_duplicate_devices(&self, configured: &HashSet<String>) -> Vec<String> {
-        // Index this machine's own local buckets (claude + codex + cursor).
+        // Index this machine's own local buckets (claude + codex + cursor + kimi).
         let mut local: HashMap<(String, u8, String, String), ArchivedHourly> = HashMap::new();
-        for provider in ["claude", "codex", "cursor"] {
+        for provider in ["claude", "codex", "cursor", "kimi"] {
             for r in self.read_raw(&format!("local:{provider}")) {
                 local.entry(r.bucket_key()).or_insert(r);
             }
@@ -912,6 +969,7 @@ mod tests {
         ParsedEntry {
             timestamp,
             model: model.to_string(),
+            model_display_name: None,
             input_tokens: input,
             output_tokens: output,
             cache_creation_5m_tokens: 0,
@@ -1001,6 +1059,61 @@ mod tests {
         // Should only return the April 11 entry.
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].input_tokens, 2000);
+    }
+
+    #[test]
+    fn archive_preserves_model_display_name() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+
+        let mut entry = make_entry("2026-04-11", 10, "kimi-code/kimi-for-coding", 1000, 500);
+        entry.model_display_name = Some("K2.7 Code".to_string());
+
+        let current_date = NaiveDate::from_ymd_opt(2026, 4, 11).unwrap();
+        mgr.archive_completed_hours(&[entry], "local:kimi", "kimi", current_date, 14);
+
+        let loaded = mgr.load_archived("local:kimi", None);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].model_display_name.as_deref(), Some("K2.7 Code"));
+    }
+
+    #[test]
+    fn migration_v2_resets_kimi_archive() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+
+        // Simulate a v1 archive state with a Kimi frontier.
+        let old_state = ArchiveState {
+            version: 1,
+            sources: {
+                let mut map = HashMap::new();
+                map.insert("local:kimi".to_string(), "2026-04-11T10".to_string());
+                map.insert("local:claude".to_string(), "2026-04-11T10".to_string());
+                map
+            },
+        };
+        mgr.save_state(&old_state);
+
+        // Create a fake Kimi archive file.
+        let kimi_dir = mgr.source_dir("local:kimi");
+        fs::create_dir_all(&kimi_dir).unwrap();
+        fs::write(kimi_dir.join("2026-04.jsonl"), b"{}\n").unwrap();
+
+        // Loading state should run the v2 migration.
+        let state = mgr.load_state();
+        assert_eq!(state.version, 2);
+        assert!(
+            !state.sources.contains_key("local:kimi"),
+            "Kimi frontier should be reset"
+        );
+        assert!(
+            state.sources.contains_key("local:claude"),
+            "Claude frontier should be preserved"
+        );
+        assert!(
+            !kimi_dir.exists(),
+            "Old Kimi archive files should be removed"
+        );
     }
 
     #[test]

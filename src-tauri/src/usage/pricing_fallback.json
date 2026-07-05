@@ -4,6 +4,7 @@
     "cursor_composer_auto": "https://cursor.com/docs/models",
     "deepseek": "https://api-docs.deepseek.com/quick_start/pricing",
     "grok": "https://docs.x.ai/developers/pricing",
+    "kimi": "https://www.kimi.com/resources/kimi-k2-7-code-pricing",
     "perplexity": "https://docs.perplexity.ai/docs/getting-started/pricing",
     "gemini": "https://cursor.com/docs/models (Cursor API pool rates)"
   },
@@ -16,6 +17,7 @@
     "deepseek-reasoner": "deepseek-v4-flash",
     "grok-4": "grok-4.3",
     "grok-latest": "grok-4.3",
+    "kimi-for-coding": "kimi-k2.7",
     "pplx-sonar": "sonar"
   },
   "models": {
@@ -105,6 +107,11 @@
       "input": 0.6,
       "output": 3.0,
       "cache_read": 0.1
+    },
+    "kimi-k2.7": {
+      "input": 0.95,
+      "output": 4.0,
+      "cache_read": 0.19
     },
     "sonar": {
       "input": 1.0,

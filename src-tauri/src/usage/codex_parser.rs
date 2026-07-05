@@ -531,6 +531,7 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
         entries.push(ParsedEntry {
             timestamp: ts,
             model: entry_model,
+            model_display_name: None,
             input_tokens: uncached_input_tokens,
             output_tokens: raw_usage.output_tokens,
             cache_creation_5m_tokens: 0,

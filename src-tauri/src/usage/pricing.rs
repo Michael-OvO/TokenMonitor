@@ -1,5 +1,5 @@
 #[cfg_attr(not(test), allow(dead_code))]
-pub const PRICING_VERSION: &str = "2026-06-17";
+pub const PRICING_VERSION: &str = "2026-07-02";
 
 use crate::models::{detect_model_family, ModelFamily};
 use crate::usage::litellm::DynamicModelRates;
@@ -297,8 +297,27 @@ fn get_fallback_rates(model: &str) -> Option<ModelRates> {
 
             Some(openai_rates(1.25, 10.00, 1.25, 0.125))
         }
+        ModelFamily::Moonshot => {
+            // LiteLLM / pricing_fallback.json already covers specific Kimi model
+            // keys such as "kimi-k2.5" and "kimi-k2.7", plus the managed alias
+            // "kimi-for-coding". This branch catches unknown Moonshot names.
+            let (input, output, cache_read) =
+                if model.contains("k2.7") || model == "kimi-for-coding" {
+                    (0.95, 4.00, 0.19)
+                } else if model.contains("k2.6") {
+                    (0.95, 4.00, 0.1)
+                } else {
+                    (0.60, 3.00, 0.1)
+                };
+            Some(ModelRates {
+                input,
+                output,
+                cache_write_5m: input,
+                cache_write_1h: input,
+                cache_read,
+            })
+        }
         ModelFamily::Google
-        | ModelFamily::Moonshot
         | ModelFamily::Qwen
         | ModelFamily::Glm
         | ModelFamily::DeepSeek
@@ -534,6 +553,30 @@ mod tests {
     }
 
     #[test]
+    fn kimi_k2_7_and_alias_use_current_rates() {
+        // K2.7 Code: $0.95 / $4.00 / $0.19 per 1M tokens.
+        // Default cache-write is 1.25x input, so 1h cache write = 0.95 * 1.25.
+        assert!(pricing_available_for_key("kimi-k2.7"));
+        assert!(pricing_available_for_key("kimi-for-coding"));
+        assert!(approx_eq(cost("kimi-k2.7", M, M), 4.95));
+        assert!(approx_eq(cost("kimi-for-coding", M, M), 4.95));
+        assert!(approx_eq(
+            cost_cache_1h("kimi-k2.7", M, M),
+            0.95 * 1.25 + 0.19
+        ));
+    }
+
+    #[test]
+    fn kimi_code_product_alias_resolves_to_k2_7_rates() {
+        // The raw alias logged by Kimi Code CLI normalizes to "kimi-for-coding",
+        // which resolves to K2.7 rates via the pricing_fallback alias.
+        assert!(approx_eq(
+            calculate_cost_for_key("kimi-for-coding", M, M, 0, 0, 0, 0),
+            4.95
+        ));
+    }
+
+    #[test]
     fn unsupported_family_defaults_to_zero_until_priced() {
         assert!(approx_eq(cost("totally-unknown-model", M, M), 0.00));
         assert!(!pricing_available_for_key("totally-unknown-model"));
@@ -549,7 +592,7 @@ mod tests {
 
     #[test]
     fn pricing_version_is_set() {
-        assert_eq!(PRICING_VERSION, "2026-06-17");
+        assert_eq!(PRICING_VERSION, "2026-07-02");
     }
 
     #[test]

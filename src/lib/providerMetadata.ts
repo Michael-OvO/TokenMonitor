@@ -8,7 +8,7 @@ import {
 
 export { ALL_USAGE_PROVIDER_ID } from "./types/index.js";
 
-export type UsageProviderLogoKind = "all" | "claude" | "codex" | "cursor" | "generic";
+export type UsageProviderLogoKind = "all" | "claude" | "codex" | "cursor" | "kimi" | "generic";
 type UsageProviderBrandColor = readonly [red: number, green: number, blue: number];
 type RateLimitUtilizationLabelFormat = "percent" | "percent_used";
 
@@ -116,6 +116,29 @@ const USAGE_INTEGRATION_DEFINITIONS: UsageProviderDefinition[] = [
       primaryWindowId: "auto_composer",
       utilizationLabelFormat: "percent_used",
       idleSummary: "No Cursor usage data available. Make sure Cursor IDE is signed in on this machine.",
+    },
+  },
+  {
+    id: "kimi",
+    label: "Kimi",
+    title: "Kimi Code",
+    logoKind: "kimi",
+    brandColor: [139, 111, 212],
+    supportsRateLimits: true,
+    rateLimits: {
+      cacheFile: "rate-limits-kimi.json",
+      // The /usages endpoint is lightweight, but we still throttle to avoid
+      // unnecesary network traffic and to match the other providers.
+      minFetchIntervalMs: 300_000,
+      primaryWindowId: "five_hour",
+      utilizationLabelFormat: "percent",
+      idleSummary: "No Kimi rate-limit data available. Make sure Kimi Code CLI is signed in on this machine.",
+      missingMetadataErrors: [
+        "kimi code cli is not signed in",
+        "failed to read kimi credentials",
+        "failed to parse kimi credentials",
+        "empty access token",
+      ],
     },
   },
 ];

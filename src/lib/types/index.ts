@@ -224,6 +224,7 @@ export interface StatusWidgetSummary {
   claudeUtil: number | null;
   codexUtil: number | null;
   cursorUtil: number | null;
+  kimiUtil: number | null;
   title: string;
 }
 
