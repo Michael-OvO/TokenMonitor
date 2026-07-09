@@ -8,7 +8,7 @@ import {
 
 export { ALL_USAGE_PROVIDER_ID } from "./types/index.js";
 
-export type UsageProviderLogoKind = "all" | "claude" | "codex" | "cursor" | "generic";
+export type UsageProviderLogoKind = "all" | "claude" | "codex" | "cursor" | "kimi" | "generic";
 type UsageProviderBrandColor = readonly [red: number, green: number, blue: number];
 type RateLimitUtilizationLabelFormat = "percent" | "percent_used";
 
@@ -117,6 +117,17 @@ const USAGE_INTEGRATION_DEFINITIONS: UsageProviderDefinition[] = [
       utilizationLabelFormat: "percent_used",
       idleSummary: "No Cursor usage data available. Make sure Cursor IDE is signed in on this machine.",
     },
+  },
+  {
+    id: "kimi",
+    label: "Kimi",
+    title: "Kimi Code",
+    logoKind: "kimi",
+    // Matches the `--kimi` brand hue (#8B6FD4) used by the chart palette.
+    brandColor: [139, 111, 212],
+    // Kimi Code CLI `wire.jsonl` logs carry token usage but no rate-limit
+    // windows, so Kimi is a usage-only integration (no rate-limit panel).
+    supportsRateLimits: false,
   },
 ];
 

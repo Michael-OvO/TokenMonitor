@@ -49,6 +49,19 @@ pub fn codex_sessions_default() -> Option<PathBuf> {
     home().map(|h| h.join(".codex").join("sessions"))
 }
 
+/// Default Kimi Code CLI session-log roots. The current CLI stores `wire.jsonl`
+/// files under `~/.kimi-code/sessions`; the legacy `kimi-cli` used
+/// `~/.kimi/sessions`. Both are returned so either install is picked up. May be
+/// overridden by `$KIMI_DATA_DIR` (handled in `usage::integrations`).
+pub fn kimi_sessions_defaults() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(h) = home() {
+        roots.push(h.join(".kimi").join("sessions"));
+        roots.push(h.join(".kimi-code").join("sessions"));
+    }
+    roots
+}
+
 /// Default Cursor workspace storage root for local chat/session metadata.
 pub fn cursor_workspace_storage_default() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
@@ -174,6 +187,13 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
             env_override: Some("CODEX_HOME"),
         });
     }
+    for p in kimi_sessions_defaults() {
+        out.push(AccessedPath {
+            purpose: "Kimi Code CLI session logs",
+            path: p,
+            env_override: Some("KIMI_DATA_DIR"),
+        });
+    }
     if let Some(p) = cursor_workspace_storage_default() {
         out.push(AccessedPath {
             purpose: "Cursor IDE workspace session metadata",
@@ -215,6 +235,7 @@ mod tests {
         assert!(set.iter().any(|p| p.contains("Claude Code")));
         assert!(set.iter().any(|p| p.contains("Codex")));
         assert!(set.iter().any(|p| p.contains("Cursor IDE")));
+        assert!(set.iter().any(|p| p.contains("Kimi")));
         assert!(set.iter().any(|p| p.contains("SSH")));
     }
 

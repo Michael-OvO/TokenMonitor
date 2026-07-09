@@ -21,6 +21,7 @@ const DEFAULT_HEADER_TABS = {
   claude: { label: "Claude", enabled: true },
   codex: { label: "Codex", enabled: true },
   cursor: { label: "Cursor", enabled: true },
+  kimi: { label: "Kimi", enabled: true },
 } as const;
 
 function makePersistedStore(saved: Partial<Settings> | null = {}) {
@@ -290,6 +291,9 @@ describe("loadSettings migration", () => {
       claude: { label: "Claude Code", enabled: true },
       codex: { label: "Codex", enabled: false },
       cursor: { label: "Cursor", enabled: true },
+      // Provider added after these settings were persisted → filled as a
+      // visible tab by the migration in normalizeHeaderTabs.
+      kimi: { label: "Kimi", enabled: true },
     });
   });
 
@@ -308,6 +312,7 @@ describe("loadSettings migration", () => {
         claude: { label: "Claude Claude Claude", enabled: false },
         codex: { label: "Codex", enabled: false },
         cursor: { label: "Cursor", enabled: false },
+        kimi: { label: "Kimi", enabled: false },
       },
       brandTheming: "yes" as unknown as Settings["brandTheming"],
       trayConfig: {
@@ -349,6 +354,7 @@ describe("loadSettings migration", () => {
       glassEffect: false,
     });
     expect(loaded.headerTabs).toEqual({
+      // Every tab was disabled, so normalization forces the first (all) visible.
       all: { label: "All", enabled: true },
       claude: {
         label: "Claude Claude Clau".slice(0, MAX_HEADER_TAB_LABEL_LENGTH),
@@ -356,6 +362,7 @@ describe("loadSettings migration", () => {
       },
       codex: { label: "Codex", enabled: false },
       cursor: { label: "Cursor", enabled: false },
+      kimi: { label: "Kimi", enabled: false },
     });
     expect(loaded.headerTabs.claude.label).toHaveLength(MAX_HEADER_TAB_LABEL_LENGTH);
   });
@@ -371,6 +378,7 @@ describe("header tab helpers", () => {
         claude: { label: "Claude", enabled: true },
         codex: { label: "Codex", enabled: true },
         cursor: { label: "Cursor", enabled: true },
+        kimi: { label: "Kimi", enabled: true },
       }),
     ).toBe(true);
   });
@@ -384,6 +392,7 @@ describe("header tab helpers", () => {
         claude: { label: "Claude", enabled: true },
         codex: { label: "Codex", enabled: true },
         cursor: { label: "Cursor", enabled: true },
+        kimi: { label: "Kimi", enabled: true },
       }),
     ).toBe(false);
 
@@ -393,6 +402,7 @@ describe("header tab helpers", () => {
         claude: { label: "Claude", enabled: false },
         codex: { label: "Codex", enabled: true },
         cursor: { label: "Cursor", enabled: true },
+        kimi: { label: "Kimi", enabled: true },
       }),
     ).toBe(false);
   });
@@ -405,6 +415,7 @@ describe("header tab helpers", () => {
       claude: { label: "Claude Code", enabled: false },
       codex: { label: "Codex", enabled: false },
       cursor: { label: "Cursor", enabled: false },
+      kimi: { label: "Kimi", enabled: false },
     });
 
     expect(normalized).toEqual({
@@ -412,6 +423,7 @@ describe("header tab helpers", () => {
       claude: { label: "Claude Code", enabled: false },
       codex: { label: "Codex", enabled: false },
       cursor: { label: "Cursor", enabled: false },
+      kimi: { label: "Kimi", enabled: false },
     });
     expect(resolveVisibleProvider("codex", normalized)).toBe("all");
   });
@@ -518,6 +530,7 @@ describe("updateSetting", () => {
           claude: { label: "Claude Code", enabled: false },
           codex: { label: "Codex", enabled: false },
           cursor: { label: "Cursor", enabled: true },
+          kimi: { label: "Kimi", enabled: true },
         },
       }),
     );

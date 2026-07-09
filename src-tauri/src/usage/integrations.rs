@@ -9,12 +9,14 @@ pub enum UsageIntegrationId {
     Claude,
     Codex,
     Cursor,
+    Kimi,
 }
 
-const ALL_USAGE_INTEGRATIONS: [UsageIntegrationId; 3] = [
+const ALL_USAGE_INTEGRATIONS: [UsageIntegrationId; 4] = [
     UsageIntegrationId::Claude,
     UsageIntegrationId::Codex,
     UsageIntegrationId::Cursor,
+    UsageIntegrationId::Kimi,
 ];
 
 impl UsageIntegrationId {
@@ -23,6 +25,7 @@ impl UsageIntegrationId {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Cursor => "cursor",
+            Self::Kimi => "kimi",
         }
     }
 
@@ -31,6 +34,7 @@ impl UsageIntegrationId {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor IDE",
+            Self::Kimi => "Kimi Code",
         }
     }
 
@@ -39,6 +43,7 @@ impl UsageIntegrationId {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
             "cursor" => Some(Self::Cursor),
+            "kimi" => Some(Self::Kimi),
             _ => None,
         }
     }
@@ -48,6 +53,7 @@ impl UsageIntegrationId {
             Self::Claude => detect_claude_project_dirs(),
             Self::Codex => vec![detect_codex_sessions_dir()],
             Self::Cursor => detect_cursor_workspace_storage_dirs(),
+            Self::Kimi => detect_kimi_sessions_dirs(),
         }
     }
 }
@@ -73,6 +79,7 @@ impl UsageIntegrationSelection {
                 UsageIntegrationId::Claude => &ALL_USAGE_INTEGRATIONS[..1],
                 UsageIntegrationId::Codex => &ALL_USAGE_INTEGRATIONS[1..2],
                 UsageIntegrationId::Cursor => &ALL_USAGE_INTEGRATIONS[2..3],
+                UsageIntegrationId::Kimi => &ALL_USAGE_INTEGRATIONS[3..4],
             },
             Self::All => &ALL_USAGE_INTEGRATIONS,
         }
@@ -104,6 +111,7 @@ pub fn provider_matches_model(provider: &str, model: &str) -> bool {
         ALL_USAGE_INTEGRATIONS_ID => true,
         "claude" => detect_model_family(model) == ModelFamily::Anthropic,
         "codex" => detect_model_family(model) == ModelFamily::OpenAI,
+        "kimi" => detect_model_family(model) == ModelFamily::Moonshot,
         _ => true,
     }
 }
@@ -131,6 +139,17 @@ fn normalize_claude_projects_dir(path: PathBuf) -> PathBuf {
 }
 
 fn normalize_codex_sessions_dir(path: PathBuf) -> PathBuf {
+    if path.file_name().is_some_and(|name| name == "sessions") {
+        path
+    } else {
+        path.join("sessions")
+    }
+}
+
+/// Normalize a Kimi data-home path to its `sessions` subdirectory. Accepts a
+/// data home (`~/.kimi`, `~/.kimi-code`) and appends `sessions`, or passes a
+/// path already ending in `sessions` through unchanged — mirroring Codex.
+fn normalize_kimi_sessions_dir(path: PathBuf) -> PathBuf {
     if path.file_name().is_some_and(|name| name == "sessions") {
         path
     } else {
@@ -231,6 +250,38 @@ fn detect_codex_sessions_dir() -> PathBuf {
     p
 }
 
+/// Kimi Code CLI session-log roots. The Kimi CLI writes `wire.jsonl` files under
+/// `<data-home>/sessions/…`; the current CLI defaults to `~/.kimi-code` and the
+/// legacy `kimi-cli` to `~/.kimi`, so both are scanned. `KIMI_DATA_DIR`
+/// (comma-separated, matching ccusage) overrides the defaults.
+fn detect_kimi_sessions_dirs() -> Vec<PathBuf> {
+    if let Ok(raw) = env::var("KIMI_DATA_DIR") {
+        let explicit = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map(normalize_kimi_sessions_dir)
+            .collect::<Vec<_>>();
+
+        if !explicit.is_empty() {
+            for p in &explicit {
+                tracing::debug!(path = %p.display(), "Kimi root (from KIMI_DATA_DIR)");
+            }
+            return dedupe_paths(explicit);
+        }
+    }
+
+    let roots = crate::paths::kimi_sessions_defaults();
+    if roots.is_empty() {
+        tracing::warn!("Could not determine home directory for Kimi sessions");
+    }
+    for p in &roots {
+        tracing::debug!(path = %p.display(), "Kimi root (default)");
+    }
+    dedupe_paths(roots)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +312,21 @@ mod tests {
                 UsageIntegrationId::Cursor
             ))
         );
+        assert_eq!(
+            UsageIntegrationSelection::parse("kimi"),
+            Some(UsageIntegrationSelection::Single(UsageIntegrationId::Kimi))
+        );
+    }
+
+    #[test]
+    fn kimi_tab_matches_only_moonshot_models() {
+        assert!(provider_matches_model("kimi", "kimi-for-coding"));
+        assert!(provider_matches_model("kimi", "kimi-k2.5"));
+        assert!(!provider_matches_model("kimi", "claude-sonnet-4-5"));
+        assert!(!provider_matches_model("kimi", "gpt-5-codex"));
+        // Kimi rows must not leak into the Claude/Codex tabs.
+        assert!(!provider_matches_model("claude", "kimi-for-coding"));
+        assert!(!provider_matches_model("codex", "kimi-for-coding"));
     }
 
     #[test]

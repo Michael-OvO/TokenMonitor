@@ -188,6 +188,12 @@ pub fn run() {
             }
             tracing::info!("[PROFILE] setup:logging = {:?}", setup_t0.elapsed());
 
+            // Kimi logs a stable alias (`kimi-for-coding`) rather than the model
+            // version; pull the real display name ("K2.7 Code High Speed") from
+            // the Kimi CLI's config.toml so the tab shows it. Key stays the alias
+            // so pricing and chart colors are unaffected.
+            models::set_model_display_overrides(usage::kimi_parser::kimi_model_display_names());
+
             // Owner instance: start the lock-port accept loop now that the
             // AppHandle exists. It answers PROBE / QUIT / FOCUS from any future
             // launch attempt. No-op when the guard is bypassed or not held.
@@ -829,6 +835,7 @@ pub(crate) fn archive_local_usage(state: &AppState) {
         ("claude", usage::integrations::UsageIntegrationId::Claude),
         ("codex", usage::integrations::UsageIntegrationId::Codex),
         ("cursor", usage::integrations::UsageIntegrationId::Cursor),
+        ("kimi", usage::integrations::UsageIntegrationId::Kimi),
     ] {
         let source_key = format!("local:{provider}");
 

@@ -5,7 +5,7 @@
 <h1 align="center">TokenMonitor</h1>
 
 <p align="center">
-  <strong>Local-first cross-platform system tray app for monitoring Claude Code, Codex CLI, and Cursor IDE token usage</strong>
+  <strong>Local-first cross-platform system tray app for monitoring Claude Code, Codex CLI, Cursor IDE, and Kimi Code token usage</strong>
 </p>
 
 <p align="center">
@@ -67,7 +67,7 @@ Grab the installer for your platform from the [latest release](https://github.co
 - Current-session spend, burn rate, and 5-hour context
 - Period views for `5h`, `day`, `week`, `month`, and `year`
 - Historical navigation with offset-based browsing
-- Claude-only, Codex-only, Cursor-only, and merged provider views
+- Claude-only, Codex-only, Cursor-only, Kimi-only, and merged provider views
 - Optional live tray spend display for quick check-ins
 - Agent/subagent cost breakdown with proportion visualization
 
@@ -179,6 +179,7 @@ TokenMonitor works from usage data you already have on disk. If no logs are pres
 | Claude Code | `~/.claude/projects/**/*.jsonl` | Also checks `$CLAUDE_CONFIG_DIR/projects` when set |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | Also respects `$CODEX_HOME/sessions` when set |
 | Cursor IDE | Cursor workspace storage `state.vscdb` | Auto-detected from Cursor IDE's local data directory |
+| Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl`, `~/.kimi/sessions/**/wire.jsonl` | Also respects `$KIMI_DATA_DIR` (comma-separated) when set |
 
 ### Rate-Limit Data
 
@@ -256,6 +257,7 @@ graph LR
     A["Claude logs<br/><sub>~/.claude/projects/**/*.jsonl</sub>"] --> B["Rust parser + pricing engine"]
     D["Codex logs<br/><sub>~/.codex/sessions/YYYY/MM/DD/*.jsonl</sub>"] --> B
     K["Cursor workspace<br/><sub>state.vscdb</sub>"] --> B
+    M["Kimi Code logs<br/><sub>~/.kimi-code/sessions/**/wire.jsonl</sub>"] --> B
     S["SSH remote logs"] --> B
     B --> C["Tauri IPC layer"]
     C --> E["Svelte 5 desktop UI"]
@@ -333,7 +335,7 @@ src-tauri/src/
 │   ├── parser.rs                  # JSONL discovery, parsing, normalization
 │   ├── claude_parser.rs           # Claude Code-specific deep parser
 │   ├── pricing.rs                 # Model-family-aware token pricing
-│   ├── integrations.rs            # Usage integration registry (Claude, Codex, Cursor)
+│   ├── integrations.rs            # Usage integration registry (Claude, Codex, Cursor, Kimi)
 │   ├── archive.rs                 # Persistent hourly aggregate storage
 │   ├── device_aggregation.rs      # Remote device data aggregation
 │   ├── exchange_rates.rs          # Dynamic USD→EUR/GBP/JPY/CNY rates (24h TTL)

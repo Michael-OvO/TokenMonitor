@@ -1,5 +1,7 @@
 use chrono::Local;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 use crate::stats::change::{ChangeStats, ModelChangeSummary};
 
@@ -596,8 +598,35 @@ impl Default for DeviceUsagePayload {
     }
 }
 
+// ── Display-name overrides ──────────────────────────────────────────────────
+//
+// Some CLIs log a stable *alias* rather than the real model version — Kimi Code
+// records every turn as `kimi-for-coding` while the human-facing name
+// ("K2.7 Code High Speed") lives only in its `config.toml`. Overrides let us
+// show that real name without disturbing the normalized *key*, which pricing
+// (`kimi-for-coding` fallback rate) and the chart palette (`startsWith("kimi")`)
+// both depend on. Populated once at startup from the CLI's own config.
+
+static MODEL_DISPLAY_OVERRIDES: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+
+/// Register display-name overrides keyed by normalized model key. Replaces any
+/// previously registered set. Keys are normalized model keys (see
+/// [`normalized_model_key`]); values are the display names to show instead.
+pub fn set_model_display_overrides(overrides: HashMap<String, String>) {
+    let lock = MODEL_DISPLAY_OVERRIDES.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Ok(mut guard) = lock.write() {
+        *guard = overrides;
+    }
+}
+
+fn display_override_for(model_key: &str) -> Option<String> {
+    let guard = MODEL_DISPLAY_OVERRIDES.get()?.read().ok()?;
+    guard.get(model_key).cloned()
+}
+
 pub fn known_model_from_raw(raw: &str) -> KnownModel {
     let (display_name, model_key) = normalize_model(raw);
+    let display_name = display_override_for(&model_key).unwrap_or(display_name);
     KnownModel {
         display_name,
         model_key,
