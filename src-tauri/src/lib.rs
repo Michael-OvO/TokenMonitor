@@ -188,6 +188,13 @@ pub fn run() {
             }
             tracing::info!("[PROFILE] setup:logging = {:?}", setup_t0.elapsed());
 
+            // Kimi logs the selected config alias (`kimi-for-coding`, `k3`,
+            // …) rather than the product name; pull the real display name
+            // ("K2.7 Coding") from the Kimi CLI's config.toml so the tab shows
+            // it. Key stays the alias so pricing and chart colors are
+            // unaffected.
+            models::set_model_display_overrides(usage::kimi_parser::kimi_model_display_names());
+
             // Owner instance: start the lock-port accept loop now that the
             // AppHandle exists. It answers PROBE / QUIT / FOCUS from any future
             // launch attempt. No-op when the guard is bypassed or not held.
@@ -820,6 +827,11 @@ pub(crate) fn archive_local_usage(state: &AppState) {
         return;
     };
 
+    // Re-read the Kimi CLI's config.toml so a model switch ("K2.7 Coding" →
+    // "K3") shows up without an app restart. Cheap: one small file per data
+    // home, and archive runs are already periodic.
+    models::set_model_display_overrides(usage::kimi_parser::kimi_model_display_names());
+
     let now = chrono::Local::now();
     let current_date = now.date_naive();
     let current_hour = now.hour() as u8;
@@ -829,6 +841,7 @@ pub(crate) fn archive_local_usage(state: &AppState) {
         ("claude", usage::integrations::UsageIntegrationId::Claude),
         ("codex", usage::integrations::UsageIntegrationId::Codex),
         ("cursor", usage::integrations::UsageIntegrationId::Cursor),
+        ("kimi", usage::integrations::UsageIntegrationId::Kimi),
     ] {
         let source_key = format!("local:{provider}");
 

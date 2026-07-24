@@ -1,5 +1,7 @@
 use chrono::Local;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 use crate::stats::change::{ChangeStats, ModelChangeSummary};
 
@@ -207,6 +209,7 @@ pub struct RateLimitsPayload {
     pub claude: Option<ProviderRateLimits>,
     pub codex: Option<ProviderRateLimits>,
     pub cursor: Option<ProviderRateLimits>,
+    pub kimi: Option<ProviderRateLimits>,
 }
 
 // ── Helpers ──
@@ -222,6 +225,20 @@ pub enum ModelFamily {
     DeepSeek,
     Cursor,
     Unknown,
+}
+
+/// Moonshot's newer bare model names (`k2`, `k3`, `k3-...`). The Kimi Code CLI
+/// logs e.g. `kimi-code/k3`, which loses the `kimi` prefix once the provider
+/// namespace is stripped, so recognize the bare K-series too.
+fn looks_like_moonshot_k_series(normalized: &str) -> bool {
+    let Some(rest) = normalized.strip_prefix('k') else {
+        return false;
+    };
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return false;
+    }
+    matches!(rest[digits..].chars().next(), None | Some('.') | Some('-'))
 }
 
 pub fn detect_model_family(raw: &str) -> ModelFamily {
@@ -252,7 +269,10 @@ pub fn detect_model_family(raw: &str) -> ModelFamily {
         return ModelFamily::Google;
     }
 
-    if normalized.starts_with("kimi") || normalized.contains("moonshot") {
+    if normalized.starts_with("kimi")
+        || normalized.contains("moonshot")
+        || looks_like_moonshot_k_series(&normalized)
+    {
         return ModelFamily::Moonshot;
     }
 
@@ -596,8 +616,37 @@ impl Default for DeviceUsagePayload {
     }
 }
 
+// ── Display-name overrides ──────────────────────────────────────────────────
+//
+// Some CLIs log a stable *alias* rather than the real product name — Kimi Code
+// records turns under the selected config alias (`kimi-for-coding`,
+// `kimi-for-coding-highspeed`, `k3`) while the human-facing name
+// ("K2.7 Coding Highspeed") lives only in its `config.toml`. Overrides let us
+// show that real name without disturbing the normalized *key*, which pricing
+// (per-alias fallback rates) and the chart palette (`startsWith("kimi")` plus
+// the bare K-series) both depend on. Populated at startup and refreshed on
+// each archive run from the CLI's own config.
+
+static MODEL_DISPLAY_OVERRIDES: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+
+/// Register display-name overrides keyed by normalized model key. Replaces any
+/// previously registered set. Keys are normalized model keys (see
+/// [`normalized_model_key`]); values are the display names to show instead.
+pub fn set_model_display_overrides(overrides: HashMap<String, String>) {
+    let lock = MODEL_DISPLAY_OVERRIDES.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Ok(mut guard) = lock.write() {
+        *guard = overrides;
+    }
+}
+
+fn display_override_for(model_key: &str) -> Option<String> {
+    let guard = MODEL_DISPLAY_OVERRIDES.get()?.read().ok()?;
+    guard.get(model_key).cloned()
+}
+
 pub fn known_model_from_raw(raw: &str) -> KnownModel {
     let (display_name, model_key) = normalize_model(raw);
+    let display_name = display_override_for(&model_key).unwrap_or(display_name);
     KnownModel {
         display_name,
         model_key,
@@ -1176,6 +1225,17 @@ mod tests {
             detect_model_family("some-moonshot-model"),
             ModelFamily::Moonshot
         );
+    }
+
+    #[test]
+    fn detects_moonshot_bare_k_series() {
+        // Kimi Code CLI logs `kimi-code/k3`; after the provider namespace is
+        // stripped the bare K-series name must still classify as Moonshot.
+        assert_eq!(detect_model_family("k3"), ModelFamily::Moonshot);
+        assert_eq!(detect_model_family("k2"), ModelFamily::Moonshot);
+        assert_eq!(detect_model_family("k3-instruct"), ModelFamily::Moonshot);
+        // A leading "k" alone (or non-numeric suffix) must not match.
+        assert_ne!(detect_model_family("kotlin-model"), ModelFamily::Moonshot);
     }
 
     #[test]

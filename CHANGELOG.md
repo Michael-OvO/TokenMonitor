@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## v0.15.0 — Kimi Code 集成
+
+### 新增
+- **Kimi Code 提供方**：新增 Kimi Code CLI 使用量追踪，递归解析 `~/.kimi-code/sessions/**/wire.jsonl`（及旧版 `~/.kimi/sessions`），支持 `$KIMI_DATA_DIR`（逗号分隔）覆盖
+- **仅统计 turn-scoped 记录**：`usage.record` 中跳过 session-scoped 的累计记录，避免重复计数；同时兼容 camelCase 与 snake_case 字段
+- **真实模型名**：从 Kimi `config.toml` 的 `display_name` 读取真实模型名（如 "K2.7 Coding"、"K3"），保持 model key 为 `kimi-for-coding` 以复用定价与图表配色；模型切换后无需重启即可刷新
+- **Rate limits**：通过 `~/.kimi-code/credentials/kimi-code.json` 调用 `api.kimi.com/coding/v1/usages`，展示 weekly 与 5h 窗口，并接入托盘 / FloatBall 利用率条
+- **定价**：`pricing_fallback.json` 新增 `kimi-for-coding`（K2.7 Code）、`kimi-for-coding-highspeed` 与 `k3` 费率，cache 写入按 input 价计（Kimi 不单独收取 cache 写费）
+- **UI**：新增 Kimi 标签页、月牙 logo 与 violet 品牌配色（复用 `--kimi` 色板，含 dark/light/glass 变体）
+
 ## v0.13.1 — Settings 重构 + SSH 搜索扩展 + FloatBall 修复
 
 ### UI

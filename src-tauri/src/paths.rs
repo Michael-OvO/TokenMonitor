@@ -49,6 +49,52 @@ pub fn codex_sessions_default() -> Option<PathBuf> {
     home().map(|h| h.join(".codex").join("sessions"))
 }
 
+/// Default Kimi Code CLI session-log roots. The current CLI stores `wire.jsonl`
+/// files under `~/.kimi-code/sessions`; the legacy `kimi-cli` used
+/// `~/.kimi/sessions`. Both are returned so either install is picked up. May be
+/// overridden by `$KIMI_DATA_DIR` (handled in `usage::integrations`).
+pub fn kimi_sessions_defaults() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(h) = home() {
+        roots.push(h.join(".kimi").join("sessions"));
+        roots.push(h.join(".kimi-code").join("sessions"));
+    }
+    roots
+}
+
+/// Kimi Code CLI credential file (`credentials/kimi-code.json` under the data
+/// home), read to call the rate-limit usage API. Honors `$KIMI_DATA_DIR`
+/// (comma-separated, matching the sessions-dir override): the first entry
+/// whose credential file exists wins, so multi-entry overrides pointing at
+/// several data homes still find their token. Falls back to the first entry
+/// (for a sensible error message), then to `~/.kimi-code`.
+pub fn kimi_credentials_file() -> Option<PathBuf> {
+    if let Ok(raw) = env::var("KIMI_DATA_DIR") {
+        let homes: Vec<PathBuf> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        if !homes.is_empty() {
+            return homes
+                .iter()
+                .map(|home| home.join("credentials").join("kimi-code.json"))
+                .find(|path| path.exists())
+                .or_else(|| {
+                    homes
+                        .first()
+                        .map(|home| home.join("credentials").join("kimi-code.json"))
+                });
+        }
+    }
+    home().map(|h| {
+        h.join(".kimi-code")
+            .join("credentials")
+            .join("kimi-code.json")
+    })
+}
+
 /// Default Cursor workspace storage root for local chat/session metadata.
 pub fn cursor_workspace_storage_default() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
@@ -174,6 +220,20 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
             env_override: Some("CODEX_HOME"),
         });
     }
+    for p in kimi_sessions_defaults() {
+        out.push(AccessedPath {
+            purpose: "Kimi Code CLI session logs",
+            path: p,
+            env_override: Some("KIMI_DATA_DIR"),
+        });
+    }
+    if let Some(p) = kimi_credentials_file() {
+        out.push(AccessedPath {
+            purpose: "Kimi Code CLI credentials for rate-limit reads",
+            path: p,
+            env_override: Some("KIMI_DATA_DIR"),
+        });
+    }
     if let Some(p) = cursor_workspace_storage_default() {
         out.push(AccessedPath {
             purpose: "Cursor IDE workspace session metadata",
@@ -215,6 +275,7 @@ mod tests {
         assert!(set.iter().any(|p| p.contains("Claude Code")));
         assert!(set.iter().any(|p| p.contains("Codex")));
         assert!(set.iter().any(|p| p.contains("Cursor IDE")));
+        assert!(set.iter().any(|p| p.contains("Kimi")));
         assert!(set.iter().any(|p| p.contains("SSH")));
     }
 

@@ -67,9 +67,28 @@ export interface ChangelogEntry {
  * sees a saved `lastOnboardedVersion` that doesn't match this, the user is
  * re-onboarded so they see the changelog and re-run any new install steps.
  */
-export const CURRENT_ONBOARDING_VERSION = "0.12.0";
+export const CURRENT_ONBOARDING_VERSION = "0.15.0";
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.15.0",
+    date: "2026-07-08",
+    title: "Kimi Code support",
+    highlights: [
+      {
+        title: "Kimi Code tab",
+        description: "Track Kimi CLI token usage and cost.",
+      },
+      {
+        title: "Real model names",
+        description: "Shows your live model, e.g. K2.7 Coding or K3.",
+      },
+      {
+        title: "Kimi rate limits",
+        description: "Weekly + 5h quota in dashboard, tray, and FloatBall.",
+      },
+    ],
+  },
   {
     version: "0.12.0",
     date: "2026-04-29",
