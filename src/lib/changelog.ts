@@ -85,7 +85,7 @@ export const CHANGELOG: ChangelogEntry[] = [
       },
       {
         title: "Kimi rate limits",
-        description: "Weekly and 5h quota windows in the dashboard, tray, and FloatBall.",
+        description: "Weekly + 5h quota in dashboard, tray, and FloatBall.",
       },
     ],
   },

@@ -64,19 +64,35 @@ pub fn kimi_sessions_defaults() -> Vec<PathBuf> {
 
 /// Kimi Code CLI credential file (`credentials/kimi-code.json` under the data
 /// home), read to call the rate-limit usage API. Honors `$KIMI_DATA_DIR`
-/// (first entry, matching the sessions-dir override) and falls back to
-/// `~/.kimi-code`.
+/// (comma-separated, matching the sessions-dir override): the first entry
+/// whose credential file exists wins, so multi-entry overrides pointing at
+/// several data homes still find their token. Falls back to the first entry
+/// (for a sensible error message), then to `~/.kimi-code`.
 pub fn kimi_credentials_file() -> Option<PathBuf> {
-    env::var("KIMI_DATA_DIR")
-        .ok()
-        .and_then(|raw| {
-            raw.split(',')
-                .map(str::trim)
-                .find(|entry| !entry.is_empty())
-                .map(PathBuf::from)
-        })
-        .or_else(|| home().map(|h| h.join(".kimi-code")))
-        .map(|p| p.join("credentials").join("kimi-code.json"))
+    if let Ok(raw) = env::var("KIMI_DATA_DIR") {
+        let homes: Vec<PathBuf> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        if !homes.is_empty() {
+            return homes
+                .iter()
+                .map(|home| home.join("credentials").join("kimi-code.json"))
+                .find(|path| path.exists())
+                .or_else(|| {
+                    homes
+                        .first()
+                        .map(|home| home.join("credentials").join("kimi-code.json"))
+                });
+        }
+    }
+    home().map(|h| {
+        h.join(".kimi-code")
+            .join("credentials")
+            .join("kimi-code.json")
+    })
 }
 
 /// Default Cursor workspace storage root for local chat/session metadata.

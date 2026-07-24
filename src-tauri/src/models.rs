@@ -618,12 +618,14 @@ impl Default for DeviceUsagePayload {
 
 // ── Display-name overrides ──────────────────────────────────────────────────
 //
-// Some CLIs log a stable *alias* rather than the real model version — Kimi Code
-// records every turn as `kimi-for-coding` while the human-facing name
-// ("K2.7 Code High Speed") lives only in its `config.toml`. Overrides let us
+// Some CLIs log a stable *alias* rather than the real product name — Kimi Code
+// records turns under the selected config alias (`kimi-for-coding`,
+// `kimi-for-coding-highspeed`, `k3`) while the human-facing name
+// ("K2.7 Coding Highspeed") lives only in its `config.toml`. Overrides let us
 // show that real name without disturbing the normalized *key*, which pricing
-// (`kimi-for-coding` fallback rate) and the chart palette (`startsWith("kimi")`)
-// both depend on. Populated once at startup from the CLI's own config.
+// (per-alias fallback rates) and the chart palette (`startsWith("kimi")` plus
+// the bare K-series) both depend on. Populated at startup and refreshed on
+// each archive run from the CLI's own config.
 
 static MODEL_DISPLAY_OVERRIDES: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 

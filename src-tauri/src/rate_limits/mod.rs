@@ -340,6 +340,14 @@ pub async fn fetch_selected_rate_limits(
             return cached_kimi;
         }
 
+        // Honor a 429 cooldown: error payloads have no windows, so `is_fresh`
+        // never trips and we'd otherwise re-hit the API every refresh cycle.
+        if let Some(rate_limits) = cached_kimi.clone() {
+            if provider_cooldown_is_active(&rate_limits, now) {
+                return Some(mark_rate_limits_stale(rate_limits));
+            }
+        }
+
         match fetch_kimi_rate_limits().await {
             Ok(rate_limits) => Some(rate_limits),
             Err(error) => {

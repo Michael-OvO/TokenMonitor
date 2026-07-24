@@ -188,10 +188,11 @@ pub fn run() {
             }
             tracing::info!("[PROFILE] setup:logging = {:?}", setup_t0.elapsed());
 
-            // Kimi logs a stable alias (`kimi-for-coding`) rather than the model
-            // version; pull the real display name ("K2.7 Code High Speed") from
-            // the Kimi CLI's config.toml so the tab shows it. Key stays the alias
-            // so pricing and chart colors are unaffected.
+            // Kimi logs the selected config alias (`kimi-for-coding`, `k3`,
+            // …) rather than the product name; pull the real display name
+            // ("K2.7 Coding") from the Kimi CLI's config.toml so the tab shows
+            // it. Key stays the alias so pricing and chart colors are
+            // unaffected.
             models::set_model_display_overrides(usage::kimi_parser::kimi_model_display_names());
 
             // Owner instance: start the lock-port accept loop now that the

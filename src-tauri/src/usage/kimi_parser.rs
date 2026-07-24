@@ -80,17 +80,18 @@ fn parse_kimi_timestamp(entry: &Value) -> Option<DateTime<Local>> {
 
 // ── Model display names (from the Kimi CLI's own config) ────────────────────
 //
-// Usage records only carry the alias `kimi-code/kimi-for-coding`; the real
-// product name is declared in `<kimi-home>/config.toml`:
+// Usage records carry the selected config alias (`kimi-code/kimi-for-coding`,
+// `kimi-code/k3`, …); the real product name is declared in
+// `<kimi-home>/config.toml`:
 //
 // ```toml
 // [models."kimi-code/kimi-for-coding"]
 // model = "kimi-for-coding"
-// display_name = "K2.7 Code High Speed"
+// display_name = "K2.7 Coding"
 // ```
 //
 // We read that mapping and register it as a display-name override so the tab
-// shows "K2.7 Code High Speed" while the model key stays `kimi-for-coding`
+// shows "K2.7 Coding" while the model key stays `kimi-for-coding`
 // (which pricing and the chart palette rely on).
 
 /// The Kimi CLI data-home directories (parents of `sessions/`), where
