@@ -4,6 +4,7 @@
     "cursor_composer_auto": "https://cursor.com/docs/models",
     "deepseek": "https://api-docs.deepseek.com/quick_start/pricing",
     "grok": "https://docs.x.ai/developers/pricing",
+    "kimi": "https://platform.moonshot.ai/docs/pricing (K2.7 Code / K2.7 Code Highspeed / K3; cache writes billed as input)",
     "perplexity": "https://docs.perplexity.ai/docs/getting-started/pricing",
     "gemini": "https://cursor.com/docs/models (Cursor API pool rates)"
   },
@@ -104,12 +105,26 @@
     "kimi-k2.5": {
       "input": 0.6,
       "output": 3.0,
+      "cache_write_5m": 0.6,
       "cache_read": 0.1
     },
     "kimi-for-coding": {
-      "input": 0.6,
-      "output": 3.0,
-      "cache_read": 0.1
+      "input": 0.95,
+      "output": 4.0,
+      "cache_write_5m": 0.95,
+      "cache_read": 0.19
+    },
+    "kimi-for-coding-highspeed": {
+      "input": 1.9,
+      "output": 8.0,
+      "cache_write_5m": 1.9,
+      "cache_read": 0.38
+    },
+    "k3": {
+      "input": 3.0,
+      "output": 15.0,
+      "cache_write_5m": 3.0,
+      "cache_read": 0.3
     },
     "sonar": {
       "input": 1.0,

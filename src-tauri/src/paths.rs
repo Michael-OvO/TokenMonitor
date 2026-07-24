@@ -62,6 +62,23 @@ pub fn kimi_sessions_defaults() -> Vec<PathBuf> {
     roots
 }
 
+/// Kimi Code CLI credential file (`credentials/kimi-code.json` under the data
+/// home), read to call the rate-limit usage API. Honors `$KIMI_DATA_DIR`
+/// (first entry, matching the sessions-dir override) and falls back to
+/// `~/.kimi-code`.
+pub fn kimi_credentials_file() -> Option<PathBuf> {
+    env::var("KIMI_DATA_DIR")
+        .ok()
+        .and_then(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .find(|entry| !entry.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| home().map(|h| h.join(".kimi-code")))
+        .map(|p| p.join("credentials").join("kimi-code.json"))
+}
+
 /// Default Cursor workspace storage root for local chat/session metadata.
 pub fn cursor_workspace_storage_default() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
@@ -190,6 +207,13 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
     for p in kimi_sessions_defaults() {
         out.push(AccessedPath {
             purpose: "Kimi Code CLI session logs",
+            path: p,
+            env_override: Some("KIMI_DATA_DIR"),
+        });
+    }
+    if let Some(p) = kimi_credentials_file() {
+        out.push(AccessedPath {
+            purpose: "Kimi Code CLI credentials for rate-limit reads",
             path: p,
             env_override: Some("KIMI_DATA_DIR"),
         });

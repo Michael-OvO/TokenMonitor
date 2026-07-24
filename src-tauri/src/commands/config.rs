@@ -762,6 +762,7 @@ pub async fn get_rate_limits(
         Some("claude") => crate::rate_limits::RateLimitSelection::Claude,
         Some("codex") => crate::rate_limits::RateLimitSelection::Codex,
         Some("cursor") => crate::rate_limits::RateLimitSelection::Cursor,
+        Some("kimi") => crate::rate_limits::RateLimitSelection::Kimi,
         Some(other) => return Err(format!("Invalid provider for rate limits: {other}")),
     };
 
@@ -778,6 +779,7 @@ pub async fn get_rate_limits(
                 claude: None,
                 codex: None,
                 cursor: None,
+                kimi: None,
             }));
     }
 

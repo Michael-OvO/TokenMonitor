@@ -81,7 +81,11 @@ export const CHANGELOG: ChangelogEntry[] = [
       },
       {
         title: "Real model names",
-        description: "Shows your live model, e.g. K2.7 Code.",
+        description: "Shows your live model, e.g. K2.7 Coding or K3.",
+      },
+      {
+        title: "Kimi rate limits",
+        description: "Weekly and 5h quota windows in the dashboard, tray, and FloatBall.",
       },
     ],
   },

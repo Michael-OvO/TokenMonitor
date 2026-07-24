@@ -188,6 +188,7 @@ Rate-limit visibility is separate from usage history parsing:
 - Claude rate limits use local authentication state already on the machine and fall back to CLI probe when needed
 - Codex rate limits are read from recent session metadata in local Codex JSONL files
 - Cursor rate limits are fetched from the Cursor API using an access token auto-detected from Cursor IDE or manually provided
+- Kimi rate limits are fetched from the Kimi usage API using the access token in `~/.kimi-code/credentials/kimi-code.json`
 
 ## Installation
 

@@ -209,6 +209,7 @@ pub struct RateLimitsPayload {
     pub claude: Option<ProviderRateLimits>,
     pub codex: Option<ProviderRateLimits>,
     pub cursor: Option<ProviderRateLimits>,
+    pub kimi: Option<ProviderRateLimits>,
 }
 
 // ── Helpers ──
@@ -224,6 +225,20 @@ pub enum ModelFamily {
     DeepSeek,
     Cursor,
     Unknown,
+}
+
+/// Moonshot's newer bare model names (`k2`, `k3`, `k3-...`). The Kimi Code CLI
+/// logs e.g. `kimi-code/k3`, which loses the `kimi` prefix once the provider
+/// namespace is stripped, so recognize the bare K-series too.
+fn looks_like_moonshot_k_series(normalized: &str) -> bool {
+    let Some(rest) = normalized.strip_prefix('k') else {
+        return false;
+    };
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return false;
+    }
+    matches!(rest[digits..].chars().next(), None | Some('.') | Some('-'))
 }
 
 pub fn detect_model_family(raw: &str) -> ModelFamily {
@@ -254,7 +269,10 @@ pub fn detect_model_family(raw: &str) -> ModelFamily {
         return ModelFamily::Google;
     }
 
-    if normalized.starts_with("kimi") || normalized.contains("moonshot") {
+    if normalized.starts_with("kimi")
+        || normalized.contains("moonshot")
+        || looks_like_moonshot_k_series(&normalized)
+    {
         return ModelFamily::Moonshot;
     }
 
@@ -1205,6 +1223,17 @@ mod tests {
             detect_model_family("some-moonshot-model"),
             ModelFamily::Moonshot
         );
+    }
+
+    #[test]
+    fn detects_moonshot_bare_k_series() {
+        // Kimi Code CLI logs `kimi-code/k3`; after the provider namespace is
+        // stripped the bare K-series name must still classify as Moonshot.
+        assert_eq!(detect_model_family("k3"), ModelFamily::Moonshot);
+        assert_eq!(detect_model_family("k2"), ModelFamily::Moonshot);
+        assert_eq!(detect_model_family("k3-instruct"), ModelFamily::Moonshot);
+        // A leading "k" alone (or non-numeric suffix) must not match.
+        assert_ne!(detect_model_family("kotlin-model"), ModelFamily::Moonshot);
     }
 
     #[test]

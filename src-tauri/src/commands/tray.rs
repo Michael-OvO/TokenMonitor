@@ -74,11 +74,15 @@ pub(crate) struct TrayUtilization {
     pub(crate) claude: Option<f64>,
     pub(crate) codex: Option<f64>,
     pub(crate) cursor: Option<f64>,
+    pub(crate) kimi: Option<f64>,
 }
 
 impl TrayUtilization {
     pub(crate) fn has_any(self) -> bool {
-        self.claude.is_some() || self.codex.is_some() || self.cursor.is_some()
+        self.claude.is_some()
+            || self.codex.is_some()
+            || self.cursor.is_some()
+            || self.kimi.is_some()
     }
 }
 
@@ -90,6 +94,7 @@ pub struct StatusWidgetSummary {
     pub claude_util: Option<f64>,
     pub codex_util: Option<f64>,
     pub cursor_util: Option<f64>,
+    pub kimi_util: Option<f64>,
     pub title: String,
 }
 
@@ -147,6 +152,7 @@ fn primary_window_id(provider: &str) -> &'static str {
         "claude" => "five_hour",
         "codex" => "primary",
         "cursor" => "auto_composer",
+        "kimi" => "five_hour",
         _ => "primary",
     }
 }
@@ -209,6 +215,10 @@ pub(crate) fn tray_utilization_from_rate_limits(
             "cursor",
             payload.and_then(|rate_limits| rate_limits.cursor.as_ref()),
         ),
+        kimi: primary_window_utilization(
+            "kimi",
+            payload.and_then(|rate_limits| rate_limits.kimi.as_ref()),
+        ),
     }
 }
 
@@ -217,6 +227,7 @@ fn merge_tray_utilization(current: TrayUtilization, patch: TrayUtilization) -> T
         claude: patch.claude.or(current.claude),
         codex: patch.codex.or(current.codex),
         cursor: patch.cursor.or(current.cursor),
+        kimi: patch.kimi.or(current.kimi),
     }
 }
 
@@ -410,6 +421,7 @@ pub async fn set_tray_config(
                 claude: claude_util,
                 codex: codex_util,
                 cursor: None,
+                kimi: None,
             },
         )
         .await
@@ -448,6 +460,7 @@ pub async fn get_status_widget_summary(
         claude_util: utilization.claude,
         codex_util: utilization.codex,
         cursor_util: utilization.cursor,
+        kimi_util: utilization.kimi,
     })
 }
 
@@ -516,6 +529,7 @@ mod tests {
             claude: Some(72.0),
             codex: Some(35.0),
             cursor: None,
+            kimi: None,
         };
 
         assert_eq!(
@@ -530,11 +544,13 @@ mod tests {
             claude: Some(72.0),
             codex: Some(35.0),
             cursor: None,
+            kimi: None,
         };
         let patch = TrayUtilization {
             claude: None,
             codex: Some(41.0),
             cursor: None,
+            kimi: None,
         };
 
         assert_eq!(
@@ -543,6 +559,7 @@ mod tests {
                 claude: Some(72.0),
                 codex: Some(41.0),
                 cursor: None,
+                kimi: None,
             }
         );
     }
@@ -585,6 +602,7 @@ mod tests {
                 fetched_at: "2026-03-18T00:00:00Z".to_string(),
             }),
             cursor: None,
+            kimi: None,
         };
 
         assert_eq!(
@@ -593,6 +611,7 @@ mod tests {
                 claude: Some(72.0),
                 codex: Some(35.0),
                 cursor: None,
+                kimi: None,
             }
         );
     }
@@ -611,6 +630,7 @@ mod tests {
                 claude: Some(72.0),
                 codex: None,
                 cursor: None,
+                kimi: None,
             }
         ));
         assert!(should_update_tray_icon(

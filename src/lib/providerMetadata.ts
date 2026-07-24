@@ -125,9 +125,22 @@ const USAGE_INTEGRATION_DEFINITIONS: UsageProviderDefinition[] = [
     logoKind: "kimi",
     // Matches the `--kimi` brand hue (#8B6FD4) used by the chart palette.
     brandColor: [139, 111, 212],
-    // Kimi Code CLI `wire.jsonl` logs carry token usage but no rate-limit
-    // windows, so Kimi is a usage-only integration (no rate-limit panel).
-    supportsRateLimits: false,
+    supportsRateLimits: true,
+    rateLimits: {
+      cacheFile: "rate-limits-kimi.json",
+      // The /usages endpoint is lightweight, but we still throttle to avoid
+      // unnecessary network traffic and to match the other providers.
+      minFetchIntervalMs: 300_000,
+      primaryWindowId: "five_hour",
+      utilizationLabelFormat: "percent",
+      idleSummary: "No Kimi rate-limit data available. Make sure Kimi Code CLI is signed in on this machine.",
+      missingMetadataErrors: [
+        "kimi code cli is not signed in",
+        "failed to read kimi credentials",
+        "failed to parse kimi credentials",
+        "empty access token",
+      ],
+    },
   },
 ];
 

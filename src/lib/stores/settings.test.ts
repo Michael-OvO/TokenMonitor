@@ -158,8 +158,8 @@ describe("loadSettings", () => {
       trayConfig: {
         barDisplay: 'custom',
         barProvider: 'claude',
-        barProviders: ["claude", "codex", "cursor"],
-        floatBallBarProviders: ["claude", "codex", "cursor"],
+        barProviders: ["claude", "codex", "cursor", "kimi"],
+        floatBallBarProviders: ["claude", "codex", "cursor", "kimi"],
         showPercentages: false,
         percentageFormat: 'compact',
         showCost: true,
