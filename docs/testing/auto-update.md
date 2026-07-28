@@ -13,7 +13,7 @@ Before tagging a real version:
 ## Per-platform checks
 
 ### macOS (Apple Silicon)
-- [ ] DMG installer is signed + notarized (unchanged from previous flow)
+- [ ] DMG installer is unsigned (no Developer ID cert); first launch requires clearing quarantine (`xattr -cr /Applications/TokenMonitor.app`)
 - [ ] `.app.tar.gz` + `.app.tar.gz.sig` appear in the release assets
 - [ ] `latest.json` is present in release assets
 - [ ] Banner appears in popover on old version

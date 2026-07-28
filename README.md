@@ -166,7 +166,7 @@ Grab the installer for your platform from the [latest release](https://github.co
 | Dock icon toggle | Supported | Not applicable | Not applicable |
 | Autostart | LaunchAgent | Registry | XDG autostart |
 | Auto-update | DMG in-place replace | NSIS passive install | AppImage replace (.deb: download link) |
-| Installer | DMG (signed + notarized) | NSIS .exe | .deb / .AppImage |
+| Installer | DMG (unsigned — see note below) | NSIS .exe | .deb / .AppImage |
 
 ## Local Data
 
@@ -223,17 +223,17 @@ Platform-specific bundle output:
 | Linux | `src-tauri/target/release/bundle/deb/token-monitor_x.y.z_amd64.deb` |
 
 > [!NOTE]
-> **macOS:** Builds you compile yourself (and fork CI builds without Apple signing
-> secrets) are **unsigned**, so on first launch Gatekeeper may report the app as
-> *"damaged and can't be opened"*. The file is fine — clear the quarantine flag once
-> after moving it to Applications:
+> **macOS:** All builds are **unsigned** (no Apple Developer ID certificate), so on
+> first launch Gatekeeper may report the app as *"damaged and can't be opened"*.
+> The file is fine — clear the quarantine flag once after moving it to
+> Applications:
 >
 > ```bash
 > xattr -cr /Applications/TokenMonitor.app
 > ```
 >
-> Official releases (the download links above) are signed and notarized, so they don't
-> need this step.
+> In-app auto-updates are unaffected: they are verified with the Tauri updater
+> (minisign) key, which is independent of Apple code signing.
 
 ### Development
 
