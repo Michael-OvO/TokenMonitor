@@ -461,6 +461,28 @@ pub(crate) struct ClaudeExtraUsageData {
     pub utilization: Option<f64>,
 }
 
+/// Display labels for Claude's usage windows, in dashboard display order.
+/// Shared by the OAuth reader and the `claude -p "/usage"` reader so both
+/// surface identical bar names.
+const CLAUDE_WINDOW_LABELS: &[(&str, &str)] = &[
+    ("five_hour", "Session (5hr)"),
+    ("seven_day", "Weekly (7 day)"),
+    ("seven_day_sonnet", "Weekly Sonnet"),
+    ("seven_day_opus", "Weekly Opus"),
+    ("seven_day_oauth_apps", "Weekly OAuth Apps"),
+    ("seven_day_cowork", "Weekly Cowork"),
+    ("iguana_necktie", "Iguana Necktie"),
+];
+
+/// Display label for a Claude window id; unknown ids fall back to the raw id.
+pub(super) fn claude_window_label(window_id: &str) -> String {
+    CLAUDE_WINDOW_LABELS
+        .iter()
+        .find(|(id, _)| *id == window_id)
+        .map(|(_, label)| (*label).to_string())
+        .unwrap_or_else(|| window_id.to_string())
+}
+
 pub(crate) fn normalize_claude_extra_usage(extra_usage: ClaudeExtraUsageData) -> ExtraUsageInfo {
     ExtraUsageInfo {
         is_enabled: extra_usage.is_enabled,
@@ -693,25 +715,21 @@ async fn try_fetch_claude_rate_limits() -> FetchAttempt {
 
     // Build windows from non-null entries
     let mut windows = Vec::new();
-    let window_specs: &[(&str, &str, &Option<ClaudeWindowData>)] = &[
-        ("five_hour", "Session (5hr)", &usage.five_hour),
-        ("seven_day", "Weekly (7 day)", &usage.seven_day),
-        ("seven_day_sonnet", "Weekly Sonnet", &usage.seven_day_sonnet),
-        ("seven_day_opus", "Weekly Opus", &usage.seven_day_opus),
-        (
-            "seven_day_oauth_apps",
-            "Weekly OAuth Apps",
-            &usage.seven_day_oauth_apps,
-        ),
-        ("seven_day_cowork", "Weekly Cowork", &usage.seven_day_cowork),
-        ("iguana_necktie", "Iguana Necktie", &usage.iguana_necktie),
+    let window_specs: &[(&str, &Option<ClaudeWindowData>)] = &[
+        ("five_hour", &usage.five_hour),
+        ("seven_day", &usage.seven_day),
+        ("seven_day_sonnet", &usage.seven_day_sonnet),
+        ("seven_day_opus", &usage.seven_day_opus),
+        ("seven_day_oauth_apps", &usage.seven_day_oauth_apps),
+        ("seven_day_cowork", &usage.seven_day_cowork),
+        ("iguana_necktie", &usage.iguana_necktie),
     ];
 
-    for (id, label, data) in window_specs {
+    for (id, data) in window_specs {
         if let Some(w) = data {
             windows.push(RateLimitWindow::new(
                 id.to_string(),
-                label.to_string(),
+                claude_window_label(id),
                 w.utilization,
                 w.resets_at.clone(),
             ));
