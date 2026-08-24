@@ -79,7 +79,12 @@ scripts/*.exe
 .claude/
 .codex/
 .agents/
-.devcompanion/
 .superpowers/
 docs/superpowers/
 CLAUDE.md
+
+# >>> AI Dev Companion (managed)
+# 3a tests-preserving (aidev init / HistoryStore; installer may replace this block)
+.devcompanion/*
+!.devcompanion/tests/
+# <<< AI Dev Companion

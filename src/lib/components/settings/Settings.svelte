@@ -588,7 +588,7 @@
           <span class="label">Default Period</span>
           <SegmentedControl
             options={[
-              { value: "5h", label: "5H" },
+              { value: "5h", label: "Usage" },
               { value: "day", label: "Day" },
               { value: "week", label: "Week" },
               { value: "month", label: "Mo" },
