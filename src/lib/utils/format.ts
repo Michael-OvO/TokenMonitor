@@ -46,6 +46,25 @@ export function formatCost(value: number): string {
   return `${symbol}${converted.toFixed(2)}`;
 }
 
+/**
+ * Credit / spend-limit amounts: thousands separators, and no cents when the
+ * converted amount lands on a whole unit. The whole-or-not decision has to
+ * happen after conversion — $70 is round, €64.40 is not.
+ *
+ * Mirrors `format_auto` in `src-tauri/src/usage/money.rs`, which does the same
+ * job for the labels Rust builds.
+ */
+export function formatCreditAmount(value: number): string {
+  const symbol = CURRENCY_SYMBOLS[activeCurrency] ?? "$";
+  const converted = value * rateFor(activeCurrency);
+  const isWhole = Math.abs(converted - Math.round(converted)) < 0.005;
+  const digits = isWhole || activeCurrency === "JPY" ? 0 : 2;
+  return `${symbol}${converted.toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}`;
+}
+
 export function formatModelCost(value: number, pricingAvailable: boolean | undefined): string {
   if (pricingAvailable === false) return "N/A";
   if (value === 0) return "Free";

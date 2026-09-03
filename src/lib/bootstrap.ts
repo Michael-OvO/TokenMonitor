@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { activePeriod, activeProvider } from "./stores/usage.js";
 import { applyGlass, applyTheme, resolveVisibleProvider, updateSetting, type Settings } from "./stores/settings.js";
 import { syncTrayConfig } from "./tray/sync.js";
@@ -61,6 +62,7 @@ function installDevOnboardingHelpers(): void {
 
 type StartupDeps = {
   invokeFn?: typeof invoke;
+  listenFn?: typeof listen;
   applyThemeFn?: typeof applyTheme;
   applyGlassFn?: typeof applyGlass;
   syncNativeWindowThemeFn?: (theme: Settings["theme"]) => Promise<void>;
@@ -72,6 +74,7 @@ export async function initializeRuntimeFromSettings(
   deps: StartupDeps = {},
 ) {
   const invokeFn = deps.invokeFn ?? invoke;
+  const listenFn = deps.listenFn ?? listen;
   const applyThemeFn = deps.applyThemeFn ?? applyTheme;
   const applyGlassFn = deps.applyGlassFn ?? applyGlass;
   const syncNativeWindowThemeFn =
@@ -88,14 +91,29 @@ export async function initializeRuntimeFromSettings(
   logger.info("bootstrap", `Initializing: provider=${provider}, period=${saved.defaultPeriod}, theme=${saved.theme}`);
 
   // Load dynamic exchange rates from Rust backend (non-blocking).
-  invokeFn<Record<string, number>>("get_exchange_rates")
-    .then((rates) => {
-      if (rates && Object.keys(rates).length > 0) {
-        setRates(rates);
-        logger.info("bootstrap", `Exchange rates loaded: ${Object.keys(rates).length} currencies`);
-      }
-    })
-    .catch((e) => logger.debug("bootstrap", `Exchange rates fetch failed: ${e}`));
+  const pullExchangeRates = (reason: string) =>
+    invokeFn<Record<string, number>>("get_exchange_rates")
+      .then((rates) => {
+        if (rates && Object.keys(rates).length > 0) {
+          setRates(rates);
+          logger.info("bootstrap", `Exchange rates loaded (${reason}): ${Object.keys(rates).length} currencies`);
+        } else {
+          // Cold start with no cache on disk: the backend is still fetching.
+          // The `exchange-rates-updated` listener below picks them up — until
+          // then `format.ts` runs on its hardcoded fallback table.
+          logger.info("bootstrap", `Exchange rates not ready yet (${reason}); awaiting backend fetch`);
+        }
+      })
+      .catch((e) => logger.debug("bootstrap", `Exchange rates fetch failed (${reason}): ${e}`));
+
+  pullExchangeRates("startup");
+
+  // Rates land asynchronously on a first launch and again on the 24h refresh.
+  // Without this the webview would keep whatever it read at startup — on a
+  // fresh install, the fallback table, for the entire session.
+  listenFn("exchange-rates-updated", () => {
+    void pullExchangeRates("backend-refresh");
+  }).catch((e) => logger.debug("bootstrap", `Exchange rate listener failed: ${e}`));
 
   // Wire dev-only onboarding helpers onto `window`. No-op in production.
   installDevOnboardingHelpers();
@@ -131,6 +149,10 @@ export async function initializeRuntimeFromSettings(
     invokeFn("set_cursor_auth_config", {
       apiKey: saved.cursorApiKey,
     }),
+    // The tray title, the Cursor meter label and the float-ball amount are
+    // rendered in Rust, which cannot read the settings store. Push the currency
+    // before the first tray sync so the menu bar never flashes the wrong symbol.
+    invokeFn("set_currency", { code: saved.currency }),
   ]);
 
   const calls: Promise<unknown>[] = [

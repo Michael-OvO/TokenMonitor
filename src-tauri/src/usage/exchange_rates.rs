@@ -84,7 +84,6 @@ pub fn set_exchange_rates(rates: HashMap<String, f64>) {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn get_rate(currency: &str) -> Option<f64> {
     let lock = EXCHANGE_RATES.get()?;
     let guard = lock.read().ok()?;
@@ -149,6 +148,9 @@ mod tests {
 
     #[test]
     fn global_rates_set_and_get() {
+        // The rate table is a process global shared with `usage::money`; take
+        // its lock so the parallel runner cannot interleave the two.
+        let _guard = crate::usage::money::CurrencyGuard::new("USD");
         let mut rates = HashMap::new();
         rates.insert("GBP".to_string(), 0.74);
         set_exchange_rates(rates);
@@ -158,6 +160,7 @@ mod tests {
 
     #[test]
     fn get_all_rates_returns_empty_before_init() {
+        let _guard = crate::usage::money::CurrencyGuard::new("USD");
         // OnceLock may already be initialized from another test in this process,
         // so we just verify it doesn't panic and returns a map.
         let all = get_all_rates();

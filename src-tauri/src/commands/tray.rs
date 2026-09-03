@@ -93,6 +93,10 @@ pub struct StatusWidgetSummary {
     pub codex_util: Option<f64>,
     pub cursor_util: Option<f64>,
     pub title: String,
+    /// `total_cost` already rendered in the user's currency. The float ball is
+    /// a separate webview that never loads the settings store, so it cannot
+    /// format this itself — it would always print dollars.
+    pub cost_text: String,
 }
 
 /// Rate-limit providers in display order, mirroring the frontend's
@@ -163,13 +167,13 @@ fn format_tray_title(config: &TrayConfig, total_cost: f64, utilization: TrayUtil
         }
     }
 
-    // Cost
+    // Cost. Rust draws the tray itself, so it has to do the currency
+    // conversion the main webview's `formatCost` does — see `usage::money`.
     if config.show_cost {
-        if config.cost_precision == CostPrecision::Whole {
-            parts.push(format!("${}", total_cost.round() as i64));
-        } else {
-            parts.push(format!("${:.2}", total_cost));
-        }
+        parts.push(crate::usage::money::format(
+            total_cost,
+            config.cost_precision == CostPrecision::Whole,
+        ));
     }
 
     parts.join("  ")
@@ -489,7 +493,7 @@ async fn current_tray_utilization(state: &AppState) -> TrayUtilization {
     tray_utilization_from_rate_limits(cached.as_ref())
 }
 
-async fn apply_tray_title_now(app: &tauri::AppHandle, state: &AppState) {
+pub(crate) async fn apply_tray_title_now(app: &tauri::AppHandle, state: &AppState) {
     let config = state.tray_config.read().await.clone();
     let total_cost = current_daily_total_cost_if_allowed(state);
     let utilization = current_tray_utilization(state).await;
@@ -565,6 +569,7 @@ pub async fn get_status_widget_summary(
 
     Ok(StatusWidgetSummary {
         title: format_tray_title(&config, total_cost, utilization),
+        cost_text: crate::usage::money::format_compact(total_cost),
         config,
         total_cost,
         claude_util: utilization.claude,
@@ -640,6 +645,7 @@ mod tests {
 
     #[test]
     fn format_tray_title_formats_cost_when_visible() {
+        let _guard = crate::usage::money::CurrencyGuard::new("USD");
         let config = TrayConfig::default(); // show_cost: true, cost_precision: "full"
         assert_eq!(
             format_tray_title(&config, 12.345, utils(None, None, None)),
@@ -647,8 +653,25 @@ mod tests {
         );
     }
 
+    /// The tray is drawn by Rust, so it never saw the currency the user picked
+    /// in Settings: a EUR user got `€4.60` in the popover and `$5.00` in the
+    /// menu bar at the same moment.
+    #[test]
+    fn format_tray_title_follows_the_selected_currency() {
+        let _guard = crate::usage::money::CurrencyGuard::new("EUR");
+        crate::usage::exchange_rates::set_exchange_rates(
+            [("EUR".to_string(), 0.92)].into_iter().collect(),
+        );
+        let config = TrayConfig::default();
+        assert_eq!(
+            format_tray_title(&config, 5.0, utils(None, None, None)),
+            "\u{20ac}4.60"
+        );
+    }
+
     #[test]
     fn format_tray_title_whole_cost() {
+        let _guard = crate::usage::money::CurrencyGuard::new("USD");
         let config = TrayConfig {
             cost_precision: CostPrecision::Whole,
             ..TrayConfig::default()
@@ -661,6 +684,7 @@ mod tests {
 
     #[test]
     fn format_tray_title_compact_percentages() {
+        let _guard = crate::usage::money::CurrencyGuard::new("USD");
         let config = TrayConfig {
             show_percentages: true,
             ..TrayConfig::default()

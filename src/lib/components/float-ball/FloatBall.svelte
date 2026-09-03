@@ -22,7 +22,6 @@
   import {
     percent,
     fillWidth,
-    formatBallCost,
     formatError,
     resolveExpandDirection,
     type FloatBallPositionPayload,
@@ -49,6 +48,7 @@
     codexUtil: null,
     cursorUtil: null,
     title: "$0.00",
+    costText: "$0",
   });
   let expanded = $state(false);
   let expandDirection = $state<FloatBallExpandDirection>("right");
@@ -488,7 +488,7 @@
       onpointerup={onPointerUp}
       onpointercancel={onPointerCancel}
     >
-      <span class="ball-label">{formatBallCost(summary.totalCost)}</span>
+      <span class="ball-label">{summary.costText}</span>
     </button>
 
     {#if expanded}

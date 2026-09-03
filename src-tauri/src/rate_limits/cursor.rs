@@ -47,12 +47,13 @@ fn api_window_label(plan: &Value) -> String {
     let Some(limit_cents) = plan_limit_cents(plan) else {
         return "API".to_string();
     };
+    // This label lands in the popover beside amounts the frontend has already
+    // converted, so it has to follow the user's currency too.
     let limit_dollars = limit_cents / 100.0;
-    if limit_dollars == limit_dollars.floor() {
-        format!("API (${} included)", limit_dollars as i64)
-    } else {
-        format!("API (${:.2} included)", limit_dollars)
-    }
+    format!(
+        "API ({} included)",
+        crate::usage::money::format_auto(limit_dollars)
+    )
 }
 
 fn label_for_known_meter(window_id: &str, plan: &Value) -> String {
@@ -278,8 +279,29 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// This label is rendered inside the popover, right beside amounts the
+    /// frontend has already converted — so a hardcoded `$` here put two
+    /// currencies on one screen.
+    #[test]
+    fn api_window_label_follows_the_selected_currency() {
+        let _guard = crate::usage::money::CurrencyGuard::new("EUR");
+        crate::usage::exchange_rates::set_exchange_rates(
+            [("EUR".to_string(), 0.92)].into_iter().collect(),
+        );
+        let plan = json!({ "limit": 7000.0 });
+        assert_eq!(api_window_label(&plan), "API (\u{20ac}64.40 included)");
+    }
+
+    #[test]
+    fn api_window_label_keeps_whole_dollars_bare_in_usd() {
+        let _guard = crate::usage::money::CurrencyGuard::new("USD");
+        let plan = json!({ "limit": 7000.0 });
+        assert_eq!(api_window_label(&plan), "API ($70 included)");
+    }
+
     #[test]
     fn builds_windows_from_plan_usage() {
+        let _guard = crate::usage::money::CurrencyGuard::new("USD");
         let resp = CursorPeriodUsageResponse {
             billing_cycle_end: Some("1714521600000".to_string()),
             plan_usage: Some(json!({
@@ -306,6 +328,7 @@ mod tests {
 
     #[test]
     fn omits_missing_meters_so_bar_count_follows_api() {
+        let _guard = crate::usage::money::CurrencyGuard::new("USD");
         let resp = CursorPeriodUsageResponse {
             billing_cycle_end: None,
             plan_usage: Some(json!({

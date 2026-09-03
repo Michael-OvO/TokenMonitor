@@ -640,6 +640,11 @@ export async function updateSetting<K extends keyof Settings>(
 
   if (key === "currency") {
     setCurrency(updated.currency);
+    // Rust renders the tray, the Cursor meter label and the float ball, so it
+    // needs the new currency too — otherwise the menu bar keeps showing dollars.
+    invoke("set_currency", { code: updated.currency }).catch((error) =>
+      logger.warn("settings", `set_currency failed: ${error}`),
+    );
   }
 
   if (key !== "cursorApiKey") {

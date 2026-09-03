@@ -12,6 +12,23 @@ pub async fn set_refresh_interval(interval: u64, state: State<'_, AppState>) -> 
     Ok(())
 }
 
+/// Push the display currency the user picked in Settings down to Rust.
+///
+/// The tray title, the Cursor API meter label and the float-ball amount are all
+/// rendered on this side, so without this they keep printing dollars while the
+/// popover shows euros. Re-renders the tray straight away — the menu bar should
+/// change when the setting does, not at the next refresh tick.
+#[tauri::command]
+pub async fn set_currency(
+    code: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    crate::usage::money::set_active_currency(&code);
+    super::tray::apply_tray_title_now(&app, &state).await;
+    Ok(())
+}
+
 /// Enable or disable live rate-limit fetching.
 ///
 /// When disabled, the background loop skips `refresh_rate_limits`, so the app

@@ -363,11 +363,19 @@ pub fn run() {
                 // Spawn async refresh if exchange rate cache is stale (>24h).
                 if usage::exchange_rates::should_refresh(&app_data) {
                     let data_dir = app_data.clone();
+                    let rates_app = app.handle().clone();
                     tauri::async_runtime::spawn(async move {
                         match usage::exchange_rates::fetch_and_cache(&data_dir).await {
                             Ok(rates) => {
                                 usage::exchange_rates::set_exchange_rates(rates);
                                 tracing::info!("Exchange rates refreshed (frankfurter.dev)");
+                                // The frontend asks for rates once during
+                                // bootstrap. On a first launch there is no
+                                // cache yet, so that call returns an empty map
+                                // and the webview would spend the whole session
+                                // on the hardcoded fallback table. Tell it the
+                                // real rates arrived.
+                                let _ = rates_app.emit("exchange-rates-updated", ());
                             }
                             Err(e) => {
                                 tracing::warn!("Exchange rate fetch failed (using fallback): {e}");
@@ -425,6 +433,7 @@ pub fn run() {
             commands::config::suppress_next_auto_hide,
             commands::config::set_auto_export_config,
             commands::config::set_refresh_interval,
+            commands::config::set_currency,
             commands::config::set_rate_limits_enabled,
             commands::config::set_usage_access_enabled,
             commands::config::set_cursor_auth_config,
@@ -783,6 +792,9 @@ async fn background_loop(app: tauri::AppHandle) {
                         Ok(rates) => {
                             usage::exchange_rates::set_exchange_rates(rates);
                             tracing::info!("Exchange rates refreshed (background)");
+                            // A session left open for days would otherwise keep
+                            // formatting with the rates it read at startup.
+                            let _ = app.emit("exchange-rates-updated", ());
                         }
                         Err(e) => {
                             tracing::warn!("Background exchange rate refresh failed: {e}");

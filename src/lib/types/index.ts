@@ -219,6 +219,12 @@ export interface StatusWidgetSummary {
   codexUtil: number | null;
   cursorUtil: number | null;
   title: string;
+  /**
+   * `totalCost` already rendered in the user's currency by the backend. The
+   * float ball is a separate webview with no settings store of its own, so it
+   * cannot convert this itself — see `src-tauri/src/usage/money.rs`.
+   */
+  costText: string;
 }
 
 // ── SSH / Device usage ──

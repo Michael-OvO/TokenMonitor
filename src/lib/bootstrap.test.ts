@@ -117,6 +117,10 @@ describe("initializeRuntimeFromSettings", () => {
       codexUtil: null,
       cursorUtil: null,
     });
+    // The tray, the Cursor meter label and the float ball are formatted in
+    // Rust, which cannot read the settings store — so the currency has to be
+    // pushed across, or those surfaces silently stay in dollars.
+    expect(invokeFn).toHaveBeenCalledWith("set_currency", { code: saved.currency });
     expect(get(activeProvider)).toBe("codex");
     expect(get(activePeriod)).toBe("month");
     expect(runtime).toEqual({ provider: "codex", period: "month" });

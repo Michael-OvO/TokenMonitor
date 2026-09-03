@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": "node .companion/companion.mjs guard --platform=cursor",
+        "failClosed": true,
+        "matcher": "Write|write|StrReplace|strreplace|Delete|delete|EditNotebook|editnotebook|ApplyPatch|applypatch|search_replace|mcp__.*|MCP:.*"
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "node .companion/companion.mjs guard --platform=cursor",
+        "failClosed": true
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "node .companion/companion.mjs guard --platform=cursor",
+        "failClosed": true
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "node .companion/companion.mjs guard --platform=cursor"
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "node .companion/companion.mjs guard --platform=cursor"
+      }
+    ],
+    "stop": [
+      {
+        "command": "node .companion/companion.mjs guard --platform=cursor"
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "node .companion/companion.mjs guard --platform=cursor"
+      }
+    ]
+  }
+}

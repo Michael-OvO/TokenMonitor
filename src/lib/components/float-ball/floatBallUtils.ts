@@ -17,12 +17,10 @@ export function fillWidth(value: number | null): string {
   return `${safe}%`;
 }
 
-export function formatBallCost(cost: number): string {
-  if (cost <= 0) return "$0";
-  if (cost < 1) return `$${cost.toFixed(2)}`;
-  if (cost < 10) return `$${cost.toFixed(1)}`;
-  return `$${Math.round(cost)}`;
-}
+// The ball's cost label now arrives pre-formatted as `StatusWidgetSummary.costText`
+// — see `format_compact` in src-tauri/src/usage/money.rs. Formatting it here meant
+// dollars forever: this webview has no settings store, so it never learned which
+// currency the user picked.
 
 export function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

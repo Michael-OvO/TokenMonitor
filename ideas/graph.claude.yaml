@@ -1,0 +1,1758 @@
+version: 1
+agent: claude
+project: TokenMonitor
+overview: >
+  TokenMonitor 是一个本地优先的跨平台托盘应用（Tauri v2 + Svelte 5），把 Claude Code、 Codex CLI 和
+  Cursor 三家 AI 编码工具散落在磁盘上的 JSONL 会话日志读出来、定价、聚合，
+  然后在托盘弹窗和悬浮球里显示"花了多少钱"和"额度用了百分之多少"。它不代理任何请求、 不上传任何数据，除了拉取公共定价表和三家官方的额度接口之外完全离线。
+  三条主线：把数字算准（解析 + 定价 + 缓存）、把历史留住（归档 + 导入导出 + 远端同步）、 把它装到别人机器上（单实例 + 自动更新 +
+  最小权限面）。
+endpoints: [ I-043, I-044, I-045 ]
+
+ideas:
+  # ────────────────────────── 地基 ──────────────────────────
+  - id: I-001
+    name: "把应用会读的每个磁盘位置登记在同一个模块里"
+    status: done
+    needs: []
+    what: >
+      把应用会读的每一个文件系统位置（Claude 项目目录、Codex 会话目录、Cursor 的
+      state.vscdb、~/.ssh/config、~/.claude/settings.json、凭据文件）都登记在一个
+      模块里，并让它能被枚举出来给用户看。
+    why: >
+      这是一个"读你本地日志"的应用，用户凭什么信它？如果访问路径散落在十几个解析器里，
+      既没人能回答"它到底读了什么"，隐私披露面板也只能靠人肉维护、迟早说谎。
+    expected: >
+      `accessed_paths()` 返回的列表与设置里"隐私"面板显示的一致；新增一个 provider 时，
+      忘记登记路径会在测试里暴露，而不是在用户投诉里暴露。
+    how: >
+      `paths.rs` 用 `AccessedPath { path, purpose, .. }` 结构统一描述每个位置， 各 provider
+      的默认根目录都由这里的函数产出，`accessed_paths()` 汇总成一份可展示的清单。
+    why_this_way: >
+      AGENTS.md 把它写成硬约定："Every filesystem location the app reads must be
+      registered in src-tauri/src/paths.rs"。集中登记是为了让隐私声明可以从代码生成，而不是靠文档追赶代码。
+    code:
+      - file: src-tauri/src/paths.rs
+        symbol: accessed_paths
+        lines: "161-229"
+      - file: src-tauri/src/paths.rs
+        symbol: claude_project_roots_default
+        lines: "36-47"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib
+        accessed_paths_includes_claude_and_codex_and_ssh
+      pass: "exit 0"
+    future: >
+      任何"这个应用碰了什么"的问题都能机器回答：审计导出、企业分发时的合规清单、 甚至可以做成"这些目录我不允许你读"的开关。
+
+  - id: I-002
+    name: "每个 provider 的界面差异只在一个文件里定义"
+    status: done
+    needs: [ I-001 ]
+    what: >
+      每个 provider（claude / codex / cursor）的 UI 与行为参数——标签、品牌色、logo、 是否有额度表、主窗口
+      id、最小拉取间隔、过期宽限、套餐价——集中定义一次， 前端所有地方从这里查，而不是各自写 if provider === "claude"。
+    why: >
+      三家 provider 的差异是这个项目最大的复杂度来源。散开写的话，加一家 provider 要改 二十个文件，改漏一个就是"Cursor 的
+      tab 有颜色但图表没有"这种半残 bug。
+    expected: >
+      `providerMetadata.ts` 是唯一列出 provider 的地方；tab 顺序、额度 provider 顺序、 默认
+      provider 都由它派生；测试覆盖每个 getter 对未知 provider 的兜底。
+    how: >
+      前端 `USAGE_INTEGRATION_DEFINITIONS` 数组 + 一组 getter；后端对应
+      `usage/integrations.rs` 的 `UsageIntegrationId` 枚举与选择解析。 套餐价来自
+      `ops.json`，不写死在组件里。
+    why_this_way: >
+      AGENTS.md 明确把它定义为 "single source of truth for provider UI behavior (tabs,
+      labels, colors, plans)"。
+    code:
+      - file: src/lib/providerMetadata.ts
+        symbol: USAGE_INTEGRATION_DEFINITIONS
+        lines: "47-133"
+      - file: src-tauri/src/usage/integrations.rs
+        symbol: all_usage_integrations
+        lines: "5-100"
+    verify:
+      command: npx vitest run src/lib/providerMetadata.test.ts
+      pass: "exit 0"
+    future: >
+      接第四家 provider（Gemini CLI、Copilot…）时，前端只需要往数组里加一条， 剩下的是后端解析器的事。
+
+  - id: I-003
+    name: "三家的日志格式归一成同一种用量条目"
+    status: done
+    needs: []
+    what: >
+      三家 provider 的原始日志格式完全不同，全部归一到同一个 `ParsedEntry` （时间戳、模型键、原始模型名、输入/输出/两档缓存
+      token、web search 次数、 provider、来源、作用域），再由它聚合成 `UsagePayload` 给前端。
+    why: >
+      如果不归一，定价、聚合、归档、导出、图表每一层都要认三种格式， 任何一层漏掉一种就是静默少算钱。
+    expected: >
+      定价、归档、导出、设备聚合都只认 `ParsedEntry` / `ArchivedHourly`； 新 provider 只要能产出
+      `ParsedEntry` 就自动获得后面所有能力。
+    how: >
+      `usage/parser.rs` 定义 `ParsedEntry`，`models.rs` 定义面向前端的 `UsagePayload` /
+      `ChartBucket` / `ModelSummary` 等 IPC 结构， 前端 `src/lib/types/` 镜像同一批类型。
+    why_this_way: >
+      作者本人的说法：统一，方便，之后好兼容。也就是说这个字段集不是为了精确描述任何一家 provider
+      的日志，而是取三家的并集加上下游（定价/归档/导出/图表）需要的东西—— 宁可让某些 provider 的某些字段恒为 0，也不让下游认三种格式。
+      代价是接第四家时字段集可能还要再扩一次，收益是扩的时候只改这一处。
+    code:
+      - file: src-tauri/src/usage/parser.rs
+        symbol: ParsedEntry
+        lines: "35-50"
+      - file: src-tauri/src/models.rs
+        symbol: UsagePayload
+        lines: "16-81"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib claude_unknown_future_family_keeps_identity
+      pass: "exit 0"
+    future: >
+      这个结构是所有"再加一个维度"的落点：按仓库分、按分支分、按人分， 只要 ParsedEntry 多一个字段。
+
+  - id: I-004
+    name: "会随外部世界变化的常量集中放进一份 JSON"
+    status: done
+    needs: []
+    what: >
+      所有会随外部世界变化的常量——各家 API base、定价表 URL、汇率 URL、缓存 TTL、 Claude 各套餐的月费——放进
+      `ops.json`，编译期 include 进二进制， 同一份也给前端读。
+    why: >
+      套餐涨价、接口换域名、TTL 需要调，这些都不该是"改代码 + 发版"级别的事， 也不该在前后端各写一份然后对不上。
+    expected: >
+      `ops()` 能读出套餐预算和全部 URL；前端的 plan tier 成本与后端同源（有测试锁定）。
+    how: >
+      `ops.rs` 用 `include_str!("ops.json")` + `OnceLock` 解析一次； 前端
+      `providerMetadata.ts` 直接 import 同一个 JSON 取 `plan_tier_costs_usd`。
+      注意：这是**纯编译期** include，没有任何运行时覆盖路径（无 env、无 app_data_dir 同名文件、
+      无远端拉取、tauri.conf.json 的 bundle 块也没有 resources），改了必须重新编译发版。
+    why_this_way: >
+      文档层面的理由写在 `ops.json:2` 的 `_notes` 和 `ops.rs:38`（"`plan_tier_costs_usd` is
+      deliberately absent here: the frontend imports it"）——集中一处、前后端同源。
+      「为什么不做成运行时可覆盖」这条**代码里没有写明**，但有一个很硬的现实约束： `ops.json` 的 `urls` 里有 5 条会被贴上凭据的
+      origin——`anthropic_usage` / `anthropic_account` 走
+      `bearer_auth(token)`（`rate_limits/claude.rs:331-341`）， 三条 cursor origin
+      分别走 `basic_auth(api_key)` / `Cookie: WorkosCursorSessionToken` /
+      `bearer_auth`（`cursor_parser.rs:733-744`、`rate_limits/cursor.rs:245-252`）。
+      让用户目录下一个可写 JSON 决定这些地址，等于给本地任意进程一个把 OAuth token 转发到任意主机的开关；而引入 ops.json
+      的那次提交标题正是 `fix(usage): stop undercounting spend and leaking the Cursor API
+      key`。 （这段安全推理是本次扫描的分析，不是代码或提交信息里的原话。）
+    code:
+      - file: src-tauri/src/ops.rs
+        symbol: ops
+        lines: "13-136"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib
+        ops_json_keeps_plan_tier_costs_for_the_frontend
+      pass: "exit 0"
+    future: >
+      如果要做运行时可覆盖，只能限定 `claude_plan_budgets` / `plan_tier_costs_usd` 这类纯数字，`urls`
+      永远不参与合并——否则就是上面那个凭据转发洞。 更便宜的一步是给 ops.json 补上 `_sources`（照
+      `pricing_fallback.json:3-11` 的形式）， 让每个值的出处可审计。
+
+  # ────────────────────────── 解析 ──────────────────────────
+  - id: I-005
+    name: "解析 Claude Code 写在磁盘上的会话日志"
+    status: done
+    needs: [ I-001, I-003 ]
+    what: >
+      递归扫描 Claude Code 的项目目录，逐行读 JSONL，从 assistant 条目里取出 模型、四类 token（输入/输出/5m
+      缓存写/1h 缓存读），并识别主代理与子代理作用域。
+    why: >
+      Claude Code 本身不告诉你花了多少钱；唯一的事实来源就是它自己写在磁盘上的会话日志。
+    expected: >
+      能从真实 JSONL 解析出条目、按日期过滤、递归匹配子目录、 对缺失 cache 明细的条目按 1h 档兜底、同模型时优先主代理作用域。
+    how: >
+      `claude_parser.rs` 负责单条目的语义（唯一哈希、作用域优先级、缓存档位兜底），
+      `parser.rs::load_claude_entries_with_debug` 负责文件遍历与缓存接入。
+    why_this_way: >
+      作用域优先级与 5m/1h 兜底都写在 `claude_parser.rs` 的测试里
+      （`prefer_main_when_output_tied`、`split_cache_defaults_missing_breakdown_to_1h`），
+      即"日志字段缺失时选择不会少算钱的那一档"。
+    code:
+      - file: src-tauri/src/usage/claude_parser.rs
+        symbol: create_claude_unique_hash
+        lines: "127-241"
+      - file: src-tauri/src/usage/parser.rs
+        symbol: load_claude_entries_with_debug
+        lines: "1561-1574"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib parse_claude_entries_from_jsonl
+      pass: "exit 0"
+    future: >
+      同一份遍历已经顺手拿到了 tool_use/tool_result，是变更统计（I-037）的输入。
+
+  - id: I-006
+    name: "把 Codex 的累计 token 数还原成每轮的增量"
+    status: done
+    needs: [ I-001, I-003 ]
+    what: >
+      Codex 的 `token_count` 事件有时是本轮增量、有时是会话累计，需要判别并相减， 同时把 reasoning token 按
+      total 口径计入计费输出。
+    why: >
+      直接把每条 token_count 相加会把累计值重复累加，用量翻好几倍—— 这类"数字明显不对"的 bug 是这个项目反复修的一类（见
+      commit `fix codex usage`）。
+    expected: >
+      累计型事件相减后得到真实增量；reasoning token 的计费口径跟随 total_tokens； 全零 usage 被丢弃而不是产生空条目。
+    how: >
+      `normalize_codex_raw_usage` 统一字段形状，`subtract_codex_raw_usage` 做增量还原，
+      `billed_output_tokens` 决定计费输出口径。
+    why_this_way: >
+      `reasoning_billing_follows_total_tokens` 这条测试就是这个选择的说明： 以 total 为准而不是把
+      reasoning 单独加一遍，才与 OpenAI 的账单口径一致。
+    code:
+      - file: src-tauri/src/usage/codex_parser.rs
+        symbol: normalize_codex_raw_usage
+        lines: "48-114"
+      - file: src-tauri/src/usage/codex_parser.rs
+        symbol: billed_output_tokens
+        lines: "81-95"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib reasoning_billing_follows_total_tokens
+      pass: "exit 0"
+    future: >
+      同样的"增量 vs 累计"判别逻辑可以复用到任何按轮次上报的 provider。
+
+  - id: I-007
+    name: "Cursor 用量从本地数据库和官方接口两条路读"
+    status: done
+    needs: [ I-001, I-003, I-029 ]
+    what: >
+      Cursor 不写 JSONL：本地读它的 `state.vscdb` / chatSessions，远端调它的用量 API；
+      并且认三种凭据（admin key、dashboard token、IDE bearer），按优先级选一种。
+    why: >
+      只读本地会漏掉云端算的账，只读远端要用户配 key。两条路都留着，用户配了 key 就更准， 没配也不是一片空白。
+    expected: >
+      能从 admin/dashboard/IDE 三种响应形状里解析出 token 用量； 凭据优先级固定（显式覆盖 > session token
+      环境变量 > api key 环境变量 > IDE token）； 分页在三种 payload 下都能判断是否还有下一页。
+    how: >
+      `cursor_parser.rs` 负责凭据分类与选择、请求构造、响应解析； 本地分支走 sqlite 读取，远端分支走
+      `api2.cursor.sh` 的分页拉取（上限 20 页 × 100 条）。
+    why_this_way: >
+      优先级顺序由一组测试固定下来（`choose_cursor_auth_prefers_secret_override`、
+      `choose_cursor_auth_session_token_env_beats_api_key_env` …），
+      即"用户显式给的凭据永远赢过自动发现的"。
+    code:
+      - file: src-tauri/src/usage/cursor_parser.rs
+        symbol: collect_cursor_entries_from_value
+        lines: "278-573"
+      - file: src-tauri/src/usage/cursor_parser.rs
+        symbol: build_cursor_usage_request_payload
+        lines: "763-790"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib choose_cursor_auth_prefers_secret_override
+      pass: "exit 0"
+    future: >
+      远端通道的分页与鉴权分类可以抽出来给任何"官方有用量 API"的 provider 用。
+
+  - id: I-008
+    name: "同一条消息在多个日志里出现时只计一次费"
+    status: done
+    needs: [ I-005, I-006 ]
+    what: >
+      同一条消息可能在多个 JSONL 文件里出现（续接会话、resume、sidechain）， 用 messageId + requestId
+      组合哈希去重；工具调用事件另有一套去重键。
+    why: >
+      不去重就是直接多算钱。这是"数字可信"这条主线上最便宜也最致命的一环。
+    expected: >
+      同一 message/request 的多次出现只计一次，包括 stop_reason 为 null 的中间态条目。
+    how: >
+      `create_claude_unique_hash` 产出条目哈希，`create_claude_tool_dedupe_key` 产出
+      工具事件键；是否启用由 `UsageIntegrationConfig::dedupe_entry_hashes` 按 provider 决定。
+    why_this_way: >
+      按 provider 开关而不是全局开：Codex 的 session 文件本身不重复， 对它做哈希去重只是白花 CPU（见
+      `dedupe_entry_hashes` / `dedupe_change_events` 的分开定义）。
+    code:
+      - file: src-tauri/src/usage/claude_parser.rs
+        symbol: create_claude_tool_dedupe_key
+        lines: "212-241"
+      - file: src-tauri/src/usage/parser.rs
+        symbol: dedupe_entry_hashes
+        lines: "189-200"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib
+        parse_claude_dedupes_null_stop_reason_entries_by_message_and_request
+      pass: "exit 0"
+    future: >
+      去重键本身就是"这条消息的身份"，可以用来做跨设备的条目级合并， 而不是现在的小时级取大合并（I-018）。
+
+  - id: I-009
+    name: "上万个日志文件分阶段并行扫描"
+    status: done
+    needs: [ I-005, I-006, I-007, I-008 ]
+    what: >
+      一次用量查询要遍历上万个 JSONL 文件。用 rayon 把"列目录 → 判新旧 → 解析 → 聚合" 分成几个阶段并行跑，并对每个阶段产出
+      debug 报告。
+    why: >
+      作者本机的日志规模是 ~14,000 个文件；串行读一遍就是几秒的卡顿， 而这个应用每次刷新都要读。
+    expected: >
+      冷启动能在可接受时间内完成全量扫描；`UsageQueryDebugReport` 能说清每个 provider
+      读了多少文件、命中多少缓存、耗时多少。
+    how: >
+      `load_integration_entries_with_debug` 按 provider 组织阶段， 文件列表走
+      `cached_jsonl_files`（目录 mtime 判新鲜），单文件解析结果进 `CachedFileEntries`。
+    why_this_way: >
+      分阶段是为了让缓存命中能在最早的阶段短路——没变的文件连打开都不打开 （见 commit `perf(parser): incremental
+      cache invalidation for log appends`）。
+    code:
+      - file: src-tauri/src/usage/parser.rs
+        symbol: load_integration_entries_with_debug
+        lines: "1258-1560"
+      - file: src-tauri/src/usage/parser.rs
+        symbol: cached_jsonl_files
+        lines: "1206-1257"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib
+        glob_jsonl_files_skips_symlinked_subdirectories
+      pass: "exit 0"
+    future: >
+      debug 报告已经是一份现成的性能画像，可以直接喂给设置里的"诊断"面板。
+
+  # ────────────────────────── 定价 ──────────────────────────
+  - id: I-010
+    name: "手工维护的模型价格表，改价必须升版本号"
+    status: done
+    needs: [ I-003 ]
+    what: >
+      一份手工维护的 `pricing_fallback.json`（每百万 token 的美元单价 + 别名表）， 配一个
+      `PRICING_VERSION` 常量；改表就要改版本号。
+    why: >
+      定价是这个应用的核心断言。没有一份可审计、可 diff、带来源链接的表， "为什么显示 $12.46" 就没法回答。
+    expected: >
+      每个已知模型的单价有测试锁定（opus / sonnet / haiku / gpt-5.x / o3 …）； 未知的 Claude
+      家族返回零成本而不是瞎猜。
+    how: >
+      `pricing.rs` 的 `get_rates_for_key` 先查静态表再走家族兜底， 表本体在
+      `pricing_fallback.json`，`_sources` 字段留了每个价格的出处链接。
+    why_this_way: >
+      JSON 里的 `_notes` 写明了规矩："Edit this file when providers update pricing, then
+      bump PRICING_VERSION in pricing.rs"——版本号存在的意义是让所有缓存键跟着失效（I-015）。
+    code:
+      - file: src-tauri/src/usage/pricing.rs
+        symbol: PRICING_VERSION
+        lines: "1-20"
+      - file: src-tauri/src/usage/pricing.rs
+        symbol: get_fallback_rates
+        lines: "301-354"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib opus_4_6_pricing
+      pass: "exit 0"
+    future: >
+      `_sources` 已经具备做"点价格看出处"的条件。
+
+  - id: I-011
+    name: "价格表里没有的新模型去公开价格源在线查价"
+    status: done
+    needs: [ I-010, I-004 ]
+    what: >
+      静态表里没有的模型，去 LiteLLM 和 OpenRouter 的公开价格表拉， 结果按 TTL 缓存到磁盘（LiteLLM 24h /
+      OpenRouter 更长）。
+    why: >
+      模型发布速度快过发版速度。没有这一层，用户升级到新模型的当天就会看到 $0.00。
+    expected: >
+      能从 LiteLLM JSON 解析出 Claude/OpenAI 系列价格，跳过非 chat 模型、 跳过 bedrock
+      前缀、跳过示例条目；超过 500 USD/Mtok 的离谱值被丢弃。
+    how: >
+      `litellm.rs` / `openrouter.rs` 各自解析并归一到 `DynamicModelRates`， 通过
+      `pricing::set_dynamic_pricing` 注入全局表，查表时动态优先于家族兜底。
+    why_this_way: >
+      `MAX_RATE_PER_MTOK` 的存在说明了取舍：宁可丢掉一个价格显示 N/A， 也不要因为上游一条脏数据把用户的月账单显示成天文数字。
+    code:
+      - file: src-tauri/src/usage/litellm.rs
+        symbol: parse_litellm_json
+        lines: "174-306"
+      - file: src-tauri/src/usage/openrouter.rs
+        symbol: parse_openrouter_models
+        lines: "47-120"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib parses_claude_model_pricing
+      pass: "exit 0"
+    future: >
+      同一套缓存机制可以用来拉别的外部事实（模型上下文窗口、弃用日期）。
+
+  - id: I-012
+    name: "缓存 token 的计价对齐 Claude 官方 /cost 的算法"
+    status: done
+    needs: [ I-010, I-011 ]
+    what: >
+      Claude 的 5 分钟缓存写和 1 小时缓存写官方单价不同，但 `claude /cost` 把两档 都按 1.25× 输入价计。应用跟随
+      `/cost` 的口径，并对动态价做同样的封顶。
+    why: >
+      用户会拿这个应用的数字去和 `claude /cost` 对。两边不一致，用户信的是 Claude， 于是这个应用就不可信了——即使它"更正确"。
+    expected: >
+      5m 与 1h 缓存 token 得到相同的费率；动态定价来的 Claude 1h 缓存价被封顶到 /cost 口径，非 Claude 模型不封顶。
+    how: >
+      `apply_claude_cost_cache_lock` 在费率查出来之后按模型键改写缓存档费率， `apply_rates` 再做实际乘法。
+    why_this_way: >
+      测试名直说了：`dynamic_claude_1h_cache_is_capped_to_cost_rate` 与
+      `dynamic_non_claude_1h_cache_is_not_capped`——封顶只对 Claude 生效， 因为要对齐的是
+      Claude 自己的展示口径，不是真实账单。
+    code:
+      - file: src-tauri/src/usage/pricing.rs
+        symbol: apply_claude_cost_cache_lock
+        lines: "49-56"
+      - file: src-tauri/src/usage/pricing.rs
+        symbol: apply_rates
+        lines: "129-148"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib claude_1h_cache_tokens
+      pass: "exit 0"
+    future: >
+      如果哪天想同时显示"/cost 口径"和"真实账单口径"两个数，这里已经是那个开关点。
+
+  - id: I-013
+    name: "金额按用户选的币种换算后再显示"
+    status: done
+    needs: [ I-010, I-004 ]
+    what: >
+      成本内部一律是 USD，展示时按当前币种换算（USD/EUR/GBP/JPY/CNY）， 汇率从 Frankfurter 拉、按 24h
+      缓存，JPY 不显示小数。
+    why: >
+      非美元用户看着一堆 $ 没有体感；但内部换算会让所有聚合和归档都变脏。
+    expected: >
+      `formatCost(1.0)` 在 EUR 下是 `€0.92`、JPY 下是 `¥150`、未知币种回落到 `$1.00`。
+      主弹窗（MetricsRow / Breakdown / Chart / Calendar / DevicesView）全部走
+      `formatCost`， 换算正确。 **但换算只覆盖了主
+      webview**：托盘（`commands/tray.rs:169,171`）、悬浮球
+      （`floatBallUtils.ts:22-24`）、UsageBars 的额外用量（`UsageBars.svelte:117-124`）、
+      Cursor 额度标签（`rate_limits/cursor.rs:52,54`）都写死 `$` 且不换算。 选 EUR 的用户会同时看到托盘
+      `$5.00` 和弹窗 `€4.60`。这一条目前不成立，由 I-047 承接。
+    how: >
+      后端 `exchange_rates.rs` 负责拉取与缓存并把汇率表推给前端， 前端 `format.ts` 的
+      `convertCost`/`formatCost` 只在渲染那一刻换算。 持久层刻意不存成本：归档 `ArchivedHourly` 只有
+      token（`archive.rs:35` 注释 "Cost is NOT stored — recalculated at query time
+      with current pricing"）， SSH 的 `CompactUsageRecord` 同样只有 token，导出文件里的
+      `cost` 字段导入时被忽略 （`usage_io.rs:11-14`）。
+    why_this_way: >
+      币种选这五个（USD/EUR/GBP/JPY/CNY）的理由是作者本人给的：这是常见币种。
+      「在渲染时换算」这个位置则由更硬的约束决定，而且这个约束是代码里写明的： 唯一真相是 token，成本是派生量——归档和远端同步都不存
+      cost，导入时也丢弃 cost， 每次查询用当时的定价表重算。既然成本本身随时会被重算，把汇率固化进任何持久层都没有意义，
+      「在哪换算」就纯粹是展示层问题、没有数据迁移风险。 至于前端还是后端：现状选前端，代价是换算逻辑活在 `format.ts` 的模块级变量里，
+      跨不过 IPC 边界（托盘由 Rust 画）也跨不过 webview 边界（悬浮球是独立 entry）， 于是产生了 expected
+      里列的那几处不一致。见 I-047。
+    code:
+      - file: src/lib/utils/format.ts
+        symbol: formatCost
+        lines: "36-54"
+      - file: src-tauri/src/usage/exchange_rates.rs
+        symbol: should_refresh
+        lines: "34-79"
+      - file: src-tauri/src/usage/archive.rs
+        symbol: "ArchivedHourly（注释：Cost is NOT stored）"
+        lines: "35-63"
+    verify:
+      command: npx vitest run src/lib/utils/format.test.ts
+      pass: "exit 0"
+    future: >
+      "只在渲染时换算"这个约束让加币种变成一行数据；也让历史数据不会因为汇率变动而改写。
+    log:
+      - date: "2026-08-25"
+        by: ccscan
+        note: "作者确认币种选择理由（常见币种）并追问前端/后端换算的优劣；核实后补上真实约束 （持久层不存 cost）并记录四处未换算的展示面，拆出
+          I-047。"
+
+  # ────────────────────────── 缓存 ──────────────────────────
+  - id: I-014
+    name: "日志追加时只重新解析改动过的那个文件"
+    status: done
+    needs: [ I-009 ]
+    what: >
+      区分两种变化——目录里多了/少了文件（listing change）与某个文件被追加了内容 （content
+      change）——只把受影响的那部分缓存扔掉，而不是全清。
+    why: >
+      Claude Code 每写一条消息就 append 一次日志。如果每次追加都清空全部缓存， 这个应用会一直在重新解析一万多个文件，CPU 常年高位。
+    expected: >
+      一次日志追加只导致该文件重新解析；目录结构没变时不重新列目录。
+    how: >
+      `scan_source_changes` 比对 `FileListStamp` / `FileStamp`，产出
+      `SourceChangeScan`；`apply_content_changes` 只清受影响的条目缓存。
+    why_this_way: >
+      commit `perf(parser): incremental cache invalidation for log appends` 与
+      `perf(lib): throttle the heavy usage-log scan to the refresh interval`
+      记录了动机： 全量重扫是当时的 CPU 热点。
+    code:
+      - file: src-tauri/src/usage/parser.rs
+        symbol: scan_source_changes
+        lines: "1008-1123"
+      - file: src-tauri/src/usage/parser.rs
+        symbol: apply_content_changes
+        lines: "1124-1173"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib
+        load_entries_populates_entries_cache_for_subsequent_cached_calls
+      pass: "exit 0"
+    future: >
+      有了"哪些文件变了"这个信号，可以做真正的增量聚合：只把新条目加进已有的桶里。
+
+  - id: I-015
+    name: "算好的结果存到磁盘，下次启动立刻有数"
+    status: done
+    needs: [ I-014, I-010 ]
+    what: >
+      把算好的 `UsagePayload` 按缓存键写到磁盘，下次启动直接读，界面立刻有数； 缓存键里嵌了 `PRICING_VERSION` 和 5
+      小时时间桶。
+    why: >
+      冷启动时全量扫描要几秒，用户点开托盘看到的是空白。磁盘缓存把"打开就有数" 变成默认体验。
+    expected: >
+      冷启动瞬间出数；改定价表（版本号变）后旧缓存自然失效； 数据源变化时按前缀清理，per-provider 视图会跟着刷新。
+    how: >
+      `payload_disk_cache.rs` 提供 save/load/clear_prefix； `usage_query.rs` 构造
+      `usage-view:` / `full:` 前缀的键并在源变化时 `clear_prefix("usage-view:")`。
+    why_this_way: >
+      磁盘缓存刻意不设 TTL——所以失效必须是显式的。这个设计一开始漏了一处， 就是 commit `fix(usage): bust the
+      payload disk cache on source change so per-provider views refresh` 修的
+      bug，现在有回归测试钉住。
+    code:
+      - file: src-tauri/src/usage/payload_disk_cache.rs
+        symbol: PayloadDiskCache
+        lines: "6-99"
+      - file: src-tauri/src/commands/usage_query.rs
+        symbol: final_usage_cache_key_with_reset
+        lines: "260-306"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib
+        clearing_usage_view_cache_keeps_provider_cache_entries
+      pass: "exit 0"
+    future: >
+      同一份磁盘 payload 可以给悬浮球和状态栏 widget 直接用，不必各自查一遍。
+
+  - id: I-016
+    name: "切换视图先显示旧数据，再在后台悄悄刷新"
+    status: done
+    needs: [ I-015 ]
+    what: >
+      前端再加一层 5 分钟 TTL 的 stale-while-revalidate 缓存，切 tab / 切周期时 先画旧数据再后台刷新；并对相邻
+      provider、常用周期做预热。
+    why: >
+      即使后端很快，一次 IPC 往返也够让切换 tab 闪一下。这个应用是"瞄一眼就关"的形态， 闪一下就是全部体验。
+    expected: >
+      切 provider/周期不出现空白；过期的响应不会覆盖更新的请求（requestId 守卫）； 预热覆盖 5h/day/week/month
+      与相邻 provider。
+    how: >
+      `stores/usage.ts` 里的 `payloadCache` Map + `fetchInFlight` 去重 +
+      `applyUsageDataIfCurrent` 顺序守卫；`warmCache` 负责预热。
+    why_this_way: >
+      注释直说了 TTL 选 5 分钟的理由："generous; background refresh keeps it current"
+      ——前台缓存只负责不闪，正确性交给后台刷新。
+    code:
+      - file: src/lib/stores/usage.ts
+        symbol: fetchData
+        lines: "284-381"
+      - file: src/lib/stores/usage.ts
+        symbol: warmCache
+        lines: "382-430"
+    verify:
+      command: npx vitest run src/lib/stores/usage.test.ts
+      pass: "exit 0"
+    future: >
+      预热清单是现成的"用户最可能看什么"的模型，可以按实际点击频率自适应。
+
+  # ────────────────────────── 历史 ──────────────────────────
+  - id: I-017
+    name: "每个已经走完的小时把用量归档落盘"
+    status: done
+    needs: [ I-009, I-003 ]
+    what: >
+      把已经走完的每个小时的用量压成一条 `ArchivedHourly`（日期/小时/模型/四类 token/
+      成本/provider）写进归档目录，当前这个未完成的小时不归档。
+    why: >
+      原始 JSONL 会被清理、会被 `/clear`、会随项目删除消失。没有归档， "去年三月我花了多少"这个问题永远无解。
+    expected: >
+      已完成小时被归档且不会重复归档；写盘失败时 frontier 不前进（下次会重试）； 当前小时永远留给实时数据。
+    how: >
+      `ArchiveManager::archive_completed_hours` 按 source_key 分目录追加 JSONL，
+      `ArchiveFrontier` 记录"归档到哪个小时了"作为时间边界去重。
+    why_this_way: >
+      用时间 frontier 而不是逐条去重，是因为归档粒度就是小时—— 测试
+      `does_not_advance_frontier_when_append_fails` 说明了写失败必须不前进边界， 否则那一小时就永久丢了。
+    code:
+      - file: src-tauri/src/usage/archive.rs
+        symbol: archive_completed_hours
+        lines: "251-407"
+      - file: src-tauri/src/usage/archive.rs
+        symbol: ArchiveFrontier
+        lines: "162-211"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib archives_completed_hours_and_skips_current
+      pass: "exit 0"
+    future: >
+      小时级归档已经足够画年视图；再往上做"删除原始日志以省磁盘"就有了安全网。
+
+  - id: I-018
+    name: "重复导入时逐字段取最大值，导几次结果都一样"
+    status: done
+    needs: [ I-017 ]
+    what: >
+      同一个 (日期, 小时, 模型, provider) 桶被重复导入时，逐字段取最大值而不是相加。
+    why: >
+      导入是会重复发生的：同一个文件导两次、两台机器互相同步、自动导出反复写同一份。 相加就会翻倍，覆盖就会丢数据。取大是唯一幂等且不丢的选择。
+    expected: >
+      同一份数据导入 N 次结果不变；部分重叠的数据合并后每个字段都不小于任一来源。
+    how: >
+      `ArchivedHourly::merge_max_from` 对每个数值字段取 max 并返回是否发生变化， `import_source`
+      据此决定要不要重写文件。
+    why_this_way: >
+      取大隐含一个前提：同一小时同一模型的用量只增不减。这在 append-only 的日志语义下成立， 也正是它能同时兼顾幂等与不丢的原因。
+    code:
+      - file: src-tauri/src/usage/archive.rs
+        symbol: merge_max_from
+        lines: "86-124"
+      - file: src-tauri/src/usage/archive.rs
+        symbol: import_source
+        lines: "662-762"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib
+        import_into_fresh_source_adds_records_and_advances_frontier
+      pass: "exit 0"
+    future: >
+      幂等是做"任意拓扑的多设备同步"的前提——不需要中心节点，谁同步谁都行。
+
+  - id: I-019
+    name: "每台机器一个生成后永不改变的名字"
+    status: done
+    needs: [ I-017 ]
+    what: >
+      每台机器有一个一次生成、永不改变的 slug，存在 `~/.tokenmonitor/device-identity.json`，导出文件名和归档
+      source_key 都用它。
+    why: >
+      改机器名、搬家目录、`scutil` 偶发失败，都会让同一台机器算出不同的 slug，
+      于是同步目录里出现两份"同一台机器"的数据，设备列表里出现幽灵设备。
+    expected: >
+      同一台机器无论改名与否始终写同一个文件名；"清空缓存"不会重新生成 slug。
+    how: >
+      `device_slug()` 用 `OnceLock` 缓存，`load_or_create_device_slug` 首次计算后落盘，
+      身份文件刻意放在归档目录之外。
+    why_this_way: >
+      代码注释把这段历史写得很清楚：身份文件"deliberately OUTSIDE the usage-archive directory so it
+      survives ArchiveManager::reset() / 'Clear Cache'; re-rolling it would
+      re-introduce the duplicate it prevents"。首次计算沿用旧算法， 是为了让已有安装不改文件名、不需要迁移。
+    code:
+      - file: src-tauri/src/commands/usage_io.rs
+        symbol: load_or_create_device_slug
+        lines: "463-520"
+      - file: src-tauri/src/commands/usage_io.rs
+        symbol: device_slug
+        lines: "425-447"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib slugify_produces_valid_source_alias
+      pass: "exit 0"
+    future: >
+      稳定身份是做"这台机器的历史趋势"和"团队维度汇总"的前提。
+
+  - id: I-020
+    name: "导入导出两种格式：整份快照，和每台设备一个追加文件"
+    status: done
+    needs: [ I-018, I-019 ]
+    what: >
+      两种格式：一份包含全部设备的 JSON 快照（人工备份用）， 和每台设备一个
+      `TokenMonitor-Usage-<slug>.jsonl`（同步用，可追加）。 导入端能自动识别是哪一种，也容忍尾行损坏。
+    why: >
+      备份和同步是两件事。备份要一个文件拿了就走；同步要能增量追加、 能被多台机器同时写而不互相覆盖。
+    expected: >
+      新旧快照格式都能解析（含 legacy 的 `p` 字段）；无 header 的 JSONL 也能读；
+      尾行损坏只丢那一行；未知格式明确报错而不是静默产出空数据。
+    how: >
+      `parse_import_payload` / `parse_jsonl_payload` 分别处理两种格式，
+      `detect_import_origin` 从 header 判别来源，`export_record` 负责写出。
+    why_this_way: >
+      容忍尾行损坏是刻意的（`tolerates_corrupt_trailing_line_in_jsonl`）：
+      追加式文件被断电或并发写截断是常态，为一行坏数据丢掉整份历史不值得。
+    code:
+      - file: src-tauri/src/commands/usage_io.rs
+        symbol: parse_jsonl_payload
+        lines: "1363-1431"
+      - file: src-tauri/src/commands/usage_io.rs
+        symbol: detect_import_origin
+        lines: "1271-1308"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib tolerates_corrupt_trailing_line_in_jsonl
+      pass: "exit 0"
+    future: >
+      JSONL 格式已经足够简单到可以被别的工具直接消费（脚本、表格、看板）。
+
+  - id: I-021
+    name: "自动导出到云盘目录，借用户已有的同步盘跨机器同步"
+    status: done
+    needs: [ I-020 ]
+    what: >
+      把本机归档持续写进用户指定的目录（iCloud/Dropbox/网盘）， 并把同目录下其他设备的文件读回来合并——用云盘当同步层。
+    why: >
+      多设备同步的正确做法是自己写服务端，但这个应用是本地优先、不上传的。 借用用户已有的同步盘，是唯一既不建服务器又能跨机器的路。
+    expected: >
+      本机文件持续增量追加（必要时整份重写）；同目录下的 peer 文件被识别、 重映射 source_key 后合并进来，且不会把 peer
+      的数据当成自己的。
+    how: >
+      `do_auto_export` 负责写，`merge_peer_files` 负责读回， `remap_peer_source` /
+      `is_own_source` 负责区分"我的"和"别人的"。
+    why_this_way: >
+      区分自他这件事有专门的测试（`own_source_excludes_foreign_peer_devices`、
+      `peer_source_remaps_local_to_device`）——因为 peer 文件里的 `local:*` 键
+      对它自己是本地、对我是远端，直接合并会把两台机器混成一台。
+    code:
+      - file: src-tauri/src/commands/usage_io.rs
+        symbol: do_auto_export
+        lines: "943-1035"
+      - file: src-tauri/src/commands/usage_io.rs
+        symbol: merge_peer_files
+        lines: "821-942"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib own_source_excludes_foreign_peer_devices
+      pass: "exit 0"
+    future: >
+      这套"文件夹即同步协议"可以扩展成 git 仓库、S3 桶，只要能列目录和读写文件。
+
+  - id: I-022
+    name: "通过 SSH 把远端开发机的用量拉回来"
+    status: done
+    needs: [ I-017, I-019 ]
+    what: >
+      对 `~/.ssh/config` 里的主机，通过 `ssh bash -s` 推一段提取脚本过去， 在远端把日志压成紧凑记录再传回来，按
+      provider 记录 `.last-sync-*` 增量位点。
+    why: >
+      开发机常常不是只有一台：本地笔记本 + 云上开发机 + 远程桌面。 不把远端的用量算进来，"我这个月花了多少"就是错的。
+    expected: >
+      只需要目标机有 ssh 和 python，不需要在远端装任何东西； 增量位点用远端观测到的最大时间戳而不是本地时钟； 远端切分出的 Claude
+      缓存档位与本地解析器一致。
+    how: >
+      `build_extraction_script` 生成 shell+python 脚本，`fetch_remote_usage` 执行并解析
+      `CompactUsageRecord`，`next_last_sync_epoch` 计算下次的起点（留 2 秒回退余量）。
+    why_this_way: >
+      位点取远端最大时间戳的理由被测试写死了：`last_sync_uses_max_remote_ts_not_local_clock`
+      ——两台机器时钟不同步时用本地时钟会永久漏掉一段数据。
+    code:
+      - file: src-tauri/src/usage/ssh_remote.rs
+        symbol: build_extraction_script
+        lines: "187-365"
+      - file: src-tauri/src/usage/ssh_remote.rs
+        symbol: next_last_sync_epoch
+        lines: "111-118"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib last_sync_uses_max_remote_ts_not_local_clock
+      pass: "exit 0"
+    future: >
+      "推一段脚本过去跑"这个模式可以用来做远端的额度读取，不只是用量。
+
+  - id: I-023
+    name: "启动时清掉设备列表里的重复幽灵设备"
+    status: done
+    needs: [ I-019, I-022 ]
+    what: >
+      启动时扫归档，删掉"其实是本机自己"的远端条目、合并历史遗留的别名重复、 把带账号前缀的 Cursor 数据折进 `local:cursor`。
+    why: >
+      设备身份冻结（I-019）之前产生的数据已经在用户机器上了。 不清理，设备列表里就永远挂着几个幽灵，总数还会重复计算。
+    expected: >
+      同一台机器不会同时以本地和远端两个身份出现； 账号维度的 Cursor 记录被折叠成一个来源。
+    how: >
+      `remove_self_duplicate_devices` / `merge_legacy_alias_duplicates` /
+      `fold_shared_cursor_into_local`，由 `lib.rs::cleanup_duplicate_devices`
+      在启动流程里调。
+    why_this_way: >
+      清理放在启动而不是写入时，是因为它要处理的是"已经写坏了的历史"， 而不是防止新的写入出错——后者由 I-019 负责。
+    code:
+      - file: src-tauri/src/usage/archive.rs
+        symbol: remove_self_duplicate_devices
+        lines: "884-940"
+      - file: src-tauri/src/lib.rs
+        symbol: cleanup_duplicate_devices
+        lines: "1012-1047"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib
+        enumerate_agg_devices_unions_configs_and_archive
+      pass: "exit 0"
+    future: >
+      清理逻辑一旦稳定，可以变成一次性迁移 + 版本标记，不必每次启动都跑。
+
+  # ────────────────────────── 额度 ──────────────────────────
+  - id: I-024
+    name: "Claude 额度依次尝试三条来源，哪条通用哪条"
+    status: done
+    needs: [ I-025, I-029 ]
+    what: >
+      按可靠度依次尝试：statusline 事件（最新、免网络）→ `claude -p "/usage"` CLI → OAuth
+      API。任一级拿到就停。
+    why: >
+      Anthropic 没有稳定的公开额度接口。每条路都会在某些环境下失效 （没装 CLI、没登录、Keychain
+      被拒、限流），只有一条路的话就是"有时候一片空白"。
+    expected: >
+      statusline 事件在 10 分钟内算新鲜并优先使用；CLI 输出的每一行额度都带重置时间； OAuth
+      路径在服务端冷却期内被跳过；未知的额度池作为额外条目显示而不是被丢弃。
+    how: >
+      `rate_limits/mod.rs::fetch_selected_rate_limits` 编排回退链，
+      `claude.rs`（OAuth）、`claude_cli.rs`（CLI 文本解析）、
+      `statusline/source.rs`（事件文件）各实现一级。
+    why_this_way: >
+      顺序是按"打扰用户的程度"排的：statusline 完全免打扰，CLI 要起子进程， OAuth 要碰 Keychain。commit 链
+      （`fix(rate-limits): read Claude usage via claude -p "/usage"` → `refactor:
+      drop the macOS Keychain pipeline` → `restore ... Keychain fallback`）
+      记录了这条链是怎么一步步试出来的。
+    code:
+      - file: src-tauri/src/rate_limits/mod.rs
+        symbol: fetch_selected_rate_limits
+        lines: "223-330"
+      - file: src-tauri/src/rate_limits/claude_cli.rs
+        symbol: parse_reset_time
+        lines: "175-247"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib parses_every_usage_row_with_its_reset_time
+      pass: "exit 0"
+    future: >
+      回退链的形状可以复用：任何"官方接口不稳定"的数据都可以按打扰程度排一串来源。
+
+  - id: I-025
+    name: "往 Claude Code 装一个状态栏脚本，借它拿最新额度"
+    status: done
+    needs: [ I-001 ]
+    what: >
+      往 Claude Code 装一个 statusline 脚本（POSIX sh + PowerShell 两版）， 让它把每次会话的
+      payload 追加到 `~/.tokenmonitor/statusline/events.jsonl`， 应用再读这个文件拿到最新额度。
+    why: >
+      Claude Code 每次渲染状态栏都会把包含 rate_limits 的完整 payload 喂给 statusline 命令。
+      这是唯一一个不用鉴权、不用网络、还总是最新的额度来源。
+    expected: >
+      安装会写脚本并 patch `~/.claude/settings.json` 的 `statusLine.command`，
+      保留用户已有的其他键并备份；卸载只删自己那一条，第三方 statusline 不受影响； 事件文件超过 1MB 时只保留尾部 200 行。
+    how: >
+      `statusline/install.rs` 负责装卸与 settings 合并，`scripts.rs` 存两个平台的脚本正文，
+      `source.rs` 负责读最新事件并做保留裁剪。
+    why_this_way: >
+      脚本目录刻意不用 Tauri 的 `app_data_dir()`：代码注释写明是为了让脚本 "never has to write into
+      another app's container and thus never triggers macOS Sequoia's App Data
+      TCC sheet"——即避免弹系统授权框。
+    code:
+      - file: src-tauri/src/statusline/mod.rs
+        symbol: statusline_dir
+        lines: "39-56"
+      - file: src-tauri/src/statusline/install.rs
+        symbol: install
+        lines: "125-199"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib install_preserves_existing_keys_and_backs_up
+      pass: "exit 0"
+    future: >
+      statusline 事件里除了额度还有会话信息，可以做"当前正在跑哪个会话、烧了多少"。
+
+  - id: I-026
+    name: "读 Codex 的额度，数据旧了标成过期而不是不显示"
+    status: done
+    needs: [ I-001 ]
+    what: >
+      优先问 Codex 的 app-server（JSON-RPC），拿不到就回退去读最新的会话文件里 带的额度快照，并判断这份快照是否已经过期。
+    why: >
+      app-server 不一定在跑。会话文件里的快照虽然可能是十分钟前的， 但标上 stale 显示出来，比什么都不显示有用。
+    expected: >
+      窗口的 used_percent 口径保持不变；长窗口格式化成"几天几小时"； 文件 mtime 太老或窗口已重置时标 stale；未知的
+      meter 作为额外条形显示。
+    how: >
+      `codex_cli.rs` 走 app-server，`codex.rs` 负责会话文件回退、 `is_codex_data_stale`
+      判新鲜度、`codex_value_to_window` 归一化窗口。
+    why_this_way: >
+      "宁可标 stale 也要显示"这个取舍写在测试里：`marks_stale_when_file_mtime_is_old` 与
+      `fresh_when_windows_active_and_file_recent` 是一对。
+    code:
+      - file: src-tauri/src/rate_limits/codex.rs
+        symbol: is_codex_data_stale
+        lines: "106-170"
+      - file: src-tauri/src/rate_limits/codex_cli.rs
+        symbol: fetch
+        lines: "1-120"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib marks_stale_when_file_mtime_is_old
+      pass: "exit 0"
+    future: >
+      app-server 的 JSON-RPC 通道还能拿到别的会话状态，不止额度。
+
+  - id: I-027
+    name: "把 Cursor 的套餐用量接口翻译成一条条额度条"
+    status: done
+    needs: [ I-029, I-004 ]
+    what: >
+      调 Cursor 的周期用量接口，把套餐里的各个百分比字段变成额度条， 并把 spend limit 变成"额外用量"信息。
+    why: >
+      Cursor 的计费是"套餐额度 + 超额按量"，只看花了多少钱看不出离限额还有多远。
+    expected: >
+      接口没返回的 meter 不显示（条形数量跟随 API 而不是写死）； 未知的百分比字段变成额外条形；空响应不崩； billing cycle
+      结束时间能从 unix 毫秒字符串解析。
+    how: >
+      `rate_limits/cursor.rs` 的 `plan_usage_windows` /
+      `build_cursor_rate_limits` 把响应翻译成统一的 `RateLimitWindow`，字段名用
+      `humanize_percent_field` 变成人话。
+    why_this_way: >
+      "条数跟随 API"是显式选择——测试名就叫
+      `omits_missing_meters_so_bar_count_follows_api`：Cursor 会改套餐结构， 写死条数就会显示一堆
+      0%。
+    code:
+      - file: src-tauri/src/rate_limits/cursor.rs
+        symbol: plan_usage_windows
+        lines: "150-192"
+      - file: src-tauri/src/rate_limits/cursor.rs
+        symbol: build_cursor_rate_limits
+        lines: "193-260"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib omits_missing_meters_so_bar_count_follows_api
+      pass: "exit 0"
+    future: >
+      同样的"未知字段变额外条"策略让 provider 加新 meter 时应用自动跟上。
+
+  - id: I-028
+    name: "额度接口报错时退避重试，且不清空已有数据"
+    status: done
+    needs: [ I-024, I-026, I-027 ]
+    what: >
+      每个 provider 有自己的最小重取间隔、失败重试退避、以及服务端给的冷却期；
+      失败时保留上一次成功的窗口而不是清空；同一个重置周期内利用率不允许倒退。
+    why: >
+      这是一个每几分钟就刷新的后台应用。一旦某个接口开始报错， 没有退避就是对人家接口的持续轰炸（commit `stop the retry storm
+      when a remote fetch keeps failing` 就是修这个），同时界面会在"有数"和"空白"之间闪。
+    expected: >
+      服务端冷却期内不发 OAuth 请求，过期后恢复； 一次空的错误响应不会抹掉已缓存的窗口； Codex 的利用率在同一重置窗口内不会向下跳。
+    how: >
+      后端 `oauth_cooldown_hold` + `is_fresh` 控制发不发； 前端 `rateLimitMonitor.ts` 的
+      `mergeProviderRateLimits` / `providerDeferredUntil` /
+      `stabilizeProviderRateLimits` 控制显示什么。
+    why_this_way: >
+      冷却只 gate 在 OAuth
+      这一路（`oauth_is_held_back_while_the_server_cooldown_is_active`）， 因为
+      statusline 和 CLI 不打服务端，不该被服务端的限流连坐。
+    code:
+      - file: src-tauri/src/rate_limits/mod.rs
+        symbol: oauth_cooldown_hold
+        lines: "176-222"
+      - file: src/lib/views/rateLimitMonitor.ts
+        symbol: mergeProviderRateLimits
+        lines: "107-199"
+    verify:
+      command: npx vitest run src/lib/views/rateLimitMonitor.test.ts
+      pass: "exit 0"
+    future: >
+      退避状态本身可以显示出来（"下次重试 3m 后"），把不确定性变成信息而不是空白。
+
+  - id: I-029
+    name: "API 密钥存进系统钥匙串，不留明文文件"
+    status: done
+    needs: []
+    what: >
+      Cursor 的 API key 存进系统钥匙串（macOS Keychain / Windows Credential Manager /
+      FreeDesktop Secret Service），拿不到守护进程时退回 0600 权限的本地文件； Claude 的 OAuth token
+      在 macOS 上通过 `/usr/bin/security` 读，并在进程内缓存。
+    why: >
+      把 key 明文写进设置文件是这个项目修过的一个真实泄漏 （commit `stop undercounting spend and leaking
+      the Cursor API key`）。 而在 macOS 上用错读取方式会给用户弹密码框——一个后台托盘应用弹密码框等于卸载。
+    expected: >
+      key 不出现在任何明文配置里；macOS 上后台刷新不弹钥匙串授权框； token 缓存在 401（真的轮换）时才失效。
+    how: >
+      `secrets/cursor.rs` 封装 keyring 三平台后端与文件回退； `rate_limits/claude.rs` 通过
+      `platform::macos::keychain::find_generic_password` 调用
+      `/usr/bin/security`，并用 `CACHED_ACCESS_TOKEN` 缓存。
+    why_this_way: >
+      代码注释写得很直接：Claude Code 用 `/usr/bin/security` 写的这个条目， 它的 ACL
+      信任那个二进制，所以同样走它读是静默的； 而"in-process Security.framework 调用会返回
+      errSecAuthFailed (-25293)， 恢复路径就是那个模态密码框"，并且注明"That shipped once; this
+      keeps it from shipping again"。Linux 侧选 `crypto-rust` 特性是为了不引入
+      libssl（Cargo.toml 注释）。
+    code:
+      - file: src-tauri/src/rate_limits/claude.rs
+        symbol: read_token_from_keychain
+        lines: "71-161"
+      - file: src-tauri/src/secrets/cursor.rs
+        symbol: store
+        lines: "33-104"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib access_token_cache_stores_and_invalidates
+      pass: "exit 0"
+    future: >
+      同一层可以放别的 provider 的凭据，前端永远只看到"已配置/未配置"。
+
+  # ────────────────────────── 界面 ──────────────────────────
+  - id: I-030
+    name: "托盘图标本身就画出花费和额度"
+    status: done
+    needs: [ I-002, I-028, I-015 ]
+    what: >
+      托盘图标本身就是信息：用纯 Rust 画 RGBA 位图，在图标旁边叠一到多条利用率条，
+      再按平台把成本文字放进标题（macOS）或提示气泡（Windows/Linux）。
+    why: >
+      这个应用的价值在于"不用打开就能知道"。要点开弹窗才看得到数字的话， 它和一个网页没区别。
+    expected: >
+      关闭条形时返回原始 template 图标；开启时画布变宽； 深色/浅色菜单栏下图标反色正确；成本在托盘标题不可用的平台上退到 tooltip；
+      Cursor 远端还在拉时保留上一次的成本而不是显示 0。
+    how: >
+      `tray/render.rs` 直接操作像素（圆角矩形、颜色、徽点）， `commands/tray.rs` 负责挑选显示哪些
+      provider、格式化标题、 以及在主线程上应用（避免后台线程更新托盘）。
+    why_this_way: >
+      平台分叉写在 AGENTS.md 里："on Windows/Linux set_title is a noop and the cost goes
+      in the tooltip"。"保留上一次成本"的取舍由一组 holdover 测试固定
+      （`tray_cost_holdover_does_not_poison_last_with_pending_zero`）， 因为托盘上闪一个
+      $0.00 会被读成"真的没花钱"。 纯 Rust 画图而不是引入图像库的原因没有在代码或提交信息里写明。
+    code:
+      - file: src-tauri/src/tray/render.rs
+        symbol: render_tray_icon
+        lines: "190-270"
+      - file: src-tauri/src/commands/tray.rs
+        symbol: resolve_tray_daily_cost_display
+        lines: "274-318"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib
+        tray_cost_holdover_does_not_poison_last_with_pending_zero
+      pass: "exit 0"
+    future: >
+      像素级自绘意味着可以画任何东西：迷你趋势线、多 provider 堆叠、告警色。
+
+  - id: I-031
+    name: "弹窗高度自动调到刚好装下内容"
+    status: done
+    needs: []
+    what: >
+      弹窗没有滚动条式的固定高度，而是测量内容高度后把原生窗口调到刚好； 带迟滞、请求合并、鼠标悬停时延后收缩、超过阈值才启用滚动。
+    why: >
+      托盘弹窗的内容高度差别巨大（5h 视图 vs 年视图 vs 设置）。 固定高度要么浪费半屏空白，要么把内容挤进小滚动区。
+    expected: >
+      3px 以内的抖动不触发缩放（打断 ResizeObserver 的反馈环）； 重叠的调整请求合并成最后一次；鼠标在窗口上时收缩被推迟到移出后再做；
+      过渡动画期间按帧节流而不是每帧都发 IPC。
+    how: >
+      `sizing.ts` 是纯函数层（测量、分类 grow/shrink/skip、各种上限计算）， `resizeOrchestrator.ts`
+      是有状态的编排层，通过 `set_window_size_and_align` 这一条 IPC 调原生窗口。
+    why_this_way: >
+      迟滞的理由写在测试名里："skips tiny height changes within hysteresis to break observer
+      feedback loops"。延后收缩来自 commit `fix(windows): defer tab-switch shrink and
+      keep the window flush to the taskbar` ——切 tab 时窗口在鼠标底下缩掉会让点击落空。
+    code:
+      - file: src/lib/window/sizing.ts
+        symbol: classifyResize
+        lines: "96-120"
+      - file: src/lib/window/resizeOrchestrator.ts
+        symbol: createResizeOrchestrator
+        lines: "62-200"
+    verify:
+      command: npx vitest run src/lib/window/resizeOrchestrator.test.ts
+      pass: "exit 0"
+    future: >
+      纯函数的 sizing 层让"固定高度模式""跟随内容模式""最大高度"都只是参数选择。
+
+  - id: I-032
+    name: "一个始终置顶的悬浮球，托盘看不见时的备用入口"
+    status: done
+    needs: [ I-030 ]
+    what: >
+      一个可选的、始终置顶的小球窗口，显示利用率条，可拖动、可展开、 拖动位置通过 RAF 合并后再发 IPC。
+    why: >
+      托盘在 Windows 上会被折叠进溢出区，在全屏应用下也看不见。 悬浮球是"永远在视线里"的那个形态。
+    expected: >
+      拖动时不会因为每个 mousemove 都发一次 IPC 而卡； 拖动阈值内的微小移动不被当成拖动（而是点击）；
+      逻辑坐标与物理坐标在多缩放率屏幕下换算正确。
+    how: >
+      独立的 Vite 入口 `src/float-ball.ts` + `FloatBall.svelte`， `MoveQueue` 用 RAF
+      合并移动请求并保证同一时刻只有一个 in-flight， `DragMachine`
+      管拖动状态机，`floatBallInteraction.ts` 管坐标换算。
+    why_this_way: >
+      作者本人的说法：因为 Windows 上任务栏图标有 bug。这与提交历史吻合—— `fix(windows): retire the
+      taskbar panel that froze the system tray` 记录了 Windows
+      侧的任务栏面板会冻住系统托盘，最后被整个撤掉。 也就是说悬浮球不是"锦上添花的第二个入口"，而是 Windows 上托盘不可靠时的替代主入口，
+      这解释了它为什么要独立成一个 Vite 入口和独立窗口，而不是复用主弹窗。
+    code:
+      - file: src/lib/components/float-ball/floatBallMoveQueue.ts
+        symbol: MoveQueue
+        lines: "13-74"
+      - file: src/lib/components/float-ball/floatBallInteraction.ts
+        symbol: detectScreenToPhysicalScale
+        lines: "1-80"
+    verify:
+      command: npx vitest run src/lib/components/float-ball/floatBallInteraction.test.ts
+      pass: "exit 0"
+    future: >
+      合并队列 + 状态机这套在任何"高频拖拽要过 IPC"的场景都能直接复用。
+
+  - id: I-033
+    name: "五个时间尺度，可以一直往前翻到最早的记录"
+    status: done
+    needs: [ I-016, I-017 ]
+    what: >
+      五个时间尺度（5h 滚动窗口 / 日 / 周 / 月 / 年）加左右翻页， 能一直往回翻到有数据的最早一天，翻到头时箭头禁用。
+    why: >
+      "现在用了多少"和"这个月花了多少"是两个不同的问题，前者决定要不要现在停手， 后者决定要不要换套餐。
+    expected: >
+      5h 视图对齐 Claude 的官方 5 小时窗口（跨午夜的用量算进同一个窗口）； 年视图只显示目标年；没有更早数据时"上一页"不可点；
+      未来的桶不显示（当天 11:30 不画 12PM 的柱子）。
+    how: >
+      `commands/period.rs` 计算各周期的时间边界（`five_hour_range` / `local_midnight`），
+      `parser.rs` 的 `get_daily`/`get_monthly`/`get_hourly`/`get_time_range` 出数据，
+      `has_entries_before` 决定能不能继续往回翻，前端 `chartBuckets.ts` 过滤未来桶。
+    why_this_way: >
+      5h 这个尺度直接对应 Claude 的额度重置窗口——测试
+      `five_h_includes_cross_midnight_usage_inside_official_window` 说明它按官方窗口
+      而不是按自然小时切。
+    code:
+      - file: src-tauri/src/commands/period.rs
+        symbol: five_hour_range
+        lines: "145-230"
+      - file: src/lib/components/chartBuckets.ts
+        symbol: filterVisibleChartBuckets
+        lines: "54-104"
+    verify:
+      command: npx vitest run src/lib/components/chartBuckets.test.ts
+      pass: "exit 0"
+    future: >
+      有了 `has_entries_before`，可以做"你的第一天"、"最贵的一周"这类回顾。
+
+  - id: I-034
+    name: "图表加热力日历，还能和套餐月费比出赚亏"
+    status: done
+    needs: [ I-033 ]
+    what: >
+      柱/线/饼三种图表，按模型或按设备分段；外加一个 GitHub 风格的月度热力日历， 并能和套餐月费对比算出"赚了还是亏了"。
+    why: >
+      一串数字说明不了模式。哪天爆了、哪个模型最贵、订阅到底值不值， 都是一眼图能回答而表格不能的。
+    expected: >
+      **在哪看**：弹窗底部栏的日历按钮（`Footer.svelte:57`）→ 月度热力图页。 强度分 5 档（0 / 1-25% / 26-50%
+      / 51-75% / 76-100%），格子颜色由 `Calendar.svelte:218` 的
+      `style:background={heatmapColor(level, brandTheming, provider)}` 内联注入。
+      品牌配色开关在 设置 → Appearance → "Brand
+      Theming"（`AppearanceSettings.svelte:72-77`）， 关掉是统一绿色；但当前 tab 选 "All"
+      时即使开着也是绿色，因为 `ALL_PROVIDER_DEFINITION` 没有
+      brandColor（`providerMetadata.ts:39-45`）。 **盈亏在哪**：日历页底部 "MONTHLY USAGE"
+      那一行，月度总额右边一个 `·` 隔开的带符号金额—— 超出套餐显示绿色 `+$147.00`，没用完显示灰色 `$5.00
+      remaining`（`Calendar.svelte:226-244`）。 界面上不出现"盈亏"或 "earned" 字样。
+      **它经常不显示，这是真的**：`{#if earned !== null}` 要求 planCost > 0，而 planCost 来自
+      运行时探测到的 `rateLimits[provider].planTier`——Claude 走 statusline 或 CLI 路径时
+      `plan_tier` 恒为 `None`（`rate_limits/mod.rs:106`、`claude_cli.rs:313`）， 且
+      `merge_provider_rate_limits`（`http.rs:139`）会用 None 覆盖掉 OAuth 曾探到的值。 所以装了
+      statusline 的 Claude 用户永远看不到这一行。Cursor 同理（`cursor.rs:225` 恒 None， 且
+      ops.json 里根本没有 cursor 的套餐价）。选 "All" tab 时也不显示。
+    how: >
+      `utils/calendar.ts` 是纯函数（强度分档、颜色、盈亏），全仓唯一消费者是 `Calendar.svelte`（`:6`
+      import，`:150` computeEarned，`:214` intensityLevel，`:218` heatmapColor）。
+      数据来自 `get_monthly_usage`。套餐价来自 ops.json 的 `plan_tier_costs_usd`， 经
+      `providerMetadata.ts:188-194` 查表，查不到返回 0。
+    why_this_way: null
+    code:
+      - file: src/lib/utils/calendar.ts
+        symbol: intensityLevel
+        lines: "4-33"
+      - file: src/lib/components/Calendar.svelte
+        symbol: heatmap grid + monthly summary
+        lines: "203-244"
+      - file: src-tauri/src/commands/calendar.rs
+        symbol: get_monthly_usage
+        lines: "170-230"
+    verify:
+      command: npx vitest run src/lib/utils/calendar.test.ts
+      pass: "exit 0"
+    future: >
+      盈亏计算已经是一个隐含的"订阅建议"引擎，可以直接长成"你该降级到 Pro"—— 但前提是 I-048
+      先把套餐档位变成用户可选的，否则大多数用户根本触发不到它。
+    log:
+      - date: "2026-08-25"
+        by: ccscan
+        note: "作者反馈「和我看到的不一样」，核实后改写 expected/how：补上入口路径与实际文案，并写明盈亏行在 statusline
+          路径下恒不显示这一真实条件。原描述只写了纯函数的行为，没写它在界面上可不可达。"
+
+  - id: I-035
+    name: "设置文件里有坏值就用默认值顶上，保证能启动"
+    status: done
+    needs: [ I-002 ]
+    what: >
+      从磁盘读回来的设置全部过一遍归一化：类型不对、枚举值不认识、 数组里混了脏数据，都回落到默认值而不是让应用崩。
+    why: >
+      设置文件会跨版本存在：旧版本写的键、手改坏的 JSON、被同步工具截断的文件。 一个托盘应用因为设置解析失败而起不来是最糟的失败模式。
+    expected: >
+      每种设置都有归一化函数并有测试；未知主题/币种/周期回落默认； 隐藏模型列表小写化、去重、丢空串；header tab 标签超长被截断。
+    how: >
+      `stores/settings.ts` 的 `DEFAULTS` + 18 个 `normalize*` 函数， 在读取时逐字段过滤
+      （`loadSettings` 的 `settings.ts:476` 拿到原始值，`settings.ts:502` 归一化）。
+    why_this_way: >
+      作者本人的取向：这一层的"静默"不是设计目标而是当前状态——他明确说了应该设计一个提示用户的东西， 见
+      I-046。所以这里记录的是它为什么先做成静默的： 归一化跑在启动路径最早的一段（`App.svelte:633` →
+      `loadSettings`）， 那时既没有窗口也没有任何提示组件可用，让它在这个位置报错就等于开不了机；
+      而这一层存在的全部意义就是"宁可用默认值也要起得来"（见 why）。 代价是坏值会被静默改写并写回磁盘（`settings.ts:567/574`
+      的迁移分支、 `updateSetting` 的 `settings.ts:646`），原值永久消失、没有备份也没有撤销通道。
+    code:
+      - file: src/lib/stores/settings.ts
+        symbol: DEFAULTS
+        lines: "133-173"
+      - file: src/lib/stores/settings.ts
+        symbol: normalizeHeaderTabs
+        lines: "247-283"
+    verify:
+      command: npx vitest run src/lib/stores/settings.test.ts
+      pass: "exit 0"
+    future: >
+      归一化层就是天然的迁移层：改设置结构时在这里加一条转换即可。 它同时是 I-046（把静默重置告诉用户）唯一可能的信息来源——
+      `settings.ts:502` 是全仓唯一同时持有原始值和归一化结果的地方。
+
+  - id: I-036
+    name: "第一次启动先讲清要读什么，让用户逐项打开"
+    status: done
+    needs: [ I-001, I-035 ]
+    what: >
+      第一次启动走一个引导：说明它要读哪些本地路径、为什么读、 哪些是可选的，用户逐项开启而不是一次性授权。
+    why: >
+      一个读你所有 AI 会话日志的应用，必须先解释自己。 "装上就开始扫描"哪怕技术上无害，观感上也是间谍软件。
+    expected: >
+      披露的每个面（usage access、rate limits、statusline、SSH…）都有明确的 tone
+      和请求策略；平台差异（macOS/Windows/Linux）在文案里体现； 引导结束后设置的落盘顺序保证不会重复弹。
+    how: >
+      `permissions/surfaces.ts` 定义每个权限面，`PermissionsOnboarding.svelte` /
+      `PermissionDisclosure.svelte` 渲染，`bootstrap.ts` 决定何时进入引导。
+    why_this_way: >
+      逐项开启而不是一次性授权，与 I-041（不申请任何多余系统权限）是同一个立场的两面： 应用能读的东西全靠用户逐个点开。
+    code:
+      - file: src/lib/permissions/surfaces.ts
+        symbol: getPermissionSurfaces
+        lines: "39-121"
+      - file: src/lib/bootstrap.ts
+        symbol: initializeRuntimeFromSettings
+        lines: "70-160"
+    verify:
+      command: npx vitest run src/lib/permissions/surfaces.test.ts
+      pass: "exit 0"
+    future: >
+      披露面是从 `paths.rs`（I-001）派生的，可以做到"代码里加一个路径， 引导里自动多一条说明"。
+
+  - id: I-037
+    name: "顺手统计改了多少行代码、子代理烧了多少钱"
+    status: done
+    needs: [ I-005, I-006 ]
+    what: >
+      顺手从会话日志里的 tool_use / tool_result 统计代码变更量（增删行、文件分类）， 以及主代理 vs 子代理各自烧了多少。
+    why: >
+      "花了 $12" 没有参照系。"花了 $12，改了 340 行代码，其中 60% 是子代理烧的" 才是能据以调整用法的信息。
+    expected: >
+      文件按类别归类（代码/配置/文档/其他）；结构化 patch 的行数能数对； 按模型汇总变更量；主/子代理的用量分开汇总。
+    how: >
+      `stats/change.rs` 做变更聚合，`stats/subagent.rs` 做作用域聚合， 输入来自解析阶段已经顺手拿到的工具事件。
+    why_this_way: >
+      作者本人的说法：就是想看看子代理用了多少。所以这个想法的重心在
+      `stats/subagent.rs`（主/子代理的花费拆分），`stats/change.rs` 的变更行数是配套的参照系，
+      不是目的本身。这也解释了为什么它挂在解析阶段顺手做——不值得为它单独走一遍日志。
+    code:
+      - file: src-tauri/src/stats/change.rs
+        symbol: aggregate_change_stats
+        lines: "89-170"
+      - file: src-tauri/src/stats/subagent.rs
+        symbol: aggregate_subagent_stats
+        lines: "209-300"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib mixed_scopes_split_correctly
+      pass: "exit 0"
+    future: >
+      有了"每美元改了多少行"，就能横向比较模型、比较自己不同时期的用法。
+
+  # ────────────────────────── 分发 ──────────────────────────
+  - id: I-038
+    name: "保证同一时刻只有一个实例在运行"
+    status: done
+    needs: []
+    what: >
+      用回环 TCP 端口 53217 当锁，配一个 PROBE / QUIT / FOCUS 文本协议； Windows
+      上还有命名互斥体兜底，端口被外部进程占用时能查到占用者 PID。
+    why: >
+      开两个实例就是两倍的日志扫描、两个托盘图标、两份互相打架的写入。 而用户会重复点图标，会开机自启后再手动点一次。
+    expected: >
+      第二个实例启动时探测到已有实例并让它聚焦，然后自己退出； 端口被非本应用占用时能识别并降级而不是死循环重试； 协议对 CRLF
+      和多余空白容错，非本应用的响应被拒绝。
+    how: >
+      `single_instance/port.rs` 绑定与占用者查询，`protocol.rs` 定义文本协议与 `decide()`
+      真值表，`mod.rs::acquire_or_exit` 编排，含 5 秒重绑定预算。
+    why_this_way: >
+      选回环端口而不是文件锁，是因为它同时解决"检测"和"通信"两件事—— 拿不到锁的那个实例正好可以用同一个端口把 FOCUS 请求发给持有者。
+      Cargo.toml 注释说明了 Windows 侧引入 `Win32_NetworkManagement_IpHelper` 的目的： "map
+      the lock port to its owning PID via GetExtendedTcpTable when a foreign
+      process holds it"。
+    code:
+      - file: src-tauri/src/single_instance/protocol.rs
+        symbol: decide
+        lines: "80-105"
+      - file: src-tauri/src/single_instance/mod.rs
+        symbol: acquire_or_exit
+        lines: "137-222"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib probe_and_quit_roundtrip_over_loopback
+      pass: "exit 0"
+    future: >
+      同一条通道可以承载更多进程间命令（打开设置、切 provider、CLI 触发刷新）。
+
+  - id: I-039
+    name: "应用内自动更新，fork 仓库也有自己的更新频道"
+    status: done
+    needs: [ I-004 ]
+    what: >
+      内置 tauri-plugin-updater，用 minisign 公钥校验；除了上游仓库， 还能发现 fork
+      的发布频道并为每个频道取它自己的公钥。
+    why: >
+      托盘应用没人会主动去看有没有新版。而这个仓库本身是一个 fork， 只认上游的更新源意味着 fork 用户永远收不到自己的版本。
+    expected: >
+      默认走上游频道；切到 fork 频道后从该 fork 的 `updater-pubkey.txt` 取公钥并缓存； 检查失败时退避到 12–24
+      小时再试。
+    how: >
+      `updater/channels.rs` 通过 GitHub forks API 发现频道并取公钥， `scheduler.rs` 负责定时（首次
+      10 秒后、之后每 6 小时）与失败退避， `persistence.rs` 存频道选择与状态。
+    why_this_way: >
+      commit `fix(updater): enable fork-channel auto-update for this fork`
+      记录了动机。 公钥按频道分开取而不是共用一把，是因为每个 fork 用自己的 minisign 私钥签名。
+    code:
+      - file: src-tauri/src/updater/channels.rs
+        symbol: discover_channels
+        lines: "41-120"
+      - file: src-tauri/src/updater/scheduler.rs
+        symbol: run_check
+        lines: "87-152"
+    verify:
+      manual: "按 docs/testing/auto-update.md 的步骤，装一个旧版本、发一个新
+        tag，确认应用在检查周期内弹出更新横幅并能完成安装。"
+      signed_off: "TzJ2006 2026-08-25（作者在会话中确认：自动更新已实现并可用）"
+    future: >
+      频道机制天然支持 beta / nightly：多一个 fork 就是多一条更新轨道。
+    log:
+      - date: 2026-08-25
+        by: ccscan
+        note: manual verify 未签字：自动更新只有 docs/testing/auto-update.md 的人工流程，无自动化测试
+      - date: 2026-08-25
+        by: ccscan
+        note: 作者确认自动更新已实现；manual verify 已签字
+
+  - id: I-040
+    name: "一条命令构建出当前平台的安装包"
+    status: done
+    needs: [ I-039 ]
+    what: >
+      一条命令为当前平台产出安装包（macOS DMG / Windows NSIS exe / Linux deb+AppImage）， 产物收进
+      `outputs/<platform>/`；每个平台有自己的 tauri 配置覆盖层。
+    why: >
+      三个平台三套打包参数，手工敲一次就会漏一个签名步骤或者装错图标。 发布流程必须是一条命令，否则它就不会被正确执行。
+    expected: >
+      `--platform current` 用宿主平台；跨平台请求明确报错而不是产出坏包； CLI 参数解析（含 `--platform=value`
+      写法）和平台/架构映射都有测试。
+    how: >
+      `build/index.mjs` 是入口，`build/lib/cli.mjs` 解析参数， `platform.mjs`
+      做平台映射，`build/config/tauri.<os>.json` 是每平台的覆盖层。
+    why_this_way: >
+      "跨平台请求 fail fast" 是显式设计（`fails fast on cross-platform requests`）： Tauri
+      的原生打包本来就不能交叉编译，让它早失败好过产出一个装不上的包。
+    code:
+      - file: build/lib/platform.mjs
+        symbol: resolvePlatform
+        lines: "1-80"
+      - file: build/index.mjs
+        symbol: main
+        lines: "1-30"
+    verify:
+      command: npx vitest run build/lib/platform.test.mjs
+      pass: "exit 0"
+    future: >
+      配置覆盖层的结构让"加一个便携版/加一个 Windows Store 包"只是多一个配置文件。
+
+  - id: I-041
+    name: "刻意不向系统申请任何多余权限，并用测试钉死"
+    status: done
+    needs: [ I-036 ]
+    what: >
+      Tauri capabilities 里刻意不开放通用文件系统权限，对话框只允许保存与打开， 不申请通知权限；并用一个仓库级测试把这条约束钉死。
+    why: >
+      这个应用要读用户所有的 AI 会话日志。它能立足的唯一理由是"它只能读它声明的东西"。 一旦 capabilities 里出现 `fs:`
+      通配，这个理由就没了。
+    expected: >
+      `capabilities/default.json` 中不含 `fs:` 权限； dialog 权限只有 `dialog:allow-save`
+      和 `dialog:allow-open`； 没有 notification 权限；调度器保持 permission-free。
+    how: >
+      所有文件读取都在 Rust 侧用 std::fs 完成并经 `paths.rs` 登记，
+      前端从不直接碰文件系统；`tests/permissionSurface.test.mjs` 断言这些不变量。
+    why_this_way: >
+      把它写成测试而不是文档，是因为 capabilities 文件是最容易"为了调试临时加一条" 然后忘了删的地方。测试让这种临时改动在 CI 里失败。
+    code:
+      - file: src-tauri/capabilities/default.json
+        symbol: default capability set
+        lines: "1-60"
+      - file: tests/permissionSurface.test.mjs
+        symbol: permission surface invariants
+        lines: "1-80"
+    verify:
+      command: npx vitest run tests/permissionSurface.test.mjs
+      pass: "exit 0"
+    future: >
+      这份不变量清单就是将来做安全审计或上架审核时的现成材料。
+
+  - id: I-042
+    name: "macOS 包没有签名，首次启动要用户敲终端命令"
+    status: blocked
+    needs: [ I-040 ]
+    what: >
+      macOS 构建目前没有 Apple Developer ID 证书，Gatekeeper 会把它报成"已损坏"， 用户必须手动跑一次 `xattr
+      -cr /Applications/TokenMonitor.app`。
+    why: >
+      "零权限的跨平台分发"这条终点线上，这是唯一还没跨过去的一段： 一个需要用户敲终端命令才能启动的应用，对非开发者用户等于装不上。
+    expected: >
+      macOS 用户双击 DMG、拖进 Applications、双击图标就能启动，不需要终端。
+    how: >
+      需要一个 Apple Developer ID 证书 + notarization 流程接进
+      `.github/workflows/release.yml` 的 macOS 构建步骤。 更新通道本身不受影响——它用的是独立的 minisign
+      密钥。
+    why_this_way: >
+      当前状态是主动选择的结果而不是疏忽：commit `docs(readme): macOS builds are unsigned now that
+      the Developer ID cert is dropped` 记录了证书被放弃。README 与 tutorial 都把 `xattr`
+      变通写成了正式步骤。 作者本人补充：macOS 首启要跨过去，需要的是**上游项目的密钥**——签名证书不在这个 fork 手里，
+      所以这一条不是本仓库能自己排掉的工作量，而是一个外部依赖。这也是它标 blocked 而不是 todo 的原因。
+    code:
+      - file: README.md
+        symbol: macOS first-launch note
+        lines: "235-241"
+      - file: .github/workflows/release.yml
+        symbol: "Build installers (macOS — unsigned)"
+        lines: "155-175"
+    verify:
+      manual: "在一台从未装过本应用的 Mac 上下载 release 的 DMG，拖进 Applications
+        后直接双击，确认不出现\"已损坏\"提示、无需任何终端命令即可启动。"
+      signed_off: null
+    future: >
+      拿到证书后，同一条流水线还能顺带解决 Windows SmartScreen 警告 （tutorial.md 里记录的另一个首启摩擦）。
+    log:
+      - date: "2026-08-24"
+        by: ccscan
+        note: "blocked：需要 Apple Developer ID 证书，仓库当前没有；现状由 README:235-241 记录为已知变通。"
+      - date: "2026-08-25"
+        by: ccscan
+        note: "作者确认：卡在上游项目的签名密钥，不是本仓库可以自行解决的工作量。维持 blocked。"
+
+  # ────────────────────────── 终点 ──────────────────────────
+  - id: I-046
+    name: "设置被静默重置时告诉用户"
+    status: todo
+    needs: [ I-035 ]
+    what: >
+      当磁盘上的设置里有值没通过归一化、被换成默认值时，在界面上说一句， 而不是像现在这样悄悄改掉再写回磁盘。
+    why: >
+      作者本人提的。当前 18 个 `normalize*` 函数没有一个把"我兜底了"这件事传出去： 返回值只有值本身，函数体内零 console、零
+      logger、零事件。最疼的几个： 自定义 5h/周预算被判非法就变 `null`，随后回落到套餐默认预算，百分比全算错而界面无任何提示
+      （`normalizePositiveNumberOrNull`，`settings.ts:449-453`）； 整份隐藏模型列表不是数组就变
+      `[]`，所有模型突然重新出现 （`normalizeHiddenModels`，`settings.ts:220-232`）； 一条 SSH
+      host 的 `enabled` 不是 boolean 就整条丢弃、不是补默认值
+      （`normalizeSshHosts`，`settings.ts:284-307`）。
+      而且原值会被写回磁盘永久消失（`settings.ts:567/574` 的迁移分支、 `updateSetting` 的
+      `settings.ts:646`），全仓没有任何备份或撤销通道。 现在唯一的痕迹是
+      `console.warn`（`settings.ts:585`），而它只在 `store.get()` 抛异常时触发——JSON
+      合法但值全是垃圾的 settings.json 走不到那个 catch。
+    expected: >
+      启动时若有字段被重置，主窗口出现一条可关闭的提示，写明哪几个字段、原值是什么、
+      现在用的是什么；不影响启动，不阻塞任何流程；没有字段被重置时完全不出现。
+    how: >
+      `settings.ts:502` 是全仓唯一同时持有原始值（`migrated`）和归一化结果（`merged`）的地方， diff
+      只能在这一行产生。把 diff 存进 `settings.ts:467` 旁边一个新的 store， 在
+      `App.svelte:791`（`<UpdateBanner />` 旁边）按现有形态渲染。 若要支持"恢复原值"，必须在
+      `settings.ts:476` 就把原始对象截留下来。
+    why_this_way: >
+      不新造 toast 系统：仓库里没有通用 toast/notification store，但已有两种现成形态——
+      `UpdateBanner.svelte:52-83`（顶部横幅，无 props、由 store 驱动、无超时、点 × 关闭） 和
+      `.usage-warning` 内联卡（`App.svelte:851-867`，标题 + 正文 + 动作按钮）。
+      后者更合适，因为这条提示需要正文（列出被重置的字段）。 不用
+      `logger`：`logger`（`utils/logger.ts:32-54`）只经 IPC 转发给 Rust 落盘， 连 console
+      都不打，IPC 失败还被静默吞掉，到不了任何界面。
+    code:
+      - file: src/lib/stores/settings.ts
+        symbol: loadSettings（归一化发生在 :502）
+        lines: "471-505"
+      - file: src/App.svelte
+        symbol: 提示挂载点（UpdateBanner 旁）
+        lines: "788-795"
+    verify:
+      command: npx vitest run src/lib/stores/settings.test.ts
+      pass: "exit 0"
+    future: >
+      同一条通道可以承载"你的设置从 v0.13 迁移过来了""这台机器的 SSH 配置有 2 条读不懂" 这类所有启动期的一次性告知。
+    log:
+      - date: "2026-08-25"
+        by: ccscan
+        note: "作者提出：归一化这层应该设计一个提示用户的东西。新建节点。"
+
+  - id: I-047
+    name: "让托盘和悬浮球也按用户选的币种显示金额"
+    status: todo
+    needs: [ I-013, I-030, I-032 ]
+    what: >
+      把货币换算从"只有主 webview 会做"变成"每一个显示金额的地方都会做"—— 托盘、悬浮球、UsageBars 的额外用量、Cursor
+      额度标签。
+    why: >
+      选了 EUR 的用户现在会在同一时刻看到托盘 `$5.00` 和弹窗 `€4.60`。 托盘是常驻可见面，它显示错误的币种符号直接打击 I-043
+      这个终点的"可信"二字。 本次扫描核实到的四处： `commands/tray.rs:169,171`（+ `lib.rs:214` 的
+      `$--.--` 占位符）Rust 直接 `format!("${:.2}")`； `floatBallUtils.ts:22-24` 悬浮球写死
+      `$`； `UsageBars.svelte:117-124` 用 `Intl.NumberFormat` 写死
+      `currency:"USD"`，就在主弹窗里； `rate_limits/cursor.rs:52,54` Rust 生成 `API ($70
+      included)` 标签混进已换算的界面。 另有两条相关的：冷启动时汇率缓存不存在则整个会话跑 `format.ts:9-14` 的硬编码历史汇率
+      （`bootstrap.ts:91-93` 的守卫会跳过空表）；后台 24h 刷新汇率时不 emit 事件， 长期不重启的会话汇率不更新。
+    expected: >
+      切到 EUR 后，托盘、悬浮球、弹窗、UsageBars 显示的是同一个数值和同一个符号； 冷启动没有汇率缓存时不静默使用硬编码汇率。
+    how: >
+      两条路，选一条： (a) 把 currency + rates 塞进 `TrayConfig`（`tray.rs:35-48`，现在没有
+      currency 字段， 整个 `src-tauri/src/` grep `currency` 只命中
+      `exchange_rates.rs:88` 一个参数名）， 让 Rust 侧统一格式化——`exchange_rates.rs:87-92` 的
+      `get_rate` 已经写好了， 而且挂着 `#[cfg_attr(not(test),
+      allow(dead_code))]`，说明这条路当初铺了一半就停了；
+      `StatusWidgetSummary.title`（`tray.rs:567`）也是现成但没人消费的载体。 (b) 给悬浮球那个独立
+      entry（`src/float-ball.ts`，全文不调 `setCurrency`/`setRates`） 单独接一遍 settings +
+      rates，托盘那侧仍然只能靠 (a)。 `UsageBars.svelte` 那一处最便宜，`import { formatCost }` 一行。
+      **已选 (a)。** 落地形态：新增 `src-tauri/src/usage/money.rs` 作为 Rust 侧唯一的金额格式化处
+      （symbol 表 + 换算 + 三种精度：`format` / `format_auto` / `format_compact`），
+      新增 `set_currency` IPC 把用户选的币种推给 Rust，
+      新增 `exchange-rates-updated` 事件把汇率推回前端；
+      托盘、Cursor 额度标签、`StatusWidgetSummary.cost_text` 都改走 money，
+      悬浮球渲染 `cost_text`，`UsageBars` 改用前端新增的 `formatCreditAmount`。
+    why_this_way: >
+      选 (a) 不是因为它更优雅，而是因为 (b) 不完整：悬浮球接上 settings 之后，
+      托盘那侧仍然只能靠 (a)——托盘是 Rust 画的，`format.ts` 的模块级变量跨不过 IPC。
+      (a) 严格覆盖 (b)，所以没有理由先做半个。
+      在 Rust 侧新开一个 `money` 模块而不是把 currency 塞进 `TrayConfig`：
+      需要换算的不止托盘——Cursor 的 `API (…included)` 标签在 `rate_limits/cursor.rs`，
+      跟托盘配置毫无关系，塞进 `TrayConfig` 会让一个与托盘无关的模块去读托盘配置。
+      币种是应用级状态，与汇率表（`exchange_rates.rs` 里已经是进程全局）同级，
+      所以它也做成进程全局，`money` 同时持有两者。
+      悬浮球走「Rust 把 `cost_text` 算好发过来」而不是「给悬浮球接一遍 settings + rates」：
+      它是独立 Vite entry，接 settings 等于把整条 settings 加载链复制到第二个 webview，
+      而 `StatusWidgetSummary` 这条 IPC 本来每次刷新都在发，多一个字符串字段的成本接近零。
+      格式化规则在 `money.rs` 和 `format.ts` 两边各写一份而不是只留一份：
+      两边运行环境不同，无法共享代码；代价是一致性只能靠测试钉住，
+      所以两边的测试都显式写明了它镜像的是另一侧。
+    code:
+      - file: src-tauri/src/usage/money.rs
+        symbol: "money（set_active_currency :36 / format :80 / format_auto :92 / format_compact :101）"
+        lines: "1-117"
+      - file: src-tauri/src/commands/tray.rs
+        symbol: "format_tray_title + StatusWidgetSummary.cost_text（:99, :572）"
+        lines: "127-180"
+      - file: src-tauri/src/commands/config.rs
+        symbol: set_currency
+        lines: "16-31"
+      - file: src-tauri/src/rate_limits/cursor.rs
+        symbol: api_window_label
+        lines: "46-58"
+      - file: src/lib/utils/format.ts
+        symbol: formatCreditAmount
+        lines: "49-66"
+      - file: src/lib/bootstrap.ts
+        symbol: "pullExchangeRates + exchange-rates-updated 监听 + set_currency 推送（:155）"
+        lines: "93-117"
+      - file: src/lib/components/UsageBars.svelte
+        symbol: formatCreditAmount 调用点
+        lines: "203"
+      - file: src/lib/components/float-ball/FloatBall.svelte
+        symbol: summary.costText 渲染
+        lines: "491"
+      - file: src/lib/stores/settings.ts
+        symbol: updateSetting 的 currency 分支
+        lines: "641-649"
+    verify:
+      manual: "设置里把币种切成 EUR，同时看托盘/菜单栏文字、悬浮球、弹窗顶部总额、 UsageBars 的额外用量四处，确认符号和数值一致；然后删掉
+        app_data_dir 下的 exchange-rates-cache.json 冷启动一次，确认没有静默用旧汇率。"
+      signed_off: null
+    future: >
+      Rust 侧一旦知道币种，导出文件也可以顺带带上一个"导出时的展示币种"元数据， 而不影响 `cost` 字段永远是 USD 这条不变量。
+    log:
+      - date: "2026-08-25"
+        by: ccscan
+        note: "由作者的问题「前端换算和后端换算哪个更有优势」引出：核实发现现状的前端换算 跨不过 IPC 和 webview
+          边界，已产生四处真实不一致。拆为独立节点。"
+      - date: "2026-08-29"
+        by: ccbuild
+        note: "已实现（走方案 a）。新增 usage/money.rs（12 个单测钉住它与 format.ts 的一致性）；
+          托盘、Cursor 额度标签、悬浮球 cost_text、UsageBars 四处全部改走币种感知的格式化；
+          新增 set_currency IPC 与 exchange-rates-updated 事件（后者同时补上冷启动无汇率缓存的洞）。
+          新增测试：Rust money 12 条 + tray/cursor 各 2 条，前端 formatCreditAmount 4 条 +
+          bootstrap 的 set_currency 契约 1 条。cargo test --lib 610 passed、npm test 300/300、
+          clippy --all-targets -D warnings 干净、svelte-check 0 errors。
+          verify 是人工项，需作者签字后才能标 done。"
+
+  - id: I-048
+    name: "让用户在设置里自己选套餐档位，不再只靠自动探测"
+    status: todo
+    needs: [ I-034, I-035 ]
+    what: >
+      给用户一个地方选自己的套餐档位，而不是像现在这样完全依赖运行时自动探测。
+    why: >
+      两个功能因为探测不到档位而对大多数用户静默失效： 日历的盈亏行（I-034）和 5h/周窗口的 token 预算百分比。
+      探测链是断的——Claude 走 statusline 或 CLI 路径时 `plan_tier` 恒为 `None`
+      （`rate_limits/mod.rs:106`、`claude_cli.rs:313`），而
+      `merge_provider_rate_limits` 的 `(Some(fresh), _) =>
+      Some(fresh)`（`http.rs:139`）会用 None **覆盖**掉 OAuth 曾经探到的值，不是"这次拿不到"而是持久擦除。
+      即使探到了也可能对不上表：`detect_claude_plan` 会返回裸 `"Max"`（`claude.rs:417`）， 而
+      ops.json 只有 `"Max 5x"` / `"Max 20x"`；Codex 侧 `normalize_plan_type`
+      （`codex_cli.rs:142-153`）会产出 `"Pro Lite"` / `"Team"` / `"Enterprise"` /
+      `"Business"` 四个 ops.json 里根本没有的档位。表现是"套餐徽章显示出来了，旁边的金额那一行无声消失"。 而设置里其实已经有
+      `claudePlanTier`（`settings.ts:87`，默认 `"Pro"`）和一条完整的
+      IPC（`bootstrap.ts:147-148` → `commands/statusline.rs:47-63`）， 只是
+      `src/lib/components/settings/` 下 7 个组件没有一个引用它——用户只能手改磁盘文件。
+      `statusline/windows.rs:6-7` 的注释甚至写着 "the user can override them in
+      Settings → Claude plan"，而那个面板不存在。
+    expected: >
+      设置里能选套餐档位（含 Custom + 自定义 token 预算）；选了之后日历的盈亏行出现、
+      窗口百分比按所选档位计算；自动探测到的档位作为默认值但可被覆盖。
+    how: >
+      在 `src/lib/components/settings/` 下加一个面板写 `claudePlanTier` 与
+      `claudePlanCustomFiveHourTokens` / `claudePlanCustomWeeklyTokens`
+      （归一化已就位，`settings.ts:428-437`）；日历侧让 `Calendar.svelte:143-148` 的
+      `detectedPlanTier` 在探测为空时回落到这个设置。 同时要处置 `statusline/windows.rs`
+      的整个模块——`compute()`（`:188`）在生产路径上
+      零调用者，`AppState.claude_plan_tier`（`commands.rs:60`）只被写从不被读，
+      所以现在就算改了这个设置也不会有任何效果。
+    why_this_way: null
+    code:
+      - file: src/lib/stores/settings.ts
+        symbol: claudePlanTier（有归一化、无 UI 写入点）
+        lines: "87-90"
+      - file: src-tauri/src/statusline/windows.rs
+        symbol: compute（生产路径零调用者）
+        lines: "188-230"
+      - file: src/lib/components/Calendar.svelte
+        symbol: detectedPlanTier / detectedPlanCost
+        lines: "143-150"
+    verify:
+      manual: "在设置里选一个套餐档位，打开日历页，确认 MONTHLY USAGE 那一行右侧出现带符号的金额； 再把档位改成另一档，确认金额跟着变。"
+      signed_off: null
+    future: >
+      档位一旦可靠，盈亏就能长成真正的订阅建议（"你连续三个月没用满 Max 5x"）。
+    log:
+      - date: "2026-08-25"
+        by: ccscan
+        note: "由作者追问「盈亏计算在哪里」引出：核实发现它在 Calendar 页存在但对 statusline 路径的 Claude
+          用户恒不显示，根因是档位探测断链且无手选入口。拆为独立节点。"
+
+  - id: I-043
+    name: "随时可见、数字可信的实时用量面板"
+    status: todo
+    needs:
+      [
+        I-012,
+        I-013,
+        I-028,
+        I-030,
+        I-031,
+        I-032,
+        I-033,
+        I-034,
+        I-035,
+        I-037,
+        I-046,
+        I-047,
+        I-048
+      ]
+    what: >
+      终点之一：托盘和悬浮球随时能显示 Claude Code / Codex / Cursor 三家的花费与额度，
+      数字准确、不过期、不重复计费，点开有五个时间尺度的明细。
+    why: >
+      这是这个项目存在的理由。一个能看但会算错的面板比没有面板更糟—— 用户会据此做"要不要继续跑"的决定。
+    expected: >
+      托盘上的数字与 `claude /cost`、Codex 与 Cursor 各自的官方显示能对上； 切 provider /
+      切周期不闪白；某个额度接口挂掉时显示退化而不是清空。
+    how: >
+      解析（I-005~I-009）→ 定价（I-010~I-013）→ 缓存（I-014~I-016）→ 额度（I-024~I-028）→
+      呈现（I-030~I-035）这条链的合成结果， 在 `App.svelte` 里装配。
+    why_this_way: >
+      口径对齐官方展示（而不是"我们算得更对"）是贯穿全链的选择， 理由见 I-012：用户会拿两边对，对不上时不信的是这个应用。
+    code:
+      - file: src/App.svelte
+        symbol: main popover shell
+        lines: "1-200"
+      - file: src-tauri/src/commands/usage_query.rs
+        symbol: get_usage_data
+        lines: "578-700"
+    verify:
+      command: npm test
+      pass: "exit 0"
+    future: >
+      面板准了之后，下一层是"据此行动"：预算告警、按项目分账、模型推荐。
+    log:
+      - date: 2026-08-25
+        by: ccscan
+        note: 非美元用户托盘显示 $ 而弹窗显示 €（I-047），日历盈亏对 statusline 用户恒不显示（I-048）——终点的『可信』尚未成立
+
+  - id: I-044
+    name: "删日志、换机器都不会丢的用量历史"
+    status: done
+    needs: [ I-018, I-020, I-021, I-022, I-023 ]
+    what: >
+      终点之二：不管原始日志被清理、换了机器、还是同时用三台设备， 历史花费都完整、不重复、可导出。
+    why: >
+      用量数据的价值随时间增长，而它的载体（AI 工具的会话日志）是随时会被清掉的临时文件。 不做归档，这个应用就只是一个"今天花了多少"的小玩具。
+    expected: >
+      删掉全部原始 JSONL 之后，历史视图的数字不变； 同一份数据导入多次总数不变；三台设备互相同步后每台看到的总数一致。
+    how: >
+      整点归档（I-017）落地事实，取大合并（I-018）保证幂等， 冻结身份（I-019）保证不分裂，导入导出（I-020/I-021）和 SSH
+      同步（I-022） 负责跨机器，清理（I-023）收拾历史遗留。
+    why_this_way: >
+      选择"小时级聚合 + 取大合并"而不是"条目级同步"，是因为前者不需要中心节点、 不需要冲突解决，任意两台机器互相导入都收敛到同一个结果（见
+      I-018）。
+    code:
+      - file: src-tauri/src/usage/archive.rs
+        symbol: ArchiveManager
+        lines: "212-560"
+      - file: src-tauri/src/commands/usage_io.rs
+        symbol: import_usage_data
+        lines: "1151-1270"
+    verify:
+      command: TM_EMBED_TEST_MANIFEST=1 cargo test --manifest-path
+        src-tauri/Cargo.toml --lib archive
+      pass: "exit 0"
+    future: >
+      完整的历史是所有分析的前提：年度回顾、团队分账、模型性价比的长期比较。
+
+  - id: I-045
+    name: "装上就能用、不申请任何权限的三平台分发"
+    status: todo
+    needs: [ I-036, I-038, I-040, I-041, I-042 ]
+    what: >
+      终点之三：三个平台都有安装包，装上双击就能用， 不申请任何多余系统权限，之后能自动更新。
+    why: >
+      前两个终点做得再好，如果只有作者本人的机器上跑得起来，那就是一个私人脚本。
+    expected: >
+      macOS / Windows / Linux 各自的安装包都能在一台干净机器上一次装成并启动；
+      启动过程中不出现任何系统授权弹框；后续版本通过应用内更新送达。
+    how: >
+      构建（I-040）+ 更新（I-039）+ 单实例（I-038）+ 最小权限面（I-041）+ 首启引导（I-036）。
+    why_this_way: >
+      "不申请权限"不是省事，而是这个应用的信任基础——它读的是用户全部的 AI 会话内容 （见 I-041）。
+    code:
+      - file: .github/workflows/release.yml
+        symbol: release pipeline
+        lines: "1-60"
+      - file: README.md
+        symbol: platform support table
+        lines: "170-245"
+    verify:
+      manual: "在三台干净机器（macOS / Windows / Linux）上分别安装同一个 release
+        的产物，确认全部能双击启动、无需终端命令、启动过程中无系统授权弹框。"
+      signed_off: null
+    future: >
+      跨过这条线之后，这个项目才具备"推荐给不写代码的同事"的资格。
+    log:
+      - date: "2026-08-24"
+        by: ccscan
+        note: "todo：三平台构建与自动更新已就绪，但 macOS 侧被 I-042（未签名，需要 xattr）挡住，故终点未达成。"
+      - date: "2026-08-25"
+        by: ccscan
+        note: "作者确认：三平台干净机器安装已实现，自动更新已实现（I-039 已签字）。
+          本节点仍留 todo，因为 manual verify 里还有一条『无需终端命令』——macOS 首启要跑
+          xattr，卡在上游项目的签名密钥（I-042）。安装本身能装上与首启无摩擦是两件事，
+          若要把这条终点收窄成只管『能装上』，改 manual 文案后即可签字。"

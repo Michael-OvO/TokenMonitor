@@ -4,7 +4,7 @@
     getRateLimitIdleSummary,
     isRateLimitProvider,
   } from "../providerMetadata.js";
-  import { formatDuration, formatRetryIn } from "../utils/format.js";
+  import { formatCreditAmount, formatDuration, formatRetryIn } from "../utils/format.js";
   import {
     currentRateLimitWindows,
     providerHasActiveCooldown,
@@ -114,16 +114,6 @@
     return 5;
   }
 
-  function formatUsdAmount(amount: number): string {
-    const wholeDollars = Math.abs(amount - Math.round(amount)) < 0.005;
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      minimumFractionDigits: wholeDollars ? 0 : 2,
-      maximumFractionDigits: 2,
-    }).format(amount);
-  }
-
   function utilizationLabel(pct: number): string {
     if (isRateLimitProvider(rateLimits.provider)) {
       return formatRateLimitUtilizationLabel(rateLimits.provider, pct);
@@ -210,7 +200,7 @@
     <div class="ub-row">
       <div class="ub-head">
         <span class="ub-label">{rateLimits.provider === "cursor" ? "On-demand" : "Extra Usage"}</span>
-        <span class="ub-val">{formatUsdAmount(rateLimits.extraUsage.usedCredits)} / {formatUsdAmount(rateLimits.extraUsage.monthlyLimit)}</span>
+        <span class="ub-val">{formatCreditAmount(rateLimits.extraUsage.usedCredits)} / {formatCreditAmount(rateLimits.extraUsage.monthlyLimit)}</span>
       </div>
       <div class="ub-track">
         <div

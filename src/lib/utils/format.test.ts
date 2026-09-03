@@ -4,6 +4,7 @@ import {
   currencySymbol,
   convertCost,
   formatCost,
+  formatCreditAmount,
   formatModelCost,
   formatTokens,
   formatTimeAgo,
@@ -52,6 +53,30 @@ describe("formatCost", () => {
   it("falls back to USD for unknown currency", () => {
     setCurrency("XYZ");
     expect(formatCost(1.0)).toBe("$1.00");
+  });
+});
+
+// `UsageBars` used to format credit/spend-limit amounts with its own
+// `Intl.NumberFormat({ currency: "USD" })`, so those two figures stayed in
+// dollars while everything around them followed the user's currency.
+describe("formatCreditAmount", () => {
+  it("drops the cents for whole amounts and keeps thousands separators", () => {
+    expect(formatCreditAmount(70)).toBe("$70");
+    expect(formatCreditAmount(1500)).toBe("$1,500");
+  });
+
+  it("keeps two decimals for fractional amounts", () => {
+    expect(formatCreditAmount(70.5)).toBe("$70.50");
+  });
+
+  it("converts and stamps the selected currency", () => {
+    setCurrency("EUR");
+    expect(formatCreditAmount(70)).toBe("€64.40");
+  });
+
+  it("follows the JPY no-decimals rule", () => {
+    setCurrency("JPY");
+    expect(formatCreditAmount(1)).toBe("¥150");
   });
 });
 
