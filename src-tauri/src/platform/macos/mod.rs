@@ -147,7 +147,13 @@ mod tests {
 
     #[test]
     fn bottom_anchored_resize_keeps_origin() {
-        assert_eq!(anchored_origin_y(10.0, 500.0, 460.0, VerticalAnchor::Bottom), 10.0);
-        assert_eq!(anchored_origin_y(10.0, 500.0, 560.0, VerticalAnchor::Bottom), 10.0);
+        assert_eq!(
+            anchored_origin_y(10.0, 500.0, 460.0, VerticalAnchor::Bottom),
+            10.0
+        );
+        assert_eq!(
+            anchored_origin_y(10.0, 500.0, 560.0, VerticalAnchor::Bottom),
+            10.0
+        );
     }
 }
