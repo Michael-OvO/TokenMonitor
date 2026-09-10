@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SettingsDisclosure from "./SettingsDisclosure.svelte";
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
@@ -45,7 +46,7 @@
 </script>
 
 <div class="block">
-  <button class="row collapsible-toggle" type="button" onclick={() => (modelsExpanded = !modelsExpanded)}>
+  <button class="row collapsible-toggle" type="button" aria-expanded={modelsExpanded} onclick={() => (modelsExpanded = !modelsExpanded)}>
     <span class="label">Models</span>
     <div class="collapsible-right">
       <span class="count">{modelsLoading ? "..." : `${availableModels.length - current.hiddenModels.length} of ${availableModels.length}`}</span>
@@ -54,9 +55,8 @@
       </svg>
     </div>
   </button>
-  <div class="models-collapse" class:open={modelsExpanded}>
-    <div class="collapse-inner">
-      {#if modelsLoading}
+  <SettingsDisclosure open={modelsExpanded}>
+    {#if modelsLoading}
       <div class="model-grid" aria-busy="true" aria-label="Loading models">
         {#each Array(4) as _, i (i)}
           <div class="model-cell skeleton-cell">
@@ -82,9 +82,8 @@
       </div>
     {:else}
       <div class="model-empty">No models discovered yet</div>
-      {/if}
-    </div>
-  </div>
+    {/if}
+  </SettingsDisclosure>
 </div>
 
 <style>
@@ -119,7 +118,6 @@
   }
   .collapsible-chevron {
     color: var(--t3);
-    transition: transform 200ms ease;
     transform: rotate(-90deg);
   }
   .collapsible-chevron.open {
@@ -188,39 +186,5 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .skeleton-block { animation: none; opacity: 0.6; }
-  }
-  .collapsible-toggle {
-    width: 100%;
-    background: none;
-    border: none;
-    cursor: pointer;
-    user-select: none;
-  }
-  .collapsible-toggle:hover {
-    background: var(--surface-hover);
-  }
-  .collapsible-right {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .collapsible-chevron {
-    color: var(--t3);
-    transition: transform var(--t-normal, 200ms) ease;
-    transform: rotate(-90deg);
-  }
-  .collapsible-chevron.open {
-    transform: rotate(0deg);
-  }
-  .models-collapse {
-    display: grid;
-    grid-template-rows: 0fr;
-    transition: grid-template-rows var(--t-normal, 200ms) ease;
-  }
-  .models-collapse.open {
-    grid-template-rows: 1fr;
-  }
-  .collapse-inner {
-    overflow: hidden;
   }
 </style>

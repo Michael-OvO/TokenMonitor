@@ -14,6 +14,10 @@
 ### 修复
 - **macOS 托盘弹窗高度变化**：改变高度时弹窗不再上下跳动——AppKit `setContentSize:` 固定的是左下角，改为在主线程用一次原子 `setFrame:` 固定顶边；切换到内容更少的标签时立即收缩，不再等鼠标离开；鼠标离开时一次性收缩，取消逐帧缩放动画，失焦时不再出现卡顿的折叠动画
 
+### UI
+- **Settings 折叠分组**：新增 `SettingsDisclosure`，按实测高度动画展开/收起（尊重 reduced-motion），Header Tabs / Models / Remote Devices / Tray 面板统一改用；Header Tabs 的 chip 改为带勾选标记的网格
+- **Footer 固定**：主界面底部操作栏改为 sticky，滚动时保持可见
+
 ## v0.13.1 — Settings 重构 + SSH 搜索扩展 + FloatBall 修复
 
 ### UI
