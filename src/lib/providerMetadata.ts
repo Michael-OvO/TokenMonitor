@@ -136,6 +136,9 @@ const USAGE_INTEGRATION_DEFINITIONS: UsageProviderDefinition[] = [
       idleSummary: "No Kimi rate-limit data available. Make sure Kimi Code CLI is signed in on this machine.",
       missingMetadataErrors: [
         "kimi code cli is not signed in",
+        // Refresh token rejected by auth.kimi.com — the user has to run
+        // `kimi` and log in again; surface the idle summary, not a hard error.
+        "sign-in has expired",
         "failed to read kimi credentials",
         "failed to parse kimi credentials",
         "empty access token",
