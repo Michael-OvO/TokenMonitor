@@ -221,11 +221,24 @@ function extractMajor(suffix: string): number {
   return match ? parseInt(match[0], 10) : NaN;
 }
 
+// Moonshot's bare K-series keys ("k2", "k3", "k3-instruct") — the Kimi Code
+// CLI logs these without the "kimi" prefix (mirrors
+// `looks_like_moonshot_k_series` in src-tauri/src/models.rs).
+function isMoonshotKSeries(key: string): boolean {
+  return /^k\d+([.-]|$)/.test(key);
+}
+
 function familyColor(key: string): string | null {
   for (const rule of FAMILY_RULES) {
-    if (!key.startsWith(rule.prefix)) continue;
-    const suffix = key.slice(rule.prefix.length);
-    const major = extractMajor(suffix);
+    let major: number;
+    if (key.startsWith(rule.prefix)) {
+      major = extractMajor(key.slice(rule.prefix.length));
+    } else if (rule.prefix === "kimi" && isMoonshotKSeries(key)) {
+      // Bare K-series keys carry the version right after the "k".
+      major = extractMajor(key);
+    } else {
+      continue;
+    }
     const tier = Number.isNaN(major) ? 2 : rule.tier(major);
     return rule.shades[tier];
   }

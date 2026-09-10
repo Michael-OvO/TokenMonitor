@@ -1170,7 +1170,14 @@ mod tests {
     fn claude_day_view_falls_back_to_parser_with_warning() {
         let dir = TempDir::new().unwrap();
         let now = Local::now();
-        let ts = (now - chrono::Duration::hours(1)).to_rfc3339();
+        // Noon anchor: `now - 1h` crosses into yesterday near midnight.
+        let ts = now
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap()
+            .to_rfc3339();
         let content = format!(
             r#"{{"type":"assistant","timestamp":"{ts}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":1000,"output_tokens":500}},"stop_reason":"end_turn"}}}}"#,
         );
@@ -1190,7 +1197,14 @@ mod tests {
     fn get_provider_data_uses_full_request_cache() {
         let dir = TempDir::new().unwrap();
         let now = Local::now();
-        let ts = (now - chrono::Duration::hours(1)).to_rfc3339();
+        // Noon anchor: `now - 1h` crosses into yesterday near midnight.
+        let ts = now
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap()
+            .to_rfc3339();
         let content = format!(
             r#"{{"type":"assistant","timestamp":"{ts}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":1000,"output_tokens":500}},"stop_reason":"end_turn"}}}}"#,
         );
@@ -1270,7 +1284,16 @@ mod tests {
     fn load_entries_populates_entries_cache_for_subsequent_cached_calls() {
         let dir = TempDir::new().unwrap();
         let now = Local::now();
-        let ts = (now - chrono::Duration::hours(1)).to_rfc3339();
+        // Anchor to noon today: `now - 1h` crosses into yesterday (and gets
+        // date-filtered out) when the suite runs in the first hour after
+        // midnight.
+        let ts = now
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap()
+            .to_rfc3339();
         let content = format!(
             r#"{{"type":"assistant","timestamp":"{ts}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":2000,"output_tokens":800}},"stop_reason":"end_turn"}}}}"#,
         );

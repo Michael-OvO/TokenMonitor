@@ -26,6 +26,7 @@ use super::cursor_parser::{
     cursor_last_warning, glob_cursor_chat_session_files, load_cursor_local_entries,
     parse_cursor_session_file, set_cursor_warning,
 };
+use super::kimi_parser::parse_kimi_session_file;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Parsed entry (shared between Claude and Codex)
@@ -153,6 +154,7 @@ enum ProviderFileKind {
     Claude,
     Codex,
     Cursor,
+    Kimi,
 }
 
 #[derive(Clone)]
@@ -171,6 +173,7 @@ impl UsageIntegrationConfig {
             UsageIntegrationId::Claude => ProviderFileKind::Claude,
             UsageIntegrationId::Codex => ProviderFileKind::Codex,
             UsageIntegrationId::Cursor => ProviderFileKind::Cursor,
+            UsageIntegrationId::Kimi => ProviderFileKind::Kimi,
         }
     }
 
@@ -183,6 +186,9 @@ impl UsageIntegrationConfig {
                 "recursive-jsonl-glob+root-file-list-cache+parsed-file-cache+token-delta"
             }
             UsageIntegrationId::Cursor => "workspace-chat-json+token-field-probe+cursor-remote-api",
+            UsageIntegrationId::Kimi => {
+                "recursive-jsonl-glob+root-file-list-cache+parsed-file-cache+turn-scoped"
+            }
         }
     }
 
@@ -672,6 +678,10 @@ fn default_usage_integration_configs() -> Vec<UsageIntegrationConfig> {
             UsageIntegrationId::Cursor,
             UsageIntegrationId::Cursor.detect_roots(),
         ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Kimi,
+            UsageIntegrationId::Kimi.detect_roots(),
+        ),
     ]
 }
 
@@ -692,6 +702,10 @@ fn usage_integration_configs_with_overrides(
         UsageIntegrationConfig::new(
             UsageIntegrationId::Cursor,
             cursor_roots.unwrap_or_else(|| UsageIntegrationId::Cursor.detect_roots()),
+        ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Kimi,
+            UsageIntegrationId::Kimi.detect_roots(),
         ),
     ]
 }
@@ -1330,6 +1344,7 @@ impl UsageParser {
                         ProviderFileKind::Claude => parse_claude_session_file(path),
                         ProviderFileKind::Codex => parse_codex_session_file(path),
                         ProviderFileKind::Cursor => parse_cursor_session_file(path),
+                        ProviderFileKind::Kimi => parse_kimi_session_file(path),
                     };
                     let earliest_date = earliest_entry_date(&raw_entries);
                     let loaded = CachedFileLoad {
@@ -1498,6 +1513,19 @@ impl UsageParser {
         (entries, change_events, report)
     }
 
+    fn load_kimi_entries_with_debug(
+        &self,
+        since: Option<NaiveDate>,
+    ) -> (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, ProviderReadDebug) {
+        let config = self
+            .integration_config(UsageIntegrationId::Kimi)
+            .expect("kimi integration should be configured");
+        let (entries, change_events, mut reports) =
+            self.load_integration_entries_with_debug(config, since);
+        let report = reports.pop().unwrap_or_default();
+        (entries, change_events, report)
+    }
+
     fn load_cursor_local_entries_with_debug(
         &self,
         since: Option<NaiveDate>,
@@ -1611,6 +1639,14 @@ impl UsageParser {
                     change_events.extend(next_change_events);
                     reports.push(next_report);
                 }
+                UsageIntegrationId::Kimi => {
+                    let (next_entries, next_change_events, next_report) =
+                        self.load_kimi_entries_with_debug(since);
+
+                    merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
+                    change_events.extend(next_change_events);
+                    reports.push(next_report);
+                }
             }
         }
 
@@ -1710,6 +1746,7 @@ impl UsageParser {
                             ProviderFileKind::Claude => parse_claude_session_file(path).0,
                             ProviderFileKind::Codex => parse_codex_session_file(path).0,
                             ProviderFileKind::Cursor => parse_cursor_session_file(path).0,
+                            ProviderFileKind::Kimi => parse_kimi_session_file(path).0,
                         };
                         earliest_entry_date(&entries)
                     })

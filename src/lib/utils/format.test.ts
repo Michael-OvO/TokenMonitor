@@ -188,6 +188,11 @@ describe("modelColor", () => {
     // ── Kimi: K2+ deep, else mid ──
     ["kimi-k2", "var(--kimi)"],
     ["kimi-k1", "var(--kimi-mid)"],
+    // ── Kimi bare K-series (Kimi Code CLI logs "k3" without the prefix) ──
+    ["k3", "var(--kimi)"],
+    ["k3-instruct", "var(--kimi)"],
+    ["k2", "var(--kimi)"],
+    ["k1", "var(--kimi-mid)"],
     // ── Qwen: >=3 deep, ==2 mid, else soft ──
     ["qwen3-coder", "var(--qwen)"],
     ["qwen2.5-max", "var(--qwen-mid)"],

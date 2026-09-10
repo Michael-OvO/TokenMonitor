@@ -6,6 +6,7 @@ pub mod cursor_parser;
 pub mod device_aggregation;
 pub mod exchange_rates;
 pub mod integrations;
+pub mod kimi_parser;
 pub mod litellm;
 pub mod openrouter;
 pub mod parser;

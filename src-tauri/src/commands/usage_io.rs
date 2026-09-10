@@ -321,7 +321,10 @@ pub struct ImportResult {
 /// safe device aliases are accepted.
 fn is_valid_source_key(key: &str) -> bool {
     match key.split_once(':') {
-        Some(("local", "claude")) | Some(("local", "codex")) | Some(("local", "cursor")) => true,
+        Some(("local", "claude"))
+        | Some(("local", "codex"))
+        | Some(("local", "cursor"))
+        | Some(("local", "kimi")) => true,
         Some(("device", alias)) => {
             !alias.is_empty()
                 && alias.len() <= 64
@@ -373,20 +376,21 @@ fn export_record<'a>(r: &'a ArchivedHourly, provider: Option<&'a str>) -> Export
     }
 }
 
-/// The source tool for a record — always one of "claude" / "codex" / "cursor",
-/// never "all". Local rows carry the authoritative integration tag in `p` (and
-/// Cursor proxies many model families, so its `p` must win over the model).
-/// Aggregated SSH-device rows store `p = "all"`, so for those the tool is
-/// recovered from the model family (devices only ever sync Claude Code / Codex
-/// data); a third-party/unknown model falls back to "claude".
+/// The source tool for a record — always one of "claude" / "codex" / "cursor" /
+/// "kimi", never "all". Local rows carry the authoritative integration tag in
+/// `p` (and Cursor proxies many model families, so its `p` must win over the
+/// model). Aggregated SSH-device rows store `p = "all"`, so for those the tool
+/// is recovered from the model family; a third-party/unknown model falls back
+/// to "claude".
 fn provider_label(record: &ArchivedHourly) -> &str {
     match record.p.as_str() {
-        p @ ("claude" | "codex" | "cursor") => p,
+        p @ ("claude" | "codex" | "cursor" | "kimi") => p,
         _ => {
             use crate::models::{detect_model_family, ModelFamily};
             match detect_model_family(&record.mk) {
                 ModelFamily::OpenAI => "codex",
                 ModelFamily::Cursor => "cursor",
+                ModelFamily::Moonshot => "kimi",
                 _ => "claude",
             }
         }
@@ -1447,6 +1451,7 @@ mod tests {
         assert!(is_valid_source_key("local:claude"));
         assert!(is_valid_source_key("local:codex"));
         assert!(is_valid_source_key("local:cursor"));
+        assert!(is_valid_source_key("local:kimi"));
         assert!(is_valid_source_key("device:my-server"));
         assert!(is_valid_source_key("device:laptop_2.local"));
     }

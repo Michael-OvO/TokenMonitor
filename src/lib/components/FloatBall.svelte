@@ -51,6 +51,7 @@
     claudeUtil: null,
     codexUtil: null,
     cursorUtil: null,
+    kimiUtil: null,
     title: "$0.00",
   });
   let expanded = $state(false);
@@ -106,18 +107,20 @@
   };
 
 
-  const FALLBACK_PROVIDERS: RateLimitProviderId[] = ["claude", "codex", "cursor"];
+  const FALLBACK_PROVIDERS: RateLimitProviderId[] = ["claude", "codex", "cursor", "kimi"];
 
   const PROVIDER_META: Record<string, { label: string; shortLabel: string; color: string }> = {
     claude: { label: "Claude", shortLabel: "CL", color: "#d79b64" },
     codex: { label: "Codex", shortLabel: "CX", color: "#72aefc" },
     cursor: { label: "Cursor", shortLabel: "CR", color: "#5c6ac4" },
+    kimi: { label: "Kimi", shortLabel: "KI", color: "#8b6fd4" },
   };
 
   function providerUtil(provider: RateLimitProviderId): number | null {
     if (provider === "claude") return summary.claudeUtil;
     if (provider === "codex") return summary.codexUtil;
     if (provider === "cursor") return summary.cursorUtil;
+    if (provider === "kimi") return summary.kimiUtil;
     return null;
   }
 

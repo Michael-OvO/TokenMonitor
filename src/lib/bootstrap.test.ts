@@ -207,6 +207,7 @@ describe("initializeRuntimeFromSettings", () => {
           claude: { label: "Claude", enabled: false },
           codex: { label: "Codex", enabled: false },
           cursor: { label: "Cursor", enabled: true },
+          kimi: { label: "Kimi", enabled: true },
         },
       }),
       { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowThemeFn, syncNativeWindowSurfaceFn },
