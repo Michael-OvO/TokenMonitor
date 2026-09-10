@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SettingsDisclosure from "./SettingsDisclosure.svelte";
   import { onMount } from "svelte";
   import { get } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
@@ -347,7 +348,7 @@
 </script>
 
 <div class="block">
-  <button class="row collapsible-toggle" type="button" onclick={() => (devicesExpanded = !devicesExpanded)}>
+  <button class="row collapsible-toggle" type="button" aria-expanded={devicesExpanded} onclick={() => (devicesExpanded = !devicesExpanded)}>
     <span class="label">Remote Devices</span>
     <div class="collapsible-right">
       {#if !devicesExpanded && totalRemoteDeviceCount > 0}
@@ -379,90 +380,88 @@
       </svg>
     </div>
   </button>
-  <div class="devices-collapse" class:open={devicesExpanded}>
-    <div class="collapse-inner">
-      <div class="remote-section">
-        <div class="section-heading">
-          <span class="section-title">SSH Remote Host</span>
-          <span class="section-count">{activeSshHostCount} of {sshHosts.length}</span>
-        </div>
-        <div class="ssh-hosts">
-          {#each sshHosts as host (host.alias)}
-            {@const configured = sshConfiguredHosts.find((h) => h.alias === host.alias)}
-            <div class="ssh-host-row">
-              <div class="ssh-host-info">
-                <span class="ssh-alias">{sshHostNames.get(host.alias) ?? host.alias}</span>
-                <span class="ssh-detail">{host.hostname}{host.user ? ` (${host.user})` : ""}{host.port !== 22 ? `:${host.port}` : ""}</span>
+  <SettingsDisclosure open={devicesExpanded}>
+    <div class="remote-section">
+      <div class="section-heading">
+        <span class="section-title">SSH Remote Host</span>
+        <span class="section-count">{activeSshHostCount} of {sshHosts.length}</span>
+      </div>
+      <div class="ssh-hosts">
+        {#each sshHosts as host (host.alias)}
+          {@const configured = sshConfiguredHosts.find((h) => h.alias === host.alias)}
+          <div class="ssh-host-row">
+            <div class="ssh-host-info">
+              <span class="ssh-alias">{sshHostNames.get(host.alias) ?? host.alias}</span>
+              <span class="ssh-detail">{host.hostname}{host.user ? ` (${host.user})` : ""}{host.port !== 22 ? `:${host.port}` : ""}</span>
+            </div>
+            <div class="ssh-host-actions">
+              {#if sshTestingHost === host.alias}
+                <span class="ssh-testing">...</span>
+              {:else if sshTestResults[host.alias]}
+                <span class="ssh-result" class:ssh-ok={sshTestResults[host.alias].success} class:ssh-fail={!sshTestResults[host.alias].success}>
+                  {sshTestResults[host.alias].success ? "OK" : "Fail"}
+                </span>
+              {/if}
+              <button class="ssh-btn" type="button" onclick={() => testSshHost(host.alias)}>Test</button>
+              <div class="mini-toggle">
+                <ToggleSwitch
+                  checked={isSshHostActive(configured)}
+                  onChange={(checked) => toggleSshHost(host.alias, checked)}
+                />
               </div>
-              <div class="ssh-host-actions">
-                {#if sshTestingHost === host.alias}
-                  <span class="ssh-testing">...</span>
-                {:else if sshTestResults[host.alias]}
-                  <span class="ssh-result" class:ssh-ok={sshTestResults[host.alias].success} class:ssh-fail={!sshTestResults[host.alias].success}>
-                    {sshTestResults[host.alias].success ? "OK" : "Fail"}
-                  </span>
-                {/if}
-                <button class="ssh-btn" type="button" onclick={() => testSshHost(host.alias)}>Test</button>
-                <div class="mini-toggle">
-                  <ToggleSwitch
-                    checked={isSshHostActive(configured)}
-                    onChange={(checked) => toggleSshHost(host.alias, checked)}
-                  />
-                </div>
+            </div>
+          </div>
+        {/each}
+        {#if sshHosts.length === 0}
+          <div class="ssh-empty">No hosts found in ~/.ssh/config</div>
+        {/if}
+      </div>
+    </div>
+
+    <div class="remote-section auto-section">
+      <div class="section-heading">
+        <span class="section-title">Remote Devices</span>
+        <span class="section-count">{activeAutoSyncDeviceCount} of {autoSyncDevices.length}</span>
+      </div>
+      {#if deviceUsageLoading}
+        <div class="ssh-empty">Loading devices...</div>
+      {:else if deviceUsageError}
+        <div class="ssh-empty error-text">{deviceUsageError}</div>
+      {:else if autoSyncDevices.length > 0}
+        <div class="auto-devices">
+          {#each autoSyncDevices as device (device.alias)}
+            <div class="auto-device-row">
+              <div class="ssh-host-info">
+                <span class="ssh-alias">{autoSyncDeviceNames.get(device.alias) ?? device.alias}</span>
+                <span class="ssh-detail">{autoSyncDetail(device)}</span>
+              </div>
+              <div class="mini-toggle">
+                <ToggleSwitch
+                  checked={device.include_in_stats}
+                  onChange={(checked) => toggleRemoteDeviceInclude(device, checked)}
+                />
               </div>
             </div>
           {/each}
-          {#if sshHosts.length === 0}
-            <div class="ssh-empty">No hosts found in ~/.ssh/config</div>
-          {/if}
         </div>
-      </div>
-
-      <div class="remote-section auto-section">
-        <div class="section-heading">
-          <span class="section-title">Remote Devices</span>
-          <span class="section-count">{activeAutoSyncDeviceCount} of {autoSyncDevices.length}</span>
-        </div>
-        {#if deviceUsageLoading}
-          <div class="ssh-empty">Loading devices...</div>
-        {:else if deviceUsageError}
-          <div class="ssh-empty error-text">{deviceUsageError}</div>
-        {:else if autoSyncDevices.length > 0}
-          <div class="auto-devices">
-            {#each autoSyncDevices as device (device.alias)}
-              <div class="auto-device-row">
-                <div class="ssh-host-info">
-                  <span class="ssh-alias">{autoSyncDeviceNames.get(device.alias) ?? device.alias}</span>
-                  <span class="ssh-detail">{autoSyncDetail(device)}</span>
-                </div>
-                <div class="mini-toggle">
-                  <ToggleSwitch
-                    checked={device.include_in_stats}
-                    onChange={(checked) => toggleRemoteDeviceInclude(device, checked)}
-                  />
-                </div>
-              </div>
-            {/each}
-          </div>
-        {:else}
-          <div class="ssh-empty">No Auto Sync devices found</div>
-        {/if}
-      </div>
-
-      <div class="ssh-sync-row">
-        <span class="ssh-sync-label">
-          {#if sshSyncResult}
-            <span class="ssh-sync-status" class:ssh-sync-error={sshSyncResult.msg.startsWith("Failed")}>{sshSyncResult.msg}</span>
-          {:else}
-            {activeRemoteDeviceCount} device(s) enabled
-          {/if}
-        </span>
-        <button class="ssh-btn" type="button" onclick={syncAllRemoteDevices} disabled={sshSyncing}>
-          {sshSyncing ? "Syncing..." : "Sync All"}
-        </button>
-      </div>
+      {:else}
+        <div class="ssh-empty">No Auto Sync devices found</div>
+      {/if}
     </div>
-  </div>
+
+    <div class="ssh-sync-row">
+      <span class="ssh-sync-label">
+        {#if sshSyncResult}
+          <span class="ssh-sync-status" class:ssh-sync-error={sshSyncResult.msg.startsWith("Failed")}>{sshSyncResult.msg}</span>
+        {:else}
+          {activeRemoteDeviceCount} device(s) enabled
+        {/if}
+      </span>
+      <button class="ssh-btn" type="button" onclick={syncAllRemoteDevices} disabled={sshSyncing}>
+        {sshSyncing ? "Syncing..." : "Sync All"}
+      </button>
+    </div>
+  </SettingsDisclosure>
 </div>
 
 <style>
@@ -621,7 +620,6 @@
   }
   .collapsible-chevron {
     color: var(--t3);
-    transition: transform var(--t-normal, 200ms) ease;
     transform: rotate(-90deg);
   }
   .collapsible-chevron.open {
@@ -631,16 +629,5 @@
     font: 400 9px/1 'Inter', sans-serif;
     color: var(--t3);
     white-space: nowrap;
-  }
-  .devices-collapse {
-    display: grid;
-    grid-template-rows: 0fr;
-    transition: grid-template-rows var(--t-normal, 200ms) ease;
-  }
-  .devices-collapse.open {
-    grid-template-rows: 1fr;
-  }
-  .collapse-inner {
-    overflow: hidden;
   }
 </style>

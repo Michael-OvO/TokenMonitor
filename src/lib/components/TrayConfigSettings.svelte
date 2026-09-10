@@ -139,7 +139,7 @@
 
 </script>
 
-<div class="card">
+<div class="group">
   <div class="group-label">
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
@@ -149,175 +149,179 @@
     Status Displays
   </div>
 
-  <!-- Combined Preview -->
-  <div class="preview-card">
-    <div class="preview-row">
-      <!-- Menu Bar -->
-      <div class="preview-col">
-        <span class="preview-label">Menu Bar</span>
-        <div class="tray-preview">
-          <div class="tp-inner">
-            <svg class="tp-icon" width="14" height="14" viewBox="0 0 44 44" fill="none">
-              <circle cx="22" cy="22" r="20" fill="currentColor"/>
-              <circle cx="16" cy="23" r="3" fill="#262628"/>
-              <path d="M28 20l-4 3.5 4 3.5" stroke="#262628" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-            </svg>
-            {#if previewBarProviders.length > 0}
-              <div class="tp-bars">
-                {#if previewBarProviders.length === 1}
-                  <div class="tp-track single">
-                    <div class="tp-fill" style={previewFillStyle(previewBarProviders[0])}></div>
-                  </div>
-                {:else}
-                  {#each previewBarProviders as provider}
-                    <div class="tp-track"><div class="tp-fill" style={previewFillStyle(provider)}></div></div>
-                  {/each}
-                {/if}
-              </div>
-            {/if}
-            {#if titlePreview}
-              <span class="tp-text">{titlePreview}</span>
-            {/if}
-          </div>
-        </div>
-      </div>
-
-      <!-- Floating Ball -->
-      {#if usesFloatingStatusWidget() && current.floatBall}
+  <div class="card">
+    <!-- Combined Preview -->
+    <div class="preview-card">
+      <div class="preview-row">
+        <!-- Menu Bar -->
         <div class="preview-col">
-          <span class="preview-label">Floating Ball</span>
-          <div class="fb-preview">
-            <div class="fb-capsule">
-              <div class="fb-panel">
-                {#if previewFloatBallBarProviders.length > 0}
-                  <div class="fb-bars">
-                    {#each previewFloatBallBarProviders as provider}
-                      <div class="fb-row">
-                        <span class="fb-tag" style:color={getUsageProviderBrandColor(provider, 1)}>{PROVIDER_SHORT_LABELS[provider] ?? provider[0]?.toUpperCase()}</span>
-                        <div class="fb-track">
-                          {#if previewUtilization(provider) > 0}
-                            <div class="fb-fill" style={previewFillStyle(provider)}></div>
-                          {/if}
-                        </div>
-                        <span class="fb-pct" style:color={getUsageProviderBrandColor(provider, 1)}>{previewUtilization(provider)}%</span>
-                      </div>
+          <span class="preview-label">Menu Bar</span>
+          <div class="tray-preview">
+            <div class="tp-inner">
+              <svg class="tp-icon" width="14" height="14" viewBox="0 0 44 44" fill="none">
+                <circle cx="22" cy="22" r="20" fill="currentColor"/>
+                <circle cx="16" cy="23" r="3" fill="#262628"/>
+                <path d="M28 20l-4 3.5 4 3.5" stroke="#262628" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+              </svg>
+              {#if previewBarProviders.length > 0}
+                <div class="tp-bars">
+                  {#if previewBarProviders.length === 1}
+                    <div class="tp-track single">
+                      <div class="tp-fill" style={previewFillStyle(previewBarProviders[0])}></div>
+                    </div>
+                  {:else}
+                    {#each previewBarProviders as provider}
+                      <div class="tp-track"><div class="tp-fill" style={previewFillStyle(provider)}></div></div>
                     {/each}
-                  </div>
-                {/if}
-              </div>
-              <div class="fb-ball"><span class="fb-cost">$17</span></div>
+                  {/if}
+                </div>
+              {/if}
+              {#if titlePreview}
+                <span class="tp-text">{titlePreview}</span>
+              {/if}
             </div>
           </div>
         </div>
-      {/if}
-    </div>
-  </div>
 
-  {#if usesFloatingStatusWidget()}
+        <!-- Floating Ball -->
+        {#if usesFloatingStatusWidget() && current.floatBall}
+          <div class="preview-col">
+            <span class="preview-label">Floating Ball</span>
+            <div class="fb-preview">
+              <div class="fb-capsule">
+                <div class="fb-panel">
+                  {#if previewFloatBallBarProviders.length > 0}
+                    <div class="fb-bars">
+                      {#each previewFloatBallBarProviders as provider}
+                        <div class="fb-row">
+                          <span class="fb-tag" style:color={getUsageProviderBrandColor(provider, 1)}>{PROVIDER_SHORT_LABELS[provider] ?? provider[0]?.toUpperCase()}</span>
+                          <div class="fb-track">
+                            {#if previewUtilization(provider) > 0}
+                              <div class="fb-fill" style={previewFillStyle(provider)}></div>
+                            {/if}
+                          </div>
+                          <span class="fb-pct" style:color={getUsageProviderBrandColor(provider, 1)}>{previewUtilization(provider)}%</span>
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+                <div class="fb-ball"><span class="fb-cost">$17</span></div>
+              </div>
+            </div>
+          </div>
+        {/if}
+      </div>
+    </div>
+
+    {#if usesFloatingStatusWidget()}
+      <div class="section border-top">
+        <div class="row">
+          <span class="label">Floating Ball</span>
+          <ToggleSwitch
+            checked={current.floatBall}
+            onChange={handleFloatBall}
+          />
+        </div>
+      </div>
+    {/if}
+
+    <!-- Bars card — tray and floating-ball bars are configured separately -->
     <div class="section border-top">
-      <div class="row">
-        <span class="label">Floating Ball</span>
-        <ToggleSwitch
-          checked={current.floatBall}
-          onChange={handleFloatBall}
-        />
-      </div>
-    </div>
-  {/if}
-
-  <!-- Bars card — tray and floating-ball bars are configured separately -->
-  <div class="section border-top">
-    <div class="row" class:border={usesFloatingStatusWidget() && current.floatBall}>
-      <span class="label">{usesFloatingStatusWidget() && current.floatBall ? "Menu Bar Bars" : "Bars"}</span>
-      <div class="provider-chips">
-        <button
-          class="chip off-chip"
-          class:active={previewBarProviders.length === 0}
-          onclick={() => applyBarProviders([])}
-        >Off</button>
-        {#each RATE_LIMIT_PROVIDER_ORDER as provider}
-          <button
-            class="chip"
-            class:active={previewBarProviders.includes(provider)}
-            style:--chip-color={getUsageProviderBrandColor(provider, 1)}
-            onclick={() => toggleBarProvider(provider)}
-          >{getUsageProviderLabel(provider)}</button>
-        {/each}
-      </div>
-    </div>
-    {#if usesFloatingStatusWidget() && current.floatBall}
-      <div class="row">
-        <span class="label">Floating Ball Bars</span>
+      <div class="row" class:border={usesFloatingStatusWidget() && current.floatBall}>
+        <span class="label">{usesFloatingStatusWidget() && current.floatBall ? "Menu Bar Bars" : "Bars"}</span>
         <div class="provider-chips">
           <button
             class="chip off-chip"
-            class:active={previewFloatBallBarProviders.length === 0}
-            onclick={() => applyFloatBallBarProviders([])}
+            class:active={previewBarProviders.length === 0}
+            onclick={() => applyBarProviders([])}
           >Off</button>
           {#each RATE_LIMIT_PROVIDER_ORDER as provider}
             <button
               class="chip"
-              class:active={previewFloatBallBarProviders.includes(provider)}
+              class:active={previewBarProviders.includes(provider)}
               style:--chip-color={getUsageProviderBrandColor(provider, 1)}
-              onclick={() => toggleFloatBallBarProvider(provider)}
+              onclick={() => toggleBarProvider(provider)}
             >{getUsageProviderLabel(provider)}</button>
           {/each}
         </div>
       </div>
-    {/if}
-  </div>
+      {#if usesFloatingStatusWidget() && current.floatBall}
+        <div class="row">
+          <span class="label">Floating Ball Bars</span>
+          <div class="provider-chips">
+            <button
+              class="chip off-chip"
+              class:active={previewFloatBallBarProviders.length === 0}
+              onclick={() => applyFloatBallBarProviders([])}
+            >Off</button>
+            {#each RATE_LIMIT_PROVIDER_ORDER as provider}
+              <button
+                class="chip"
+                class:active={previewFloatBallBarProviders.includes(provider)}
+                style:--chip-color={getUsageProviderBrandColor(provider, 1)}
+                onclick={() => toggleFloatBallBarProvider(provider)}
+              >{getUsageProviderLabel(provider)}</button>
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
 
-  <!-- Percentages card -->
-  <div class="section border-top">
-    <div class="row border">
-      <span class="label">Show Percentages</span>
-      <ToggleSwitch
-        checked={current.trayConfig.showPercentages}
-        onChange={(checked) => handleTrayConfig("showPercentages", checked)}
-      />
+    <!-- Percentages card -->
+    <div class="section border-top">
+      <div class="row border">
+        <span class="label">Show Percentages</span>
+        <ToggleSwitch
+          checked={current.trayConfig.showPercentages}
+          onChange={(checked) => handleTrayConfig("showPercentages", checked)}
+        />
+      </div>
+      <div class="row" class:dim={!current.trayConfig.showPercentages}>
+        <span class="label">Format</span>
+        <SegmentedControl
+          options={[
+            { value: "compact", label: "72 · 35" },
+            { value: "verbose", label: verbosePercentagePreview },
+          ]}
+          value={current.trayConfig.percentageFormat}
+          onChange={(v) => handleTrayConfig("percentageFormat", v as TrayConfig["percentageFormat"])}
+        />
+      </div>
     </div>
-    <div class="row" class:dim={!current.trayConfig.showPercentages}>
-      <span class="label">Format</span>
-      <SegmentedControl
-        options={[
-          { value: "compact", label: "72 · 35" },
-          { value: "verbose", label: verbosePercentagePreview },
-        ]}
-        value={current.trayConfig.percentageFormat}
-        onChange={(v) => handleTrayConfig("percentageFormat", v as TrayConfig["percentageFormat"])}
-      />
-    </div>
-  </div>
 
-  <!-- Cost card -->
-  <div class="section border-top">
-    <div class="row border">
-      <span class="label">Show Cost</span>
-      <ToggleSwitch
-        checked={current.trayConfig.showCost}
-        onChange={(checked) => handleTrayConfig("showCost", checked)}
-      />
-    </div>
-    <div class="row" class:dim={!current.trayConfig.showCost}>
-      <span class="label">Precision</span>
-      <SegmentedControl
-        options={[
-          { value: "whole", label: "$17" },
-          { value: "full", label: "$17.19" },
-        ]}
-        value={current.trayConfig.costPrecision}
-        onChange={(v) => handleTrayConfig("costPrecision", v as TrayConfig["costPrecision"])}
-      />
+    <!-- Cost card -->
+    <div class="section border-top">
+      <div class="row border">
+        <span class="label">Show Cost</span>
+        <ToggleSwitch
+          checked={current.trayConfig.showCost}
+          onChange={(checked) => handleTrayConfig("showCost", checked)}
+        />
+      </div>
+      <div class="row" class:dim={!current.trayConfig.showCost}>
+        <span class="label">Precision</span>
+        <SegmentedControl
+          options={[
+            { value: "whole", label: "$17" },
+            { value: "full", label: "$17.19" },
+          ]}
+          value={current.trayConfig.costPrecision}
+          onChange={(v) => handleTrayConfig("costPrecision", v as TrayConfig["costPrecision"])}
+        />
+      </div>
     </div>
   </div>
 </div>
 
 <style>
+  .group {
+    margin-bottom: 8px;
+  }
   .card {
     background: var(--surface-2);
     border-radius: 8px;
     overflow: hidden;
-    margin-bottom: 8px;
   }
   .section {
     overflow: hidden;
@@ -347,7 +351,6 @@
   /* Combined preview card */
   .preview-card {
     padding: 8px 10px;
-    border-top: 1px solid var(--border-subtle);
   }
   .preview-row {
     display: flex;

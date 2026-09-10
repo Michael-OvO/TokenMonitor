@@ -465,3 +465,16 @@ body {
 .group-label svg {
   color: var(--t3);
 }
+
+/* Match every settings disclosure to the measured-height reveal. */
+.settings .collapsible-chevron {
+  transition: transform 140ms var(--ease-out);
+}
+.settings .collapsible-chevron.open {
+  transition-duration: 180ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings .collapsible-chevron {
+    transition: none;
+  }
+}

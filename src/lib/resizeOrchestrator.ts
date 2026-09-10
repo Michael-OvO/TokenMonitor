@@ -4,7 +4,6 @@ import {
   MIN_WINDOW_HEIGHT,
   RESIZE_HYSTERESIS_PX,
   RESIZE_SETTLE_DELAY_MS,
-  SHRINK_ON_LEAVE_ANIM_MS,
   WINDOW_WIDTH,
   clampWindowHeight,
   classifyResize,
@@ -15,6 +14,9 @@ import {
   resolveFixedWindowHeight,
   resolveScrollThresholdHeight,
 } from "./windowSizing.js";
+
+/** Which edge of the native window stays put when its height changes. */
+export type WindowAnchorEdge = "top" | "bottom";
 
 export interface ResizeOrchestratorDeps {
   getPopEl: () => HTMLDivElement | null;
@@ -46,9 +48,14 @@ export interface ResizeOrchestrator {
   refreshWindowMetrics: () => Promise<void>;
   setChartHoverActive: (active: boolean) => void;
   /** Track whether the pointer is over the popover. While true, shrink
-   * requests are deferred and the latest desired height is flushed (eased)
-   * when the pointer leaves. */
+   * requests are deferred and the latest desired height is flushed in a
+   * single resize when the pointer leaves. */
   setMouseOverWindow: (active: boolean) => void;
+  /** Tell the orchestrator which edge the native window is anchored to. Only a
+   * bottom-anchored window (Windows taskbar) needs shrinks held back while the
+   * pointer is over it, because there a shrink moves the top edge and the
+   * content under the cursor. */
+  setAnchorEdge: (edge: WindowAnchorEdge) => void;
   /** Release the "no shrink before first data" gate; shrink requests were buffered until now. */
   markInitialContentReady: () => void;
   destroy: () => void;
@@ -76,11 +83,16 @@ export function createResizeOrchestrator(
   let observerResizeRaf = 0;
   let pendingObserverSource = "observer";
   let chartHoverActive = false;
-  // While the pointer is over the popover, shrink requests are held back so
-  // the window doesn't collapse under the cursor mid-interaction. The latest
-  // desired (smaller) height is queued here and flushed with a slow ease once
-  // the pointer leaves. Grows always apply immediately.
+  // On a bottom-anchored window (Windows, flush to the taskbar) a shrink moves
+  // the TOP edge, so the tabs the user just clicked would slide down under the
+  // cursor. There, shrink requests are held back while the pointer is over the
+  // popover; the latest desired (smaller) height is queued and flushed as one
+  // resize once the pointer leaves. A top-anchored window (macOS tray popover,
+  // Linux top-right) shrinks from the bottom, so nothing moves under the cursor
+  // and holding the shrink only makes a tab switch look unresponsive: there,
+  // shrinks apply immediately. Grows always apply immediately.
   let mouseOverWindow = false;
+  let deferShrinkWhilePointerOver = true;
   let deferredShrinkHeight: number | null = null;
 
   // Resize throttle: max 3 operations per 500ms window
@@ -326,7 +338,12 @@ export function createResizeOrchestrator(
     // target and collapse on mouse-leave. Only engage after the first paint so
     // the cold-launch settle (handled by the initialContentReady gate above)
     // is never deferred.
-    if (initialContentReady && mouseOverWindow && nextHeight < lastWindowH) {
+    if (
+      initialContentReady &&
+      deferShrinkWhilePointerOver &&
+      mouseOverWindow &&
+      nextHeight < lastWindowH
+    ) {
       deferredShrinkHeight = nextHeight;
       deps.logDebug("resize:shrink-deferred-mouse-over", {
         source,
@@ -631,12 +648,34 @@ export function createResizeOrchestrator(
       hasDeferredShrink: deferredShrinkHeight !== null,
     });
     if (!active && deferredShrinkHeight !== null) {
-      // Pointer left — collapse to the latest desired height with a slow ease
-      // rather than a hard snap. animateWindowHeight already eases + throttles
-      // its per-frame setSize calls and bypasses the (now-cleared) mouse gate.
+      // Pointer left — collapse to the latest desired height in ONE native
+      // resize. This used to ease over 280ms via animateWindowHeight, which
+      // issues a set_window_size_and_align call every ~32ms. On macOS each
+      // of those is several synchronous main-thread hops plus a WKWebView
+      // relayout of a transparent window, and because #app paints down to
+      // the window's bottom edge every step visibly "folded" the card up in
+      // stutter-steps. Worse, the pointer usually leaves on its way to click
+      // another window, and the focus-loss hide (150ms after blur) cut the
+      // animation off mid-fold. A single snap is what native popovers do.
+      // The mouse gate is already cleared above, so this applies directly.
       const target = deferredShrinkHeight;
       deferredShrinkHeight = null;
-      animateWindowHeight(target, SHRINK_ON_LEAVE_ANIM_MS, "mouse-leave-flush");
+      applyWindowHeight(target, "mouse-leave-flush");
+    }
+  }
+
+  function setAnchorEdge(edge: WindowAnchorEdge): void {
+    deferShrinkWhilePointerOver = edge === "bottom";
+    deps.logDebug("resize:anchor-edge", {
+      edge,
+      deferShrinkWhilePointerOver,
+      hasDeferredShrink: deferredShrinkHeight !== null,
+    });
+    // A shrink queued before the edge was known has no reason to wait any more.
+    if (!deferShrinkWhilePointerOver && deferredShrinkHeight !== null) {
+      const target = deferredShrinkHeight;
+      deferredShrinkHeight = null;
+      applyWindowHeight(target, "anchor-edge-flush");
     }
   }
 
@@ -672,6 +711,7 @@ export function createResizeOrchestrator(
     refreshWindowMetrics,
     setChartHoverActive,
     setMouseOverWindow,
+    setAnchorEdge,
     markInitialContentReady,
     destroy,
     getMaxWindowH: () => maxWindowH,

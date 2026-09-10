@@ -191,11 +191,9 @@ describe("createResizeOrchestrator", () => {
     orchestrator.destroy();
   });
 
-  it("defers a shrink while the pointer is over the window, then flushes it on mouse-leave", async () => {
+  it("defers a shrink under the pointer on a bottom-anchored window, then snaps it in one resize on mouse-leave", async () => {
     installWindowStub(420);
     const { runNextFrame } = installRafStub();
-    let now = 0;
-    vi.spyOn(performance, "now").mockImplementation(() => now);
     const popEl = createPopEl(420);
     const invoke = vi.fn(() => Promise.resolve());
     const orchestrator = createTestOrchestrator({
@@ -208,20 +206,56 @@ describe("createResizeOrchestrator", () => {
     await flushMicrotasks();
     expect(invoke).not.toHaveBeenCalled();
 
-    // Pointer over the popover: a shrink request must be held back, not applied.
+    // Bottom-anchored (Windows taskbar): a shrink moves the top edge, so it is
+    // held back while the pointer is over the popover rather than applied.
+    orchestrator.setAnchorEdge("bottom");
     orchestrator.setMouseOverWindow(true);
     popEl.setHeight(300);
     orchestrator.syncSizeAndVerify("content-shrank");
     await flushMicrotasks();
     expect(invoke).not.toHaveBeenCalled();
 
-    // Pointer leaves: the deferred shrink flushes via the eased animation.
+    // Pointer leaves: the deferred shrink must land as a single native resize,
+    // with no animation frame in between. Easing it through per-frame
+    // set_window_size_and_align calls made the card visibly fold up in
+    // stutter-steps on macOS, and the focus-loss hide cut that off mid-fold.
     orchestrator.setMouseOverWindow(false);
-    now = 280;
-    runNextFrame(280);
     await flushMicrotasks();
 
-    expect(invoke).toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenLastCalledWith("set_window_size_and_align", {
+      width: WINDOW_WIDTH,
+      height: 300,
+    });
+    expect(() => runNextFrame(16)).toThrow("No queued animation frame to run");
+
+    orchestrator.destroy();
+  });
+
+  it("applies a shrink immediately under the pointer on a top-anchored window", async () => {
+    installWindowStub(420);
+    installRafStub();
+    const popEl = createPopEl(420);
+    const invoke = vi.fn(() => Promise.resolve());
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: popEl.element,
+    });
+
+    orchestrator.markInitialContentReady();
+    await flushMicrotasks();
+    expect(invoke).not.toHaveBeenCalled();
+
+    // A tray popover hanging below the macOS menu bar (or Linux top-right)
+    // shrinks from the bottom, so nothing moves under the cursor. Switching to
+    // a shorter tab must resize right away instead of waiting for mouse-leave.
+    orchestrator.setAnchorEdge("top");
+    orchestrator.setMouseOverWindow(true);
+    popEl.setHeight(300);
+    orchestrator.syncSizeAndVerify("tab-switch");
+    await flushMicrotasks();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenLastCalledWith("set_window_size_and_align", {
       width: WINDOW_WIDTH,
       height: 300,

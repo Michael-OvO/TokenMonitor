@@ -69,3 +69,6 @@ docs/repo-audit*.json
 docs/repo-audit*.md
 docs/debug/*.md
 docs/bug-report-dedup-overcounting.md
+
+# Impeccable design plugin state (per-machine cache)
+.impeccable/

@@ -660,7 +660,12 @@
         try {
           const edge = await invoke<string>("get_window_anchor_edge");
           document.documentElement.setAttribute("data-anchor", edge);
+          resizeOrch?.setAnchorEdge(edge === "bottom" ? "bottom" : "top");
         } catch { /* non-critical */ }
+      } else {
+        // The macOS tray popover and the Linux top-right window shrink from
+        // the bottom, so shrinks never need to wait for the pointer to leave.
+        resizeOrch?.setAnchorEdge("top");
       }
 
       void refreshStatuslineProbe();
@@ -988,7 +993,9 @@
         {/if}
       </div>
       {/if}
-      <Footer {data} {provider} {period} {rateLimits} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} onDevices={() => { showDevices = true; }} />
+      <div class="app-footer">
+        <Footer {data} {provider} {period} {rateLimits} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} onDevices={() => { showDevices = true; }} />
+      </div>
       </div>
     {:else}
       <div class="loading">
@@ -1055,6 +1062,15 @@
        if upswipe judder returns, prefer `will-change: transform` over
        `translateZ(0)` since `will-change` alone doesn't change
        layout. */
+  }
+  .app-footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 3;
+    background: var(--surface);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.15);
   }
   .hr { height: 1px; background: var(--border-subtle); margin: 0 12px; }
   .loading {

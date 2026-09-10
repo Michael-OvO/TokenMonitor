@@ -1,4 +1,5 @@
 <script lang="ts">
+  import SettingsDisclosure from "./SettingsDisclosure.svelte";
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getVersion } from "@tauri-apps/api/app";
@@ -666,7 +667,7 @@
         Integrations
       </div>
       <div class="card">
-        <button class="row collapsible-toggle" type="button" onclick={() => (cursorExpanded = !cursorExpanded)}>
+        <button class="row collapsible-toggle" type="button" aria-expanded={cursorExpanded} onclick={() => (cursorExpanded = !cursorExpanded)}>
           <span class="label"><svg class="cursor-icon" width="13" height="13" viewBox="0 0 512 512" fill="currentColor"><path d="m415.035 156.35-151.503-87.4695c-4.865-2.8094-10.868-2.8094-15.733 0l-151.4969 87.4695c-4.0897 2.362-6.6146 6.729-6.6146 11.459v176.383c0 4.73 2.5249 9.097 6.6146 11.458l151.5039 87.47c4.865 2.809 10.868 2.809 15.733 0l151.504-87.47c4.089-2.361 6.614-6.728 6.614-11.458v-176.383c0-4.73-2.525-9.097-6.614-11.459zm-9.516 18.528-146.255 253.32c-.988 1.707-3.599 1.01-3.599-.967v-165.872c0-3.314-1.771-6.379-4.644-8.044l-143.645-82.932c-1.707-.988-1.01-3.599.968-3.599h292.509c4.154 0 6.75 4.503 4.673 8.101h-.007z"/></svg>Cursor</span>
           <div class="collapsible-right">
             <span class="status status-{cursorStatusTone(cursorAuthStatus)}">
@@ -677,9 +678,8 @@
             </svg>
           </div>
         </button>
-        <div class="cursor-collapse" class:open={cursorExpanded}>
-          <div class="collapse-inner">
-            <div class="cursor-section">
+        <SettingsDisclosure open={cursorExpanded}>
+          <div class="cursor-section">
             <label class="label" for="cursor-api-key">Official API Key</label>
             <input
               id="cursor-api-key"
@@ -707,22 +707,21 @@
             </div>
             {#if cursorAuthMessage || cursorAuthStatus?.lastWarning}
               <div class="cursor-message">{cursorAuthMessage ?? cursorAuthStatus?.lastWarning}</div>
-            {#if cursorStatusTone(cursorAuthStatus) === "amber"}
-              <div class="cursor-actions" style="margin-top: 6px;">
-                <button
-                  type="button"
-                  class="secondary-btn"
-                  disabled={cursorRetrying}
-                  onclick={openCursorAndRetry}
-                >
-                  {cursorRetrying ? "Waiting for Cursor..." : "Open Cursor to refresh token"}
-                </button>
-              </div>
-            {/if}
+              {#if cursorStatusTone(cursorAuthStatus) === "amber"}
+                <div class="cursor-actions" style="margin-top: 6px;">
+                  <button
+                    type="button"
+                    class="secondary-btn"
+                    disabled={cursorRetrying}
+                    onclick={openCursorAndRetry}
+                  >
+                    {cursorRetrying ? "Waiting for Cursor..." : "Open Cursor to refresh token"}
+                  </button>
+                </div>
+              {/if}
             {/if}
           </div>
-        </div>
-      </div>
+        </SettingsDisclosure>
       </div>
     </div>
 
@@ -924,7 +923,7 @@
         Privacy & Permissions
       </div>
       <div class="card">
-        <button class="row collapsible-toggle" type="button" onclick={() => (privacyExpanded = !privacyExpanded)}>
+        <button class="row collapsible-toggle" type="button" aria-expanded={privacyExpanded} onclick={() => (privacyExpanded = !privacyExpanded)}>
           <span class="label">Permissions</span>
           <div class="collapsible-right">
             <svg class="collapsible-chevron" class:open={privacyExpanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -932,14 +931,12 @@
             </svg>
           </div>
         </button>
-        <div class="privacy-collapse" class:open={privacyExpanded}>
-          <div class="collapse-inner">
-            <PermissionSettings />
-            <div class="permissions-meta">
-              <PermissionDisclosure mode="settings" onManage={handleManagePermission} />
-            </div>
+        <SettingsDisclosure open={privacyExpanded}>
+          <PermissionSettings />
+          <div class="permissions-meta">
+            <PermissionDisclosure mode="settings" onManage={handleManagePermission} />
           </div>
-        </div>
+        </SettingsDisclosure>
       </div>
     </div>
 
@@ -1016,6 +1013,17 @@
     border-top: none;
   }
 
+  #settings-visibility .card > :global(.block > .collapsible-toggle) {
+    min-height: 36px;
+    padding: 10px 12px;
+    gap: 12px;
+  }
+
+  #settings-visibility :global(.collapsible-right) {
+    flex-shrink: 0;
+    gap: 8px;
+  }
+
   .row {
     padding: 7px 10px;
     display: flex;
@@ -1054,26 +1062,11 @@
   }
   .collapsible-chevron {
     color: var(--t3);
-    transition: transform var(--t-normal) ease;
     transform: rotate(-90deg);
   }
   .collapsible-chevron.open {
     transform: rotate(0deg);
   }
-  .cursor-collapse,
-  .privacy-collapse {
-    display: grid;
-    grid-template-rows: 0fr;
-    transition: grid-template-rows var(--t-normal) ease;
-  }
-  .cursor-collapse.open,
-  .privacy-collapse.open {
-    grid-template-rows: 1fr;
-  }
-  .collapse-inner {
-    overflow: hidden;
-  }
-
   .cursor-section {
     padding: 8px 10px;
   }
