@@ -7,8 +7,12 @@
 - **仅统计 turn-scoped 记录**：`usage.record` 中跳过 session-scoped 的累计记录，避免重复计数；同时兼容 camelCase 与 snake_case 字段
 - **真实模型名**：从 Kimi `config.toml` 的 `display_name` 读取真实模型名（如 "K2.7 Coding"、"K3"），保持 model key 为 `kimi-for-coding` 以复用定价与图表配色；模型切换后无需重启即可刷新
 - **Rate limits**：通过 `~/.kimi-code/credentials/kimi-code.json` 调用 `api.kimi.com/coding/v1/usages`，展示 weekly 与 5h 窗口，并接入托盘 / FloatBall 利用率条
+- **Token 自动刷新**：Kimi access token 仅 15 分钟有效，过期或 API 返回 401 时自动用 `refresh_token` 向 `auth.kimi.com` 换新并原子写回 `kimi-code.json`（与 CLI 共用同一 token 链），不再持续报 401；refresh token 失效时提示重新登录并冷却 5 分钟
 - **定价**：`pricing_fallback.json` 新增 `kimi-for-coding`（K2.7 Code）、`kimi-for-coding-highspeed` 与 `k3` 费率，cache 写入按 input 价计（Kimi 不单独收取 cache 写费）
-- **UI**：新增 Kimi 标签页、月牙 logo 与 violet 品牌配色（复用 `--kimi` 色板，含 dark/light/glass 变体）
+- **UI**：新增 Kimi 标签页、官方 Kimi logo（LobeHub icons）与 violet 品牌配色（复用 `--kimi` 色板，含 dark/light/glass 变体）
+
+### 修复
+- **macOS 托盘弹窗高度变化**：改变高度时弹窗不再上下跳动——AppKit `setContentSize:` 固定的是左下角，改为在主线程用一次原子 `setFrame:` 固定顶边；切换到内容更少的标签时立即收缩，不再等鼠标离开；鼠标离开时一次性收缩，取消逐帧缩放动画，失焦时不再出现卡顿的折叠动画
 
 ## v0.13.1 — Settings 重构 + SSH 搜索扩展 + FloatBall 修复
 

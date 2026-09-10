@@ -11,10 +11,6 @@ export const SCROLL_THRESHOLD_CAP = 500;
 export const RESIZE_SETTLE_DELAY_MS = 100;
 /** Ignore sub-pixel / 1px oscillation between ResizeObserver and setSize (feedback loop). */
 export const RESIZE_HYSTERESIS_PX = 3;
-/** Eased duration (ms) for the deferred shrink that fires once the cursor
- * leaves the popover. Shrinks are held while the mouse is over the window so
- * content doesn't collapse under the pointer; on leave we ease down gently. */
-export const SHRINK_ON_LEAVE_ANIM_MS = 280;
 
 export type ResizeDisposition = "grow" | "shrink" | "skip";
 

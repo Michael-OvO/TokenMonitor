@@ -660,7 +660,12 @@
         try {
           const edge = await invoke<string>("get_window_anchor_edge");
           document.documentElement.setAttribute("data-anchor", edge);
+          resizeOrch?.setAnchorEdge(edge === "bottom" ? "bottom" : "top");
         } catch { /* non-critical */ }
+      } else {
+        // The macOS tray popover and the Linux top-right window shrink from
+        // the bottom, so shrinks never need to wait for the pointer to leave.
+        resizeOrch?.setAnchorEdge("top");
       }
 
       void refreshStatuslineProbe();

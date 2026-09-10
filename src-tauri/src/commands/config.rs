@@ -692,31 +692,15 @@ pub async fn set_window_size_and_align(
         }
         #[cfg(target_os = "macos")]
         {
-            use tauri::{LogicalSize, Size};
-            // Capture position before resize so we can keep the anchored edge fixed.
-            let old_pos = window.outer_position().ok();
-            let old_size = window.outer_size().ok();
-
-            let _ = window.set_size(Size::Logical(LogicalSize::new(width, height)));
-
-            // For bottom-anchored windows, move upward so the bottom edge stays put.
-            // macOS keeps top-left fixed after set_size, so top-anchored is free.
-            if let (Some(pos), Some(old_sz)) = (old_pos, old_size) {
-                let old_bottom = pos.y + old_sz.height as i32;
-                if let Some(monitor) = window.current_monitor().ok().flatten() {
-                    let work_top = monitor.position().y;
-                    let work_bottom = monitor.position().y + monitor.size().height as i32;
-                    let top_gap = (pos.y - work_top).abs();
-                    let bottom_gap = (work_bottom - old_bottom).abs();
-                    if top_gap > bottom_gap {
-                        let new_size = window.outer_size().unwrap_or(old_sz);
-                        let new_y = (old_bottom - new_size.height as i32).max(work_top);
-                        if new_y != pos.y {
-                            let _ = window.set_position(tauri::PhysicalPosition::new(pos.x, new_y));
-                        }
-                    }
-                }
-            }
+            // tao's `set_size` goes through `setContentSize:`, which anchors the
+            // window's BOTTOM-left corner: every shrink dropped the popover away
+            // from the menu bar and every grow lifted it back. Resize in one
+            // atomic `setFrame:display:` on the main thread with the anchored
+            // edge pinned instead (see `platform::macos::set_size_keeping_anchor`).
+            let w = window.clone();
+            let _ = window.run_on_main_thread(move || {
+                crate::platform::macos::set_size_keeping_anchor(&w, width, height);
+            });
             crate::platform::clamp_window_to_work_area(&window);
         }
         #[cfg(target_os = "linux")]
