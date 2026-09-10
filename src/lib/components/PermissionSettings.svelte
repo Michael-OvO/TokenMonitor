@@ -302,7 +302,7 @@
 <style>
   .ps-card {
     background: var(--surface-2);
-    border-radius: 8px;
+    /* The enclosing settings card owns the rounded outer corners. */
     overflow: hidden;
   }
 
