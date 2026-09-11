@@ -234,9 +234,52 @@ export function getAdjacentWarmProviders(provider: UsageProvider): UsageProvider
     .filter((candidate) => candidate !== provider);
 }
 
+/** Separator between integration ids in a multi-integration scope string,
+ * e.g. `claude+kimi`. Mirrors `USAGE_SELECTION_SEPARATOR` in
+ * `src-tauri/src/usage/integrations.rs`. */
+export const USAGE_SCOPE_SEPARATOR = "+";
+
+/** Integration tabs (never the All tab itself) that are enabled, in the
+ * backend's canonical order. */
+export function enabledIntegrationIds(headerTabs: HeaderTabs): UsageProvider[] {
+  return USAGE_INTEGRATION_DEFINITIONS
+    .map((definition) => definition.id)
+    .filter((id) => headerTabs[id]?.enabled ?? true);
+}
+
+/** The scope string the All tab sends to the backend: `all` when every
+ * integration is enabled, one id when only one is, otherwise the enabled ids
+ * joined by `+`. An empty set (which the settings UI prevents) falls back to
+ * `all` rather than sending an unparseable scope. */
+export function usageScopeForAll(headerTabs: HeaderTabs): UsageProvider {
+  const ids = effectiveIntegrationIds(headerTabs);
+  if (ids.length === USAGE_INTEGRATION_DEFINITIONS.length) return ALL_USAGE_PROVIDER_ID;
+  return ids.join(USAGE_SCOPE_SEPARATOR);
+}
+
+/** The integrations the All view and the tray actually cover. The settings UI
+ * lets every integration tab be disabled while the All tab stays on; the All
+ * view never shows nothing, so that state means every integration. Use this,
+ * not `enabledIntegrationIds`, wherever the set is handed to the backend. */
+export function effectiveIntegrationIds(headerTabs: HeaderTabs): UsageProvider[] {
+  const enabled = enabledIntegrationIds(headerTabs);
+  return enabled.length === 0 ? USAGE_INTEGRATION_DEFINITIONS.map((definition) => definition.id) : enabled;
+}
+
+/** Map a tab id to the backend scope: only the All tab is rewritten. */
+export function resolveUsageScope(provider: UsageProvider, headerTabs: HeaderTabs): UsageProvider {
+  return provider === ALL_USAGE_PROVIDER_ID ? usageScopeForAll(headerTabs) : provider;
+}
+
+/** Providers named by a scope string (`all`, one id, or ids joined by `+`). */
+export function usageScopeProviders(scope: UsageProvider): UsageProvider[] {
+  const integrationIds = USAGE_INTEGRATION_DEFINITIONS.map((definition) => definition.id);
+  if (scope === ALL_USAGE_PROVIDER_ID) return integrationIds;
+  return scope.split(USAGE_SCOPE_SEPARATOR).filter((id) => integrationIds.includes(id));
+}
+
 export function rateLimitProvidersForScope(scope: UsageProvider): RateLimitProviderId[] {
-  if (scope === ALL_USAGE_PROVIDER_ID) return [...RATE_LIMIT_PROVIDER_ORDER];
-  return isRateLimitProvider(scope) ? [scope] : [];
+  return usageScopeProviders(scope).filter(isRateLimitProvider);
 }
 
 export function getRateLimitCacheFile(provider: RateLimitProviderId): string {

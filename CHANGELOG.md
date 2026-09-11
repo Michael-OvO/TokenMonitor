@@ -10,6 +10,7 @@
 - **Token 自动刷新**：Kimi access token 仅 15 分钟有效，过期或 API 返回 401 时自动用 `refresh_token` 向 `auth.kimi.com` 换新并原子写回 `kimi-code.json`（与 CLI 共用同一 token 链），不再持续报 401；refresh token 失效时提示重新登录并冷却 5 分钟
 - **定价**：`pricing_fallback.json` 新增 `kimi-for-coding`（K2.7 Code）、`kimi-for-coding-highspeed` 与 `k3` 费率，cache 写入按 input 价计（Kimi 不单独收取 cache 写费）
 - **UI**：新增 Kimi 标签页、官方 Kimi logo（LobeHub icons）与 violet 品牌配色（复用 `--kimi` 色板，含 dark/light/glass 变体）
+- **All 视图跟随标签设置**：在 Settings → Header Tabs 关闭某个提供方后，All 面板（汇总、图表、模型列表、日历）与菜单栏费用立即排除该提供方，重新开启即恢复；后端以 `claude+kimi` 这类作用域字符串按启用集合聚合并缓存
 
 ### 修复
 - **macOS 托盘弹窗高度变化**：改变高度时弹窗不再上下跳动——AppKit `setContentSize:` 固定的是左下角，改为在主线程用一次原子 `setFrame:` 固定顶边；切换到内容更少的标签时立即收缩，不再等鼠标离开；鼠标离开时一次性收缩，取消逐帧缩放动画，失焦时不再出现卡顿的折叠动画

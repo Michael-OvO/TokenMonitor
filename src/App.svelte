@@ -25,6 +25,8 @@
     getUsageProviderTitle,
     isRateLimitProvider,
     rateLimitProvidersForScope,
+    effectiveIntegrationIds,
+    resolveUsageScope,
   } from "./lib/providerMetadata.js";
 
   import {
@@ -204,7 +206,7 @@
     })),
   );
   let visibleUsableRateLimitProviders = $derived.by(() =>
-    rateLimitProvidersForScope(provider).filter((candidate) =>
+    rateLimitProvidersForScope(backendScope(provider)).filter((candidate) =>
       hasRateLimitWindows(providerPayload(rateLimits, candidate)),
     ),
   );
@@ -220,6 +222,9 @@
       brandTheming = s.brandTheming;
       if (!areHeaderTabsEqual(headerTabs, s.headerTabs)) {
         headerTabs = s.headerTabs;
+        // Startup is handled by bootstrap (set_enabled_integrations) and the
+        // initial load; only live edits from Settings need the runtime update.
+        if (appReady) void applyHeaderTabsToRuntime(s.headerTabs);
       }
     });
     const unsub4 = rateLimitsData.subscribe((v) => (rateLimits = v));
@@ -280,7 +285,7 @@
       logResizeDebug("app:data-ready", { provider, period, offset });
 
       if (period === "5h") {
-        await fetchRateLimits(provider);
+        await fetchRateLimits(backendScope(provider));
       } else {
         await hydrateRateLimits();
       }
@@ -302,7 +307,7 @@
     // Force the fetch — the cached payload may carry a cooldownUntil from a
     // previous CLI rejection that the user has just resolved by re-granting,
     // and the normal eligibility filter would otherwise skip the call.
-    await fetchRateLimits(provider, { force: true });
+    await fetchRateLimits(backendScope(provider), { force: true });
     await tick();
     syncSizeAndVerify("rate-limits-enabled");
   }
@@ -374,6 +379,36 @@
     }
   }
 
+  /** Backend scope for a tab: the All tab covers only the enabled integrations. */
+  function backendScope(tab: UsageProvider): UsageProvider {
+    return resolveUsageScope(tab, headerTabs);
+  }
+
+  /** A Header Tabs change reshapes the All scope: tell the tray, then refetch
+   * the All view (and its 5h rate limits) so the dashboard follows at once. */
+  let headerTabsRuntimeGeneration = 0;
+  async function applyHeaderTabsToRuntime(tabs: HeaderTabs) {
+    // Two quick toggles overlap here; only the latest set may drive the
+    // refetch and the rate-limit scope.
+    const generation = ++headerTabsRuntimeGeneration;
+    try {
+      await invoke("set_enabled_integrations", { ids: effectiveIntegrationIds(tabs) });
+    } catch (e) {
+      logger.warn("settings", `set_enabled_integrations failed: ${e}`);
+    }
+    if (generation !== headerTabsRuntimeGeneration) return;
+    if (provider !== ALL_USAGE_PROVIDER_ID) return;
+    const prov = provider;
+    const per = period;
+    const off = offset;
+    await fetchData(prov, per, off);
+    if (generation !== headerTabsRuntimeGeneration) return;
+    if (provider !== prov || period !== per || offset !== off) return;
+    if (per === "5h") await fetchRateLimits(resolveUsageScope(prov, tabs));
+    await tick();
+    syncSizeAndVerify("header-tabs-change");
+  }
+
   async function handleProviderChange(p: UsageProvider) {
     const nextProvider = resolveVisibleProvider(p, headerTabs);
     if (provider === nextProvider) return;
@@ -382,7 +417,7 @@
     activeProvider.set(nextProvider);
     await fetchData(nextProvider, period, offset);
     if (provider !== nextProvider) return;
-    if (period === "5h") await fetchRateLimits(nextProvider);
+    if (period === "5h") await fetchRateLimits(backendScope(nextProvider));
     if (provider !== nextProvider) return;
     await tick();
     syncSizeAndVerify("provider-change");
@@ -402,7 +437,7 @@
     activeOffset.set(0);
     await fetchData(prov, p, 0);
     if (period !== p || provider !== prov) return;
-    if (p === "5h") await fetchRateLimits(provider);
+    if (p === "5h") await fetchRateLimits(backendScope(provider));
     if (period !== p || provider !== prov) return;
     await tick();
     syncSizeAndVerify("period-change");
@@ -555,7 +590,7 @@
         syncSizeAndVerify("window-focus");
         // Refresh silently — never drop the live view back to the spinner.
         fetchData(provider, period, offset, { silent: true });
-        if (period === "5h") fetchRateLimits(provider);
+        if (period === "5h") fetchRateLimits(backendScope(provider));
       },
       onBlur: () => {
         logResizeDebug("window:blur", captureSnapshot("window-blur"));
@@ -724,7 +759,7 @@
         // the cache + cold-fetching here re-showed the loading spinner over
         // live data every ~120s; keep the view and swap in fresh numbers.
         fetchData(provider, period, offset, { silent: true });
-        if (period === "5h") fetchRateLimits(provider);
+        if (period === "5h") fetchRateLimits(backendScope(provider));
       });
 
       unlistenWindowResize = await tauriWindow.onResized(({ payload }) => {

@@ -6,7 +6,7 @@
   import { planTierCost } from "../utils/plans.js";
   import { intensityLevel, computeEarned, heatmapColor } from "../utils/calendar.js";
   import { rateLimitsData } from "../stores/rateLimits.js";
-  import { isRateLimitProvider } from "../providerMetadata.js";
+  import { isRateLimitProvider, resolveUsageScope } from "../providerMetadata.js";
   import { logger } from "../utils/logger.js";
   import type { MonthlyUsagePayload, RateLimitsPayload, UsageProvider } from "../types/index.js";
 
@@ -45,7 +45,7 @@
     loading = true;
     try {
       data = await invoke<MonthlyUsagePayload>("get_monthly_usage", {
-        provider: prov,
+        provider: resolveUsageScope(prov, $settings.headerTabs),
         year,
         month,
       });

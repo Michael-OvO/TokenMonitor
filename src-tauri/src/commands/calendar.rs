@@ -5,7 +5,7 @@ use super::{
     UsageDebugReport,
 };
 use crate::models::*;
-use crate::usage::integrations::{all_usage_integrations, UsageIntegrationSelection};
+use crate::usage::integrations::UsageIntegrationSelection;
 use crate::usage::parser::UsageQueryDebugReport;
 use chrono::{Datelike, NaiveDate};
 use std::collections::HashMap;
@@ -95,15 +95,16 @@ pub(crate) fn get_monthly_usage_with_debug_sync(
         Ok((days, usage.usage_source, usage.usage_warning, query))
     };
 
-    let (days, usage_source, usage_warning, queries) = match selection {
-        UsageIntegrationSelection::All => {
+    let (days, usage_source, usage_warning, queries) = match &selection {
+        UsageIntegrationSelection::All | UsageIntegrationSelection::Subset(_) => {
+            // `All` and `Subset` share the merge path: iterate the selection's ids.
             let mut day_map: HashMap<u32, f64> = HashMap::new();
             let mut queries = Vec::new();
             let mut usage_source = UsageSource::Parser;
             let mut usage_warning = None;
             let mut initialized = false;
 
-            for integration_id in all_usage_integrations() {
+            for integration_id in selection.integration_ids() {
                 let (integration_days, source, warning, query) =
                     fetch_for_provider(integration_id.as_str())?;
                 if let Some(query) = query {
@@ -501,6 +502,53 @@ mod tests {
         assert!(
             merged_claude_day > local_claude_day,
             "the affected calendar day should increase after merging remote usage"
+        );
+    }
+
+    #[test]
+    fn get_monthly_usage_merges_only_subset_members() {
+        let claude_dir = TempDir::new().unwrap();
+        let codex_dir = TempDir::new().unwrap();
+
+        let claude_project = claude_dir.path().join("test-project");
+        fs::create_dir_all(&claude_project).unwrap();
+        let claude_entry = r#"{"type":"assistant","timestamp":"2026-03-05T10:00:00-04:00","message":{"model":"claude-sonnet-4-6-20260301","usage":{"input_tokens":1000,"output_tokens":500},"stop_reason":"end_turn"}}"#;
+        write_file(&claude_project.join("session.jsonl"), claude_entry);
+
+        let day_dir = codex_dir.path().join("2026").join("03").join("05");
+        fs::create_dir_all(&day_dir).unwrap();
+        let codex_entry = r#"{"type":"event_msg","timestamp":"2026-03-05T14:00:00-04:00","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":500,"output_tokens":250,"reasoning_output_tokens":0,"cached_input_tokens":0}}}}"#;
+        write_file(&day_dir.join("session.jsonl"), codex_entry);
+
+        let parser = UsageParser::with_dirs(
+            claude_dir.path().to_path_buf(),
+            codex_dir.path().to_path_buf(),
+        );
+        let state = AppState::with_parser(parser);
+
+        let day5 = |payload: &MonthlyUsagePayload| {
+            payload
+                .days
+                .iter()
+                .find(|d| d.day == 5)
+                .map(|d| d.cost)
+                .unwrap_or(0.0)
+        };
+        let claude_only = get_monthly_usage_sync(&state, "claude", 2026, 3);
+        let subset = get_monthly_usage_sync(&state, "claude+kimi", 2026, 3);
+        let all = get_monthly_usage_sync(&state, "all", 2026, 3);
+
+        assert!(
+            day5(&claude_only) > 0.0,
+            "fixture must produce Claude cost on day 5"
+        );
+        assert!(
+            (day5(&subset) - day5(&claude_only)).abs() < 0.001,
+            "claude+kimi must equal claude alone when there is no Kimi data"
+        );
+        assert!(
+            day5(&all) > day5(&subset),
+            "all must additionally include Codex"
         );
     }
 }

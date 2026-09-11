@@ -18,6 +18,10 @@ vi.mock("../utils/logger.js", () => ({
   logger: mockLogger,
 }));
 
+vi.mock("@tauri-apps/plugin-store", () => ({
+  load: vi.fn(),
+}));
+
 vi.mock("../uiStability.js", () => ({
   isResizeDebugEnabled: () => false,
   logResizeDebug: vi.fn(),
@@ -565,5 +569,71 @@ describe("warmAllPeriods", () => {
     );
 
     expect(calledPeriods).toEqual(new Set(["5h", "week", "month"]));
+  });
+});
+
+describe("All-tab scope", () => {
+  it("requests and caches the enabled integrations instead of `all`", async () => {
+    mockInvoke.mockResolvedValue(makePayload());
+    const { settings } = await import("./settings.js");
+    const { createDefaultHeaderTabs } = await import("../providerMetadata.js");
+    const tabs = createDefaultHeaderTabs();
+    tabs.codex = { ...tabs.codex, enabled: false };
+    settings.update((current) => ({ ...current, headerTabs: tabs }));
+
+    const { fetchData } = await loadUsageModule();
+    await fetchData("all", "day", 0);
+    expect(mockInvoke).toHaveBeenCalledWith("get_usage_data", {
+      provider: "claude+cursor+kimi",
+      period: "day",
+      offset: 0,
+    });
+
+    // Re-enabling the tab is a different scope, so it must hit IPC again
+    // rather than reuse the claude+cursor+kimi cache entry.
+    const restored = { ...tabs, codex: { ...tabs.codex, enabled: true } };
+    settings.update((current) => ({ ...current, headerTabs: restored }));
+    await fetchData("all", "day", 0);
+    expect(mockInvoke).toHaveBeenLastCalledWith("get_usage_data", {
+      provider: "all",
+      period: "day",
+      offset: 0,
+    });
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves single-provider tabs untouched", async () => {
+    mockInvoke.mockResolvedValue(makePayload());
+    const { fetchData } = await loadUsageModule();
+    await fetchData("codex", "week", 0);
+    expect(mockInvoke).toHaveBeenCalledWith("get_usage_data", {
+      provider: "codex",
+      period: "week",
+      offset: 0,
+    });
+  });
+});
+
+describe("subset scope cache invalidation", () => {
+  it("drops a subset entry when one of its providers is cleared", async () => {
+    const { settings } = await import("./settings.js");
+    const { createDefaultHeaderTabs } = await import("../providerMetadata.js");
+    const tabs = createDefaultHeaderTabs();
+    tabs.codex = { ...tabs.codex, enabled: false };
+    settings.update((current) => ({ ...current, headerTabs: tabs }));
+    const { fetchData, seedUsageCache, clearUsageCacheForProviders, usageData } =
+      await loadUsageModule();
+
+    // Warm entry for the All tab's scope is served synchronously.
+    seedUsageCache("claude+cursor+kimi", "day", 0, makePayload({ total_cost: 9 }));
+    mockInvoke.mockReturnValueOnce(deferred<UsagePayload>().promise);
+    void fetchData("all", "day", 0);
+    expect(get(usageData)?.total_cost).toBe(9);
+
+    // Clearing one member drops the subset entry: the next fetch is cold.
+    clearUsageCacheForProviders(["claude"]);
+    mockInvoke.mockReturnValueOnce(deferred<UsagePayload>().promise);
+    void fetchData("all", "day", 0);
+    expect(get(usageData)?.total_cost).not.toBe(9);
   });
 });

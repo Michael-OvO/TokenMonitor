@@ -3,7 +3,9 @@ use chrono::Timelike;
 use crate::commands::AppState;
 use crate::models::{ChartBucket, ChartSegment, DeviceModelSummary, DeviceSummary};
 use crate::usage::archive::ArchiveManager;
-use crate::usage::integrations::{provider_matches_model, ALL_USAGE_INTEGRATIONS_ID};
+use crate::usage::integrations::{
+    remote_record_matches_provider, UsageIntegrationId, UsageIntegrationSelection,
+};
 use crate::usage::ssh_remote::{CompactUsageRecord, SshHostConfig};
 
 pub(crate) fn parse_remote_ts(ts: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
@@ -18,12 +20,20 @@ fn parse_remote_ts_to_local_date(ts: &str) -> chrono::NaiveDate {
         .unwrap_or(chrono::NaiveDate::MIN)
 }
 
+/// Remote SSH records only ever carry Claude and Codex usage, so a scope
+/// includes them exactly when it contains one of those integrations.
 pub(crate) fn provider_includes_remote_ssh_usage(provider: &str) -> bool {
-    matches!(provider, ALL_USAGE_INTEGRATIONS_ID | "claude" | "codex")
+    match UsageIntegrationSelection::parse(provider) {
+        Some(selection) => {
+            selection.contains(UsageIntegrationId::Claude)
+                || selection.contains(UsageIntegrationId::Codex)
+        }
+        None => false,
+    }
 }
 
 pub(crate) fn compact_record_matches_provider(record: &CompactUsageRecord, provider: &str) -> bool {
-    provider_matches_model(provider, &record.model)
+    remote_record_matches_provider(provider, &record.model)
 }
 
 /// A device to aggregate in the dashboard: either a configured+enabled SSH host
@@ -347,7 +357,7 @@ pub(crate) async fn build_device_breakdown_for_payload(
             .map(|a| a.load_archived(&source_key, Some(since)))
             .unwrap_or_default()
             .into_iter()
-            .filter(|e| provider_matches_model(provider, &e.model))
+            .filter(|e| remote_record_matches_provider(provider, &e.model))
             .collect();
 
         // Live SSH-cache rows only for configured hosts; file-imported peers have
@@ -471,7 +481,7 @@ pub(crate) async fn build_included_devices_payload(
         // ── Archived hourly rows for completed hours ──
         if let Some(ref a) = archive {
             for entry in a.load_archived(&source_key, Some(since)) {
-                if !provider_matches_model(provider, &entry.model) {
+                if !remote_record_matches_provider(provider, &entry.model) {
                     continue;
                 }
                 let entry_date = entry.timestamp.date_naive();
@@ -726,7 +736,7 @@ pub(crate) async fn build_device_time_chart_buckets(
             // regardless of the SSH cache manager, so peers still chart.
             if let Some(ref a) = archive {
                 for entry in a.load_archived(&source_key, Some(since)) {
-                    if !provider_matches_model(provider, &entry.model) {
+                    if !remote_record_matches_provider(provider, &entry.model) {
                         continue;
                     }
                     let date = entry.timestamp.date_naive();
@@ -1553,5 +1563,21 @@ mod tests {
             summary_miss.total_cost == 0.0,
             "record should be excluded when local date is outside the range"
         );
+    }
+
+    #[test]
+    fn remote_ssh_usage_gate_follows_subset_membership() {
+        // Existing answers.
+        assert!(provider_includes_remote_ssh_usage("all"));
+        assert!(provider_includes_remote_ssh_usage("claude"));
+        assert!(provider_includes_remote_ssh_usage("codex"));
+        assert!(!provider_includes_remote_ssh_usage("cursor"));
+        assert!(!provider_includes_remote_ssh_usage("kimi"));
+        assert!(!provider_includes_remote_ssh_usage("gemini"));
+        // Subsets: remote records are Claude/Codex only, so include them
+        // exactly when one of those two is in the scope.
+        assert!(provider_includes_remote_ssh_usage("codex+kimi"));
+        assert!(provider_includes_remote_ssh_usage("claude+cursor"));
+        assert!(!provider_includes_remote_ssh_usage("cursor+kimi"));
     }
 }

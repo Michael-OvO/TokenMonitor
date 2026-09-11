@@ -4,6 +4,7 @@ import {
   getRateLimitMinFetchIntervalMs,
   isRateLimitProvider,
   RATE_LIMIT_PROVIDER_ORDER as SUPPORTED_RATE_LIMIT_PROVIDER_ORDER,
+  rateLimitProvidersForScope,
   shouldPreservePeakRateLimitUtilization,
 } from "../providerMetadata.js";
 import type {
@@ -67,8 +68,7 @@ export function createRateLimitsMonitorState(): RateLimitsMonitorState {
 }
 
 export function requestedProviders(scope: RateLimitScope): RateLimitProvider[] {
-  if (scope === "all") return [...RATE_LIMIT_PROVIDER_ORDER];
-  return isRateLimitProvider(scope) ? [scope] : [];
+  return rateLimitProvidersForScope(scope);
 }
 
 export function providerPayload(
