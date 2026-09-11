@@ -7,9 +7,7 @@ use crate::models::*;
 #[cfg(test)]
 use crate::stats::change::ParsedChangeEvent;
 use crate::stats::change::{aggregate_change_stats, aggregate_model_change_summary};
-use crate::usage::integrations::{
-    all_usage_integrations, UsageIntegrationSelection, ALL_USAGE_INTEGRATIONS_ID,
-};
+use crate::usage::integrations::UsageIntegrationSelection;
 use crate::usage::parser::UsageParser;
 #[cfg(test)]
 use chrono::Datelike;
@@ -529,6 +527,11 @@ pub(crate) async fn get_usage_data_inner(
 
     let parser = &state.parser;
     let selection = parse_usage_selection(provider)?;
+    // Canonical spelling (sorted, de-duplicated) so every cache key, disk
+    // entry and debug report for the same set of integrations lines up no
+    // matter how the caller spelled the scope.
+    let canonical_provider = selection.to_string();
+    let provider = canonical_provider.as_str();
     let refresh_interval_secs = *state.refresh_interval.read().await;
     let final_cache_key = final_usage_cache_key(provider, period, offset, refresh_interval_secs);
     // The 5h key is time-bucketed (see final_usage_cache_key), so every refresh
@@ -612,14 +615,13 @@ pub(crate) async fn get_usage_data_inner(
             finalize_usage_payload(state, provider, period, offset, payload).await
         }
         UsageIntegrationSelection::All | UsageIntegrationSelection::Subset(_) => {
-            // Task 3 replaces this arm to iterate `selection.integration_ids()`
             // instead of every integration; until then a subset scope here
             // resolves the same as `all`.
             let bounds = resolve_period_bounds(period, offset)?;
             let mut merged: Option<UsagePayload> = None;
             let mut queries = Vec::new();
 
-            for integration_id in all_usage_integrations() {
+            for integration_id in selection.integration_ids() {
                 let mut payload =
                     get_provider_chart_data(parser, integration_id.as_str(), period, offset)?;
                 if let Some(warning) = payload.usage_warning.take() {
@@ -641,7 +643,7 @@ pub(crate) async fn get_usage_data_inner(
                 state,
                 UsageDebugReport {
                     request_kind: String::from("usage"),
-                    requested_provider: String::from(ALL_USAGE_INTEGRATIONS_ID),
+                    requested_provider: provider.to_string(),
                     period: Some(period.to_string()),
                     offset: Some(offset),
                     year: None,
@@ -651,8 +653,8 @@ pub(crate) async fn get_usage_data_inner(
             )
             .await;
 
-            // Aggregate stats once from all providers' entries.
-            attach_local_stats(parser, &mut merged, ALL_USAGE_INTEGRATIONS_ID, &bounds);
+            // Aggregate stats once from the selected providers' entries.
+            attach_local_stats(parser, &mut merged, provider, &bounds);
 
             finalize_usage_payload(state, provider, period, offset, merged).await
         }
@@ -737,6 +739,7 @@ pub(crate) async fn get_usage_data_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::integrations::{all_usage_integrations, ALL_USAGE_INTEGRATIONS_ID};
     use crate::usage::parser::UsageParser;
     use crate::usage::ssh_remote::{SshCacheManager, SshHostConfig};
     use chrono::Local;
@@ -1824,5 +1827,67 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn get_usage_data_inner_subset_excludes_integrations_outside_the_selection() {
+        let claude_dir = TempDir::new().unwrap();
+        let codex_dir = TempDir::new().unwrap();
+        let now = Local::now();
+        let timestamp = now.to_rfc3339();
+
+        write_file(
+            &claude_dir.path().join("session.jsonl"),
+            &claude_assistant_entry(&timestamp, "claude-sonnet-4-6-20260301", 1_000, 500),
+        );
+        let codex_day_dir = codex_dir
+            .path()
+            .join(now.format("%Y").to_string())
+            .join(now.format("%m").to_string())
+            .join(now.format("%d").to_string());
+        write_file(
+            &codex_day_dir.join("session.jsonl"),
+            &codex_token_count_entry(&timestamp, "gpt-5-codex", 800, 400),
+        );
+
+        let mut state = AppState::new();
+        state.parser = Arc::new(UsageParser::with_dirs(
+            claude_dir.path().to_path_buf(),
+            codex_dir.path().to_path_buf(),
+        ));
+        state.usage_access_enabled.store(true, Ordering::SeqCst);
+
+        let all = get_usage_data_inner(None, &state, "all", "day", 0)
+            .await
+            .unwrap();
+        let claude_only = get_usage_data_inner(None, &state, "claude", "day", 0)
+            .await
+            .unwrap();
+        // Non-canonical spelling on purpose: the command must normalise it.
+        let subset = get_usage_data_inner(None, &state, "kimi+claude", "day", 0)
+            .await
+            .unwrap();
+
+        assert!(
+            all.total_tokens > claude_only.total_tokens,
+            "fixture must contribute Codex usage to the all view"
+        );
+        assert_eq!(subset.total_tokens, claude_only.total_tokens);
+        assert!((subset.total_cost - claude_only.total_cost).abs() < 1e-9);
+        assert!(
+            subset
+                .model_breakdown
+                .iter()
+                .all(|model| !model.model_key.contains("gpt")),
+            "Codex models must not appear in a claude+kimi subset"
+        );
+        assert_eq!(
+            subset.chart_buckets.iter().map(|b| b.total).sum::<f64>(),
+            claude_only
+                .chart_buckets
+                .iter()
+                .map(|b| b.total)
+                .sum::<f64>()
+        );
     }
 }
