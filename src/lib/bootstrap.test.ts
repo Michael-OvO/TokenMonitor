@@ -1,3 +1,4 @@
+import { createDefaultHeaderTabs, enabledIntegrationIds } from "./providerMetadata.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 import { initializeRuntimeFromSettings } from "./bootstrap.js";
@@ -81,6 +82,25 @@ beforeEach(() => {
 });
 
 describe("initializeRuntimeFromSettings", () => {
+  it("tells the backend which integrations the header tabs enable", async () => {
+    const invokeFn = vi.fn().mockResolvedValue(undefined);
+    const headerTabs = createDefaultHeaderTabs();
+    headerTabs.codex = { ...headerTabs.codex, enabled: false };
+    const saved = makeSettings({ headerTabs });
+
+    await initializeRuntimeFromSettings(saved, {
+      invokeFn,
+      applyThemeFn: vi.fn(),
+      applyGlassFn: vi.fn(),
+      syncNativeWindowThemeFn: vi.fn().mockResolvedValue(undefined),
+      syncNativeWindowSurfaceFn: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(invokeFn).toHaveBeenCalledWith("set_enabled_integrations", {
+      ids: ["claude", "cursor", "kimi"],
+    });
+  });
+
   it("applies provider/period stores and forwards refresh interval to the backend", async () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyThemeFn = vi.fn();
@@ -109,6 +129,9 @@ describe("initializeRuntimeFromSettings", () => {
     expect(invokeFn).toHaveBeenCalledWith("set_dock_icon_visible", { visible: false });
     expect(syncNativeWindowSurfaceFn).toHaveBeenCalledWith(invokeFn, true);
     expect(invokeFn).toHaveBeenCalledWith("set_refresh_interval", { interval: 300 });
+    expect(invokeFn).toHaveBeenCalledWith("set_enabled_integrations", {
+      ids: enabledIntegrationIds(saved.headerTabs),
+    });
     expect(invokeFn).toHaveBeenCalledWith("set_usage_access_enabled", { enabled: true });
     expect(invokeFn).toHaveBeenCalledWith("set_cursor_auth_config", {
       apiKey: "",
