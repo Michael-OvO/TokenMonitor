@@ -25,7 +25,7 @@
     getUsageProviderTitle,
     isRateLimitProvider,
     rateLimitProvidersForScope,
-    enabledIntegrationIds,
+    effectiveIntegrationIds,
     resolveUsageScope,
   } from "./lib/providerMetadata.js";
 
@@ -386,17 +386,23 @@
 
   /** A Header Tabs change reshapes the All scope: tell the tray, then refetch
    * the All view (and its 5h rate limits) so the dashboard follows at once. */
+  let headerTabsRuntimeGeneration = 0;
   async function applyHeaderTabsToRuntime(tabs: HeaderTabs) {
+    // Two quick toggles overlap here; only the latest set may drive the
+    // refetch and the rate-limit scope.
+    const generation = ++headerTabsRuntimeGeneration;
     try {
-      await invoke("set_enabled_integrations", { ids: enabledIntegrationIds(tabs) });
+      await invoke("set_enabled_integrations", { ids: effectiveIntegrationIds(tabs) });
     } catch (e) {
-      logger.debug("settings", `set_enabled_integrations failed: ${e}`);
+      logger.warn("settings", `set_enabled_integrations failed: ${e}`);
     }
+    if (generation !== headerTabsRuntimeGeneration) return;
     if (provider !== ALL_USAGE_PROVIDER_ID) return;
     const prov = provider;
     const per = period;
     const off = offset;
     await fetchData(prov, per, off);
+    if (generation !== headerTabsRuntimeGeneration) return;
     if (provider !== prov || period !== per || offset !== off) return;
     if (per === "5h") await fetchRateLimits(resolveUsageScope(prov, tabs));
     await tick();

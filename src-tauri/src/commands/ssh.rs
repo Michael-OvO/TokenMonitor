@@ -346,7 +346,9 @@ pub async fn get_device_usage(
                 .map(|a| a.load_archived(&source_key, Some(since)))
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|e| crate::usage::integrations::provider_matches_model(&provider, &e.model))
+                .filter(|e| {
+                    crate::usage::integrations::remote_record_matches_provider(&provider, &e.model)
+                })
                 .collect();
 
             // Live compact rows only for configured SSH hosts; file-imported
@@ -465,7 +467,7 @@ pub async fn get_single_device_usage(
 ) -> Result<crate::models::UsagePayload, String> {
     use crate::commands::period::{compute_date_bounds, format_day_label};
     use crate::models::{ModelSummary, UsagePayload, UsageSource};
-    use crate::usage::integrations::provider_matches_model;
+    use crate::usage::integrations::remote_record_matches_provider;
     use crate::usage::pricing::{
         calculate_cost_for_key, pricing_available_for_key, provider_multiplier,
     };
@@ -547,7 +549,7 @@ pub async fn get_single_device_usage(
         // Archived completed hours, filtered to the active provider's family.
         if let Some(ref a) = archive {
             for entry in a.load_archived(&source_key, Some(since)) {
-                if !provider_matches_model(&provider, &entry.model) {
+                if !remote_record_matches_provider(&provider, &entry.model) {
                     continue;
                 }
                 let date = entry.timestamp.date_naive();
@@ -597,7 +599,7 @@ pub async fn get_single_device_usage(
                 }
             };
             for record in &records {
-                if !provider_matches_model(&provider, &record.model) {
+                if !remote_record_matches_provider(&provider, &record.model) {
                     continue;
                 }
                 let parsed_ts = match parse_remote_ts(&record.ts) {

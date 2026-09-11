@@ -97,8 +97,7 @@ pub(crate) fn get_monthly_usage_with_debug_sync(
 
     let (days, usage_source, usage_warning, queries) = match &selection {
         UsageIntegrationSelection::All | UsageIntegrationSelection::Subset(_) => {
-            // instead of every integration; until then a subset scope here
-            // resolves the same as `all`.
+            // `All` and `Subset` share the merge path: iterate the selection's ids.
             let mut day_map: HashMap<u32, f64> = HashMap::new();
             let mut queries = Vec::new();
             let mut usage_source = UsageSource::Parser;

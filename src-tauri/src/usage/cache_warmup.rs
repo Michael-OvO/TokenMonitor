@@ -7,7 +7,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::commands::period::resolve_period_bounds;
 use crate::commands::usage_query::get_usage_data_inner;
 use crate::commands::AppState;
-use crate::usage::integrations::all_usage_integrations;
+use crate::usage::integrations::{all_usage_integrations, UsageIntegrationSelection};
 
 static WARMUP_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -52,7 +52,14 @@ fn build_warmup_keys(
             .filter(|id| id.detect_roots().iter().any(|r| r.exists()))
             .map(|id| id.as_str().to_string())
             .collect();
-        p.push("all".to_string());
+        // The merged view the popover actually requests: the enabled tabs'
+        // scope (`all` when every tab is on), not the literal `all`.
+        let enabled = state
+            .enabled_integrations
+            .read()
+            .map(|ids| ids.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        p.push(UsageIntegrationSelection::from_ids(&enabled).to_string());
         p
     };
 

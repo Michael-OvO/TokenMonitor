@@ -86,12 +86,27 @@ impl UsageIntegrationSelection {
                 ids.push(id);
             }
         }
-        ids.sort_by_key(|id| ALL_USAGE_INTEGRATIONS.iter().position(|c| c == id));
-        match ids.len() {
-            0 => None,
-            1 => Some(Self::Single(ids[0])),
-            n if n == ALL_USAGE_INTEGRATIONS.len() => Some(Self::All),
-            _ => Some(Self::Subset(ids)),
+        if ids.is_empty() {
+            None
+        } else {
+            Some(Self::from_ids(&ids))
+        }
+    }
+
+    /// Canonical selection for a set of ids: sorted into integration order,
+    /// de-duplicated, and collapsed to `Single`/`All` exactly like `parse`.
+    /// An empty set yields `All`, mirroring the frontend's fallback when no
+    /// integration tab is enabled (the All view never shows nothing).
+    pub fn from_ids(ids: &[UsageIntegrationId]) -> Self {
+        let sorted: Vec<UsageIntegrationId> = ALL_USAGE_INTEGRATIONS
+            .into_iter()
+            .filter(|id| ids.contains(id))
+            .collect();
+        match sorted.len() {
+            0 => Self::All,
+            1 => Self::Single(sorted[0]),
+            n if n == ALL_USAGE_INTEGRATIONS.len() => Self::All,
+            _ => Self::Subset(sorted),
         }
     }
 
@@ -154,14 +169,52 @@ pub fn provider_matches_model(provider: &str, model: &str) -> bool {
     if let Some(id) = UsageIntegrationId::parse(provider) {
         return integration_matches_model(id, model);
     }
-    match UsageIntegrationSelection::parse(provider) {
-        Some(selection) => selection
-            .integration_ids()
-            .into_iter()
-            .any(|id| integration_matches_model(id, model)),
-        // Unknown provider strings pass through, as before.
-        None => true,
+    // Subset (`claude+kimi`): walk the parts without allocating — this runs
+    // once per entry in the parser's retain and the device filters.
+    let mut saw_known = false;
+    for part in provider.split(USAGE_SELECTION_SEPARATOR) {
+        if let Some(id) = UsageIntegrationId::parse(part) {
+            saw_known = true;
+            if integration_matches_model(id, model) {
+                return true;
+            }
+        }
     }
+    // Unknown provider strings pass through, as before.
+    !saw_known
+}
+
+/// Match a remote SSH or archived peer-device row against a scope.
+///
+/// Those rows only ever carry Claude and Codex usage and, unlike rows read
+/// from the local Cursor integration, have no "belongs to the Cursor tab"
+/// meaning. So Cursor's match-everything rule from `provider_matches_model`
+/// must not apply here: with only the Codex tab disabled the scope is
+/// `claude+cursor+kimi`, and a Codex row has to be excluded rather than
+/// admitted through the Cursor wildcard. Allocation-free like its sibling.
+pub fn remote_record_matches_provider(provider: &str, model: &str) -> bool {
+    use crate::models::{detect_model_family, ModelFamily};
+    if provider == ALL_USAGE_INTEGRATIONS_ID {
+        return true;
+    }
+    let family = detect_model_family(model);
+    let mut saw_known = false;
+    for part in provider.split(USAGE_SELECTION_SEPARATOR) {
+        let Some(id) = UsageIntegrationId::parse(part) else {
+            continue;
+        };
+        saw_known = true;
+        let matches = match id {
+            UsageIntegrationId::Claude => family == ModelFamily::Anthropic,
+            UsageIntegrationId::Codex => family == ModelFamily::OpenAI,
+            UsageIntegrationId::Cursor | UsageIntegrationId::Kimi => false,
+        };
+        if matches {
+            return true;
+        }
+    }
+    // Unknown provider strings pass through, as `provider_matches_model` does.
+    !saw_known
 }
 
 fn integration_matches_model(id: UsageIntegrationId, model: &str) -> bool {
@@ -470,5 +523,65 @@ mod tests {
         // Existing single-tab and all-tab answers are unchanged.
         assert!(provider_matches_model("all", "gpt-5-codex"));
         assert!(!provider_matches_model("claude", "gpt-5-codex"));
+    }
+
+    #[test]
+    fn from_ids_canonicalises_and_collapses() {
+        use UsageIntegrationId::*;
+        assert_eq!(
+            UsageIntegrationSelection::from_ids(&[Kimi, Claude, Kimi]),
+            UsageIntegrationSelection::Subset(vec![Claude, Kimi])
+        );
+        assert_eq!(
+            UsageIntegrationSelection::from_ids(&[Codex]),
+            UsageIntegrationSelection::Single(Codex)
+        );
+        assert_eq!(
+            UsageIntegrationSelection::from_ids(&[Kimi, Cursor, Codex, Claude]),
+            UsageIntegrationSelection::All
+        );
+        assert_eq!(
+            UsageIntegrationSelection::from_ids(&[]),
+            UsageIntegrationSelection::All
+        );
+        assert_eq!(
+            UsageIntegrationSelection::from_ids(&[Kimi, Claude]).to_string(),
+            "claude+kimi"
+        );
+    }
+
+    #[test]
+    fn remote_rows_ignore_the_cursor_wildcard() {
+        // Only the Codex tab disabled: the scope still contains Cursor, but a
+        // remote Codex row must stay out.
+        assert!(!remote_record_matches_provider(
+            "claude+cursor+kimi",
+            "gpt-5-codex"
+        ));
+        assert!(remote_record_matches_provider(
+            "claude+cursor+kimi",
+            "claude-sonnet-4-5"
+        ));
+        assert!(remote_record_matches_provider("codex+kimi", "gpt-5-codex"));
+        assert!(!remote_record_matches_provider(
+            "cursor+kimi",
+            "gpt-5-codex"
+        ));
+        assert!(!remote_record_matches_provider(
+            "cursor+kimi",
+            "claude-sonnet-4-5"
+        ));
+        // Single ids and `all` behave as the tabs always did for remote rows.
+        assert!(remote_record_matches_provider("all", "gpt-5-codex"));
+        assert!(remote_record_matches_provider(
+            "claude",
+            "claude-sonnet-4-5"
+        ));
+        assert!(!remote_record_matches_provider("claude", "gpt-5-codex"));
+        assert!(remote_record_matches_provider("codex", "gpt-5-codex"));
+        // Unknown scopes pass through like provider_matches_model.
+        assert!(remote_record_matches_provider("gemini", "gpt-5-codex"));
+        // Local rows keep Cursor's pass-through (unchanged behaviour).
+        assert!(provider_matches_model("claude+cursor+kimi", "gpt-5-codex"));
     }
 }

@@ -615,8 +615,7 @@ pub(crate) async fn get_usage_data_inner(
             finalize_usage_payload(state, provider, period, offset, payload).await
         }
         UsageIntegrationSelection::All | UsageIntegrationSelection::Subset(_) => {
-            // instead of every integration; until then a subset scope here
-            // resolves the same as `all`.
+            // `All` and `Subset` share the merge path: iterate the selection's ids.
             let bounds = resolve_period_bounds(period, offset)?;
             let mut merged: Option<UsagePayload> = None;
             let mut queries = Vec::new();

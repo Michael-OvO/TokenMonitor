@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { activePeriod, activeProvider } from "./stores/usage.js";
 import { applyGlass, applyTheme, resolveVisibleProvider, updateSetting, type Settings } from "./stores/settings.js";
 import { syncTrayConfig } from "./tray/sync.js";
-import { enabledIntegrationIds } from "./providerMetadata.js";
+import { effectiveIntegrationIds } from "./providerMetadata.js";
 import {
   setNativeGlassEffect,
   syncNativeWindowSurface,
@@ -130,7 +130,7 @@ export async function initializeRuntimeFromSettings(
     }),
     invokeFn("set_rate_limits_enabled", { enabled: saved.rateLimitsEnabled }),
     invokeFn("set_enabled_integrations", {
-      ids: enabledIntegrationIds(saved.headerTabs),
+      ids: effectiveIntegrationIds(saved.headerTabs),
     }),
     invokeFn("set_auto_export_config", {
       enabled: saved.autoExportEnabled,

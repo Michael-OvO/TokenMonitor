@@ -1,6 +1,11 @@
 import { writable, get } from "svelte/store";
 import { invoke } from "@tauri-apps/api/core";
-import { DEFAULT_USAGE_PROVIDER, resolveUsageScope } from "../providerMetadata.js";
+import {
+  ALL_USAGE_PROVIDER_ID,
+  DEFAULT_USAGE_PROVIDER,
+  resolveUsageScope,
+  usageScopeProviders,
+} from "../providerMetadata.js";
 import { settings } from "./settings.js";
 import type {
   UsagePayload,
@@ -200,7 +205,14 @@ export function clearUsageCache() {
 export function clearUsageCacheForProviders(providers: Iterable<UsageProvider>) {
   const affectedProviders = new Set(providers);
   logger.info("usage", `Cache cleared for providers: ${[...affectedProviders].join(", ")}`);
-  invalidateMatchingUsageCache(({ provider }) => affectedProviders.has(provider));
+  // A subset scope such as `claude+cursor+kimi` is affected when any of its
+  // members is; `all` keeps its exact-membership rule.
+  invalidateMatchingUsageCache(
+    ({ provider }) =>
+      affectedProviders.has(provider) ||
+      (provider !== ALL_USAGE_PROVIDER_ID &&
+        usageScopeProviders(provider).some((member) => affectedProviders.has(member))),
+  );
 }
 
 export function seedUsageCache(

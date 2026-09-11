@@ -613,3 +613,27 @@ describe("All-tab scope", () => {
     });
   });
 });
+
+describe("subset scope cache invalidation", () => {
+  it("drops a subset entry when one of its providers is cleared", async () => {
+    const { settings } = await import("./settings.js");
+    const { createDefaultHeaderTabs } = await import("../providerMetadata.js");
+    const tabs = createDefaultHeaderTabs();
+    tabs.codex = { ...tabs.codex, enabled: false };
+    settings.update((current) => ({ ...current, headerTabs: tabs }));
+    const { fetchData, seedUsageCache, clearUsageCacheForProviders, usageData } =
+      await loadUsageModule();
+
+    // Warm entry for the All tab's scope is served synchronously.
+    seedUsageCache("claude+cursor+kimi", "day", 0, makePayload({ total_cost: 9 }));
+    mockInvoke.mockReturnValueOnce(deferred<UsagePayload>().promise);
+    void fetchData("all", "day", 0);
+    expect(get(usageData)?.total_cost).toBe(9);
+
+    // Clearing one member drops the subset entry: the next fetch is cold.
+    clearUsageCacheForProviders(["claude"]);
+    mockInvoke.mockReturnValueOnce(deferred<UsagePayload>().promise);
+    void fetchData("all", "day", 0);
+    expect(get(usageData)?.total_cost).not.toBe(9);
+  });
+});

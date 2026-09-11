@@ -252,11 +252,18 @@ export function enabledIntegrationIds(headerTabs: HeaderTabs): UsageProvider[] {
  * joined by `+`. An empty set (which the settings UI prevents) falls back to
  * `all` rather than sending an unparseable scope. */
 export function usageScopeForAll(headerTabs: HeaderTabs): UsageProvider {
+  const ids = effectiveIntegrationIds(headerTabs);
+  if (ids.length === USAGE_INTEGRATION_DEFINITIONS.length) return ALL_USAGE_PROVIDER_ID;
+  return ids.join(USAGE_SCOPE_SEPARATOR);
+}
+
+/** The integrations the All view and the tray actually cover. The settings UI
+ * lets every integration tab be disabled while the All tab stays on; the All
+ * view never shows nothing, so that state means every integration. Use this,
+ * not `enabledIntegrationIds`, wherever the set is handed to the backend. */
+export function effectiveIntegrationIds(headerTabs: HeaderTabs): UsageProvider[] {
   const enabled = enabledIntegrationIds(headerTabs);
-  if (enabled.length === 0 || enabled.length === USAGE_INTEGRATION_DEFINITIONS.length) {
-    return ALL_USAGE_PROVIDER_ID;
-  }
-  return enabled.join(USAGE_SCOPE_SEPARATOR);
+  return enabled.length === 0 ? USAGE_INTEGRATION_DEFINITIONS.map((definition) => definition.id) : enabled;
 }
 
 /** Map a tab id to the backend scope: only the All tab is rewritten. */

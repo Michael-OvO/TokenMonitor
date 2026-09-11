@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import { isRateLimitMissingMetadataError } from "./providerMetadata.js";
+import {
+  createDefaultHeaderTabs,
+  effectiveIntegrationIds,
+  enabledIntegrationIds,
+  RATE_LIMIT_PROVIDER_ORDER,
+  rateLimitProvidersForScope,
+  resolveUsageScope,
+  usageScopeForAll,
+  usageScopeProviders,
+} from "./providerMetadata.js";
+import type { HeaderTabs } from "./types/index.js";
 
 describe("isRateLimitMissingMetadataError (kimi)", () => {
   it("treats an expired CLI sign-in as missing metadata, not a hard error", () => {
@@ -25,16 +36,6 @@ describe("isRateLimitMissingMetadataError (kimi)", () => {
   });
 });
 
-import {
-  createDefaultHeaderTabs,
-  enabledIntegrationIds,
-  RATE_LIMIT_PROVIDER_ORDER,
-  rateLimitProvidersForScope,
-  resolveUsageScope,
-  usageScopeForAll,
-  usageScopeProviders,
-} from "./providerMetadata.js";
-import type { HeaderTabs } from "./types/index.js";
 
 function tabsWithDisabled(disabled: string[] = []): HeaderTabs {
   const tabs = createDefaultHeaderTabs();
@@ -54,6 +55,14 @@ describe("usage scope for the All tab", () => {
   it("joins the enabled integrations in canonical order", () => {
     expect(usageScopeForAll(tabsWithDisabled(["codex"]))).toBe("claude+cursor+kimi");
     expect(enabledIntegrationIds(tabsWithDisabled(["cursor", "codex"]))).toEqual(["claude", "kimi"]);
+  });
+
+  it("treats no enabled integration as every integration", () => {
+    const none = tabsWithDisabled(["claude", "codex", "cursor", "kimi"]);
+    expect(enabledIntegrationIds(none)).toEqual([]);
+    expect(effectiveIntegrationIds(none)).toEqual(["claude", "codex", "cursor", "kimi"]);
+    expect(usageScopeForAll(none)).toBe("all");
+    expect(effectiveIntegrationIds(tabsWithDisabled(["codex"]))).toEqual(["claude", "cursor", "kimi"]);
   });
 
   it("collapses to the single id when only one integration is enabled", () => {
