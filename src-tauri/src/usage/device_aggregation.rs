@@ -3,7 +3,9 @@ use chrono::Timelike;
 use crate::commands::AppState;
 use crate::models::{ChartBucket, ChartSegment, DeviceModelSummary, DeviceSummary};
 use crate::usage::archive::ArchiveManager;
-use crate::usage::integrations::{provider_matches_model, ALL_USAGE_INTEGRATIONS_ID};
+use crate::usage::integrations::{
+    provider_matches_model, UsageIntegrationId, UsageIntegrationSelection,
+};
 use crate::usage::ssh_remote::{CompactUsageRecord, SshHostConfig};
 
 pub(crate) fn parse_remote_ts(ts: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
@@ -18,8 +20,16 @@ fn parse_remote_ts_to_local_date(ts: &str) -> chrono::NaiveDate {
         .unwrap_or(chrono::NaiveDate::MIN)
 }
 
+/// Remote SSH records only ever carry Claude and Codex usage, so a scope
+/// includes them exactly when it contains one of those integrations.
 pub(crate) fn provider_includes_remote_ssh_usage(provider: &str) -> bool {
-    matches!(provider, ALL_USAGE_INTEGRATIONS_ID | "claude" | "codex")
+    match UsageIntegrationSelection::parse(provider) {
+        Some(selection) => {
+            selection.contains(UsageIntegrationId::Claude)
+                || selection.contains(UsageIntegrationId::Codex)
+        }
+        None => false,
+    }
 }
 
 pub(crate) fn compact_record_matches_provider(record: &CompactUsageRecord, provider: &str) -> bool {
@@ -1553,5 +1563,21 @@ mod tests {
             summary_miss.total_cost == 0.0,
             "record should be excluded when local date is outside the range"
         );
+    }
+
+    #[test]
+    fn remote_ssh_usage_gate_follows_subset_membership() {
+        // Existing answers.
+        assert!(provider_includes_remote_ssh_usage("all"));
+        assert!(provider_includes_remote_ssh_usage("claude"));
+        assert!(provider_includes_remote_ssh_usage("codex"));
+        assert!(!provider_includes_remote_ssh_usage("cursor"));
+        assert!(!provider_includes_remote_ssh_usage("kimi"));
+        assert!(!provider_includes_remote_ssh_usage("gemini"));
+        // Subsets: remote records are Claude/Codex only, so include them
+        // exactly when one of those two is in the scope.
+        assert!(provider_includes_remote_ssh_usage("codex+kimi"));
+        assert!(provider_includes_remote_ssh_usage("claude+cursor"));
+        assert!(!provider_includes_remote_ssh_usage("cursor+kimi"));
     }
 }
