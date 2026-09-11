@@ -1,6 +1,7 @@
 import { writable, get } from "svelte/store";
 import { invoke } from "@tauri-apps/api/core";
-import { DEFAULT_USAGE_PROVIDER } from "../providerMetadata.js";
+import { DEFAULT_USAGE_PROVIDER, resolveUsageScope } from "../providerMetadata.js";
+import { settings } from "./settings.js";
 import type {
   UsagePayload,
   UsagePeriod,
@@ -95,6 +96,14 @@ const fetchInFlight = new Map<string, Promise<UsagePayload>>();
 
 function cacheKey(provider: string, period: string, offset: number = 0) {
   return `${provider}:${period}:${offset}`;
+}
+
+/** The scope the backend should serve for a tab. The All tab maps to the
+ * enabled Header Tabs (see `usageScopeForAll`); every other tab is itself.
+ * Resolved here, at the single choke point, so the cache key and the IPC
+ * argument always agree and toggling a tab is simply a different key. */
+function backendScope(provider: UsageProvider): UsageProvider {
+  return resolveUsageScope(provider, get(settings).headerTabs);
 }
 
 type CacheEntryScope = {
@@ -278,7 +287,8 @@ export async function fetchData(
 ) {
   const requestId = ++currentRequestId;
   const cacheEpoch = currentCacheEpoch;
-  const key = cacheKey(provider, period, offset);
+  const scope = backendScope(provider);
+  const key = cacheKey(scope, period, offset);
   const ctx: FetchCtx = { provider, period, offset, requestId, cacheKey: key };
   logger.debug("usage", `Fetch: ${provider}/${period} offset=${offset}`);
   logResizeDebug("usage:fetch-start", { ...ctx, hadFrontendCache: payloadCache.has(key) });
@@ -292,7 +302,7 @@ export async function fetchData(
   // the cold path below, re-showing the spinner over already-loaded data
   // ("loading finishes, then loads again").
   if (opts.silent) {
-    requestUsagePayload(provider, period, offset)
+    requestUsagePayload(scope, period, offset)
       .then((fresh: UsagePayload) => {
         logPayloadWarning(ctx, fresh, "silent-refresh");
         cachePayload(key, fresh, cacheEpoch);
@@ -315,7 +325,7 @@ export async function fetchData(
     logger.debug("usage", `Cache hit: ${key}`);
     logResizeDebug("usage:frontend-cache-hit", { ...ctx, cacheAgeMs: Date.now() - cached.at });
     // Silent background refresh — no loading indicator
-    requestUsagePayload(provider, period, offset)
+    requestUsagePayload(scope, period, offset)
       .then((fresh: UsagePayload) => {
         logPayloadWarning(ctx, fresh, "background-refresh");
         cachePayload(key, fresh, cacheEpoch);
@@ -340,7 +350,7 @@ export async function fetchData(
   try {
     let pending = fetchInFlight.get(key);
     if (!pending) {
-      pending = requestUsagePayload(provider, period, offset).finally(() => {
+      pending = requestUsagePayload(scope, period, offset).finally(() => {
         fetchInFlight.delete(key);
       });
       fetchInFlight.set(key, pending);
@@ -375,9 +385,10 @@ export function warmCache(
   period: UsagePeriod,
   offset: number = 0,
 ) {
-  const key = cacheKey(provider, period, offset);
+  const scope = backendScope(provider);
+  const key = cacheKey(scope, period, offset);
   const cacheEpoch = currentCacheEpoch;
-  requestUsagePayload(provider, period, offset)
+  requestUsagePayload(scope, period, offset)
     .then((data: UsagePayload) => {
       logPayloadWarning({ provider, period, offset, cacheKey: key }, data, "warm-cache");
       cachePayload(key, data, cacheEpoch);
