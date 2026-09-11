@@ -14,7 +14,9 @@ pub use tray::sync_tray_title;
 
 use crate::models::*;
 use crate::statusline::windows::ClaudePlanTier;
-use crate::usage::integrations::UsageIntegrationSelection;
+use crate::usage::integrations::{
+    all_usage_integrations, UsageIntegrationId, UsageIntegrationSelection,
+};
 use crate::usage::parser::{UsageParser, UsageQueryDebugReport};
 use crate::usage::payload_disk_cache::PayloadDiskCache;
 use crate::usage::ssh_remote::{SshCacheManager, SshHostConfig};
@@ -62,6 +64,11 @@ pub struct AppState {
     /// Runtime state for the JSONL auto-export (once-per-session full-sync flag
     /// + per-source append cursors). Not persisted; resets on launch.
     pub auto_export_runtime: Arc<RwLock<usage_io::AutoExportRuntime>>,
+    /// Integrations whose usage counts toward the menu-bar cost. Mirrors the
+    /// enabled Header Tabs: pushed by the frontend at bootstrap and on every
+    /// change through `set_enabled_integrations`. A std lock because the
+    /// reader (`current_daily_total_cost`) is synchronous.
+    pub enabled_integrations: Arc<std::sync::RwLock<Vec<UsageIntegrationId>>>,
 }
 
 impl AppState {
@@ -86,6 +93,9 @@ impl AppState {
             payload_disk_cache: Arc::new(RwLock::new(None)),
             auto_export: Arc::new(RwLock::new(usage_io::AutoExportConfig::default())),
             auto_export_runtime: Arc::new(RwLock::new(usage_io::AutoExportRuntime::default())),
+            enabled_integrations: Arc::new(std::sync::RwLock::new(
+                all_usage_integrations().to_vec(),
+            )),
         }
     }
 

@@ -1,7 +1,7 @@
 use super::usage_query::get_provider_data;
 use super::AppState;
 use crate::models::*;
-use crate::usage::integrations::all_usage_integrations;
+use crate::usage::integrations::UsageIntegrationId;
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 #[cfg(target_os = "macos")]
@@ -232,7 +232,12 @@ fn merge_tray_utilization(current: TrayUtilization, patch: TrayUtilization) -> T
 }
 
 fn current_daily_total_cost(state: &AppState) -> f64 {
-    all_usage_integrations()
+    let enabled = state
+        .enabled_integrations
+        .read()
+        .map(|ids| ids.clone())
+        .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+    enabled
         .iter()
         .map(|integration_id| {
             get_provider_data(&state.parser, integration_id.as_str(), "day", 0)
@@ -442,6 +447,48 @@ pub async fn set_tray_config(
     );
     emit_status_widget_updated(&app);
 
+    Ok(())
+}
+
+/// Validate the ids the frontend sends for the enabled Header Tabs. Order is
+/// preserved, duplicates dropped; an empty list is rejected because the
+/// settings UI never lets the last tab be disabled.
+pub(crate) fn parse_enabled_integrations(
+    ids: &[String],
+) -> Result<Vec<UsageIntegrationId>, String> {
+    let mut parsed = Vec::new();
+    for id in ids {
+        let integration = UsageIntegrationId::parse(id)
+            .ok_or_else(|| format!("Unknown usage integration: {id}"))?;
+        if !parsed.contains(&integration) {
+            parsed.push(integration);
+        }
+    }
+    if parsed.is_empty() {
+        return Err(String::from(
+            "At least one usage integration must stay enabled",
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Mirror of Settings → Header Tabs: only these integrations count toward
+/// the menu-bar cost. Resyncs the tray title immediately.
+#[tauri::command]
+pub async fn set_enabled_integrations(
+    ids: Vec<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let parsed = parse_enabled_integrations(&ids)?;
+    {
+        let mut current = state
+            .enabled_integrations
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = parsed;
+    }
+    sync_tray_title(&app, &state).await;
     Ok(())
 }
 
@@ -757,5 +804,69 @@ mod tests {
             primary_window_utilization("codex", Some(&rate_limits)),
             Some(5.0)
         );
+    }
+
+    #[test]
+    fn parse_enabled_integrations_validates_and_dedupes() {
+        assert!(parse_enabled_integrations(&[]).is_err());
+        assert!(parse_enabled_integrations(&["gemini".to_string()]).is_err());
+        assert_eq!(
+            parse_enabled_integrations(&[
+                "codex".to_string(),
+                "codex".to_string(),
+                "claude".to_string()
+            ])
+            .unwrap(),
+            vec![UsageIntegrationId::Codex, UsageIntegrationId::Claude]
+        );
+    }
+
+    #[test]
+    fn current_daily_total_cost_sums_only_enabled_integrations() {
+        use crate::usage::parser::UsageParser;
+        use std::sync::Arc;
+        use tempfile::TempDir;
+
+        let claude_dir = TempDir::new().unwrap();
+        let codex_dir = TempDir::new().unwrap();
+        let now = chrono::Local::now();
+        let ts = now.to_rfc3339();
+
+        std::fs::write(
+            claude_dir.path().join("session.jsonl"),
+            format!(
+                r#"{{"type":"assistant","timestamp":"{ts}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":1000,"output_tokens":500}},"stop_reason":"end_turn"}}}}"#
+            ),
+        )
+        .unwrap();
+        let codex_day_dir = codex_dir
+            .path()
+            .join(now.format("%Y").to_string())
+            .join(now.format("%m").to_string())
+            .join(now.format("%d").to_string());
+        std::fs::create_dir_all(&codex_day_dir).unwrap();
+        std::fs::write(
+            codex_day_dir.join("session.jsonl"),
+            format!(
+                "{{\"type\":\"turn_context\",\"payload\":{{\"cwd\":\"/tmp/demo\",\"model\":\"gpt-5-codex\"}}}}\n{{\"type\":\"event_msg\",\"timestamp\":\"{ts}\",\"payload\":{{\"type\":\"token_count\",\"info\":{{\"last_token_usage\":{{\"input_tokens\":800,\"output_tokens\":400,\"reasoning_output_tokens\":0,\"cached_input_tokens\":0}}}}}}}}"
+            ),
+        )
+        .unwrap();
+
+        let mut state = AppState::new();
+        state.parser = Arc::new(UsageParser::with_dirs(
+            claude_dir.path().to_path_buf(),
+            codex_dir.path().to_path_buf(),
+        ));
+
+        let everything = current_daily_total_cost(&state);
+        let claude_only = get_provider_data(&state.parser, "claude", "day", 0)
+            .unwrap()
+            .total_cost;
+        assert!(claude_only > 0.0, "fixture must produce Claude cost today");
+        assert!(everything > claude_only, "fixture must include Codex cost");
+
+        *state.enabled_integrations.write().unwrap() = vec![UsageIntegrationId::Claude];
+        assert!((current_daily_total_cost(&state) - claude_only).abs() < 1e-9);
     }
 }
