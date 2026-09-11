@@ -42,7 +42,8 @@
     align-items: center;
     justify-content: center;
     gap: 12px;
-    padding: 4px 12px 0;
+    /* Breathing room between the period tabs and the date/year label. */
+    padding: 10px 12px 0;
     animation: fadeUp var(--t-slow) var(--ease-out) both .05s;
   }
   .arrow {
