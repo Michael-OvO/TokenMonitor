@@ -588,7 +588,7 @@ pub(crate) async fn get_usage_data_inner(
         _ipc_t0.elapsed()
     );
 
-    let mut payload = match selection {
+    let mut payload = match &selection {
         UsageIntegrationSelection::Single(integration_id) => {
             let mut payload = get_provider_data(parser, provider, period, offset)?;
             payload.provider_detected =
@@ -611,7 +611,10 @@ pub(crate) async fn get_usage_data_inner(
 
             finalize_usage_payload(state, provider, period, offset, payload).await
         }
-        UsageIntegrationSelection::All => {
+        UsageIntegrationSelection::All | UsageIntegrationSelection::Subset(_) => {
+            // Task 3 replaces this arm to iterate `selection.integration_ids()`
+            // instead of every integration; until then a subset scope here
+            // resolves the same as `all`.
             let bounds = resolve_period_bounds(period, offset)?;
             let mut merged: Option<UsagePayload> = None;
             let mut queries = Vec::new();

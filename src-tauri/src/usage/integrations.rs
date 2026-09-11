@@ -58,35 +58,76 @@ impl UsageIntegrationId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Separator between integration ids in a multi-integration scope string,
+/// e.g. `claude+kimi`. Mirrored by `USAGE_SCOPE_SEPARATOR` in
+/// `src/lib/providerMetadata.ts`.
+pub const USAGE_SELECTION_SEPARATOR: char = '+';
+
+/// Which integrations a usage request covers. Parsed from the `provider`
+/// string the frontend sends: `all`, one id, or ids joined by `+`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageIntegrationSelection {
     Single(UsageIntegrationId),
+    /// Two or more, but not all, integrations in canonical order with no
+    /// duplicates. Built only through `parse`, which normalises the input.
+    Subset(Vec<UsageIntegrationId>),
     All,
 }
 
 impl UsageIntegrationSelection {
     pub fn parse(value: &str) -> Option<Self> {
         if value == ALL_USAGE_INTEGRATIONS_ID {
-            Some(Self::All)
-        } else {
-            UsageIntegrationId::parse(value).map(Self::Single)
+            return Some(Self::All);
+        }
+        let mut ids: Vec<UsageIntegrationId> = Vec::new();
+        for part in value.split(USAGE_SELECTION_SEPARATOR) {
+            let id = UsageIntegrationId::parse(part)?;
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids.sort_by_key(|id| ALL_USAGE_INTEGRATIONS.iter().position(|c| c == id));
+        match ids.len() {
+            0 => None,
+            1 => Some(Self::Single(ids[0])),
+            n if n == ALL_USAGE_INTEGRATIONS.len() => Some(Self::All),
+            _ => Some(Self::Subset(ids)),
         }
     }
 
-    pub fn integration_ids(self) -> &'static [UsageIntegrationId] {
+    pub fn integration_ids(&self) -> Vec<UsageIntegrationId> {
         match self {
-            Self::Single(id) => match id {
-                UsageIntegrationId::Claude => &ALL_USAGE_INTEGRATIONS[..1],
-                UsageIntegrationId::Codex => &ALL_USAGE_INTEGRATIONS[1..2],
-                UsageIntegrationId::Cursor => &ALL_USAGE_INTEGRATIONS[2..3],
-                UsageIntegrationId::Kimi => &ALL_USAGE_INTEGRATIONS[3..4],
-            },
-            Self::All => &ALL_USAGE_INTEGRATIONS,
+            Self::Single(id) => vec![*id],
+            Self::Subset(ids) => ids.clone(),
+            Self::All => ALL_USAGE_INTEGRATIONS.to_vec(),
         }
     }
 
-    pub fn includes_cursor(self) -> bool {
-        matches!(self, Self::All | Self::Single(UsageIntegrationId::Cursor))
+    pub fn contains(&self, id: UsageIntegrationId) -> bool {
+        match self {
+            Self::Single(single) => *single == id,
+            Self::Subset(ids) => ids.contains(&id),
+            Self::All => true,
+        }
+    }
+
+    pub fn includes_cursor(&self) -> bool {
+        self.contains(UsageIntegrationId::Cursor)
+    }
+}
+
+impl std::fmt::Display for UsageIntegrationSelection {
+    /// The canonical scope string: `all`, a single id, or sorted ids joined
+    /// by `+`. Every cache key and debug report uses this spelling.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::All => f.write_str(ALL_USAGE_INTEGRATIONS_ID),
+            Self::Single(id) => f.write_str(id.as_str()),
+            Self::Subset(ids) => {
+                let parts: Vec<&str> = ids.iter().map(|id| id.as_str()).collect();
+                f.write_str(&parts.join(&USAGE_SELECTION_SEPARATOR.to_string()))
+            }
+        }
     }
 }
 
@@ -106,13 +147,30 @@ pub fn all_usage_integrations() -> &'static [UsageIntegrationId] {
 /// multiplexes composer/gpt/claude/etc. — all rows from the Cursor
 /// integration conceptually belong to the Cursor tab.
 pub fn provider_matches_model(provider: &str, model: &str) -> bool {
+    if provider == ALL_USAGE_INTEGRATIONS_ID {
+        return true;
+    }
+    // Fast path for the single-id strings the per-record device filters use.
+    if let Some(id) = UsageIntegrationId::parse(provider) {
+        return integration_matches_model(id, model);
+    }
+    match UsageIntegrationSelection::parse(provider) {
+        Some(selection) => selection
+            .integration_ids()
+            .into_iter()
+            .any(|id| integration_matches_model(id, model)),
+        // Unknown provider strings pass through, as before.
+        None => true,
+    }
+}
+
+fn integration_matches_model(id: UsageIntegrationId, model: &str) -> bool {
     use crate::models::{detect_model_family, ModelFamily};
-    match provider {
-        ALL_USAGE_INTEGRATIONS_ID => true,
-        "claude" => detect_model_family(model) == ModelFamily::Anthropic,
-        "codex" => detect_model_family(model) == ModelFamily::OpenAI,
-        "kimi" => detect_model_family(model) == ModelFamily::Moonshot,
-        _ => true,
+    match id {
+        UsageIntegrationId::Claude => detect_model_family(model) == ModelFamily::Anthropic,
+        UsageIntegrationId::Codex => detect_model_family(model) == ModelFamily::OpenAI,
+        UsageIntegrationId::Kimi => detect_model_family(model) == ModelFamily::Moonshot,
+        UsageIntegrationId::Cursor => true,
     }
 }
 
@@ -332,5 +390,85 @@ mod tests {
     #[test]
     fn usage_integration_selection_rejects_unknown_values() {
         assert_eq!(UsageIntegrationSelection::parse("gemini"), None);
+    }
+
+    #[test]
+    fn usage_integration_selection_parses_subsets_in_canonical_order() {
+        assert_eq!(
+            UsageIntegrationSelection::parse("kimi+claude"),
+            Some(UsageIntegrationSelection::Subset(vec![
+                UsageIntegrationId::Claude,
+                UsageIntegrationId::Kimi,
+            ]))
+        );
+        // Duplicates collapse; a single survivor is a Single, not a Subset.
+        assert_eq!(
+            UsageIntegrationSelection::parse("codex+codex"),
+            Some(UsageIntegrationSelection::Single(UsageIntegrationId::Codex))
+        );
+        // Every integration spelled out is just `all`.
+        assert_eq!(
+            UsageIntegrationSelection::parse("kimi+cursor+codex+claude"),
+            Some(UsageIntegrationSelection::All)
+        );
+    }
+
+    #[test]
+    fn usage_integration_selection_rejects_malformed_subsets() {
+        assert_eq!(UsageIntegrationSelection::parse(""), None);
+        assert_eq!(UsageIntegrationSelection::parse("claude+"), None);
+        assert_eq!(UsageIntegrationSelection::parse("claude+gemini"), None);
+        assert_eq!(UsageIntegrationSelection::parse("claude+all"), None);
+    }
+
+    #[test]
+    fn usage_integration_selection_round_trips_through_display() {
+        for spelling in ["all", "claude", "kimi+claude", "cursor+codex+kimi"] {
+            let parsed = UsageIntegrationSelection::parse(spelling).unwrap();
+            let canonical = parsed.to_string();
+            assert_eq!(UsageIntegrationSelection::parse(&canonical), Some(parsed));
+        }
+        assert_eq!(
+            UsageIntegrationSelection::parse("kimi+claude")
+                .unwrap()
+                .to_string(),
+            "claude+kimi"
+        );
+        assert_eq!(
+            UsageIntegrationSelection::parse("all").unwrap().to_string(),
+            "all"
+        );
+    }
+
+    #[test]
+    fn usage_integration_selection_membership() {
+        let subset = UsageIntegrationSelection::parse("claude+kimi").unwrap();
+        assert_eq!(
+            subset.integration_ids(),
+            vec![UsageIntegrationId::Claude, UsageIntegrationId::Kimi]
+        );
+        assert!(subset.contains(UsageIntegrationId::Kimi));
+        assert!(!subset.contains(UsageIntegrationId::Codex));
+        assert!(!subset.includes_cursor());
+        assert!(UsageIntegrationSelection::parse("cursor+kimi")
+            .unwrap()
+            .includes_cursor());
+        assert!(UsageIntegrationSelection::All.includes_cursor());
+        assert_eq!(
+            UsageIntegrationSelection::All.integration_ids(),
+            all_usage_integrations().to_vec()
+        );
+    }
+
+    #[test]
+    fn subset_matches_models_of_any_member() {
+        assert!(provider_matches_model("claude+kimi", "kimi-for-coding"));
+        assert!(provider_matches_model("claude+kimi", "claude-sonnet-4-5"));
+        assert!(!provider_matches_model("claude+kimi", "gpt-5-codex"));
+        // Cursor passes every model through, as it does for the single tab.
+        assert!(provider_matches_model("cursor+kimi", "gpt-5-codex"));
+        // Existing single-tab and all-tab answers are unchanged.
+        assert!(provider_matches_model("all", "gpt-5-codex"));
+        assert!(!provider_matches_model("claude", "gpt-5-codex"));
     }
 }
