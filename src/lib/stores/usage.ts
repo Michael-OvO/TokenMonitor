@@ -12,7 +12,7 @@ import type {
   UsagePeriod,
   UsageProvider,
 } from "../types/index.js";
-import { formatDebugError, isResizeDebugEnabled, logResizeDebug } from "../uiStability.js";
+import { formatDebugError, isResizeDebugEnabled, logResizeDebug } from "../window/uiStability.js";
 import { logger } from "../utils/logger.js";
 
 export const activeProvider = writable<UsageProvider>(DEFAULT_USAGE_PROVIDER);

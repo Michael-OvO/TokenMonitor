@@ -4,14 +4,14 @@
   import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
   import { currentMonitor } from "@tauri-apps/api/window";
   import { onMount, tick } from "svelte";
-  import { isLinux } from "../utils/platform.js";
-  import { logger } from "../utils/logger.js";
+  import { isLinux } from "../../utils/platform.js";
+  import { logger } from "../../utils/logger.js";
   import type {
     FloatBallExpandDirection,
     RateLimitProviderId,
     StatusWidgetSummary,
     TrayConfig,
-  } from "../types/index.js";
+  } from "../../types/index.js";
   import {
     detectScreenToPhysicalScale,
     getPhysicalWindowPositionFromPointer,

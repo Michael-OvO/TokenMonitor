@@ -22,8 +22,8 @@ fn main() {
         && target_env == "msvc"
     {
         let manifest = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
-            .join("tests.manifest");
-        println!("cargo:rerun-if-changed=tests.manifest");
+            .join("resources/windows-test.manifest");
+        println!("cargo:rerun-if-changed=resources/windows-test.manifest");
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
     }

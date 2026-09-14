@@ -5,15 +5,15 @@
     settings,
     updateSetting,
     type Settings as SettingsType,
-  } from "../stores/settings.js";
+  } from "../../stores/settings.js";
   import {
     getUsageProviderLogoKind,
     getUsageProviderTitle,
     USAGE_PROVIDER_ORDER,
     type UsageProviderLogoKind,
-  } from "../providerMetadata.js";
-  import type { HeaderTabConfig, UsageProvider } from "../types/index.js";
-  import Toggle from "./Toggle.svelte";
+  } from "../../providerMetadata.js";
+  import type { HeaderTabConfig, UsageProvider } from "../../types/index.js";
+  import Toggle from "../Toggle.svelte";
 
   let current = $derived($settings as SettingsType);
 

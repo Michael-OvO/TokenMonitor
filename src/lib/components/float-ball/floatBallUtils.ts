@@ -1,4 +1,4 @@
-import type { FloatBallExpandDirection } from "../types/index.js";
+import type { FloatBallExpandDirection } from "../../types/index.js";
 
 // ── Constants ──────────────────────────────────────────────────────────
 

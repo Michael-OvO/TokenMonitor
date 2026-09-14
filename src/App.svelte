@@ -51,8 +51,8 @@
   } from "./lib/stores/settings.js";
   import { initializeRuntimeFromSettings } from "./lib/bootstrap.js";
   import { syncTrayConfig } from "./lib/tray/sync.js";
-  import { DEFAULT_MAX_WINDOW_HEIGHT } from "./lib/windowSizing.js";
-  import { createResizeOrchestrator, type ResizeOrchestrator } from "./lib/resizeOrchestrator.js";
+  import { DEFAULT_MAX_WINDOW_HEIGHT } from "./lib/window/sizing.js";
+  import { createResizeOrchestrator, type ResizeOrchestrator } from "./lib/window/resizeOrchestrator.js";
   import { syncNativeWindowSurface } from "./lib/window/appearance.js";
   import {
     captureResizeDebugSnapshot,
@@ -60,7 +60,7 @@
     initResizeDebug,
     isResizeDebugEnabled,
     logResizeDebug,
-  } from "./lib/uiStability.js";
+  } from "./lib/window/uiStability.js";
   import { setupAppEventListeners } from "./lib/appEventListeners.js";
   import { isMacOS, isWindows } from "./lib/utils/platform.js";
   import {
@@ -78,7 +78,7 @@
   import Footer from "./lib/components/Footer.svelte";
   import SetupScreen from "./lib/components/SetupScreen.svelte";
   import SplashScreen from "./lib/components/SplashScreen.svelte";
-  import Settings from "./lib/components/Settings.svelte";
+  import Settings from "./lib/components/settings/Settings.svelte";
   import Calendar from "./lib/components/Calendar.svelte";
   import DateNav from "./lib/components/DateNav.svelte";
   import DevicesView from "./lib/components/DevicesView.svelte";

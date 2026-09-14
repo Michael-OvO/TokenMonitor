@@ -3,25 +3,25 @@
   import { onMount } from "svelte";
   import { get } from "svelte/store";
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
+  import { settings, updateSetting, type Settings as SettingsType } from "../../stores/settings.js";
   import {
     clearUsageCache,
     fetchData,
     activeProvider,
     activePeriod,
     activeOffset,
-  } from "../stores/usage.js";
-  import { setRemoteDeviceIncludeFlag } from "../views/deviceStats.js";
-  import { deviceDisplayNames, deviceIdentityKey, formatCost, formatTimeAgo } from "../utils/format.js";
-  import { logger } from "../utils/logger.js";
-  import ToggleSwitch from "./ToggleSwitch.svelte";
+  } from "../../stores/usage.js";
+  import { setRemoteDeviceIncludeFlag } from "../../views/deviceStats.js";
+  import { deviceDisplayNames, deviceIdentityKey, formatCost, formatTimeAgo } from "../../utils/format.js";
+  import { logger } from "../../utils/logger.js";
+  import ToggleSwitch from "../ToggleSwitch.svelte";
   import type {
     DeviceUsagePayload,
     SshHostInfo,
     SshHostStatus,
     SshSyncResult,
     SshTestResult as SshTestResultType,
-  } from "../types/index.js";
+  } from "../../types/index.js";
 
   type ConfiguredSshHost = {
     alias: string;

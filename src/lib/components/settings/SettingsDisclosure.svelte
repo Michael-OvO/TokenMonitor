@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import { disclosureMotion } from "../utils/disclosureMotion.js";
+  import { disclosureMotion } from "../../utils/disclosureMotion.js";
 
   let { open, children }: { open: boolean; children: Snippet } = $props();
 </script>

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import FloatBall from "./lib/components/FloatBall.svelte";
+import FloatBall from "./lib/components/float-ball/FloatBall.svelte";
 import { mount } from "svelte";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { logger, type LogLevel } from "./lib/utils/logger.js";

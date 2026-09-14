@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createResizeOrchestrator } from "./resizeOrchestrator.js";
-import { WINDOW_WIDTH } from "./windowSizing.js";
+import { WINDOW_WIDTH } from "./sizing.js";
 
 type Deferred<T> = {
   promise: Promise<T>;

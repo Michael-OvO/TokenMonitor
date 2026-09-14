@@ -1,26 +1,26 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
-  import { rateLimitsData } from "../stores/rateLimits.js";
-  import { syncTrayConfig } from "../tray/sync.js";
-  import { formatTrayTitle } from "../tray/title.js";
-  import { usesFloatingStatusWidget } from "../utils/platform.js";
-  import { logger } from "../utils/logger.js";
+  import { settings, updateSetting, type Settings as SettingsType } from "../../stores/settings.js";
+  import { rateLimitsData } from "../../stores/rateLimits.js";
+  import { syncTrayConfig } from "../../tray/sync.js";
+  import { formatTrayTitle } from "../../tray/title.js";
+  import { usesFloatingStatusWidget } from "../../utils/platform.js";
+  import { logger } from "../../utils/logger.js";
   import {
     getRateLimitPrimaryWindowId,
     getUsageProviderBrandColor,
     getUsageProviderLabel,
     getUsageProviderTitle,
     RATE_LIMIT_PROVIDER_ORDER,
-  } from "../providerMetadata.js";
+  } from "../../providerMetadata.js";
   import type {
     BarDisplay,
     RateLimitProviderId,
     RateLimitsPayload,
     TrayConfig,
-  } from "../types/index.js";
-  import SegmentedControl from "./SegmentedControl.svelte";
-  import ToggleSwitch from "./ToggleSwitch.svelte";
+  } from "../../types/index.js";
+  import SegmentedControl from "../SegmentedControl.svelte";
+  import ToggleSwitch from "../ToggleSwitch.svelte";
 
   let current = $derived($settings as SettingsType);
 

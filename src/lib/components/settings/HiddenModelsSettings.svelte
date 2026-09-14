@@ -2,11 +2,11 @@
   import SettingsDisclosure from "./SettingsDisclosure.svelte";
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, updateSetting, type Settings as SettingsType } from "../stores/settings.js";
-  import { setAutoExportConfig } from "../stores/usageIo.js";
-  import { modelColor } from "../utils/format.js";
-  import type { KnownModel } from "../types/index.js";
-  import ToggleSwitch from "./ToggleSwitch.svelte";
+  import { settings, updateSetting, type Settings as SettingsType } from "../../stores/settings.js";
+  import { setAutoExportConfig } from "../../stores/usageIo.js";
+  import { modelColor } from "../../utils/format.js";
+  import type { KnownModel } from "../../types/index.js";
+  import ToggleSwitch from "../ToggleSwitch.svelte";
 
   let current = $derived($settings as SettingsType);
 

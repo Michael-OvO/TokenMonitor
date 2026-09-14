@@ -22,7 +22,7 @@ vi.mock("@tauri-apps/plugin-store", () => ({
   load: vi.fn(),
 }));
 
-vi.mock("../uiStability.js", () => ({
+vi.mock("../window/uiStability.js", () => ({
   isResizeDebugEnabled: () => false,
   logResizeDebug: vi.fn(),
   formatDebugError: (e: unknown) => ({ message: String(e) }),

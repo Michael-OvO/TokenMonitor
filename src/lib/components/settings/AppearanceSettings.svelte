@@ -6,17 +6,17 @@
     settings,
     updateSetting,
     type Settings as SettingsType,
-  } from "../stores/settings.js";
-  import { syncTrayConfig } from "../tray/sync.js";
+  } from "../../stores/settings.js";
+  import { syncTrayConfig } from "../../tray/sync.js";
   import {
     setNativeGlassEffect,
     syncNativeWindowSurface,
     syncNativeWindowTheme,
-  } from "../window/appearance.js";
-  import { isMacOS, isWindows } from "../utils/platform.js";
-  import { logger } from "../utils/logger.js";
-  import SegmentedControl from "./SegmentedControl.svelte";
-  import ToggleSwitch from "./ToggleSwitch.svelte";
+  } from "../../window/appearance.js";
+  import { isMacOS, isWindows } from "../../utils/platform.js";
+  import { logger } from "../../utils/logger.js";
+  import SegmentedControl from "../SegmentedControl.svelte";
+  import ToggleSwitch from "../ToggleSwitch.svelte";
 
   let current = $derived($settings as SettingsType);
 

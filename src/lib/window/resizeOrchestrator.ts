@@ -1,4 +1,4 @@
-import type { AccordionToggleDetail } from "./types/index.js";
+import type { AccordionToggleDetail } from "../types/index.js";
 import {
   DEFAULT_MAX_WINDOW_HEIGHT,
   MIN_WINDOW_HEIGHT,
@@ -13,7 +13,7 @@ import {
   resolveMonitorMaxWindowHeight,
   resolveFixedWindowHeight,
   resolveScrollThresholdHeight,
-} from "./windowSizing.js";
+} from "./sizing.js";
 
 /** Which edge of the native window stays put when its height changes. */
 export type WindowAnchorEdge = "top" | "bottom";

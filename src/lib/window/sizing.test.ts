@@ -15,7 +15,7 @@ import {
   SCROLL_THRESHOLD_CAP,
   resolveFixedWindowHeight,
   FIXED_HEIGHT_CAP,
-} from "./windowSizing.js";
+} from "./sizing.js";
 
 describe("measureTargetWindowHeight", () => {
   it("rounds content height up and adds the window padding", () => {
