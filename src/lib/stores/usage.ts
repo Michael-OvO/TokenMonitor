@@ -23,6 +23,8 @@ export const chartSegmentMode = writable<"model" | "device">("model");
 export const usageData = writable<UsagePayload | null>(null);
 export const isLoading = writable(false);
 export const isPlaceholderLoading = writable(false);
+/** Non-blocking hint when a silent/SWR refresh fails while stale data is still shown. */
+export const usageRefreshError = writable<string | null>(null);
 
 function emptyPayload(): UsagePayload {
   return {
@@ -162,6 +164,7 @@ function invalidateMatchingUsageCache(
   currentRequestId += 1;
   isLoading.set(false);
   isPlaceholderLoading.set(false);
+  usageRefreshError.set(null);
 }
 
 function requestUsagePayload(
@@ -188,8 +191,16 @@ function applyUsageDataIfCurrent(requestId: number, data: UsagePayload): boolean
       usageData.set(data);
     }
     isPlaceholderLoading.set(false);
+    usageRefreshError.set(null);
   }
   return appliedToUi;
+}
+
+function noteRefreshFailure(requestId: number, error: unknown, source: string) {
+  logger.error("usage", `${source} failed: ${formatDebugError(error).message}`);
+  if (requestId === currentRequestId) {
+    usageRefreshError.set("Couldn't refresh usage. Showing last known data.");
+  }
 }
 
 // Monotonically increasing request ID prevents stale responses from
@@ -304,8 +315,6 @@ export async function fetchData(
   const ctx: FetchCtx = { provider, period, offset, requestId, cacheKey: key };
   logger.debug("usage", `Fetch: ${provider}/${period} offset=${offset}`);
   logResizeDebug("usage:fetch-start", { ...ctx, hadFrontendCache: payloadCache.has(key) });
-  const _fetchT0 = performance.now();
-  console.log(`[PROFILE] fetchData:start provider=${provider} period=${period} offset=${offset}`);
 
   // ── Silent refresh: never show a loading state ──
   // Used by background `data-updated` and window-focus refreshes. Keeps the
@@ -322,6 +331,7 @@ export async function fetchData(
       })
       .catch((error) => {
         logResizeDebug("usage:silent-refresh-rejected", { ...ctx, error: formatDebugError(error) });
+        noteRefreshFailure(requestId, error, "Silent refresh");
       });
     return;
   }
@@ -346,6 +356,7 @@ export async function fetchData(
       })
       .catch((error) => {
         logResizeDebug("usage:background-refresh-rejected", { ...ctx, error: formatDebugError(error) });
+        noteRefreshFailure(requestId, error, "Background refresh");
       });
     return;
   }
@@ -374,17 +385,15 @@ export async function fetchData(
     await logUsageReadDebug("usage:fetch-resolved", {
       ...ctx, appliedToUi, fromPayloadCache: data.from_cache,
     });
-    console.log(`[PROFILE] fetchData:IPC-resolved = ${(performance.now() - _fetchT0).toFixed(1)}ms provider=${provider}`);
   } catch (e) {
-    logger.error("usage", `Fetch failed: provider=${provider} period=${period} offset=${offset} error=${formatDebugError(e)}`);
     logResizeDebug("usage:fetch-rejected", { ...ctx, error: formatDebugError(e) });
+    noteRefreshFailure(requestId, e, `Fetch provider=${provider} period=${period} offset=${offset}`);
   } finally {
     if (requestId === currentRequestId) {
       isLoading.set(false);
       isPlaceholderLoading.set(false);
     }
   }
-  console.log(`[PROFILE] fetchData:TOTAL = ${(performance.now() - _fetchT0).toFixed(1)}ms provider=${provider}`);
 }
 
 /**

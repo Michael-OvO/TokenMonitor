@@ -334,6 +334,9 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 6px 10px;
+    flex-wrap: wrap;
+    min-width: 0;
   }
   .row.border {
     border-bottom: 1px solid var(--border-subtle);
@@ -344,6 +347,8 @@
     transition: opacity 0.15s ease;
   }
   .label {
+    flex: 1 1 110px;
+    min-width: 0;
     font: 400 10px/1 'Inter', sans-serif;
     color: var(--t1);
   }

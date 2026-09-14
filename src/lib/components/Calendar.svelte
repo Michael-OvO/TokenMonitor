@@ -3,10 +3,9 @@
   import { settings } from "../stores/settings.js";
   import { activeProvider } from "../stores/usage.js";
   import { formatCost } from "../utils/format.js";
-  import { planTierCost } from "../utils/plans.js";
   import { intensityLevel, computeEarned, heatmapColor } from "../utils/calendar.js";
   import { rateLimitsData } from "../stores/rateLimits.js";
-  import { isRateLimitProvider, resolveUsageScope } from "../providerMetadata.js";
+  import { getUsageProviderPlanTierCost, isRateLimitProvider, resolveUsageScope } from "../providerMetadata.js";
   import { logger } from "../utils/logger.js";
   import type { MonthlyUsagePayload, RateLimitsPayload, UsageProvider } from "../types/index.js";
 
@@ -146,7 +145,7 @@
     return null;
   });
 
-  let detectedPlanCost = $derived(planTierCost(detectedPlanTier, provider));
+  let detectedPlanCost = $derived(getUsageProviderPlanTierCost(provider, detectedPlanTier));
 
   let earned = $derived(data ? computeEarned(data.total_cost, detectedPlanCost) : null);
 </script>

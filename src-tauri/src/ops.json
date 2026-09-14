@@ -1,0 +1,35 @@
+{
+  "_notes": "Vendor-facing values that go stale when Anthropic/OpenAI/Cursor/LiteLLM/Frankfurter change published numbers or hosts. Do NOT put UI sizes, CSS, HTTP status codes, array indices, window flags, loopback ports, or 5h-window math here.",
+  "claude_plan_budgets": {
+    "free": { "five_hour_tokens": 50000, "weekly_tokens": 1000000 },
+    "pro": { "five_hour_tokens": 200000, "weekly_tokens": 7000000 },
+    "max5x": { "five_hour_tokens": 1000000, "weekly_tokens": 35000000 },
+    "max20x": { "five_hour_tokens": 4000000, "weekly_tokens": 140000000 }
+  },
+  "plan_tier_costs_usd": {
+    "claude": {
+      "Pro": 20,
+      "Max 5x": 100,
+      "Max 20x": 200,
+      "Free": 0
+    },
+    "codex": {
+      "Plus": 20,
+      "Pro": 200,
+      "Free": 0
+    }
+  },
+  "urls": {
+    "anthropic_usage": "https://api.anthropic.com/api/oauth/usage",
+    "anthropic_account": "https://api.anthropic.com/api/oauth/account",
+    "cursor_official_api": "https://api.cursor.com",
+    "cursor_dashboard": "https://cursor.com",
+    "cursor_ide": "https://api2.cursor.sh",
+    "openrouter_models": "https://openrouter.ai/api/v1/models",
+    "litellm_prices": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
+    "frankfurter_latest": "https://api.frankfurter.dev/v1/latest?from=USD&to=EUR,GBP,JPY,CNY"
+  },
+  "ttls_secs": {
+    "litellm_cache": 604800
+  }
+}

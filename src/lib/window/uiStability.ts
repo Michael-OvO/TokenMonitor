@@ -19,11 +19,7 @@ export function shouldSkipResizeByJitter(
   return Math.abs(nextHeight - previousHeight) <= thresholdPx;
 }
 
-// ── Resize debug stubs ──────────────────────────────────────────────
-// These replace the deleted resizeDebug.ts module. The resize debug
-// overlay was removed during refactoring; these stubs keep callsites
-// compiling and allow debug logging to be re-enabled via localStorage.
-
+// Enable with localStorage.setItem("resize-debug", "1")
 let debugEnabled: boolean | null = null;
 
 export function initResizeDebug(): void {
@@ -43,12 +39,4 @@ export function logResizeDebug(type: string, details: Record<string, unknown>): 
 export function formatDebugError(error: unknown): { message: string } {
   if (error instanceof Error) return { message: error.message };
   return { message: String(error) };
-}
-
-export function captureResizeDebugSnapshot(
-  _reason: string,
-  _el: HTMLElement | null,
-  _meta: Record<string, unknown>,
-): Record<string, unknown> {
-  return {};
 }

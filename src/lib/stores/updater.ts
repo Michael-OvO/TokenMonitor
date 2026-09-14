@@ -50,7 +50,6 @@ type RustUpdaterState = {
   lastCheck: string | null;
   lastCheckError: string | null;
   skippedVersions: string[];
-  lastNotifiedVersion: string | null;
   autoCheckEnabled: boolean;
   progress: DownloadProgress | null;
   dismissedForSession: boolean;

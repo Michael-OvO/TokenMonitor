@@ -113,7 +113,7 @@ const USAGE_INTEGRATION_DEFINITIONS: UsageProviderDefinition[] = [
     rateLimits: {
       cacheFile: "rate-limits-cursor.json",
       minFetchIntervalMs: 300_000,
-      primaryWindowId: "auto_composer",
+      primaryWindowId: "first_party",
       utilizationLabelFormat: "percent_used",
       idleSummary: "No Cursor usage data available. Make sure Cursor IDE is signed in on this machine.",
     },

@@ -19,6 +19,40 @@
 - **Settings 折叠分组**：新增 `SettingsDisclosure`，按实测高度动画展开/收起（尊重 reduced-motion），Header Tabs / Models / Remote Devices / Tray 面板统一改用；Header Tabs 的 chip 改为带勾选标记的网格
 - **Footer 固定**：主界面底部操作栏改为 sticky，滚动时保持可见
 
+## v0.14.x — TzJ2006 fork releases (merged into main 2026-09)
+
+Releases cut on [TzJ2006/TokenMonitor](https://github.com/TzJ2006/TokenMonitor) between v0.13.1 and this merge. Kimi support, the sticky footer and the Settings disclosure animation from main are retained; the fork's Claude rate-limit design replaces the OAuth Keychain pipeline.
+
+### v0.14.2
+
+- Claude rate limits now come from `claude -p "/usage"`, so they no longer disappear for an hour after Anthropic's abuse guard trips.
+- Fixed the refresh loop ignoring its own cooldown, which kept re-arming that hour-long ban.
+- Removed the macOS Keychain permission flow for Claude — the credentials file is read directly, with no prompt.
+
+### v0.14.1
+
+- Reorganized frontend window utilities, cross-layer tests, and native test resources.
+- Removed the obsolete standalone profiler, retired no-op commands and settings, and removed the unused notification integration.
+- Refreshed repository documentation and ignore rules to match the current project.
+
+### v0.14.0
+
+- Added JSON usage import and export, including Cursor usage and synchronized SSH devices.
+- Added optional automatic export to a user-selected folder.
+- Improved remote-device synchronization progress, caching, and settings controls.
+- Reduced repeated log scanning with refresh-aware throttling and incremental cache invalidation.
+- Added payload disk caching for faster cold starts and cache warm-up controls.
+- Added selectable updater channels for the official project and compatible forks.
+- Improved onboarding, autostart feedback, FloatBall rate-limit controls, and Windows tray behavior.
+
+### v0.13.2 – v0.13.7
+
+- Repaired Cursor usage display and range-aware remote caching; added a capped window-height mode.
+- Fixed updater signing-key handling and allowed macOS updater artifacts without an Apple certificate.
+- Kept `Cargo.lock` in sync during releases; improved Windows popover positioning and resize behavior.
+- Added usage cache import and export, independent provider bars for FloatBall, and retired the Windows taskbar panel that could freeze the system tray.
+- Included Cursor and freshly synchronized SSH data in exports; throttled expensive usage-log scans to the refresh interval.
+
 ## v0.13.1 — Settings 重构 + SSH 搜索扩展 + FloatBall 修复
 
 ### UI

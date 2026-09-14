@@ -40,11 +40,7 @@ struct LiteLLMEntry {
     cache_creation_1h_cost: Option<f64>,
 }
 
-const LITELLM_URL: &str =
-    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
-
 const CACHE_FILENAME: &str = "pricing-cache.json";
-const CACHE_TTL_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 const PER_MTOK: f64 = 1_000_000.0;
 /// Sanity upper bound: reject per-million-token rates above $500.
 /// Current max is ~$75/Mtok (output) so this is 6x+ headroom.
@@ -62,14 +58,15 @@ fn now_epoch() -> u64 {
 }
 
 /// Check if the local cache needs refreshing (missing, corrupt, wrong version,
-/// or older than 7 days).
+/// or older than the LiteLLM TTL in `ops.json`).
 pub fn should_refresh(app_data_dir: &Path) -> bool {
     let path = cache_path(app_data_dir);
     match std::fs::read_to_string(&path) {
         Ok(content) => match serde_json::from_str::<PricingCache>(&content) {
             Ok(cache) => {
                 cache.version != CACHE_VERSION
-                    || now_epoch().saturating_sub(cache.fetched_at) > CACHE_TTL_SECS
+                    || now_epoch().saturating_sub(cache.fetched_at)
+                        > crate::ops::litellm_cache_ttl_secs()
             }
             Err(_) => true,
         },
@@ -97,7 +94,7 @@ pub fn load_cached(app_data_dir: &Path) -> Option<HashMap<String, DynamicModelRa
 ///
 /// Returns the parsed rates HashMap, or an error string.
 async fn fetch_litellm() -> Result<HashMap<String, DynamicModelRates>, String> {
-    let body = reqwest::get(LITELLM_URL)
+    let body = reqwest::get(crate::ops::litellm_prices_url())
         .await
         .map_err(|e| format!("LiteLLM HTTP fetch failed: {e}"))?
         .text()
@@ -397,9 +394,9 @@ mod tests {
         std::fs::write(cache_path(dir.path()), json).unwrap();
         assert!(!should_refresh(dir.path()));
 
-        // Write a stale cache (>7 days ago).
+        // Write a stale cache (older than the configured TTL).
         let old_cache = PricingCache {
-            fetched_at: now_epoch() - CACHE_TTL_SECS - 1,
+            fetched_at: now_epoch() - crate::ops::litellm_cache_ttl_secs() - 1,
             version: CACHE_VERSION,
             rates: HashMap::new(),
         };

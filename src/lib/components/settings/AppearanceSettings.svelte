@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
   import {
     applyGlass,
     applyTheme,
@@ -27,7 +26,7 @@
     applyTheme(theme);
     void Promise.allSettled([
       syncNativeWindowTheme(theme),
-      syncNativeWindowSurface(invoke, current.glassEffect),
+      syncNativeWindowSurface(),
       syncTrayConfig(current.trayConfig, null),
     ]);
   }
@@ -38,7 +37,7 @@
     applyGlass(checked);
     try {
       await setNativeGlassEffect(checked);
-      await syncNativeWindowSurface(invoke, checked);
+      await syncNativeWindowSurface();
     } catch (e) {
       console.error("Failed to toggle glass effect:", e);
     }
@@ -103,11 +102,16 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 6px 10px;
+    flex-wrap: wrap;
+    min-width: 0;
   }
   .row.border {
     border-bottom: 1px solid var(--border-subtle);
   }
   .label {
+    flex: 1 1 110px;
+    min-width: 0;
     font: 400 10px/1 'Inter', sans-serif;
     color: var(--t1);
   }

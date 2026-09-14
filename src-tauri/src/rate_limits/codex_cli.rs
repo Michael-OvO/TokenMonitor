@@ -1,13 +1,14 @@
-use crate::models::{CreditsInfo, ProviderRateLimits, RateLimitWindow};
+use crate::models::{CreditsInfo, ProviderRateLimits};
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
+use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
 
-use super::RateLimitFetchError;
+use super::{codex::codex_windows_from_rate_limits, RateLimitFetchError};
 
 static CACHED_CODEX_CLI_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
@@ -125,25 +126,7 @@ struct AppServerError {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RateLimitsReadResult {
-    rate_limits: RateLimitSnapshot,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RateLimitSnapshot {
-    primary: Option<AppServerWindow>,
-    secondary: Option<AppServerWindow>,
-    credits: Option<CreditsSnapshot>,
-    plan_type: Option<String>,
-    rate_limit_reached_type: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AppServerWindow {
-    used_percent: f64,
-    window_duration_mins: Option<u64>,
-    resets_at: Option<u64>,
+    rate_limits: Value,
 }
 
 #[derive(Deserialize)]
@@ -155,25 +138,6 @@ struct CreditsSnapshot {
 }
 
 // ── Mapping helpers ──
-
-fn app_server_window_to_rate_limit(id: &str, w: &AppServerWindow) -> RateLimitWindow {
-    let mins = w
-        .window_duration_mins
-        .unwrap_or(if id == "primary" { 300 } else { 10080 });
-    let label = match (id, mins) {
-        ("primary", 300) => "Session (5hr)".to_string(),
-        ("primary", _) => format!("Primary ({mins}m)"),
-        ("secondary", 10080) => "Weekly (7 day)".to_string(),
-        ("secondary", _) => format!("Secondary ({mins}m)"),
-        _ => id.to_string(),
-    };
-
-    let resets_at = w
-        .resets_at
-        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts as i64, 0).map(|dt| dt.to_rfc3339()));
-
-    RateLimitWindow::new(id.to_string(), label, w.used_percent, resets_at)
-}
 
 fn normalize_plan_type(plan_type: &str) -> String {
     match plan_type {
@@ -219,19 +183,30 @@ pub(super) fn parse_rate_limits_response(
         .ok_or_else(|| RateLimitFetchError::message("Codex app-server returned empty result"))?;
 
     let snapshot = result.rate_limits;
+    let windows = codex_windows_from_rate_limits(&snapshot);
 
-    let mut windows = Vec::new();
-    if let Some(primary) = &snapshot.primary {
-        windows.push(app_server_window_to_rate_limit("primary", primary));
-    }
-    if let Some(secondary) = &snapshot.secondary {
-        windows.push(app_server_window_to_rate_limit("secondary", secondary));
-    }
+    let plan_tier = snapshot
+        .get("planType")
+        .or_else(|| snapshot.get("plan_type"))
+        .and_then(|v| v.as_str())
+        .map(normalize_plan_type);
+    let credits = snapshot
+        .get("credits")
+        .cloned()
+        .and_then(|v| serde_json::from_value::<CreditsSnapshot>(v).ok())
+        .map(credits_from_snapshot);
 
-    let plan_tier = snapshot.plan_type.as_deref().map(normalize_plan_type);
-    let credits = snapshot.credits.map(credits_from_snapshot);
+    let rate_limit_reached = snapshot
+        .get("rateLimitReachedType")
+        .or_else(|| snapshot.get("rate_limit_reached_type"))
+        .and_then(|v| match v {
+            Value::Null => None,
+            Value::String(s) if s.is_empty() => None,
+            other => Some(other.clone()),
+        })
+        .is_some();
 
-    let cooldown_until = if snapshot.rate_limit_reached_type.is_some() {
+    let cooldown_until = if rate_limit_reached {
         windows
             .iter()
             .filter_map(|w| w.resets_at.as_ref())

@@ -46,7 +46,7 @@ TokenMonitor is a local-first cross-platform system tray app for people who use 
 
 It reads the session logs already on your machine, applies provider-aware pricing rules in Rust, and turns them into a compact desktop interface for current-session spend, history, model mix, and rate-limit context.
 
-No API keys. No cloud sync. No runtime dependency on `ccusage` or any other external CLI.
+No provider API key is required for local usage history. No cloud sync. No runtime dependency on `ccusage` or any other external CLI.
 
 ## Quick Install
 
@@ -64,7 +64,7 @@ Grab the installer for your platform from the [latest release](https://github.co
 
 ### Usage Monitoring
 
-- Current-session spend, burn rate, and 5-hour context
+- Official 5-hour rate-limit window spend, burn rate, and context
 - Period views for `5h`, `day`, `week`, `month`, and `year`
 - Historical navigation with offset-based browsing
 - Claude-only, Codex-only, Cursor-only, Kimi-only, and merged provider views
@@ -84,13 +84,14 @@ Grab the installer for your platform from the [latest release](https://github.co
 - Claude, Codex, and Cursor rate-limit panels when provider data is available
 - Utilization, reset timing, cooldown state, and pace hints
 - Cursor plan usage + spend limit tracking via API
-- Local fallback paths for rate-limit context when direct provider data is incomplete
+- Claude Code statusline events provide fresh, server-reported limits without a network request
+- OAuth, CLI, and local-session fallbacks cover stale or unavailable primary data
 
 ### Auto-Updater
 
 - In-app update banner with download progress
 - Tray icon red badge dot when an update is available
-- OS notification (deduped per version, 6h check interval with exponential backoff)
+- In-app update checks every 6 hours with exponential backoff after failures
 - Skip / Later / Update Now actions
 - Persisted updater state across restarts (skipped versions, last check)
 - Platform-aware: macOS/Linux auto-install, Windows passive NSIS, Linux .deb shows "Download" link
@@ -113,10 +114,13 @@ Grab the installer for your platform from the [latest release](https://github.co
 - Native system tray popover on all platforms
 - Launch-at-login support (LaunchAgent / Registry / XDG autostart)
 - Theme, currency, refresh interval, and branding controls
-- macOS glass (vibrancy) effect with toggle (opaque on Windows/Linux)
+- Native glass effect with a toggle (macOS vibrancy, Windows Mica/Acrylic)
 - Integrated settings and calendar panels inside the same popover flow
 - First-launch welcome card with permission disclosures and opt-in toggles
 - Dynamic exchange rates (USD, EUR, GBP, JPY, CNY) with 24h cache
+- Manual import/export and optional automatic usage exports
+- Cache clearing and warm-up controls for large histories
+- Selectable update channels for the official project and compatible forks
 
 ### Pricing Accuracy
 
@@ -159,10 +163,10 @@ Grab the installer for your platform from the [latest release](https://github.co
 |---------|-------|---------|-------|
 | System tray icon | Menu bar | System tray | System tray |
 | Cost display | `set_title()` text beside icon | Tooltip on hover | Tooltip on hover |
-| Rate limits (Claude) | OAuth via Keychain + API, CLI probe fallback | CLI probe only | CLI probe only |
+| Rate limits (Claude) | Statusline, OAuth/CLI fallback | Statusline, CLI fallback | Statusline, CLI fallback |
 | Rate limits (Codex) | JSONL session files | JSONL session files | JSONL session files |
 | Rate limits (Cursor) | API (auto-detected or manual token) | API (auto-detected or manual token) | API (manual token) |
-| Glass blur effect | Supported (toggle in Settings) | Not available (opaque) | Not available (opaque) |
+| Glass blur effect | Vibrancy | Mica/Acrylic | Not available |
 | Dock icon toggle | Supported | Not applicable | Not applicable |
 | Autostart | LaunchAgent | Registry | XDG autostart |
 | Auto-update | DMG in-place replace | NSIS passive install | AppImage replace (.deb: download link) |
@@ -185,10 +189,17 @@ TokenMonitor works from usage data you already have on disk. If no logs are pres
 
 Rate-limit visibility is separate from usage history parsing:
 
-- Claude rate limits use local authentication state already on the machine and fall back to CLI probe when needed
+- Claude rate limits prefer fresh events from the optional TokenMonitor statusline installed into Claude Code; OAuth and CLI probes are fallbacks
 - Codex rate limits are read from recent session metadata in local Codex JSONL files
-- Cursor rate limits are fetched from the Cursor API using an access token auto-detected from Cursor IDE or manually provided
+- Cursor rate limits are fetched from the Cursor API using a configured Admin API key or locally detected authentication state
 - Kimi rate limits are fetched from the Kimi usage API using the token set in `~/.kimi-code/credentials/kimi-code.json`. Kimi access tokens expire after 15 minutes, so when the stored one is expired (or rejected) TokenMonitor performs the same `refresh_token` grant the Kimi CLI does and writes the rotated tokens back to that file
+
+## Documentation
+
+- [Tutorial](docs/tutorial.md) — installation, onboarding, daily use, and troubleshooting
+- [Development guide](docs/DEVELOPMENT.md) — repository layout, validation, and releases
+- [Changelog](CHANGELOG.md) — release history
+- [Updater test matrix](docs/testing/auto-update.md) — release-candidate smoke tests
 
 ## Installation
 
@@ -210,7 +221,7 @@ Grab the latest installer from the [Releases](https://github.com/Michael-OvO/Tok
 ```bash
 git clone https://github.com/Michael-OvO/TokenMonitor.git
 cd TokenMonitor
-npm install
+npm ci
 npx tauri build
 ```
 
@@ -238,7 +249,7 @@ Platform-specific bundle output:
 ### Development
 
 ```bash
-npm install
+npm ci
 npx tauri dev          # full app: hot-reload frontend + debug Rust backend
 npm run dev            # frontend only at http://localhost:1420 (no Rust)
 ```
@@ -289,26 +300,25 @@ src/
     │   ├── Breakdown.svelte       # Per-model cost breakdown
     │   ├── Calendar.svelte        # Heatmap calendar view
     │   ├── DevicesView.svelte     # SSH remote device management
-    │   ├── FloatBall.svelte       # Always-on-top overlay component
-    │   ├── floatBallInteraction.ts # FloatBall drag/scale detection
-    │   ├── floatBallUtils.ts      # FloatBall formatting and constants
+    │   ├── float-ball/            # Overlay component, interactions, and move queue
     │   ├── Footer.svelte          # Active session, burn rate
     │   ├── PermissionDisclosure.svelte # Privacy/permission surface display
-    │   ├── Settings.svelte        # Settings panel
-    │   ├── SubagentList.svelte    # Agent/subagent cost breakdown
-    │   ├── UpdateBanner.svelte    # In-app update notification banner
-    │   ├── UsageBars.svelte       # Rate limit utilization bars
-    │   └── WelcomeCard.svelte     # First-launch onboarding card
+    │   ├── PermissionsOnboarding.svelte # First-launch onboarding wizard
+    │   ├── settings/              # Settings panel and focused subpanels
+    │   ├── UpdateBanner.svelte    # In-app update banner
+    │   └── UsageBars.svelte       # Rate limit utilization bars
     ├── permissions/
-    │   ├── keychain.ts            # macOS Keychain access flow
+    │   ├── statusline.ts          # Claude Code statusline install/check
     │   └── surfaces.ts            # Permission surface definitions
     ├── tray/
     │   ├── sync.ts                # Frontend-to-native tray state syncing
     │   └── title.ts               # Tray title formatting
     ├── views/                     # View-model logic (footer, rate limits, devices)
     ├── window/
-    │   └── appearance.ts          # Window surface syncing
-    ├── windowSizing.ts            # Window size management
+    │   ├── appearance.ts          # Native theme and visual effects
+    │   ├── sizing.ts              # Window size calculations
+    │   ├── resizeOrchestrator.ts  # Resize lifecycle
+    │   └── uiStability.ts         # Resize stability and diagnostics
     └── utils/
         ├── platform.ts            # OS detection (macOS/Windows/Linux)
         ├── plans.ts               # Plan tier cost lookups
@@ -318,20 +328,12 @@ src/
 
 src-tauri/src/
 ├── lib.rs                         # Tauri app setup, tray wiring, background refresh
-├── commands.rs                    # IPC dispatch hub
-│   └── commands/
-│       ├── usage_query.rs         # Data fetching
-│       ├── calendar.rs            # Heatmap queries
-│       ├── period.rs              # Time range selection
-│       ├── config.rs              # Settings sync
-│       ├── tray.rs                # Title/utilization rendering
-│       ├── ssh.rs                 # Remote device management
-│       ├── float_ball/            # Overlay state + layout engine
-│       ├── updater.rs             # Auto-update IPC commands
-│       └── logging.rs             # Log-level control
+├── commands.rs                    # IPC module registry
+├── commands/                      # Usage, calendar, config, tray, SSH, overlay, and updater IPC
 ├── logging.rs                     # tracing + rolling file appender
 ├── models.rs                      # Shared backend payload types
 ├── paths.rs                       # Central registry of all filesystem paths read
+├── statusline/                    # Claude statusline scripts, installation, and event parsing
 ├── usage/
 │   ├── parser.rs                  # JSONL discovery, parsing, normalization
 │   ├── claude_parser.rs           # Claude Code-specific deep parser
@@ -346,7 +348,7 @@ src-tauri/src/
 │   └── ssh_config.rs              # SSH host discovery
 ├── rate_limits/
 │   ├── claude.rs                  # OAuth Keychain + API (macOS)
-│   ├── claude_cli.rs              # CLI probe fallback (all platforms)
+│   ├── codex_cli.rs               # Codex CLI probe fallback
 │   ├── codex.rs                   # Session file parsing
 │   ├── cursor.rs                  # Cursor API usage + spend limit
 │   └── http.rs                    # Shared HTTP client
@@ -367,7 +369,6 @@ src-tauri/src/
     ├── mod.rs                     # Cross-platform helpers
     ├── macos/                     # macOS window management
     ├── windows/
-    │   ├── taskbar.rs             # GDI taskbar panel
     │   └── window.rs              # Taskbar-aligned positioning
     └── linux/                     # Linux window management
 ```
@@ -387,7 +388,7 @@ src-tauri/src/
 | Desktop shell | [Tauri v2](https://v2.tauri.app/) |
 | Frontend | [Svelte 5](https://svelte.dev/) + TypeScript |
 | Backend | Rust |
-| Build tool | [Vite 6](https://vitejs.dev/) |
+| Build tool | [Vite 8](https://vite.dev/) |
 | State path | Local JSONL parsing + Tauri IPC + Svelte stores |
 
 ## For Builders
@@ -400,9 +401,9 @@ src-tauri/src/
 ```bash
 npx svelte-check                # Svelte type checking
 npm test                        # Vitest
-cd src-tauri && cargo fmt --check       # Rust format
-cd src-tauri && cargo clippy -- -D warnings  # Rust lints
-cd src-tauri && cargo test      # Rust tests
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+npm run test:rust               # Rust tests
 ```
 
 Convenience command:
@@ -421,10 +422,10 @@ cargo test benchmark_real_log_cache_paths --manifest-path src-tauri/Cargo.toml -
 
 ### Versioning
 
-Version must stay in sync across three files: `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`.
+Version must stay in sync across `package.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`.
 
 ```bash
-npm run release -- X.Y.Z    # bumps all 3 files, commits, tags, pushes
+npm run release -- X.Y.Z    # bumps version files, commits, tags, pushes
 ```
 
 Tag push triggers GitHub Actions release workflow which builds for all three platforms.

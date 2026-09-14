@@ -29,7 +29,7 @@ pub struct SshHostConfig {
     pub include_in_stats: bool,
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
@@ -68,10 +68,10 @@ pub struct CompactUsageRecord {
     pub input_tokens: u64,
     #[serde(rename = "out")]
     pub output_tokens: u64,
-    /// cache_creation_input_tokens (5-min tier)
+    /// cache_creation 5-minute tier (0 when the log has no breakdown)
     #[serde(rename = "c5", default)]
     pub cache_5m: u64,
-    /// cache_creation_input_tokens (1-hour tier — currently mapped to same field)
+    /// cache_creation 1-hour tier (all writes land here when breakdown is missing)
     #[serde(rename = "c1", default)]
     pub cache_1h: u64,
     /// cache_read_input_tokens
@@ -86,6 +86,33 @@ fn compact_record_key(r: &CompactUsageRecord) -> String {
         "{}:{}:{}:{}",
         r.ts, r.model, r.input_tokens, r.output_tokens
     )
+}
+
+fn compact_ts_epoch(ts: &str) -> Option<u64> {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .or_else(|_| chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f%z"))
+        .ok()
+        .and_then(|dt| u64::try_from(dt.timestamp()).ok())
+}
+
+fn max_remote_epoch(
+    records: &[CompactUsageRecord],
+    family: crate::models::ModelFamily,
+) -> Option<u64> {
+    records
+        .iter()
+        .filter(|r| crate::models::detect_model_family(&r.model) == family)
+        .filter_map(|r| compact_ts_epoch(&r.ts))
+        .max()
+}
+
+/// ponytail: 2s back-margin so exclusive `ts>S` / `-newer` doesn't skip
+/// same-second appends. Never moves the marker backwards.
+fn next_last_sync_epoch(previous: Option<u64>, observed_max: u64) -> u64 {
+    const BACK_MARGIN_SECS: u64 = 2;
+    previous
+        .unwrap_or(0)
+        .max(observed_max.saturating_sub(BACK_MARGIN_SECS))
 }
 
 /// Test SSH connectivity to a host using `ssh <host> echo ok`.
@@ -225,11 +252,13 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
         "     if dk:seen.add(dk)\n",
         "     u=msg.get('usage')\n",
         "     if u:\n",
+        "      cc=u.get('cache_creation')\n",
         "      r={'ts':d.get('timestamp',''),",
         "'m':msg.get('model',''),",
         "'in':u.get('input_tokens',0),",
         "'out':u.get('output_tokens',0),",
-        "'c5':u.get('cache_creation_input_tokens',0),",
+        "'c5':((cc.get('ephemeral_5m_input_tokens') or 0) if isinstance(cc,dict) else 0),",
+        "'c1':((cc.get('ephemeral_1h_input_tokens') or 0) if isinstance(cc,dict) else u.get('cache_creation_input_tokens',0)),",
         "'cr':u.get('cache_read_input_tokens',0)}\n",
         "      if u.get('speed')=='fast':r['sp']='fast'\n",
         "      print(json.dumps(r))\n",
@@ -409,16 +438,34 @@ fn parse_full_entry_to_compact(line: &str) -> Option<CompactUsageRecord> {
         .filter(|s| *s == "fast")
         .map(String::from);
 
+    let total_cw = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let breakdown = usage.get("cache_creation").and_then(|bd| {
+        if bd.is_null() {
+            None
+        } else {
+            Some((
+                bd.get("ephemeral_5m_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                bd.get("ephemeral_1h_input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            ))
+        }
+    });
+    let (cache_5m, cache_1h) =
+        super::claude_parser::split_claude_cache_creation(total_cw, breakdown);
+
     Some(CompactUsageRecord {
         ts: value.get("timestamp")?.as_str()?.to_string(),
         model: model.to_string(),
         input_tokens: usage.get("input_tokens")?.as_u64().unwrap_or(0),
         output_tokens: usage.get("output_tokens")?.as_u64().unwrap_or(0),
-        cache_5m: usage
-            .get("cache_creation_input_tokens")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0),
-        cache_1h: 0,
+        cache_5m,
+        cache_1h,
         cache_read: usage
             .get("cache_read_input_tokens")
             .and_then(|v| v.as_u64())
@@ -618,15 +665,13 @@ impl SshCacheManager {
     }
 
     /// Write the last-sync timestamp for a host and provider.
-    fn set_last_sync(&self, alias: &str, provider: &str) -> Result<(), String> {
+    ///
+    /// Marker is the max observed *remote* timestamp (not local wall clock).
+    /// Remote clocks behind local would otherwise skip every later record.
+    fn set_last_sync(&self, alias: &str, provider: &str, epoch: u64) -> Result<(), String> {
         Self::validate_provider(provider)?;
         let dir = self.host_cache_dir(alias)?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-
-        let epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
 
         let marker = dir.join(format!(".last-sync-{provider}"));
         std::fs::write(marker, epoch.to_string()).map_err(|e| format!("write: {e}"))
@@ -753,11 +798,19 @@ impl SshCacheManager {
             .map_err(|e| format!("write cache: {e}"))?;
 
         // Only advance a provider's timestamp when that provider had data.
+        // Use max remote record time, not local now — clock skew would skip forever.
         if has_claude {
-            self.set_last_sync(alias, "claude")?;
+            if let Some(max_ts) = max_remote_epoch(&records, crate::models::ModelFamily::Anthropic)
+            {
+                let prev = self.last_sync_epoch(alias, "claude");
+                self.set_last_sync(alias, "claude", next_last_sync_epoch(prev, max_ts))?;
+            }
         }
         if has_codex {
-            self.set_last_sync(alias, "codex")?;
+            if let Some(max_ts) = max_remote_epoch(&records, crate::models::ModelFamily::OpenAI) {
+                let prev = self.last_sync_epoch(alias, "codex");
+                self.set_last_sync(alias, "codex", next_last_sync_epoch(prev, max_ts))?;
+            }
         }
 
         Ok(new_count)
@@ -791,5 +844,56 @@ impl SshCacheManager {
             .map_while(Result::ok)
             .filter_map(|line| serde_json::from_str::<CompactUsageRecord>(&line).ok())
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(ts: &str, model: &str) -> CompactUsageRecord {
+        CompactUsageRecord {
+            ts: ts.to_string(),
+            model: model.to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_5m: 0,
+            cache_1h: 0,
+            cache_read: 0,
+            speed: None,
+        }
+    }
+
+    #[test]
+    fn ssh_claude_cache_split_matches_local_parser() {
+        let with_breakdown = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":50,"cache_read_input_tokens":3,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":30}}}}"#;
+        let r = parse_full_entry_to_compact(with_breakdown).unwrap();
+        assert_eq!(r.cache_5m, 20);
+        assert_eq!(r.cache_1h, 30);
+
+        let no_breakdown = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":50,"cache_read_input_tokens":3}}}"#;
+        let r = parse_full_entry_to_compact(no_breakdown).unwrap();
+        assert_eq!(
+            r.cache_5m, 0,
+            "missing breakdown must not dump all writes into 5m"
+        );
+        assert_eq!(r.cache_1h, 50);
+    }
+
+    #[test]
+    fn last_sync_uses_max_remote_ts_not_local_clock() {
+        let records = vec![
+            rec("2026-03-15T12:00:00+00:00", "claude-sonnet-4-6"),
+            rec("2026-03-15T12:00:05+00:00", "claude-opus-4-6"),
+            rec("2026-03-15T13:00:00+00:00", "gpt-5.4"),
+        ];
+        let claude = max_remote_epoch(&records, crate::models::ModelFamily::Anthropic).unwrap();
+        let expected = compact_ts_epoch("2026-03-15T12:00:05+00:00").unwrap();
+        assert_eq!(claude, expected);
+        assert_eq!(next_last_sync_epoch(None, claude), expected - 2);
+        assert_eq!(
+            next_last_sync_epoch(Some(expected + 100), claude),
+            expected + 100
+        );
     }
 }

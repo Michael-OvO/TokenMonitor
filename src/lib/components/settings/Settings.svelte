@@ -35,7 +35,7 @@
   import SshHostsSettings from "./SshHostsSettings.svelte";
   import CacheWarmupSettings from "./CacheWarmupSettings.svelte";
   import PermissionDisclosure from "../PermissionDisclosure.svelte";
-  import PermissionSettings from "../PermissionSettings.svelte";
+  import ProviderLogo from "../ProviderLogo.svelte";
 
   interface Props {
     onBack: () => void;
@@ -194,7 +194,7 @@
     }
   }
 
-  async function syncCursorAuth(apiKey = current.cursorApiKey) {
+  async function syncCursorAuth(apiKey: string) {
     cursorAuthStatus = await invoke<CursorAuthStatus>("set_cursor_auth_config", {
       apiKey,
     });
@@ -202,9 +202,24 @@
     await invoke("clear_payload_cache").catch((e) => logger.debug("settings", `clear_payload_cache failed: ${e}`));
   }
 
+  async function clearCursorAuth() {
+    cursorAuthStatus = await invoke<CursorAuthStatus>("clear_cursor_auth_config");
+    clearUsageCache();
+    await invoke("clear_payload_cache").catch((e) => logger.debug("settings", `clear_payload_cache failed: ${e}`));
+  }
+
   async function handleCursorApiKeyInput(value: string) {
     await updateSetting("cursorApiKey", value);
+    if (!value.trim()) {
+      await clearCursorAuth();
+      return;
+    }
     await syncCursorAuth(value);
+  }
+
+  async function disconnectCursorAuth() {
+    await updateSetting("cursorApiKey", "");
+    await clearCursorAuth();
   }
 
   async function openCursorDashboard() {
@@ -574,7 +589,7 @@
           <span class="label">Default Period</span>
           <SegmentedControl
             options={[
-              { value: "5h", label: "5H" },
+              { value: "5h", label: "Usage" },
               { value: "day", label: "Day" },
               { value: "week", label: "Week" },
               { value: "month", label: "Mo" },
@@ -625,13 +640,6 @@
             />
           </div>
         </div>
-        <div class="row">
-          <span class="label">Model Change Stats</span>
-          <ToggleSwitch
-            checked={current.showModelChangeStats}
-            onChange={(checked) => updateSetting("showModelChangeStats", checked)}
-          />
-        </div>
       </div>
     </div>
 
@@ -668,7 +676,7 @@
       </div>
       <div class="card">
         <button class="row collapsible-toggle" type="button" aria-expanded={cursorExpanded} onclick={() => (cursorExpanded = !cursorExpanded)}>
-          <span class="label"><svg class="cursor-icon" width="13" height="13" viewBox="0 0 512 512" fill="currentColor"><path d="m415.035 156.35-151.503-87.4695c-4.865-2.8094-10.868-2.8094-15.733 0l-151.4969 87.4695c-4.0897 2.362-6.6146 6.729-6.6146 11.459v176.383c0 4.73 2.5249 9.097 6.6146 11.458l151.5039 87.47c4.865 2.809 10.868 2.809 15.733 0l151.504-87.47c4.089-2.361 6.614-6.728 6.614-11.458v-176.383c0-4.73-2.525-9.097-6.614-11.459zm-9.516 18.528-146.255 253.32c-.988 1.707-3.599 1.01-3.599-.967v-165.872c0-3.314-1.771-6.379-4.644-8.044l-143.645-82.932c-1.707-.988-1.01-3.599.968-3.599h292.509c4.154 0 6.75 4.503 4.673 8.101h-.007z"/></svg>Cursor</span>
+          <span class="label"><ProviderLogo kind="cursor" size={13} class="cursor-icon" />Cursor</span>
           <div class="collapsible-right">
             <span class="status status-{cursorStatusTone(cursorAuthStatus)}">
               <span class="status-dot"></span>{cursorStatusLabel(cursorAuthStatus)}
@@ -700,6 +708,13 @@
                 onclick={openCursorDashboard}
               >
                 click me to find your cursor API key
+              </button>
+              <button
+                type="button"
+                class="secondary-btn"
+                onclick={disconnectCursorAuth}
+              >
+                Disconnect
               </button>
             </div>
             <div class="hint">
@@ -932,7 +947,6 @@
           </div>
         </button>
         <SettingsDisclosure open={privacyExpanded}>
-          <PermissionSettings />
           <div class="permissions-meta">
             <PermissionDisclosure mode="settings" onManage={handleManagePermission} />
           </div>
@@ -1029,6 +1043,9 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 6px 10px;
+    flex-wrap: wrap;
+    min-width: 0;
   }
   .row.border {
     border-bottom: 1px solid var(--border-subtle);
@@ -1047,6 +1064,7 @@
 
   .collapsible-toggle {
     width: 100%;
+    text-align: left;
     background: none;
     border: none;
     cursor: pointer;
@@ -1069,9 +1087,6 @@
   }
   .cursor-section {
     padding: 8px 10px;
-  }
-  .permissions-meta {
-    margin-top: 8px;
   }
   .secret-input {
     width: 100%;
@@ -1111,11 +1126,13 @@
   }
 
   .label {
+    flex: 1 1 110px;
+    min-width: 0;
     font: 400 10px/1 'Inter', sans-serif;
     color: var(--t1);
   }
 
-  .cursor-icon {
+  .label :global(svg.cursor-icon) {
     margin-right: 5px;
     vertical-align: -2px;
     opacity: 0.85;
@@ -1128,7 +1145,12 @@
   .value-group {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 10px;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .status {
@@ -1138,6 +1160,11 @@
     font: 500 11px/1 'Inter', sans-serif;
     padding-left: 2px;
     transition: color 180ms ease;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .status-dot {
     width: 5px;
@@ -1182,10 +1209,13 @@
   }
 
   .currency-select {
+    width: fit-content;
+    max-width: 100%;
+    field-sizing: content;
     background: var(--surface-hover);
     border: 1px solid var(--border);
     border-radius: 5px;
-    padding: 3px 6px;
+    padding: 2px 5px;
     font: 400 9px/1 'Inter', sans-serif;
     color: var(--t1);
     cursor: pointer;
@@ -1197,7 +1227,11 @@
   .cost-row-right {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
     gap: 8px;
+    min-width: 0;
   }
   .cost-input {
     display: flex;
@@ -1227,22 +1261,30 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex: 1 1 170px;
     flex-wrap: wrap;
     justify-content: flex-end;
+    min-width: 0;
   }
   .auto-export-right {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 8px;
+    flex: 1 1 160px;
+    flex-wrap: wrap;
     min-width: 0;
   }
   .auto-export-folder {
+    min-width: 0;
     max-width: 130px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .channel-select {
-    max-width: 150px;
+    width: fit-content;
+    max-width: 100%;
+    field-sizing: content;
     padding: 2px 6px;
     border: 1px solid var(--border-subtle);
     border-radius: 4px;

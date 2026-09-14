@@ -1,31 +1,38 @@
 use chrono::Timelike;
-use std::sync::atomic::Ordering;
 use tauri::State;
 
+use crate::commands::period::{format_day_label, resolve_period_bounds_for_provider, PeriodBounds};
 use crate::commands::AppState;
 use crate::models::{ChartBucket, ChartSegment, DeviceUsagePayload};
 use crate::usage::device_aggregation::{
-    bucket_key_for_timestamp, bucket_label_for_key, build_device_chart_buckets,
+    archived_hour_keys, bucket_key_for_timestamp, bucket_label_for_key, build_device_chart_buckets,
     build_device_summary_from_parsed, build_device_summary_merged, compact_record_matches_provider,
     enrich_cost_percentages, enumerate_agg_devices, parse_remote_ts,
-    provider_includes_remote_ssh_usage,
+    provider_includes_remote_ssh_usage, ssh_live_hour_open,
 };
 use crate::usage::integrations::UsageIntegrationSelection;
 use crate::usage::ssh_config::{discover_ssh_hosts, SshHostInfo};
 use crate::usage::ssh_remote::{
     CompactUsageRecord, SshHostConfig, SshHostStatus, SshSyncResult, SshTestResult,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RemoteDeviceIncludeFlag {
     pub alias: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::usage::ssh_remote::default_true")]
     pub include_in_stats: bool,
 }
 
-fn default_true() -> bool {
-    true
+async fn period_bounds_for(
+    state: &AppState,
+    provider: &str,
+    period: &str,
+    offset: i32,
+) -> Result<PeriodBounds, String> {
+    let cached = state.cached_rate_limits.read().await;
+    resolve_period_bounds_for_provider(period, offset, provider, cached.as_ref())
+        .map_err(|e| format!("Invalid period: {e}"))
 }
 
 fn validate_ssh_alias(alias: &str) -> Result<(), String> {
@@ -48,10 +55,6 @@ fn validate_ssh_alias(alias: &str) -> Result<(), String> {
         );
     }
     Ok(())
-}
-
-fn usage_access_enabled(state: &AppState) -> bool {
-    state.usage_access_enabled.load(Ordering::SeqCst)
 }
 
 /// Invalidate the cached usage-view payloads (in-memory + disk) so the next
@@ -107,17 +110,6 @@ pub async fn add_ssh_host(alias: String, state: State<'_, AppState>) -> Result<(
     }
 
     // A newly-added host defaults to enabled+included, so it changes totals now.
-    invalidate_usage_view_cache(&state).await;
-    Ok(())
-}
-
-/// Remove an SSH host from the monitored list.
-#[tauri::command]
-pub async fn remove_ssh_host(alias: String, state: State<'_, AppState>) -> Result<(), String> {
-    {
-        let mut configs = state.ssh_hosts.write().await;
-        configs.retain(|c| c.alias != alias);
-    }
     invalidate_usage_view_cache(&state).await;
     Ok(())
 }
@@ -290,14 +282,12 @@ pub async fn get_device_usage(
     offset: i32,
     state: State<'_, AppState>,
 ) -> Result<DeviceUsagePayload, String> {
-    use crate::commands::period::{compute_date_bounds, format_day_label};
-
     if UsageIntegrationSelection::parse(&provider).is_none() {
         return Err(format!("Invalid provider: {provider}"));
     }
 
-    let (since, end) =
-        compute_date_bounds(&period, offset).ok_or_else(|| format!("Invalid period: {period}"))?;
+    let bounds = period_bounds_for(&state, &provider, &period, offset).await?;
+    let since = bounds.start;
 
     let period_label = format_day_label(since);
     let parser = &state.parser;
@@ -305,10 +295,9 @@ pub async fn get_device_usage(
     // 1. Local device usage — filtered by the selected provider tab.
     let mut devices = Vec::new();
     let mut total_cost = 0.0;
-    if usage_access_enabled(&state) {
+    if state.usage_access_enabled() {
         let (local_entries, _, _) = parser.load_entries(&provider, Some(since));
-        let mut local_summary =
-            build_device_summary_from_parsed("Local", &local_entries, since, end);
+        let mut local_summary = build_device_summary_from_parsed("Local", &local_entries, &bounds);
         local_summary.is_local = true;
         local_summary.status = String::from("online");
         total_cost = local_summary.total_cost;
@@ -350,6 +339,7 @@ pub async fn get_device_usage(
                     crate::usage::integrations::remote_record_matches_provider(&provider, &e.model)
                 })
                 .collect();
+            let archived_hours = archived_hour_keys(&archived_entries);
 
             // Live compact rows only for configured SSH hosts; file-imported
             // peers have no SSH cache and contribute from archived data alone.
@@ -367,21 +357,11 @@ pub async fn get_device_usage(
 
             // Filter live records:
             //  • drop model families outside the active provider tab
-            //  • drop hours already covered by the archive frontier
+            //  • drop hours that actually have archive rows (not empty frontier gaps)
             let live_records: Vec<&CompactUsageRecord> = records
                 .iter()
                 .filter(|r| compact_record_matches_provider(r, &provider))
-                .filter(|r| {
-                    if let Some(ref f) = frontier {
-                        let dt = parse_remote_ts(&r.ts).map(|d| d.with_timezone(&chrono::Local));
-                        match dt {
-                            Some(local) => !f.covers(local.date_naive(), local.hour() as u8),
-                            None => true, // Can't parse → include as live.
-                        }
-                    } else {
-                        true
-                    }
-                })
+                .filter(|r| ssh_live_hour_open(frontier.as_ref(), &archived_hours, &r.ts))
                 .collect();
 
             // An archive-only peer with no data for the active provider would be
@@ -392,13 +372,8 @@ pub async fn get_device_usage(
             }
 
             // Build summary: archived entries + live compact records.
-            let mut summary = build_device_summary_merged(
-                &dev.alias,
-                &archived_entries,
-                &live_records,
-                since,
-                end,
-            );
+            let mut summary =
+                build_device_summary_merged(&dev.alias, &archived_entries, &live_records, &bounds);
 
             if dev.configured {
                 // Enrich with live status from the SSH cache manager.
@@ -465,7 +440,6 @@ pub async fn get_single_device_usage(
     offset: i32,
     state: State<'_, AppState>,
 ) -> Result<crate::models::UsagePayload, String> {
-    use crate::commands::period::{compute_date_bounds, format_day_label};
     use crate::models::{ModelSummary, UsagePayload, UsageSource};
     use crate::usage::integrations::remote_record_matches_provider;
     use crate::usage::pricing::{
@@ -485,8 +459,8 @@ pub async fn get_single_device_usage(
         return Err(format!("Invalid provider: {provider}"));
     }
 
-    let (since, end) =
-        compute_date_bounds(&period, offset).ok_or_else(|| format!("Invalid period: {period}"))?;
+    let bounds = period_bounds_for(&state, &provider, &period, offset).await?;
+    let since = bounds.start;
 
     let period_label = format_day_label(since);
     let parser = &state.parser;
@@ -496,7 +470,7 @@ pub async fn get_single_device_usage(
     let mut bucket_map: HashMap<String, ModelAggMap> = HashMap::new();
 
     if device == "Local" {
-        if !usage_access_enabled(&state) {
+        if !state.usage_access_enabled() {
             return Ok(UsagePayload {
                 period_label,
                 usage_warning: Some(String::from("Usage access has not been enabled yet.")),
@@ -505,7 +479,7 @@ pub async fn get_single_device_usage(
         }
         let (entries, _, _) = parser.load_entries(&provider, Some(since));
         for entry in &entries {
-            if entry.timestamp.date_naive() >= end {
+            if !bounds.contains_timestamp(entry.timestamp) {
                 continue;
             }
             let (display_name, model_key) = crate::models::normalize_model(&entry.model);
@@ -545,6 +519,7 @@ pub async fn get_single_device_usage(
         let source_key = format!("device:{device}");
         let archive = parser.archive();
         let frontier = archive.as_ref().and_then(|a| a.frontier(&source_key));
+        let mut archived_hours = HashSet::new();
 
         // Archived completed hours, filtered to the active provider's family.
         if let Some(ref a) = archive {
@@ -552,8 +527,8 @@ pub async fn get_single_device_usage(
                 if !remote_record_matches_provider(&provider, &entry.model) {
                     continue;
                 }
-                let date = entry.timestamp.date_naive();
-                if date < since || date >= end {
+                archived_hours.insert((entry.timestamp.date_naive(), entry.timestamp.hour() as u8));
+                if !bounds.contains_timestamp(entry.timestamp) {
                     continue;
                 }
                 let (display_name, model_key) = crate::models::normalize_model(&entry.model);
@@ -607,14 +582,10 @@ pub async fn get_single_device_usage(
                     None => continue,
                 };
                 let local = parsed_ts.with_timezone(&chrono::Local);
-                if let Some(ref f) = frontier {
-                    if f.covers(local.date_naive(), local.hour() as u8) {
-                        continue;
-                    }
+                if !ssh_live_hour_open(frontier.as_ref(), &archived_hours, &record.ts) {
+                    continue;
                 }
-                let record_date = local.date_naive();
-
-                if record_date < since || record_date >= end {
+                if !bounds.contains_timestamp(local) {
                     continue;
                 }
 

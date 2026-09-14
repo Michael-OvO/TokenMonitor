@@ -86,7 +86,11 @@ import re
 p = 'src-tauri/Cargo.lock'
 with open(p, encoding='utf-8', newline='') as f:
     s = f.read()
-s = re.sub(r'(name = \"token-monitor\"\nversion = \")[^\"]*(\")', r'\g<1>$VERSION\g<2>', s, count=1)
+# \r?\n: the file is opened with newline='' so CRLF survives verbatim, and on
+# Windows checkouts a bare \n never matches.
+s, n = re.subn(r'(name = \"token-monitor\"\r?\nversion = \")[^\"]*(\")', r'\g<1>$VERSION\g<2>', s, count=1)
+if n != 1:
+    raise SystemExit('Error: could not find the token-monitor version in Cargo.lock')
 with open(p, 'w', encoding='utf-8', newline='') as f:
     f.write(s)
 "
@@ -97,12 +101,14 @@ echo "Bumped token-monitor version in Cargo.lock."
 CARGO_VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
 TAURI_VERSION=$(python -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
 NPM_VERSION=$(node -p "require('./package.json').version")
+LOCK_VERSION=$(grep -A1 'name = "token-monitor"' src-tauri/Cargo.lock | grep '^version' | sed 's/version = "\(.*\)"/\1/' | tr -d '\r')
 
-if [ "$CARGO_VERSION" != "$VERSION" ] || [ "$TAURI_VERSION" != "$VERSION" ] || [ "$NPM_VERSION" != "$VERSION" ]; then
+if [ "$CARGO_VERSION" != "$VERSION" ] || [ "$TAURI_VERSION" != "$VERSION" ] || [ "$NPM_VERSION" != "$VERSION" ] || [ "$LOCK_VERSION" != "$VERSION" ]; then
   echo "Error: version mismatch after bump — check files manually"
   echo "  Cargo.toml:       $CARGO_VERSION"
   echo "  tauri.conf.json:  $TAURI_VERSION"
   echo "  package.json:     $NPM_VERSION"
+  echo "  Cargo.lock:       $LOCK_VERSION"
   exit 1
 fi
 

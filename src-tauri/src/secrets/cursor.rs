@@ -95,7 +95,13 @@ fn load_from_dir(app_data: &Path) -> Option<(String, StorageBackend)> {
 }
 
 // ── Keyring layer ────────────────────────────────────────────────────────────
+//
+// Windows (Credential Manager) and Linux (Secret Service) go through the
+// `keyring` crate as normal. macOS does not: see `platform::macos::keychain`
+// for why an in-process Security.framework write pops a modal password panel
+// on this app, and why `/usr/bin/security` does not.
 
+#[cfg(not(target_os = "macos"))]
 fn try_set_keyring(value: &str) -> Result<(), String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
         .map_err(|e| format!("keyring entry: {e}"))?;
@@ -105,17 +111,11 @@ fn try_set_keyring(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn try_get_keyring() -> Option<String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).ok()?;
     match entry.get_password() {
-        Ok(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        }
+        Ok(value) => normalize_secret(&value),
         Err(keyring::Error::NoEntry) => None,
         Err(other) => {
             tracing::debug!(error = %other, "Cursor keyring read failed");
@@ -124,6 +124,7 @@ fn try_get_keyring() -> Option<String> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn try_clear_keyring() -> Result<(), String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
         .map_err(|e| format!("keyring entry: {e}"))?;
@@ -131,6 +132,125 @@ fn try_clear_keyring() -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(other) => Err(format!("keyring delete: {other}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn try_set_keyring(value: &str) -> Result<(), String> {
+    crate::platform::macos::keychain::upsert_generic_password(
+        KEYRING_SERVICE,
+        KEYRING_ACCOUNT,
+        value,
+    )?;
+    // A pre-`security` item may still be sitting there under the same
+    // service/account with an ACL pinned to an old build. `upsert` uses
+    // `-U`, which updates in place, so this is normally a no-op — but if the
+    // two ever coexist, drop the unreadable one.
+    discard_unreadable_legacy_item();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn try_get_keyring() -> Option<String> {
+    match crate::platform::macos::keychain::find_generic_password(
+        KEYRING_SERVICE,
+        Some(KEYRING_ACCOUNT),
+    ) {
+        Ok(value) => normalize_secret(&value),
+        Err(error) => {
+            tracing::debug!(error = %error, "Cursor Keychain read failed");
+            migrate_legacy_item()
+        }
+    }
+}
+
+/// One-shot rescue of a secret stored by a pre-`security` build.
+///
+/// Those items were written through Security.framework, so their ACL is
+/// pinned to the build that wrote them and `/usr/bin/security` cannot read
+/// them. A user still running that same build *can*, though — which is the
+/// common case for anyone who pasted a token and has not updated since — so
+/// we try once, re-store the value through `security` where it will stay
+/// readable forever, and drop the old item.
+///
+/// The read is wrapped in [`with_ui_suppressed`], so a build mismatch fails
+/// fast instead of raising the password panel this whole change exists to
+/// remove.
+#[cfg(target_os = "macos")]
+fn migrate_legacy_item() -> Option<String> {
+    use security_framework::os::macos::passwords::find_generic_password as legacy_find;
+
+    let recovered = crate::platform::macos::keychain::with_ui_suppressed(|| {
+        legacy_find(None, KEYRING_SERVICE, KEYRING_ACCOUNT)
+            .ok()
+            .and_then(|(password, _)| {
+                let bytes: &[u8] = password.as_ref();
+                String::from_utf8(bytes.to_vec()).ok()
+            })
+    })
+    .ok()
+    .flatten()
+    .and_then(|value| normalize_secret(&value))?;
+
+    match crate::platform::macos::keychain::upsert_generic_password(
+        KEYRING_SERVICE,
+        KEYRING_ACCOUNT,
+        &recovered,
+    ) {
+        Ok(()) => tracing::info!("Migrated Cursor secret to a prompt-free Keychain item"),
+        Err(e) => {
+            // Return the value anyway — this session works, and the next
+            // successful `store` will migrate it.
+            tracing::warn!(error = %e, "Cursor secret migration write failed");
+        }
+    }
+    Some(recovered)
+}
+
+#[cfg(target_os = "macos")]
+fn try_clear_keyring() -> Result<(), String> {
+    crate::platform::macos::keychain::delete_generic_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .map(|_| ())
+}
+
+/// Drop a Keychain item this app wrote through Security.framework in an
+/// earlier version.
+///
+/// Such an item's ACL is pinned to the build that created it, so no later
+/// build can read it and every write attempt against it raised a password
+/// panel. It is unrecoverable rather than merely stale, so removing it is
+/// the only useful action. The unified `SecItemDelete` does not consult the
+/// legacy ACL, so this cannot prompt.
+#[cfg(target_os = "macos")]
+fn discard_unreadable_legacy_item() {
+    if crate::platform::macos::keychain::find_generic_password(
+        KEYRING_SERVICE,
+        Some(KEYRING_ACCOUNT),
+    )
+    .is_ok()
+    {
+        return; // Readable through `security` — this is our own item.
+    }
+    match security_framework::passwords::delete_generic_password(KEYRING_SERVICE, KEYRING_ACCOUNT) {
+        Ok(()) => tracing::info!(
+            service = KEYRING_SERVICE,
+            "Removed unreadable pre-existing Cursor Keychain item"
+        ),
+        Err(e) => {
+            let msg = format!("{e}");
+            if !msg.contains("-25300") && !msg.to_ascii_lowercase().contains("not found") {
+                tracing::debug!(error = %msg, "Could not remove legacy Cursor Keychain item");
+            }
+        }
+    }
+}
+
+fn normalize_secret(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 

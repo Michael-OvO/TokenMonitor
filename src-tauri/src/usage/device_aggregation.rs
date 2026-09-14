@@ -1,5 +1,6 @@
 use chrono::Timelike;
 
+use crate::commands::period::{resolve_period_bounds_for_provider, PeriodBounds};
 use crate::commands::AppState;
 use crate::models::{ChartBucket, ChartSegment, DeviceModelSummary, DeviceSummary};
 use crate::usage::archive::ArchiveManager;
@@ -7,6 +8,7 @@ use crate::usage::integrations::{
     remote_record_matches_provider, UsageIntegrationId, UsageIntegrationSelection,
 };
 use crate::usage::ssh_remote::{CompactUsageRecord, SshHostConfig};
+use std::collections::HashSet;
 
 pub(crate) fn parse_remote_ts(ts: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     chrono::DateTime::parse_from_rfc3339(ts)
@@ -14,6 +16,34 @@ pub(crate) fn parse_remote_ts(ts: &str) -> Option<chrono::DateTime<chrono::Fixed
         .ok()
 }
 
+pub(crate) fn archived_hour_keys(
+    entries: &[crate::usage::parser::ParsedEntry],
+) -> HashSet<(chrono::NaiveDate, u8)> {
+    entries
+        .iter()
+        .map(|e| (e.timestamp.date_naive(), e.timestamp.hour() as u8))
+        .collect()
+}
+
+/// Keep live SSH rows for hours the frontier covers but archive has no rows.
+pub(crate) fn ssh_live_hour_open(
+    frontier: Option<&crate::usage::archive::ArchiveFrontier>,
+    archived_hours: &HashSet<(chrono::NaiveDate, u8)>,
+    ts: &str,
+) -> bool {
+    let Some(f) = frontier else {
+        return true;
+    };
+    match parse_remote_ts(ts).map(|d| d.with_timezone(&chrono::Local)) {
+        Some(local) => {
+            let hour = (local.date_naive(), local.hour() as u8);
+            !(f.covers(hour.0, hour.1) && archived_hours.contains(&hour))
+        }
+        None => true,
+    }
+}
+
+#[cfg(test)]
 fn parse_remote_ts_to_local_date(ts: &str) -> chrono::NaiveDate {
     parse_remote_ts(ts)
         .map(|dt| dt.with_timezone(&chrono::Local).date_naive())
@@ -34,6 +64,22 @@ pub(crate) fn provider_includes_remote_ssh_usage(provider: &str) -> bool {
 
 pub(crate) fn compact_record_matches_provider(record: &CompactUsageRecord, provider: &str) -> bool {
     remote_record_matches_provider(provider, &record.model)
+}
+
+fn remote_ts_in_bounds(bounds: &PeriodBounds, ts: &str) -> bool {
+    parse_remote_ts(ts)
+        .map(|dt| bounds.contains_timestamp(dt.with_timezone(&chrono::Local)))
+        .unwrap_or(false)
+}
+
+async fn period_bounds_for(
+    state: &AppState,
+    provider: &str,
+    period: &str,
+    offset: i32,
+) -> Option<PeriodBounds> {
+    let cached = state.cached_rate_limits.read().await;
+    resolve_period_bounds_for_provider(period, offset, provider, cached.as_ref()).ok()
 }
 
 /// A device to aggregate in the dashboard: either a configured+enabled SSH host
@@ -89,8 +135,7 @@ pub(crate) fn enumerate_agg_devices(
 pub(crate) fn build_device_summary_from_parsed(
     device_name: &str,
     entries: &[crate::usage::parser::ParsedEntry],
-    _since: chrono::NaiveDate,
-    end: chrono::NaiveDate,
+    bounds: &PeriodBounds,
 ) -> DeviceSummary {
     use crate::models::normalize_model;
     use crate::usage::pricing::{
@@ -101,7 +146,7 @@ pub(crate) fn build_device_summary_from_parsed(
     let mut model_map: HashMap<String, (String, f64, u64, bool)> = HashMap::new();
 
     for entry in entries {
-        if entry.timestamp.date_naive() >= end {
+        if !bounds.contains_timestamp(entry.timestamp) {
             continue;
         }
 
@@ -133,8 +178,7 @@ pub(crate) fn build_device_summary_from_parsed(
 pub(crate) fn build_device_summary_from_compact(
     device_name: &str,
     records: &[CompactUsageRecord],
-    since: chrono::NaiveDate,
-    end: chrono::NaiveDate,
+    bounds: &PeriodBounds,
 ) -> DeviceSummary {
     use crate::models::normalize_model;
     use crate::usage::pricing::{
@@ -149,9 +193,7 @@ pub(crate) fn build_device_summary_from_compact(
             continue;
         }
 
-        let record_date = parse_remote_ts_to_local_date(&record.ts);
-
-        if record_date < since || record_date >= end {
+        if !remote_ts_in_bounds(bounds, &record.ts) {
             continue;
         }
 
@@ -183,8 +225,7 @@ pub(crate) fn build_device_summary_merged(
     device_name: &str,
     archived_entries: &[crate::usage::parser::ParsedEntry],
     live_records: &[&CompactUsageRecord],
-    since: chrono::NaiveDate,
-    end: chrono::NaiveDate,
+    bounds: &PeriodBounds,
 ) -> DeviceSummary {
     use crate::models::normalize_model;
     use crate::usage::pricing::{
@@ -195,8 +236,7 @@ pub(crate) fn build_device_summary_merged(
     let mut model_map: HashMap<String, (String, f64, u64, bool)> = HashMap::new();
 
     for entry in archived_entries {
-        let entry_date = entry.timestamp.date_naive();
-        if entry_date < since || entry_date >= end {
+        if !bounds.contains_timestamp(entry.timestamp) {
             continue;
         }
         let (display_name, model_key) = normalize_model(&entry.model);
@@ -223,8 +263,7 @@ pub(crate) fn build_device_summary_merged(
         if record.model.starts_with('<') {
             continue;
         }
-        let record_date = parse_remote_ts_to_local_date(&record.ts);
-        if record_date < since || record_date >= end {
+        if !remote_ts_in_bounds(bounds, &record.ts) {
             continue;
         }
         let (display_name, model_key) = normalize_model(&record.model);
@@ -309,10 +348,9 @@ pub(crate) async fn build_device_breakdown_for_payload(
     period: &str,
     offset: i32,
 ) -> Option<Vec<DeviceSummary>> {
-    use crate::commands::period::compute_date_bounds;
-
     let configs = state.ssh_hosts.read().await;
-    let (since, end) = compute_date_bounds(period, offset)?;
+    let bounds = period_bounds_for(state, provider, period, offset).await?;
+    let since = bounds.start;
     let parser = &state.parser;
     let archive = parser.archive();
 
@@ -329,7 +367,7 @@ pub(crate) async fn build_device_breakdown_for_payload(
 
     let loaded = parser.load_entries_cached(provider, Some(since));
     let local_entries = &loaded.entries;
-    let mut local_summary = build_device_summary_from_parsed("Local", local_entries, since, end);
+    let mut local_summary = build_device_summary_from_parsed("Local", local_entries, &bounds);
     local_summary.is_local = true;
     local_summary.status = String::from("online");
 
@@ -359,6 +397,7 @@ pub(crate) async fn build_device_breakdown_for_payload(
             .into_iter()
             .filter(|e| remote_record_matches_provider(provider, &e.model))
             .collect();
+        let archived_hours = archived_hour_keys(&archived_entries);
 
         // Live SSH-cache rows only for configured hosts; file-imported peers have
         // no SSH cache and contribute from archived data alone.
@@ -376,16 +415,7 @@ pub(crate) async fn build_device_breakdown_for_payload(
         let filtered: Vec<&CompactUsageRecord> = all_records
             .iter()
             .filter(|r| compact_record_matches_provider(r, provider))
-            .filter(|r| {
-                if let Some(ref f) = frontier {
-                    match parse_remote_ts(&r.ts).map(|d| d.with_timezone(&chrono::Local)) {
-                        Some(local) => !f.covers(local.date_naive(), local.hour() as u8),
-                        None => true,
-                    }
-                } else {
-                    true
-                }
-            })
+            .filter(|r| ssh_live_hour_open(frontier.as_ref(), &archived_hours, &r.ts))
             .collect();
 
         // Skip devices with no data matching the selected provider (provider
@@ -395,7 +425,7 @@ pub(crate) async fn build_device_breakdown_for_payload(
         }
 
         let mut summary =
-            build_device_summary_merged(&dev.alias, &archived_entries, &filtered, since, end);
+            build_device_summary_merged(&dev.alias, &archived_entries, &filtered, &bounds);
 
         if dev.configured {
             if let Some(host_status) = statuses.iter().find(|s| s.alias == dev.alias) {
@@ -430,7 +460,6 @@ pub(crate) async fn build_included_devices_payload(
     period: &str,
     offset: i32,
 ) -> Option<crate::models::UsagePayload> {
-    use crate::commands::period::compute_date_bounds;
     use crate::models::{ModelSummary, UsagePayload, UsageSource};
     use crate::usage::pricing::{
         calculate_cost_for_key, pricing_available_for_key, provider_multiplier,
@@ -452,7 +481,8 @@ pub(crate) async fn build_included_devices_payload(
         return None;
     }
 
-    let (since, end) = compute_date_bounds(period, offset)?;
+    let bounds = period_bounds_for(state, provider, period, offset).await?;
+    let since = bounds.start;
     let cache_mgr = state.ssh_cache.read().await;
     let mgr = cache_mgr.as_ref();
 
@@ -477,6 +507,7 @@ pub(crate) async fn build_included_devices_payload(
         }
         let source_key = format!("device:{}", dev.alias);
         let frontier = archive.as_ref().and_then(|a| a.frontier(&source_key));
+        let mut archived_hours = HashSet::new();
 
         // ── Archived hourly rows for completed hours ──
         if let Some(ref a) = archive {
@@ -484,8 +515,8 @@ pub(crate) async fn build_included_devices_payload(
                 if !remote_record_matches_provider(provider, &entry.model) {
                     continue;
                 }
-                let entry_date = entry.timestamp.date_naive();
-                if entry_date < since || entry_date >= end {
+                archived_hours.insert((entry.timestamp.date_naive(), entry.timestamp.hour() as u8));
+                if !bounds.contains_timestamp(entry.timestamp) {
                     continue;
                 }
                 let (display_name, model_key) = crate::models::normalize_model(&entry.model);
@@ -545,13 +576,10 @@ pub(crate) async fn build_included_devices_payload(
                 None => continue,
             };
             let local = parsed_ts.with_timezone(&chrono::Local);
-            if let Some(ref f) = frontier {
-                if f.covers(local.date_naive(), local.hour() as u8) {
-                    continue;
-                }
+            if !ssh_live_hour_open(frontier.as_ref(), &archived_hours, &record.ts) {
+                continue;
             }
-            let record_date = local.date_naive();
-            if record_date < since || record_date >= end {
+            if !bounds.contains_timestamp(local) {
                 continue;
             }
 
@@ -673,7 +701,6 @@ pub(crate) async fn build_device_time_chart_buckets(
     period: &str,
     offset: i32,
 ) -> Option<Vec<ChartBucket>> {
-    use crate::commands::period::compute_date_bounds;
     use crate::models::normalize_model;
     use crate::usage::pricing::{calculate_cost_for_key, provider_multiplier};
     use std::collections::HashMap;
@@ -690,15 +717,15 @@ pub(crate) async fn build_device_time_chart_buckets(
         return None;
     }
 
-    let (since, end) = compute_date_bounds(period, offset)?;
+    let bounds = period_bounds_for(state, provider, period, offset).await?;
+    let since = bounds.start;
 
     let mut device_cost_by_bucket: HashMap<String, HashMap<String, f64>> = HashMap::new();
 
     let loaded = parser.load_entries_cached(provider, Some(since));
     let local_entries = &loaded.entries;
     for entry in local_entries {
-        let date = entry.timestamp.date_naive();
-        if date >= end {
+        if !bounds.contains_timestamp(entry.timestamp) {
             continue;
         }
         let bucket_key = bucket_key_for_timestamp(&entry.timestamp.fixed_offset(), period);
@@ -730,6 +757,7 @@ pub(crate) async fn build_device_time_chart_buckets(
             }
             let source_key = format!("device:{}", dev.alias);
             let frontier = archive.as_ref().and_then(|a| a.frontier(&source_key));
+            let mut archived_hours = HashSet::new();
 
             // Archived entries for this device, filtered by the active provider's
             // model family. Read for EVERY device (configured or file-imported)
@@ -739,8 +767,9 @@ pub(crate) async fn build_device_time_chart_buckets(
                     if !remote_record_matches_provider(provider, &entry.model) {
                         continue;
                     }
-                    let date = entry.timestamp.date_naive();
-                    if date >= end {
+                    archived_hours
+                        .insert((entry.timestamp.date_naive(), entry.timestamp.hour() as u8));
+                    if !bounds.contains_timestamp(entry.timestamp) {
                         continue;
                     }
                     let bucket_key =
@@ -784,13 +813,10 @@ pub(crate) async fn build_device_time_chart_buckets(
                     None => continue,
                 };
                 let local = parsed_ts.with_timezone(&chrono::Local);
-                if let Some(ref f) = frontier {
-                    if f.covers(local.date_naive(), local.hour() as u8) {
-                        continue;
-                    }
+                if !ssh_live_hour_open(frontier.as_ref(), &archived_hours, &record.ts) {
+                    continue;
                 }
-                let record_date = local.date_naive();
-                if record_date < since || record_date >= end {
+                if !bounds.contains_timestamp(local) {
                     continue;
                 }
 
@@ -993,6 +1019,7 @@ mod tests {
             h: 12,
             mk: "opus-4-6".into(),
             mn: "Opus 4.6".into(),
+            raw_model: None,
             input_tokens: 1,
             out: 2,
             c5: 0,
@@ -1482,6 +1509,25 @@ mod tests {
             12,
         );
         assert!(archived > 0, "archive should have written at least one row");
+        archive_mgr.import_source(
+            "device:remote-inc",
+            &[crate::usage::archive::ArchivedHourly {
+                d: today.to_string(),
+                h: 8,
+                mk: String::from("opus"),
+                mn: String::from("Opus"),
+                raw_model: None,
+                input_tokens: 10,
+                out: 10,
+                c5: 0,
+                c1: 0,
+                cr: 0,
+                ws: 0,
+                p: String::from("claude"),
+            }],
+            today,
+            12,
+        );
         state.parser.set_archive(archive_mgr);
 
         // Write a live JSONL with:
@@ -1511,14 +1557,14 @@ mod tests {
             .await
             .expect("included devices payload should exist when archive has data");
 
-        // Expected tokens: archive (1_000+1_000) + later live row (2_000+2_000)
-        //                  = input=3_000, output=3_000
+        // Expected tokens: legacy Opus (10+10) + archive (1_000+1_000)
+        //                  + later live row (2_000+2_000) = 3_010 each.
         // The archived-hour live row must be skipped via frontier.
         assert_eq!(
-            payload.input_tokens, 3_000,
+            payload.input_tokens, 3_010,
             "frontier should have de-duped the archived-hour live row"
         );
-        assert_eq!(payload.output_tokens, 3_000);
+        assert_eq!(payload.output_tokens, 3_010);
         assert!(payload.total_cost > 0.0);
         assert!(
             payload
@@ -1527,6 +1573,17 @@ mod tests {
                 .any(|m| m.model_key == "sonnet-4-6"),
             "sonnet-4-6 should appear in the model breakdown"
         );
+        assert!(
+            payload
+                .model_breakdown
+                .iter()
+                .any(|m| m.model_key == "opus-5"),
+            "legacy post-release Opus archive rows should appear as opus-5"
+        );
+        assert!(payload
+            .model_breakdown
+            .iter()
+            .all(|m| m.model_key != "opus"));
     }
 
     #[test]
@@ -1543,22 +1600,24 @@ mod tests {
         }];
 
         let local_date = parse_remote_ts_to_local_date(&records[0].ts);
+        let noon = local_date
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .single()
+            .unwrap();
+        let hit = crate::commands::period::resolve_period_bounds_at("day", 0, noon, None).unwrap();
+        let miss =
+            crate::commands::period::resolve_period_bounds_at("day", -1, noon, None).unwrap();
 
-        let summary = build_device_summary_from_compact(
-            "test-host",
-            &records,
-            local_date,
-            local_date + chrono::Duration::days(1),
-        );
+        let summary = build_device_summary_from_compact("test-host", &records, &hit);
         assert_eq!(
             summary.model_breakdown.len(),
             1,
             "record should be included when filtered by its local date"
         );
 
-        let day_before = local_date - chrono::Duration::days(1);
-        let summary_miss =
-            build_device_summary_from_compact("test-host", &records, day_before, local_date);
+        let summary_miss = build_device_summary_from_compact("test-host", &records, &miss);
         assert!(
             summary_miss.total_cost == 0.0,
             "record should be excluded when local date is outside the range"

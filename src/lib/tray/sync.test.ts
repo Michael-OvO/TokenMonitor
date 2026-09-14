@@ -41,11 +41,12 @@ const RATE_LIMITS: RateLimitsPayload = {
 };
 
 describe("trayConfigPayload", () => {
-  it("extracts primary utilization for both providers", () => {
+  it("extracts primary utilization for every rate-limit provider", () => {
     expect(trayConfigPayload(CONFIG, RATE_LIMITS)).toEqual({
       config: CONFIG,
       claudeUtil: 72,
       codexUtil: 35,
+      cursorUtil: null,
     });
   });
 
@@ -54,6 +55,7 @@ describe("trayConfigPayload", () => {
       config: CONFIG,
       claudeUtil: null,
       codexUtil: null,
+      cursorUtil: null,
     });
   });
 });
@@ -68,6 +70,7 @@ describe("syncTrayConfig", () => {
       config: CONFIG,
       claudeUtil: 72,
       codexUtil: 35,
+      cursorUtil: null,
     });
   });
 });

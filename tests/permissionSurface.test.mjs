@@ -31,8 +31,7 @@ describe("native permission surface", () => {
     );
     expect(dialogPermissions).toEqual(["dialog:allow-save", "dialog:allow-open"]);
     expect(flatPermissions).not.toContain("dialog:default");
-    expect(flatPermissions).not.toContain("notification:default");
-    expect(flatPermissions).toContain("notification:allow-is-permission-granted");
+    expect(flatPermissions.some((permission) => permission.startsWith("notification:"))).toBe(false);
   });
 
   it("keeps updater checks on the in-app banner path instead of OS notifications", () => {
@@ -43,16 +42,17 @@ describe("native permission surface", () => {
     expect(scheduler).toContain("permission-free");
   });
 
-  it("keeps Keychain access fallback-only instead of part of first-run setup", () => {
-    const welcome = readRepoFile("src/lib/components/WelcomeCard.svelte");
+  it("keeps first-run setup on PermissionsOnboarding without Keychain prompts", () => {
+    const onboarding = readRepoFile("src/lib/components/PermissionsOnboarding.svelte");
     const app = readRepoFile("src/App.svelte");
     const enableStart = app.indexOf("async function handleEnableRateLimits()");
-    const enableEnd = app.indexOf("async function handleShowKeychainFallback()");
+    const enableEnd = app.indexOf("async function handleInstallStatusline()");
     const enableHandler = app.slice(enableStart, enableEnd);
 
-    expect(welcome).not.toContain("requestClaudeKeychainAccessOnce");
-    expect(welcome).not.toContain("markClaudeKeychainAccessHandled");
-    expect(welcome).toContain("PermissionDisclosure");
+    expect(onboarding).not.toContain("requestClaudeKeychainAccessOnce");
+    expect(onboarding).not.toContain("markClaudeKeychainAccessHandled");
+    expect(onboarding).toContain("installStatusline");
+    expect(onboarding).toContain("checkStatusline");
     expect(enableHandler).not.toContain("showKeychainPermissionPanel = true");
     expect(enableHandler).toContain("await enableRateLimits()");
   });

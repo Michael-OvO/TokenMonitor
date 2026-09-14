@@ -139,6 +139,18 @@ fn claude_scope_priority(scope: AgentScope) -> u8 {
     }
 }
 
+/// Split cache creation into 5m/1h. Breakdown present → use it; missing →
+/// all into 1h (Claude Code's default). SSH compact records must use this too.
+pub(crate) fn split_claude_cache_creation(
+    total_cw: u64,
+    breakdown: Option<(u64, u64)>,
+) -> (u64, u64) {
+    match breakdown {
+        Some((five_m, one_h)) => (five_m, one_h),
+        None => (0, total_cw),
+    }
+}
+
 pub(crate) fn should_prefer_claude_entry(candidate: &ParsedEntry, existing: &ParsedEntry) -> bool {
     if candidate.output_tokens != existing.output_tokens {
         return candidate.output_tokens > existing.output_tokens;
@@ -147,7 +159,8 @@ pub(crate) fn should_prefer_claude_entry(candidate: &ParsedEntry, existing: &Par
     let candidate_scope = claude_scope_priority(candidate.agent_scope);
     let existing_scope = claude_scope_priority(existing.agent_scope);
     if candidate_scope != existing_scope {
-        return candidate_scope > existing_scope;
+        // Main (0) wins a token/output tie over Subagent (1).
+        return candidate_scope < existing_scope;
     }
 
     if candidate.timestamp != existing.timestamp {
@@ -178,7 +191,8 @@ pub(crate) fn should_prefer_claude_change_event(
     let candidate_scope = claude_scope_priority(candidate.agent_scope);
     let existing_scope = claude_scope_priority(existing.agent_scope);
     if candidate_scope != existing_scope {
-        return candidate_scope > existing_scope;
+        // Same rule as usage entries: Main (0) wins a tie over Subagent (1).
+        return candidate_scope < existing_scope;
     }
 
     if candidate.timestamp != existing.timestamp {
@@ -435,17 +449,16 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                         model
                     };
 
-                    // Split cache creation into 5m and 1h tiers.
-                    // If the breakdown sub-object exists, use it directly.
-                    // Otherwise default all cache creation to 1h (Claude Code's default).
                     let total_cw = usage.cache_creation_input_tokens.unwrap_or(0);
-                    let (cw_5m, cw_1h) = match &usage.cache_creation {
-                        Some(bd) => (
-                            bd.ephemeral_5m_input_tokens.unwrap_or(0),
-                            bd.ephemeral_1h_input_tokens.unwrap_or(0),
-                        ),
-                        None => (0, total_cw),
-                    };
+                    let (cw_5m, cw_1h) = split_claude_cache_creation(
+                        total_cw,
+                        usage.cache_creation.as_ref().map(|bd| {
+                            (
+                                bd.ephemeral_5m_input_tokens.unwrap_or(0),
+                                bd.ephemeral_1h_input_tokens.unwrap_or(0),
+                            )
+                        }),
+                    );
 
                     let web_search_requests = usage
                         .server_tool_use
@@ -672,4 +685,49 @@ pub(crate) fn test_count_lines(s: &str) -> u64 {
 #[cfg(test)]
 pub(crate) fn test_is_provider_internal_path(path: &str) -> bool {
     is_provider_internal_path(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Local, TimeZone};
+
+    fn entry(output: u64, scope: AgentScope) -> ParsedEntry {
+        ParsedEntry {
+            timestamp: Local
+                .with_ymd_and_hms(2026, 3, 15, 12, 0, 0)
+                .single()
+                .unwrap(),
+            model: String::from("claude-opus-4-6"),
+            input_tokens: 10,
+            output_tokens: output,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            cache_read_tokens: 0,
+            web_search_requests: 0,
+            unique_hash: Some(String::from("msg:req")),
+            session_key: String::from("s"),
+            agent_scope: scope,
+        }
+    }
+
+    #[test]
+    fn prefer_main_when_output_tied() {
+        let main = entry(100, AgentScope::Main);
+        let sub = entry(100, AgentScope::Subagent);
+        assert!(
+            should_prefer_claude_entry(&main, &sub),
+            "Main should replace Subagent on an output tie"
+        );
+        assert!(
+            !should_prefer_claude_entry(&sub, &main),
+            "Subagent must not replace Main on an output tie"
+        );
+    }
+
+    #[test]
+    fn split_cache_defaults_missing_breakdown_to_1h() {
+        assert_eq!(split_claude_cache_creation(50, None), (0, 50));
+        assert_eq!(split_claude_cache_creation(50, Some((20, 30))), (20, 30));
+    }
 }

@@ -1,6 +1,6 @@
 use chrono::Utc;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -14,7 +14,6 @@ pub struct LoggingState {
     reload_handle: ReloadHandle,
     frontend_writer: Mutex<RollingFileAppender>,
     current_level: Mutex<String>,
-    pub log_dir: PathBuf,
     _backend_guard: WorkerGuard,
 }
 
@@ -95,7 +94,6 @@ pub fn init_logging(app_data_dir: &Path) -> LoggingState {
         reload_handle,
         frontend_writer: Mutex::new(frontend_appender),
         current_level: Mutex::new(normalize_log_level(&default_filter_spec).to_string()),
-        log_dir,
         _backend_guard: backend_guard,
     }
 }

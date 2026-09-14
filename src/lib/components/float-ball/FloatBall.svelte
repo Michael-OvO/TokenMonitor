@@ -22,11 +22,7 @@
   import {
     percent,
     fillWidth,
-    formatBallCost,
-    formatPoint,
-    formatMonitor,
     formatError,
-    formatInteraction,
     resolveExpandDirection,
     type FloatBallPositionPayload,
   } from "./floatBallUtils.js";
@@ -53,6 +49,7 @@
     cursorUtil: null,
     kimiUtil: null,
     title: "$0.00",
+    costText: "$0",
   });
   let expanded = $state(false);
   let expandDirection = $state<FloatBallExpandDirection>("right");
@@ -71,15 +68,8 @@
     interactionId: string | null | undefined,
   ): Promise<void> {
     const sequence = moveQueue.nextSequence();
-    logger.debug(
-      "floatBall",
-      `Move invoke: ${formatInteraction(interactionId)} sequence=${sequence} target=${formatPoint({ x, y })}`,
-    );
     return invoke<void>("move_float_ball_to", { x, y, sequence, interactionId }).catch((error) => {
-      logger.warn(
-        "floatBall",
-        `Move invoke failed: ${formatInteraction(interactionId)} sequence=${sequence} target=${formatPoint({ x, y })} error=${formatError(error)}`,
-      );
+      logger.warn("floatBall", `Move invoke failed: ${formatError(error)}`);
       throw error;
     });
   }
@@ -150,16 +140,12 @@
     interactionId: string | null | undefined,
     reason: string,
   ): Promise<FloatBallPositionPayload> {
-    logger.debug(
-      "floatBall",
-      `Position invoke: ${formatInteraction(interactionId)} reason=${reason}`,
-    );
     return invoke<FloatBallPositionPayload>("get_float_ball_position", {
       interactionId,
     }).catch((error) => {
       logger.warn(
         "floatBall",
-        `Position invoke failed: ${formatInteraction(interactionId)} reason=${reason} error=${formatError(error)}`,
+        `Position invoke failed: reason=${reason} error=${formatError(error)}`,
       );
       throw error;
     });
@@ -187,29 +173,14 @@
     interactionId = nextInteractionId(next ? "expand" : "collapse"),
   ) {
     const requestId = ++expansionRequestId;
-    logger.info(
-      "floatBall",
-      `setExpanded requested: ${formatInteraction(interactionId)} source=${source} next=${next} requestId=${requestId} expanded=${expanded} direction=${expandDirection}`,
-    );
 
     if (next) {
       collapsedAnchor = null;
-
-      if (expanded) {
-        logger.debug(
-          "floatBall",
-          `Expand skipped: ${formatInteraction(interactionId)} source=${source} already visual requestId=${requestId}`,
-        );
-        return;
-      }
+      if (expanded) return;
 
       try {
         const pos = await getFloatBallPosition(interactionId, "expand-preflight");
         const monitor = await currentMonitor();
-        logger.debug(
-          "floatBall",
-          `Expand preflight: ${formatInteraction(interactionId)} source=${source} requestId=${requestId} pos=${formatPoint(pos)} monitor=${formatMonitor(monitor)}`,
-        );
         expandDirection = resolveExpandDirection(pos, monitor, expandDirection);
 
         await new Promise((r) => requestAnimationFrame(r));
@@ -224,15 +195,11 @@
         collapsedAnchor = null;
 
         ignoreBlurUntil = Date.now() + BLUR_GUARD_MS;
-        logger.info(
-          "floatBall",
-          `Expand applied: ${formatInteraction(interactionId)} source=${source} requestId=${requestId} direction=${nextLayout.expandDirection}`,
-        );
       } catch (e) {
         if (requestId !== expansionRequestId) return;
         logger.error(
           "floatBall",
-          `Expansion failed: ${formatInteraction(interactionId)} source=${source} requestId=${requestId} error=${formatError(e)}`,
+          `Expansion failed: source=${source} error=${formatError(e)}`,
         );
         expanded = false;
       }
@@ -244,10 +211,6 @@
     }
 
     expanded = false;
-    logger.debug(
-      "floatBall",
-      `Collapse visual phase: ${formatInteraction(interactionId)} source=${source} requestId=${requestId}`,
-    );
 
     await tick();
     await new Promise((r) => requestAnimationFrame(r));
@@ -261,14 +224,10 @@
       );
       expandDirection = nextLayout.expandDirection;
       syncCollapsedAnchor(await getFloatBallPosition(interactionId, "collapse-post"));
-      logger.info(
-        "floatBall",
-        `Collapse applied: ${formatInteraction(interactionId)} source=${source} requestId=${requestId} direction=${nextLayout.expandDirection}`,
-      );
     } catch (e) {
       logger.error(
         "floatBall",
-        `Collapse native OS call failed: ${formatInteraction(interactionId)} source=${source} requestId=${requestId} error=${formatError(e)}`,
+        `Collapse native OS call failed: source=${source} error=${formatError(e)}`,
       );
     } finally {
       if (requestId === expansionRequestId) {
@@ -284,16 +243,12 @@
   }
 
   function snapFloatBall(interactionId: string | null | undefined): Promise<void> {
-    logger.info("floatBall", `Snap invoke: ${formatInteraction(interactionId)}`);
     return invoke<void>("snap_float_ball", { interactionId })
       .then(async () => {
         syncCollapsedAnchor(await getFloatBallPosition(interactionId, "snap-post"));
       })
       .catch((error) => {
-        logger.warn(
-          "floatBall",
-          `Snap invoke failed: ${formatInteraction(interactionId)} error=${formatError(error)}`,
-        );
+        logger.warn("floatBall", `Snap invoke failed: ${formatError(error)}`);
         throw error;
       });
   }
@@ -314,13 +269,9 @@
   }
 
   function onPointerDown(event: PointerEvent) {
-    if (!shouldHandleFloatBallPointerButton(event.button, IS_LINUX)) return;
+    if (!shouldHandleFloatBallPointerButton(event.button)) return;
     event.preventDefault();
     const interactionId = nextInteractionId(event.button === 2 ? "secondary" : "pointer");
-    logger.info(
-      "floatBall",
-      `Pointer down: ${formatInteraction(interactionId)} pointerId=${event.pointerId} button=${event.button} screen=${formatPoint({ x: event.screenX, y: event.screenY })} client=${formatPoint({ x: event.clientX, y: event.clientY })} expanded=${expanded}`,
-    );
 
     const target = event.currentTarget as HTMLElement;
     target.setPointerCapture(event.pointerId);
@@ -358,18 +309,11 @@
           event.pointerId, event.button, interactionId,
           screenX, screenY, pos.x, pos.y, screenToPhysicalScale,
         );
-        logger.debug(
-          "floatBall",
-          `Pointer init ready: ${formatInteraction(interactionId)} pointerId=${event.pointerId} button=${event.button} startWindow=${formatPoint(pos)} scale=${scale} detectedScale=${screenToPhysicalScale}`,
-        );
         syncCollapsedAnchor(pos);
       })
       .catch((error) => {
         if (gen !== dragGeneration || activePointer?.pointerId !== event.pointerId) return;
-        logger.warn(
-          "floatBall",
-          `Pointer init failed: ${formatInteraction(interactionId)} pointerId=${event.pointerId} error=${formatError(error)}`,
-        );
+        logger.warn("floatBall", `Pointer init failed: ${formatError(error)}`);
         resetPointerInteraction(target, event.pointerId);
       });
   }
@@ -389,18 +333,8 @@
         dragging: true,
         interactionId: dragState.interactionId,
       }).catch((e) => logger.debug("floatBall", `set_float_ball_dragging(true) failed: ${e}`));
-      const dx = event.screenX - dragState.startScreenX;
-      const dy = event.screenY - dragState.startScreenY;
-      logger.info(
-        "floatBall",
-        `Drag started: ${formatInteraction(dragState.interactionId)} pointerId=${event.pointerId} startWindow=${formatPoint({ x: dragState.startWindowX, y: dragState.startWindowY })} delta=${formatPoint({ x: dx, y: dy })} scale=${dragState.screenToPhysicalScale}`,
-      );
     }
 
-    logger.debug(
-      "floatBall",
-      `Drag move: ${formatInteraction(dragState.interactionId)} pointerId=${event.pointerId} target=${formatPoint({ x: result.physicalX, y: result.physicalY })} screen=${formatPoint({ x: event.screenX, y: event.screenY })}`,
-    );
     moveQueue.queue(result.physicalX, result.physicalY, dragState.interactionId);
   }
 
@@ -426,27 +360,13 @@
     const interactionId = pointerState?.interactionId ?? activePointer.interactionId;
     resetPointerInteraction(target, event.pointerId);
     suppressShellClick = button === 0 && !wasDragging;
-    logger.info(
-      "floatBall",
-      `Pointer up: ${formatInteraction(interactionId)} pointerId=${event.pointerId} button=${button} wasDragging=${wasDragging} final=${formatPoint(finalPosition)} expanded=${expanded} suppressShellClick=${suppressShellClick}`,
-    );
 
     if (button === 2) {
-      // Right click: toggle expand
       if (!wasDragging) {
-        logger.info(
-          "floatBall",
-          `Right-click toggle: ${formatInteraction(interactionId)} nextExpanded=${!expanded}`,
-        );
         void setExpanded(!expanded, "right-click", interactionId);
       }
     } else if (button === 0) {
-      // Left drag: apply the final move.
       if (finalPosition && !expanded) {
-        logger.info(
-          "floatBall",
-          `Drag ended: ${formatInteraction(interactionId)} requesting final move at ${formatPoint(finalPosition)}`,
-        );
         moveQueue.cancel();
         void moveFloatBallTo(finalPosition.x, finalPosition.y, interactionId)
           .then(() => snapFloatBall(interactionId))
@@ -457,11 +377,6 @@
             }).catch((e) => logger.debug("floatBall", `set_float_ball_dragging(false) after snap failed: ${e}`)),
           )
           .catch((e) => logger.debug("floatBall", `moveFloatBallTo/snap failed: ${e}`));
-      } else if (!wasDragging) {
-        logger.debug(
-          "floatBall",
-          `Left click ended without drag action: ${formatInteraction(interactionId)}`,
-        );
       }
     }
   }
@@ -469,10 +384,6 @@
   function onPointerCancel(event: PointerEvent) {
     if (!activePointer || event.pointerId !== activePointer.pointerId) return;
     const target = event.currentTarget as HTMLElement;
-    logger.info(
-      "floatBall",
-      `Pointer cancel: ${formatInteraction(activePointer.interactionId)} pointerId=${event.pointerId}`,
-    );
     resetPointerInteraction(target, event.pointerId);
   }
 
@@ -580,7 +491,7 @@
       onpointerup={onPointerUp}
       onpointercancel={onPointerCancel}
     >
-      <span class="ball-label">{formatBallCost(summary.totalCost)}</span>
+      <span class="ball-label">{summary.costText}</span>
     </button>
 
     {#if expanded}

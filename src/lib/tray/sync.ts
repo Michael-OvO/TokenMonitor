@@ -16,10 +16,14 @@ export function trayConfigPayload(
   config: TrayConfig,
   rateLimits: RateLimitsPayload | null,
 ) {
+  // Every rate-limit provider has to be sent: the tray renders bars and
+  // percentages from these fields alone, so an omitted provider is invisible
+  // in the menu bar no matter what the user selected in settings.
   return {
     config,
     claudeUtil: primaryUtilization(rateLimits, "claude"),
     codexUtil: primaryUtilization(rateLimits, "codex"),
+    cursorUtil: primaryUtilization(rateLimits, "cursor"),
   };
 }
 

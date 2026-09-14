@@ -129,6 +129,20 @@ mod tests {
     #[test]
     fn grok_and_gemini_entries_exist() {
         assert!(lookup("grok-4.3").is_some());
+        assert!(lookup("grok-4.5").is_some());
+        assert!(lookup("grok-4.5-fast").is_some());
+        assert!(lookup("cursor-grok-4.5-high-fast").is_some());
+        let grok46 = lookup("grok-4.6").expect("grok-4.6");
+        assert!((grok46.input - 2.0).abs() < 1e-9);
+        assert!((grok46.output - 6.0).abs() < 1e-9);
+        assert!((grok46.cache_read - 0.5).abs() < 1e-9);
+        let grok46_fast = lookup("grok-4.6-fast").expect("grok-4.6-fast");
+        assert!((grok46_fast.input - 4.0).abs() < 1e-9);
+        assert!((grok46_fast.output - 18.0).abs() < 1e-9);
+        assert!((grok46_fast.cache_read - 1.0).abs() < 1e-9);
+        assert!(lookup("cursor-grok-4.6-high-fast").is_some());
+        assert!(lookup("cursor-grok-4.6-xhigh-fast").is_some());
+        assert!(lookup("cursor-grok-4.6-xhigh").is_some());
         assert!(lookup("gemini-2.5-pro").is_some());
     }
 

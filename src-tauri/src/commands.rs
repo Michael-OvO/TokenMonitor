@@ -22,8 +22,8 @@ use crate::usage::payload_disk_cache::PayloadDiskCache;
 use crate::usage::ssh_remote::{SshCacheManager, SshHostConfig};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 #[allow(dead_code)]
@@ -34,7 +34,6 @@ pub struct AppState {
     pub(crate) tray_utilization: Arc<RwLock<tray::TrayUtilization>>,
     pub last_usage_debug: Arc<RwLock<Option<UsageDebugReport>>>,
     pub cached_rate_limits: Arc<RwLock<Option<RateLimitsPayload>>>,
-    pub glass_enabled: Arc<RwLock<bool>>,
     pub float_ball_state: Arc<RwLock<float_ball::FloatBallState>>,
     pub ssh_hosts: Arc<RwLock<Vec<SshHostConfig>>>,
     pub remote_device_include_flags: Arc<RwLock<HashMap<String, bool>>>,
@@ -53,6 +52,11 @@ pub struct AppState {
     /// the first-run local access disclosure. Existing installs enable this at
     /// bootstrap; new installs flip it after the welcome card is dismissed.
     pub usage_access_enabled: Arc<AtomicBool>,
+    /// Last non-pending tray daily cost. Kept across Cursor remote-cache TTL
+    /// gaps so the menu bar does not flash `$0` while a refetch is in flight.
+    pub last_tray_daily_cost: Arc<Mutex<Option<f64>>>,
+    /// Dedupes concurrent Cursor remote fetches spawned from tray + usage query.
+    pub cursor_remote_fetch_inflight: Arc<AtomicBool>,
     /// Plan tier used to compute the rolling-window utilization percentages.
     /// Updated by `set_claude_plan_tier`; defaults to `Pro` for new installs.
     pub claude_plan_tier: Arc<RwLock<ClaudePlanTier>>,
@@ -80,7 +84,6 @@ impl AppState {
             tray_utilization: Arc::new(RwLock::new(tray::TrayUtilization::default())),
             last_usage_debug: Arc::new(RwLock::new(None)),
             cached_rate_limits: Arc::new(RwLock::new(None)),
-            glass_enabled: Arc::new(RwLock::new(true)),
             float_ball_state: Arc::new(RwLock::new(float_ball::FloatBallState::default())),
             ssh_hosts: Arc::new(RwLock::new(Vec::new())),
             remote_device_include_flags: Arc::new(RwLock::new(HashMap::new())),
@@ -89,6 +92,8 @@ impl AppState {
             suppress_auto_hide: Arc::new(AtomicBool::new(false)),
             rate_limits_enabled: Arc::new(AtomicBool::new(false)),
             usage_access_enabled: Arc::new(AtomicBool::new(false)),
+            last_tray_daily_cost: Arc::new(Mutex::new(None)),
+            cursor_remote_fetch_inflight: Arc::new(AtomicBool::new(false)),
             claude_plan_tier: Arc::new(RwLock::new(ClaudePlanTier::default())),
             payload_disk_cache: Arc::new(RwLock::new(None)),
             auto_export: Arc::new(RwLock::new(usage_io::AutoExportConfig::default())),
@@ -97,6 +102,10 @@ impl AppState {
                 all_usage_integrations().to_vec(),
             )),
         }
+    }
+
+    pub(crate) fn usage_access_enabled(&self) -> bool {
+        self.usage_access_enabled.load(Ordering::SeqCst)
     }
 
     /// Drop the persistent payload disk cache for every usage view.
@@ -155,4 +164,21 @@ pub(crate) fn maybe_capture_query_debug(
 pub(crate) fn parse_usage_selection(provider: &str) -> Result<UsageIntegrationSelection, String> {
     UsageIntegrationSelection::parse(provider)
         .ok_or_else(|| format!("Unknown usage integration: {provider}"))
+}
+
+pub(crate) fn merge_usage_source(left: UsageSource, right: UsageSource) -> UsageSource {
+    if left == right {
+        left
+    } else {
+        UsageSource::Mixed
+    }
+}
+
+pub(crate) fn merge_usage_warning(left: Option<String>, right: Option<String>) -> Option<String> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(warning), None) | (None, Some(warning)) => Some(warning),
+        (Some(left), Some(right)) if left == right => Some(left),
+        (Some(left), Some(right)) => Some(format!("{left}\n{right}")),
+    }
 }

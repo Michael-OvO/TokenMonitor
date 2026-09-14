@@ -1,5 +1,5 @@
 #[cfg_attr(not(test), allow(dead_code))]
-pub const PRICING_VERSION: &str = "2026-07-23";
+pub const PRICING_VERSION: &str = "2026-09-14";
 
 use crate::models::{detect_model_family, ModelFamily};
 use crate::usage::litellm::DynamicModelRates;
@@ -31,13 +31,26 @@ fn lookup_dynamic(model_key: &str) -> Option<ModelRates> {
     let lock = DYNAMIC_PRICING.get()?;
     let guard = lock.read().ok()?;
     let r = guard.get(model_key)?;
-    Some(ModelRates {
-        input: r.input,
-        output: r.output,
-        cache_write_5m: r.cache_write_5m,
-        cache_write_1h: r.cache_write_1h,
-        cache_read: r.cache_read,
-    })
+    Some(apply_claude_cost_cache_lock(
+        model_key,
+        ModelRates {
+            input: r.input,
+            output: r.output,
+            cache_write_5m: r.cache_write_5m,
+            cache_write_1h: r.cache_write_1h,
+            cache_read: r.cache_read,
+        },
+    ))
+}
+
+/// Claude Code `/cost` bills both cache-write tiers at 1.25× input. LiteLLM's
+/// Anthropic table uses the API's true 2× 1h rate — pin 1h back so dynamic
+/// load cannot override `/cost`. Non-Claude models are unchanged.
+fn apply_claude_cost_cache_lock(model_key: &str, mut rates: ModelRates) -> ModelRates {
+    if detect_model_family(model_key) == ModelFamily::Anthropic {
+        rates.cache_write_1h = rates.input * 1.25;
+    }
+    rates
 }
 
 /// Web search cost: $10 per 1,000 searches ($0.01 per search).
@@ -198,6 +211,28 @@ fn get_rates_for_key(model: &str) -> Option<ModelRates> {
     // Claude models: handled entirely by get_fallback_rates() using family-level
     // detection (opus/sonnet/haiku). LiteLLM dynamic pricing above provides
     // per-version accuracy; the family fallback uses latest known rates.
+
+    // ── Grok 4.5 / 4.6 (Cursor / xAI) ────────────────────────────────────────
+    // Cursor docs: standard $2/$6, Fast $4/$18. Cache read = 25% of input.
+    // Fuzzy match covers Cursor slug variants (cursor-grok-4.6-xhigh-fast, etc.).
+    if model.contains("grok-4.6") || model.contains("grok-4.5") {
+        if model.contains("fast") {
+            return Some(ModelRates {
+                input: 4.0,
+                output: 18.0,
+                cache_write_5m: 5.0,
+                cache_write_1h: 5.0,
+                cache_read: 1.0,
+            });
+        }
+        return Some(ModelRates {
+            input: 2.0,
+            output: 6.0,
+            cache_write_5m: 2.5,
+            cache_write_1h: 2.5,
+            cache_read: 0.5,
+        });
+    }
 
     // ── OpenAI / Codex models ────────────────────────────────────────────────
 
@@ -395,6 +430,37 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_claude_1h_cache_is_capped_to_cost_rate() {
+        let capped = apply_claude_cost_cache_lock(
+            "sonnet-4-6",
+            ModelRates {
+                input: 3.0,
+                output: 15.0,
+                cache_write_5m: 3.75,
+                cache_write_1h: 6.0, // LiteLLM API 2×
+                cache_read: 0.3,
+            },
+        );
+        assert!(approx_eq(capped.cache_write_1h, 3.75));
+        assert!(approx_eq(capped.cache_write_5m, 3.75));
+    }
+
+    #[test]
+    fn dynamic_non_claude_1h_cache_is_not_capped() {
+        let rates = apply_claude_cost_cache_lock(
+            "gpt-5.4",
+            ModelRates {
+                input: 2.5,
+                output: 15.0,
+                cache_write_5m: 2.5,
+                cache_write_1h: 9.9,
+                cache_read: 0.25,
+            },
+        );
+        assert!(approx_eq(rates.cache_write_1h, 9.9));
+    }
+
+    #[test]
     fn opus_4_1_falls_back_to_family() {
         // Without LiteLLM, opus-4-1 uses the family fallback rate ($5/$25).
         assert!(approx_eq(cost("claude-opus-4-1-20250401", M, M), 30.00));
@@ -534,6 +600,40 @@ mod tests {
     }
 
     #[test]
+    fn grok_4_5_standard_pricing() {
+        assert!(pricing_available_for_key("grok-4.5"));
+        assert!(approx_eq(cost("grok-4.5", M, M), 8.0));
+        assert!(approx_eq(cost("cursor-grok-4.5-high", M, M), 8.0));
+    }
+
+    #[test]
+    fn grok_4_5_fast_pricing() {
+        // Fast: $4/$18 → $22 per 1M in + 1M out
+        assert!(pricing_available_for_key("cursor-grok-4.5-high-fast"));
+        assert!(approx_eq(cost("cursor-grok-4.5-high-fast", M, M), 22.0));
+        assert!(approx_eq(cost("grok-4.5-fast", M, M), 22.0));
+        assert!(approx_eq(cost("grok-4.5-fast-xhigh", M, M), 22.0));
+    }
+
+    #[test]
+    fn grok_4_6_standard_pricing() {
+        assert!(pricing_available_for_key("grok-4.6"));
+        assert!(approx_eq(cost("grok-4.6", M, M), 8.0));
+        assert!(approx_eq(cost("cursor-grok-4.6-high", M, M), 8.0));
+        assert!(approx_eq(cost("cursor-grok-4.6-xhigh", M, M), 8.0));
+    }
+
+    #[test]
+    fn grok_4_6_fast_pricing() {
+        // Fast: $4/$18 → $22 per 1M in + 1M out (same as Grok 4.5 Fast)
+        assert!(pricing_available_for_key("cursor-grok-4.6-high-fast"));
+        assert!(approx_eq(cost("cursor-grok-4.6-high-fast", M, M), 22.0));
+        assert!(approx_eq(cost("cursor-grok-4.6-xhigh-fast", M, M), 22.0));
+        assert!(approx_eq(cost("grok-4.6-fast", M, M), 22.0));
+        assert!(approx_eq(cost("grok-4.6-fast-xhigh", M, M), 22.0));
+    }
+
+    #[test]
     fn unsupported_family_defaults_to_zero_until_priced() {
         assert!(approx_eq(cost("totally-unknown-model", M, M), 0.00));
         assert!(!pricing_available_for_key("totally-unknown-model"));
@@ -549,7 +649,7 @@ mod tests {
 
     #[test]
     fn pricing_version_is_set() {
-        assert_eq!(PRICING_VERSION, "2026-07-23");
+        assert_eq!(PRICING_VERSION, "2026-09-14");
     }
 
     #[test]

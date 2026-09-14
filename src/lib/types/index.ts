@@ -4,7 +4,7 @@ export type UsageProvider = string;
 export type RateLimitProviderId = string;
 export type UsagePeriod = "5h" | "day" | "week" | "month" | "year";
 export type DefaultPeriod = Exclude<UsagePeriod, "year">;
-export type UsageSource = "ccusage" | "parser" | "mixed";
+export type UsageSource = "parser" | "mixed";
 
 export interface HeaderTabConfig {
   label: string;
@@ -142,12 +142,6 @@ export type AccordionToggleDetail = {
   scope: "main" | "subagents" | "devices";
 };
 
-export type ChartDetailToggleDetail = {
-  durationMs: number;
-  fromHeight: number;
-  toHeight: number;
-};
-
 export interface CalendarDay {
   day: number;
   cost: number;
@@ -226,6 +220,12 @@ export interface StatusWidgetSummary {
   cursorUtil: number | null;
   kimiUtil: number | null;
   title: string;
+  /**
+   * `totalCost` already rendered in the user's currency by the backend. The
+   * float ball is a separate webview with no settings store of its own, so it
+   * cannot convert this itself — see `src-tauri/src/usage/money.rs`.
+   */
+  costText: string;
 }
 
 // ── SSH / Device usage ──

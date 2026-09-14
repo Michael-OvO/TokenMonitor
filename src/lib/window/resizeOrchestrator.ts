@@ -20,6 +20,8 @@ export type WindowAnchorEdge = "top" | "bottom";
 
 export interface ResizeOrchestratorDeps {
   getPopEl: () => HTMLDivElement | null;
+  /** Optional fixed chrome below the scroll body (e.g. main-view footer). */
+  getFooterEl?: () => HTMLElement | null;
   invoke: (cmd: string, args: Record<string, unknown>) => Promise<void>;
   onScrollLockChange: (locked: boolean) => void;
   currentMonitor: () => Promise<{
@@ -28,15 +30,14 @@ export interface ResizeOrchestratorDeps {
     scaleFactor: number;
   } | null>;
   logDebug: (event: string, data: Record<string, unknown>) => void;
-  captureDebugSnapshot: (reason: string) => Record<string, unknown>;
   formatDebugError: (error: unknown) => { message: string };
-  isDebugEnabled: () => boolean;
   /** Reported whenever a setSize request succeeds; lets callers persist the last applied height. */
   onHeightApplied?: (height: number) => void;
 }
 
 export interface ResizeOrchestrator {
   syncSizeAndVerify: (source?: string) => void;
+  reconcileWindowGeometry: (source?: string) => void;
   animateWindowHeight: (
     targetHeight: number,
     durationMs: number,
@@ -110,18 +111,11 @@ export function createResizeOrchestrator(
   let fixedWindowH = 0;
   // ── Internal helpers ──
 
-  function captureDebugSnapshot(reason: string): Record<string, unknown> {
-    return deps.isDebugEnabled()
-      ? deps.captureDebugSnapshot(reason)
-      : {};
-  }
-
   function clearPendingResize(): void {
     deps.logDebug("resize:clear-pending", {
       hadTimer: Boolean(resizeTimer),
       hadRaf: resizeRaf !== 0,
       hadObserverRaf: observerResizeRaf !== 0,
-      ...captureDebugSnapshot("clear-pending"),
     });
     if (resizeTimer) {
       clearTimeout(resizeTimer);
@@ -201,7 +195,6 @@ export function createResizeOrchestrator(
         nextHeight,
         scrollThresholdH,
         effectiveMaxWindowH: getEffectiveWindowMaxHeight(),
-        ...captureDebugSnapshot(`scroll-lock-${source}`),
       },
     );
   }
@@ -216,7 +209,10 @@ export function createResizeOrchestrator(
   } | null {
     const popEl = deps.getPopEl();
     if (!popEl) return null;
-    const rawMeasuredHeight = measureTargetWindowHeight(popEl.scrollHeight);
+    const footerHeight = deps.getFooterEl?.()?.offsetHeight ?? 0;
+    const rawMeasuredHeight = measureTargetWindowHeight(
+      popEl.scrollHeight + footerHeight,
+    );
     const effectiveMaxWindowH = getEffectiveWindowMaxHeight();
     const scrollLocked = isWindowScrollLocked(
       rawMeasuredHeight,
@@ -249,19 +245,31 @@ export function createResizeOrchestrator(
         height: request.height,
       })
       .then(() => {
+        // When the OS clamps below the request, re-align hysteresis to the
+        // applied height. Ignore stale innerHeight that still matches the
+        // pre-resize window (common briefly after invoke resolves).
+        if (typeof window !== "undefined") {
+          const applied = window.innerHeight;
+          if (
+            Number.isFinite(applied)
+            && applied > 0
+            && applied < request.height - RESIZE_HYSTERESIS_PX
+          ) {
+            lastWindowH = applied;
+          }
+        }
         deps.logDebug("resize:set-size-resolved", {
           source: request.source,
           nextHeight: request.height,
-          ...captureDebugSnapshot(`set-size-resolved-${request.source}`),
+          appliedHeight: lastWindowH,
         });
-        deps.onHeightApplied?.(request.height);
+        deps.onHeightApplied?.(lastWindowH > 0 ? lastWindowH : request.height);
       })
       .catch((error) => {
         deps.logDebug("resize:set-size-rejected", {
           source: request.source,
           nextHeight: request.height,
           error: deps.formatDebugError(error),
-          ...captureDebugSnapshot(`set-size-rejected-${request.source}`),
         });
         if (!pendingWindowHeightRequest && typeof window !== "undefined") {
           lastWindowH = window.innerHeight;
@@ -293,6 +301,31 @@ export function createResizeOrchestrator(
     applyWindowHeight(measurement.nextHeight, source);
   }
 
+  function forceApplyWindowHeight(targetHeight: number, source = "unknown"): void {
+    const effectiveMaxWindowH = getEffectiveWindowMaxHeight();
+    const nextHeight = clampWindowHeight(
+      targetHeight,
+      effectiveMaxWindowH,
+      MIN_WINDOW_HEIGHT,
+    );
+    deps.logDebug("resize:force-apply-request", {
+      source,
+      targetHeight,
+      nextHeight,
+      effectiveMaxWindowH,
+      scrollLocked: isScrollLocked,
+      deltaFromLast: nextHeight - lastWindowH,
+    });
+
+    deferredShrinkHeight = null;
+    lastWindowH = nextHeight;
+    pendingWindowHeightRequest = {
+      height: nextHeight,
+      source,
+    };
+    flushWindowHeightRequest();
+  }
+
   function applyWindowHeight(targetHeight: number, source = "unknown"): void {
     const effectiveMaxWindowH = getEffectiveWindowMaxHeight();
     const nextHeight = clampWindowHeight(
@@ -315,7 +348,6 @@ export function createResizeOrchestrator(
       deltaFromLast: nextHeight - lastWindowH,
       deltaAbs: Math.abs(nextHeight - lastWindowH),
       hysteresisPx: RESIZE_HYSTERESIS_PX,
-      ...captureDebugSnapshot(`apply-${source}`),
     });
     if (disposition === "skip") return;
     if (!initialContentReady && disposition === "shrink") {
@@ -380,7 +412,6 @@ export function createResizeOrchestrator(
       effectiveMaxWindowH:
         measurement?.effectiveMaxWindowH ?? getEffectiveWindowMaxHeight(),
       scrollLocked: measurement?.scrollLocked ?? isScrollLocked,
-      ...captureDebugSnapshot(`sync-${source}`),
     });
     if (!measurement) return null;
     applyWindowHeight(measurement.nextHeight, source);
@@ -409,7 +440,6 @@ export function createResizeOrchestrator(
     deps.logDebug("resize:schedule-settled", {
       source,
       delay,
-      ...captureDebugSnapshot(`schedule-${source}`),
     });
     clearPendingResize();
     resizeTimer = setTimeout(() => {
@@ -419,7 +449,6 @@ export function createResizeOrchestrator(
           resizeRaf = 0;
           deps.logDebug("resize:settled-fire", {
             source,
-            ...captureDebugSnapshot(`settled-fire-${source}`),
           });
           syncSizeAndVerify(`${source}:settled`);
         });
@@ -434,6 +463,13 @@ export function createResizeOrchestrator(
     const measurement = measureWindowHeight(`sync-${source}`);
     if (!measurement) return;
     applyMeasuredHeight(measurement, `${source}:sync`);
+  }
+
+  function reconcileWindowGeometry(source = "unknown"): void {
+    deps.logDebug("resize:reconcile-window-geometry", { source });
+    const measurement = measureWindowHeight(`reconcile-${source}`);
+    if (!measurement) return;
+    forceApplyWindowHeight(measurement.nextHeight, `${source}:reconcile`);
   }
 
   function animateWindowHeight(
@@ -463,7 +499,6 @@ export function createResizeOrchestrator(
       effectiveMaxWindowH,
       scrollLocked: isScrollLocked,
       disposition,
-      ...captureDebugSnapshot(`animate-${source}`),
     });
 
     if (disposition === "skip" || durationMs <= 0) {
@@ -579,7 +614,6 @@ export function createResizeOrchestrator(
     if (isWindowHeightAnimating) {
       deps.logDebug("resize:observer-skipped-animation", {
         source,
-        ...captureDebugSnapshot(`observer-skipped-${source}`),
       });
       return;
     }
@@ -608,7 +642,6 @@ export function createResizeOrchestrator(
         deltaFromLast,
         deltaAbs: deltaFromLast == null ? null : Math.abs(deltaFromLast),
         hysteresisPx: RESIZE_HYSTERESIS_PX,
-        ...captureDebugSnapshot(`resize-to-content-${scheduledSource}`),
       });
       if (!measurement) return;
       applyMeasuredHeight(measurement, `${scheduledSource}:observer`);
@@ -704,6 +737,7 @@ export function createResizeOrchestrator(
 
   return {
     syncSizeAndVerify,
+    reconcileWindowGeometry,
     animateWindowHeight,
     followContentDuringTransition,
     resizeToContent,

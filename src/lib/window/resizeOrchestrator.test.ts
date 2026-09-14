@@ -73,16 +73,16 @@ function installRafStub() {
 function createTestOrchestrator(options?: {
   invoke?: (cmd: string, args: Record<string, unknown>) => Promise<void>;
   popEl?: HTMLDivElement | null;
+  footerEl?: HTMLElement | null;
 }) {
   return createResizeOrchestrator({
     getPopEl: () => options?.popEl ?? null,
+    getFooterEl: () => options?.footerEl ?? null,
     invoke: options?.invoke ?? (() => Promise.resolve()),
     onScrollLockChange: () => {},
     currentMonitor: async () => null,
     logDebug: () => {},
-    captureDebugSnapshot: () => ({}),
     formatDebugError: () => ({ message: "test" }),
-    isDebugEnabled: () => false,
   });
 }
 
@@ -191,6 +191,29 @@ describe("createResizeOrchestrator", () => {
     orchestrator.destroy();
   });
 
+  it("can reconcile the native window rect even when height is unchanged", async () => {
+    installWindowStub(420);
+    installRafStub();
+    const popEl = createPopEl(420);
+    const invoke = vi.fn(() => Promise.resolve());
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: popEl.element,
+    });
+
+    orchestrator.syncSizeAndVerify("same-height");
+    expect(invoke).not.toHaveBeenCalled();
+
+    orchestrator.reconcileWindowGeometry("monitor-change");
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenLastCalledWith("set_window_size_and_align", {
+      width: WINDOW_WIDTH,
+      height: 420,
+    });
+
+    orchestrator.destroy();
+  });
+
   it("defers a shrink under the pointer on a bottom-anchored window, then snaps it in one resize on mouse-leave", async () => {
     installWindowStub(420);
     const { runNextFrame } = installRafStub();
@@ -286,6 +309,29 @@ describe("createResizeOrchestrator", () => {
     }
 
     expect(invoke).toHaveBeenCalledTimes(3);
+    orchestrator.destroy();
+  });
+
+  it("includes fixed footer chrome in the measured window height", async () => {
+    installWindowStub(320);
+    installRafStub();
+    const popEl = createPopEl(400);
+    const footerEl = { offsetHeight: 44 } as HTMLElement;
+    const invoke = vi.fn(() => Promise.resolve());
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: popEl.element,
+      footerEl,
+    });
+
+    orchestrator.syncSizeAndVerify("with-footer");
+    await flushMicrotasks();
+
+    expect(invoke).toHaveBeenCalledWith("set_window_size_and_align", {
+      width: WINDOW_WIDTH,
+      height: 444,
+    });
+
     orchestrator.destroy();
   });
 });

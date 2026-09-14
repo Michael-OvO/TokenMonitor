@@ -19,7 +19,6 @@
     "store:default",
     "autostart:default",
     "updater:default",
-    "notification:allow-is-permission-granted",
     "dialog:allow-save",
     "dialog:allow-open",
     {

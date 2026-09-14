@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 
 static EXCHANGE_RATES: OnceLock<RwLock<HashMap<String, f64>>> = OnceLock::new();
 
-const API_URL: &str = "https://api.frankfurter.dev/v1/latest?from=USD&to=EUR,GBP,JPY,CNY";
-
 const CACHE_FILENAME: &str = "exchange-rates-cache.json";
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 
@@ -51,7 +49,7 @@ pub fn load_cached(app_data_dir: &Path) -> Option<HashMap<String, f64>> {
 }
 
 pub async fn fetch_and_cache(app_data_dir: &Path) -> Result<HashMap<String, f64>, String> {
-    let body = reqwest::get(API_URL)
+    let body = reqwest::get(crate::ops::frankfurter_latest_url())
         .await
         .map_err(|e| format!("Exchange rate HTTP fetch failed: {e}"))?
         .text()
@@ -86,7 +84,6 @@ pub fn set_exchange_rates(rates: HashMap<String, f64>) {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn get_rate(currency: &str) -> Option<f64> {
     let lock = EXCHANGE_RATES.get()?;
     let guard = lock.read().ok()?;
@@ -151,6 +148,9 @@ mod tests {
 
     #[test]
     fn global_rates_set_and_get() {
+        // The rate table is a process global shared with `usage::money`; take
+        // its lock so the parallel runner cannot interleave the two.
+        let _guard = crate::usage::money::CurrencyGuard::new("USD");
         let mut rates = HashMap::new();
         rates.insert("GBP".to_string(), 0.74);
         set_exchange_rates(rates);
@@ -160,6 +160,7 @@ mod tests {
 
     #[test]
     fn get_all_rates_returns_empty_before_init() {
+        let _guard = crate::usage::money::CurrencyGuard::new("USD");
         // OnceLock may already be initialized from another test in this process,
         // so we just verify it doesn't panic and returns a map.
         let all = get_all_rates();

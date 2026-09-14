@@ -1,67 +1,62 @@
-# Dependencies
+# Dependencies and package-manager caches
 node_modules/
+.npm/
+.pnpm-store/
+.yarn/
 
-# Build output
+# Build, test, and generated output
 dist/
 coverage/
-src-tauri/target/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Tauri
-src-tauri/gen/
-
-# Superpowers
-.superpowers/
-docs/superpowers/
-
-# Build outputs & caches
 outputs/
+target/
+src-tauri/gen/
 build/cache/
-
-# Code signing & notarization (keep locally, never commit)
-signing/
-CLAUDE.md
-
-# Development artifacts
-tmp/
-
-# Legacy / archived code (kept locally for reference)
-archive/
-
-# Pre-built binaries (build from source via CI instead)
-scripts/*.exe
-
-# Build/lint artifacts
+.svelte-kit/
+.vite/
+*.tsbuildinfo
+*.long-type-*.txt
 src-tauri/clippy_ascii.txt
 src-tauri/clippy_errors.txt
-*.long-type-*.txt
 
-# User-specific Claude Code settings
-.claude/settings.local.json
-.devcompanion/
+# Logs and runtime data
+*.log
+logs/
+*.pid
+*.pid.lock
+*.stackdump
 
-# Profiler build cache & profiling scratch (fork-only)
-profiler/target/
-profiling/
+# Local environments and language caches
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
-# AI Dev Companion generated files (machine-specific absolute paths - do not publish)
-.claude/settings.json
-.claude/commands/cc*.md
-.claude/commands/idea.md
+# Credentials, signing, and release secrets
+signing/
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+credentials*.json
+secrets*.json
+*.secret
+.npmrc
+.cargo/credentials
+.cargo/credentials.toml
 
 # Local/internal development artifacts
 .claude/worktrees/
+.claude/settings.local.json
 scripts/tmp-merge-dedup-usage.mjs
 src-tauri/test_extra_fields.rs
 docs/ecl/*.yaml
@@ -72,3 +67,31 @@ docs/bug-report-dedup-overcounting.md
 
 # Impeccable design plugin state (per-machine cache)
 .impeccable/
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Temporary and local-only files
+tmp/
+*.tmp
+*.temp
+*.bak
+*.orig
+archive/
+profiling/
+scripts/tmp-*
+scripts/*.exe
+
+# Local assistant/tool state
+.codex/
+.agents/
+.superpowers/
+docs/superpowers/
+CLAUDE.md

@@ -18,7 +18,7 @@ pub enum UsageSource {
 pub struct UsagePayload {
     pub total_cost: f64,
     pub total_tokens: u64,
-    /// 5H: number of activity blocks (split by 30-min gaps); others: buckets with nonzero cost
+    /// 5h: hourly buckets with cost; others: buckets with nonzero cost
     pub session_count: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -28,9 +28,9 @@ pub struct UsagePayload {
     pub web_search_requests: u64,
     pub chart_buckets: Vec<ChartBucket>,
     pub model_breakdown: Vec<ModelSummary>,
-    /// 5H period only — current session burn rate and projection
+    /// 5h period only — burn rate and projection for the official window
     pub active_block: Option<ActiveBlock>,
-    /// 5H period only — cost of the active (or total) block
+    /// 5h period only — cost inside the official (or rolling) 5h window
     pub five_hour_cost: f64,
     pub last_updated: String,
     pub from_cache: bool,
@@ -298,7 +298,6 @@ pub fn detect_model_family(raw: &str) -> ModelFamily {
 struct ClaudeFamily {
     lower: &'static str,
     display: &'static str,
-    allow_major_only: bool,
     allow_preview: bool,
 }
 
@@ -307,42 +306,33 @@ const CLAUDE_FAMILIES: &[ClaudeFamily] = &[
     ClaudeFamily {
         lower: "fable",
         display: "Fable",
-        allow_major_only: true,
         allow_preview: false,
     },
     ClaudeFamily {
         lower: "mythos",
         display: "Mythos",
-        allow_major_only: true,
         allow_preview: true,
     },
     ClaudeFamily {
         lower: "opus",
         display: "Opus",
-        allow_major_only: false,
         allow_preview: false,
     },
     ClaudeFamily {
         lower: "sonnet",
         display: "Sonnet",
-        allow_major_only: false,
         allow_preview: false,
     },
     ClaudeFamily {
         lower: "haiku",
         display: "Haiku",
-        allow_major_only: false,
         allow_preview: false,
     },
 ];
 
 /// Extract (major, optional minor) version from text immediately after a family
-/// name. Most Claude 4.x model IDs use "-{major}-{minor}"; Fable/Mythos use
-/// "-{major}".
-fn extract_claude_version(
-    after_family: &str,
-    allow_major_only: bool,
-) -> Option<(&str, Option<&str>)> {
+/// name. Claude 4.x IDs use "-{major}-{minor}"; newer aliases may use "-{major}".
+fn extract_claude_version(after_family: &str) -> Option<(&str, Option<&str>)> {
     let rest = after_family.strip_prefix('-')?;
     let major_end = rest
         .find(|c: char| !c.is_ascii_digit())
@@ -353,13 +343,13 @@ fn extract_claude_version(
     let major = &rest[..major_end];
     let after_major = &rest[major_end..];
     let Some(after_dash) = after_major.strip_prefix('-') else {
-        return allow_major_only.then_some((major, None));
+        return Some((major, None));
     };
     let minor_end = after_dash
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(after_dash.len());
     if minor_end == 0 || minor_end > 2 {
-        return allow_major_only.then_some((major, None));
+        return Some((major, None));
     }
     Some((major, Some(&after_dash[..minor_end])))
 }
@@ -458,7 +448,7 @@ pub fn normalize_claude_model(raw: &str) -> (String, String) {
                     format!("{family_lower}-preview{suffix_key}"),
                 );
             }
-            if let Some((major, minor)) = extract_claude_version(after, family.allow_major_only) {
+            if let Some((major, minor)) = extract_claude_version(after) {
                 if let Some(minor) = minor {
                     return (
                         format!("{family_display} {major}.{minor}{suffix_display}"),
@@ -674,9 +664,21 @@ mod tests {
     }
 
     #[test]
+    fn claude_opus_5() {
+        let (d, k) = normalize_claude_model("claude-opus-5");
+        assert_eq!((d.as_str(), k.as_str()), ("Opus 5", "opus-5"));
+    }
+
+    #[test]
     fn claude_sonnet_4_6() {
         let (d, k) = normalize_claude_model("claude-sonnet-4-6-20260301");
         assert_eq!((d.as_str(), k.as_str()), ("Sonnet 4.6", "sonnet-4-6"));
+    }
+
+    #[test]
+    fn claude_sonnet_5() {
+        let (d, k) = normalize_claude_model("claude-sonnet-5");
+        assert_eq!((d.as_str(), k.as_str()), ("Sonnet 5", "sonnet-5"));
     }
 
     #[test]

@@ -41,17 +41,30 @@ struct Color {
 }
 
 const CLAUDE_COLOR: Color = Color {
-    r: 212,
-    g: 165,
-    b: 116,
+    r: 196,
+    g: 112,
+    b: 75,
     a: 255,
-}; // #d4a574
+};
 const CODEX_COLOR: Color = Color {
-    r: 122,
-    g: 175,
-    b: 255,
+    r: 74,
+    g: 123,
+    b: 157,
     a: 255,
-}; // #7aafff
+};
+const CURSOR_COLOR: Color = Color {
+    r: 92,
+    g: 106,
+    b: 196,
+    a: 255,
+};
+// Kimi violet, matching `--accent` for `[data-provider="kimi"]` in app.css.
+const KIMI_COLOR: Color = Color {
+    r: 139,
+    g: 111,
+    b: 212,
+    a: 255,
+};
 
 const BADGE_COLOR: Color = Color {
     r: 232,
@@ -132,33 +145,48 @@ pub fn is_menu_bar_dark() -> bool {
 }
 
 /// Check if we have any utilization data to render bars with.
-fn has_utilization(config: &TrayConfig, claude_util: Option<f64>, codex_util: Option<f64>) -> bool {
-    match config.bar_display {
-        BarDisplay::Both => claude_util.is_some() || codex_util.is_some(),
-        BarDisplay::Single => {
-            if config.bar_provider == "claude" {
-                claude_util.is_some()
-            } else {
-                codex_util.is_some()
-            }
-        }
-        BarDisplay::Off => false,
+fn selected_bars(
+    config: &TrayConfig,
+    claude_util: Option<f64>,
+    codex_util: Option<f64>,
+    cursor_util: Option<f64>,
+    kimi_util: Option<f64>,
+) -> Vec<(Option<f64>, &'static Color)> {
+    let providers: Vec<&str> = match config.bar_display {
+        BarDisplay::Off => vec![],
+        BarDisplay::Single => vec![config.bar_provider.as_str()],
+        BarDisplay::Both => vec!["claude", "codex"],
+        BarDisplay::Custom => config.bar_providers.iter().map(String::as_str).collect(),
+    };
+    providers
+        .into_iter()
+        .filter_map(|provider| match provider {
+            "claude" => Some((claude_util, &CLAUDE_COLOR)),
+            "codex" => Some((codex_util, &CODEX_COLOR)),
+            "cursor" => Some((cursor_util, &CURSOR_COLOR)),
+            "kimi" => Some((kimi_util, &KIMI_COLOR)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_utilization(bars: &[(Option<f64>, &'static Color)]) -> bool {
+    bars.iter().any(|(utilization, _)| utilization.is_some())
+}
+
+fn canvas_width(bar_count: usize) -> u32 {
+    match bar_count {
+        0 => ICON_W,
+        1 => CANVAS_W_SINGLE,
+        _ => CANVAS_W_BOTH,
     }
 }
 
-fn canvas_width(config: &TrayConfig) -> u32 {
-    match config.bar_display {
-        BarDisplay::Both => CANVAS_W_BOTH,
-        BarDisplay::Single => CANVAS_W_SINGLE,
-        BarDisplay::Off => ICON_W,
-    }
-}
-
-fn bar_width(config: &TrayConfig) -> u32 {
-    if config.bar_display == BarDisplay::Both {
-        BAR_W_BOTH
-    } else {
+fn bar_width(bar_count: usize) -> u32 {
+    if bar_count == 1 {
         BAR_W_SINGLE
+    } else {
+        BAR_W_BOTH
     }
 }
 
@@ -168,16 +196,21 @@ fn bar_width(config: &TrayConfig) -> u32 {
 ///
 /// `dark_bar`: true if the macOS menu bar is dark, false if light.
 /// Affects icon color (white on dark, black on light) and track color.
+// One optional utilization per provider; a struct would only move the count.
+#[allow(clippy::too_many_arguments)]
 pub fn render_tray_icon(
     base_icon: &[u8],
     config: &TrayConfig,
     claude_util: Option<f64>,
     codex_util: Option<f64>,
+    cursor_util: Option<f64>,
+    kimi_util: Option<f64>,
     dark_bar: bool,
     update_available: bool,
 ) -> (Vec<u8>, u32, u32, bool) {
     // If bars are off, or we have no utilization data yet, return original icon for template mode
-    if config.bar_display == BarDisplay::Off || !has_utilization(config, claude_util, codex_util) {
+    let bars = selected_bars(config, claude_util, codex_util, cursor_util, kimi_util);
+    if bars.is_empty() || !has_utilization(&bars) {
         if update_available {
             let mut buf = render_icon_only(base_icon, dark_bar);
             draw_update_badge(&mut buf, ICON_W);
@@ -194,7 +227,7 @@ pub fn render_tray_icon(
         TRACK_COLOR_LIGHT
     };
 
-    let width = canvas_width(config);
+    let width = canvas_width(bars.len());
     let height = ICON_H;
     let mut buf = vec![0u8; (width * height * 4) as usize];
 
@@ -215,65 +248,25 @@ pub fn render_tray_icon(
     }
 
     let bar_x = ICON_W + BAR_GAP;
-    let bar_w = bar_width(config);
+    let bar_w = bar_width(bars.len());
+    let bar_h = if bars.len() == 1 {
+        BAR_H_SINGLE
+    } else {
+        BAR_H_BOTH
+    };
+    let spacing = if bars.len() > 2 { 4 } else { BAR_SPACING };
+    let total_h = bar_h * bars.len() as u32 + spacing * bars.len().saturating_sub(1) as u32;
+    let top_y = (ICON_H - total_h) / 2;
 
-    if config.bar_display == BarDisplay::Both {
-        // Utilization values are 0–100, normalize to 0–1 for pixel rendering
-        let c_util = (claude_util.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0);
-        let x_util = (codex_util.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0);
-
-        // Vertically center two bars
-        let total_h = BAR_H_BOTH * 2 + BAR_SPACING;
-        let top_y = (ICON_H - total_h) / 2;
-
-        // Claude bar (top)
+    for (index, (utilization, color)) in bars.into_iter().enumerate() {
         draw_bar(
             &mut buf,
             width,
             bar_x,
-            top_y,
+            top_y + index as u32 * (bar_h + spacing),
             bar_w,
-            BAR_H_BOTH,
-            c_util,
-            &CLAUDE_COLOR,
-            &track_color,
-        );
-        // Codex bar (bottom)
-        let bottom_y = top_y + BAR_H_BOTH + BAR_SPACING;
-        draw_bar(
-            &mut buf,
-            width,
-            bar_x,
-            bottom_y,
-            bar_w,
-            BAR_H_BOTH,
-            x_util,
-            &CODEX_COLOR,
-            &track_color,
-        );
-    } else if config.bar_display == BarDisplay::Single {
-        let util = if config.bar_provider == "claude" {
-            claude_util
-        } else {
-            codex_util
-        };
-        let u = (util.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0);
-        let color = if config.bar_provider == "claude" {
-            &CLAUDE_COLOR
-        } else {
-            &CODEX_COLOR
-        };
-
-        // Vertically center single bar
-        let top_y = (ICON_H - BAR_H_SINGLE) / 2;
-        draw_bar(
-            &mut buf,
-            width,
-            bar_x,
-            top_y,
-            bar_w,
-            BAR_H_SINGLE,
-            u,
+            bar_h,
+            (utilization.unwrap_or(0.0) / 100.0).clamp(0.0, 1.0),
             color,
             &track_color,
         );
@@ -441,6 +434,8 @@ mod tests {
             &make_config(BarDisplay::Off),
             None,
             None,
+            None,
+            None,
             true,
             false,
         );
@@ -458,6 +453,8 @@ mod tests {
             &make_config(BarDisplay::Both),
             None,
             None,
+            None,
+            None,
             true,
             false,
         );
@@ -473,6 +470,8 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(70.0),
             Some(30.0),
+            None,
+            None,
             true,
             false,
         );
@@ -495,6 +494,8 @@ mod tests {
             &make_config(BarDisplay::Single),
             Some(50.0),
             None,
+            None,
+            None,
             true,
             false,
         );
@@ -502,6 +503,18 @@ mod tests {
         assert_eq!(h, 44);
         assert_eq!(buf.len(), (CANVAS_W_SINGLE * 44 * 4) as usize);
         assert!(!tmpl);
+    }
+
+    #[test]
+    fn custom_selection_keeps_each_provider_and_color() {
+        let mut config = make_config(BarDisplay::Custom);
+        config.bar_providers = vec!["cursor".into(), "claude".into(), "codex".into()];
+
+        let bars = selected_bars(&config, Some(10.0), Some(20.0), Some(30.0), None);
+
+        assert_eq!(bars.len(), 3);
+        assert_eq!(bars[0].0, Some(30.0));
+        assert_eq!((bars[0].1.r, bars[0].1.g, bars[0].1.b), (92, 106, 196));
     }
 
     #[test]
@@ -514,6 +527,8 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(50.0),
             Some(50.0),
+            None,
+            None,
             true,
             false,
         );
@@ -534,6 +549,8 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(50.0),
             Some(50.0),
+            None,
+            None,
             false,
             false,
         );
@@ -561,6 +578,8 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(50.0),
             Some(50.0),
+            None,
+            None,
             true,
             false,
         );
@@ -569,6 +588,8 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(50.0),
             Some(50.0),
+            None,
+            None,
             true,
             true,
         );
@@ -584,11 +605,21 @@ mod tests {
             &make_config(BarDisplay::Off),
             None,
             None,
+            None,
+            None,
             true,
             false,
         );
-        let (with, _, _, tmpl_w) =
-            render_tray_icon(&icon, &make_config(BarDisplay::Off), None, None, true, true);
+        let (with, _, _, tmpl_w) = render_tray_icon(
+            &icon,
+            &make_config(BarDisplay::Off),
+            None,
+            None,
+            None,
+            None,
+            true,
+            true,
+        );
         assert_ne!(without, with);
         assert!(tmpl_wo, "no badge → template");
         assert!(!tmpl_w, "badge → non-template");

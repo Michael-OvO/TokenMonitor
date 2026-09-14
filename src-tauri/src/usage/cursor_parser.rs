@@ -39,9 +39,6 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const CURSOR_API_MAX_PAGES: usize = 20;
 const CURSOR_API_PAGE_SIZE: usize = 100;
-const CURSOR_OFFICIAL_API_BASE_URL: &str = "https://api.cursor.com";
-const CURSOR_DASHBOARD_API_BASE_URL: &str = "https://cursor.com";
-const CURSOR_IDE_API_BASE_URL: &str = "https://api2.cursor.sh";
 const CURSOR_API_KEY_ENV: &str = "CURSOR_API_KEY";
 const CURSOR_SESSION_TOKEN_ENV: &str = "CURSOR_SESSION_TOKEN";
 const CURSOR_USER_DIR_ENV: &str = "CURSOR_USER_DIR";
@@ -713,13 +710,22 @@ pub(crate) fn cursor_response_has_next_page(data: &Value, page: usize, page_size
 pub(crate) fn cursor_request_url(auth: &CursorAuth) -> String {
     match auth {
         CursorAuth::Admin(_) => {
-            format!("{CURSOR_OFFICIAL_API_BASE_URL}/teams/filtered-usage-events")
+            format!(
+                "{}/teams/filtered-usage-events",
+                crate::ops::cursor_official_api_base()
+            )
         }
         CursorAuth::Dashboard(_) => {
-            format!("{CURSOR_DASHBOARD_API_BASE_URL}/api/dashboard/get-filtered-usage-events")
+            format!(
+                "{}/api/dashboard/get-filtered-usage-events",
+                crate::ops::cursor_dashboard_api_base()
+            )
         }
         CursorAuth::IdeBearer(_) => {
-            format!("{CURSOR_IDE_API_BASE_URL}/aiserver.v1.DashboardService/GetFilteredUsageEvents")
+            format!(
+                "{}/aiserver.v1.DashboardService/GetFilteredUsageEvents",
+                crate::ops::cursor_ide_api_base()
+            )
         }
     }
 }

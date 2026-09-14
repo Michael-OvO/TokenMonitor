@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use super::litellm::DynamicModelRates;
 
-const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
 const PER_MTOK: f64 = 1_000_000.0;
 /// Sanity upper bound: reject per-million-token rates above $500.
 const MAX_RATE_PER_MTOK: f64 = 500.0;
@@ -28,7 +27,7 @@ struct OpenRouterPricing {
 
 /// Fetch model pricing from the OpenRouter API and parse into normalized rates.
 pub async fn fetch_openrouter() -> Result<HashMap<String, DynamicModelRates>, String> {
-    let body = reqwest::get(OPENROUTER_URL)
+    let body = reqwest::get(crate::ops::openrouter_models_url())
         .await
         .map_err(|e| format!("OpenRouter HTTP fetch failed: {e}"))?
         .text()

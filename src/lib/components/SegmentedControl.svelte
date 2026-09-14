@@ -28,6 +28,10 @@
 <style>
   .seg {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 100%;
+    min-width: 0;
     background: var(--surface-2);
     border-radius: 5px;
     overflow: hidden;
@@ -41,6 +45,9 @@
     border: none;
     cursor: pointer;
     transition: color var(--t-fast) ease, background var(--t-fast) ease;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
   .seg-btn:hover:not(.active) {

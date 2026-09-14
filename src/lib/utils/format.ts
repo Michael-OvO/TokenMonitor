@@ -46,6 +46,25 @@ export function formatCost(value: number): string {
   return `${symbol}${converted.toFixed(2)}`;
 }
 
+/**
+ * Credit / spend-limit amounts: thousands separators, and no cents when the
+ * converted amount lands on a whole unit. The whole-or-not decision has to
+ * happen after conversion — $70 is round, €64.40 is not.
+ *
+ * Mirrors `format_auto` in `src-tauri/src/usage/money.rs`, which does the same
+ * job for the labels Rust builds.
+ */
+export function formatCreditAmount(value: number): string {
+  const symbol = CURRENCY_SYMBOLS[activeCurrency] ?? "$";
+  const converted = value * rateFor(activeCurrency);
+  const isWhole = Math.abs(converted - Math.round(converted)) < 0.005;
+  const digits = isWhole || activeCurrency === "JPY" ? 0 : 2;
+  return `${symbol}${converted.toLocaleString("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}`;
+}
+
 export function formatModelCost(value: number, pricingAvailable: boolean | undefined): string {
   if (pricingAvailable === false) return "N/A";
   if (value === 0) return "Free";
@@ -71,27 +90,30 @@ export function formatResetsIn(isoString: string | null): string {
   if (!isoString) return "";
   const ms = new Date(isoString).getTime() - Date.now();
   if (ms <= 0) return "Resetting...";
-  const hours = Math.floor(ms / 3_600_000);
-  const minutes = Math.floor((ms % 3_600_000) / 60_000);
-  if (hours >= 24) {
-    const days = Math.floor(hours / 24);
-    return `Resets in ${days}d ${hours % 24}h`;
-  }
-  return hours > 0 ? `Resets in ${hours}h ${minutes}m` : `Resets in ${minutes}m`;
+  return `Resets in ${formatDuration(ms)}`;
+}
+
+export function formatDuration(ms: number): string {
+  if (ms <= 0) return "";
+  const totalMinutes = Math.ceil(ms / 60_000);
+  const units = [
+    ["w", Math.floor(totalMinutes / 10_080)],
+    ["d", Math.floor((totalMinutes % 10_080) / 1_440)],
+    ["h", Math.floor((totalMinutes % 1_440) / 60)],
+    ["m", totalMinutes % 60],
+  ] as const;
+  return units
+    .filter(([, value]) => value > 0)
+    .slice(0, 3)
+    .map(([unit, value]) => `${value}${unit}`)
+    .join(" ");
 }
 
 export function formatRetryIn(isoString: string | null, now = Date.now()): string {
   if (!isoString) return "";
   const ms = new Date(isoString).getTime() - now;
   if (ms <= 0) return "Retrying...";
-
-  const totalSeconds = Math.ceil(ms / 1000);
-  if (totalSeconds < 60) return `Retry in ${totalSeconds}s`;
-
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.ceil((totalSeconds % 3600) / 60);
-  if (hours > 0) return `Retry in ${hours}h ${minutes}m`;
-  return `Retry in ${minutes}m`;
+  return `Retry in ${formatDuration(ms)}`;
 }
 
 function hashString(value: string): number {

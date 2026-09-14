@@ -30,7 +30,7 @@ function transitionError(
   return Math.abs(physicalX - expectedPhysicalX) + Math.abs(physicalY - expectedPhysicalY);
 }
 
-export function shouldHandleFloatBallPointerButton(button: number, _isLinux: boolean): boolean {
+export function shouldHandleFloatBallPointerButton(button: number): boolean {
   return button === 0 || button === 2;
 }
 
