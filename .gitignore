@@ -54,20 +54,6 @@ secrets*.json
 .cargo/credentials
 .cargo/credentials.toml
 
-# Local/internal development artifacts
-.claude/worktrees/
-.claude/settings.local.json
-scripts/tmp-merge-dedup-usage.mjs
-src-tauri/test_extra_fields.rs
-docs/ecl/*.yaml
-docs/repo-audit*.json
-docs/repo-audit*.md
-docs/debug/*.md
-docs/bug-report-dedup-overcounting.md
-
-# Impeccable design plugin state (per-machine cache)
-.impeccable/
-
 # Editors and operating systems
 .DS_Store
 Thumbs.db
@@ -90,8 +76,26 @@ scripts/tmp-*
 scripts/*.exe
 
 # Local assistant/tool state
+.claude/
 .codex/
 .agents/
 .superpowers/
 docs/superpowers/
 CLAUDE.md
+
+# >>> AI Dev Companion (managed)
+# 3a tests-preserving (aidev init / HistoryStore; installer may replace this block)
+.devcompanion/*
+!.devcompanion/tests/
+# <<< AI Dev Companion
+
+# ai-companion (local tooling, not part of this project)
+.companion/
+.devcompanion/
+.agents/skills/cc*/
+.claude/skills/cc*/
+.claude/settings.json
+.cursor/hooks.json
+.codex/hooks.json
+ideas/
+docs/ecl/
