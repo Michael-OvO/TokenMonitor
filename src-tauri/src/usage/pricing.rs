@@ -1,5 +1,5 @@
 #[cfg_attr(not(test), allow(dead_code))]
-pub const PRICING_VERSION: &str = "2026-09-14";
+pub const PRICING_VERSION: &str = "2026-09-16";
 
 use crate::models::{detect_model_family, ModelFamily};
 use crate::usage::litellm::DynamicModelRates;
@@ -215,8 +215,24 @@ fn get_rates_for_key(model: &str) -> Option<ModelRates> {
     // ── Grok 4.5 / 4.6 (Cursor / xAI) ────────────────────────────────────────
     // Cursor docs: standard $2/$6, Fast $4/$18. Cache read = 25% of input.
     // Fuzzy match covers Cursor slug variants (cursor-grok-4.6-xhigh-fast, etc.).
-    if model.contains("grok-4.6") || model.contains("grok-4.5") {
-        if model.contains("fast") {
+    // ── Grok Bot (Cursor "sand" desktop app) ─────────────────────────────────
+    // Its events arrive in the Cursor usage feed as `grok-bot-default` /
+    // `grok-bot-cua` with a server-side `totalCents`. Rates below were fitted
+    // against 499 real events (2026-09-09..16): `default` matches Grok 4.6 Fast
+    // to <0.5¢ per event; `cua` (computer-use agent) is a much cheaper model.
+    // Re-fit with `cursor_remote_probe_event_shapes` in cursor_parser.rs if
+    // totals drift from Cursor's dashboard.
+    if model.contains("grok-bot-cua") {
+        return Some(ModelRates {
+            input: 0.36,
+            output: 1.2,
+            cache_write_5m: 0.25,
+            cache_write_1h: 0.25,
+            cache_read: 0.02,
+        });
+    }
+    if model.contains("grok-4.6") || model.contains("grok-4.5") || model.contains("grok-bot") {
+        if model.contains("fast") || model.contains("grok-bot") {
             return Some(ModelRates {
                 input: 4.0,
                 output: 18.0,
@@ -634,6 +650,19 @@ mod tests {
     }
 
     #[test]
+    fn grok_bot_pricing_matches_cursor_server_cents() {
+        // Real events from the Cursor usage feed (tokenUsage.totalCents).
+        // grok-bot-default: 400 in, 295 out, 141568 cache read → 14.8478¢
+        let default_usd = calculate_cost("grok-bot-default", 400, 295, 0, 0, 141_568, 0);
+        assert!((default_usd - 0.148478).abs() < 0.001, "{default_usd}");
+        // grok-bot-cua: 3 in, 312 out, 2699 cache write, 21433 cache read → 0.1478¢
+        let cua_usd = calculate_cost("grok-bot-cua", 3, 312, 0, 2699, 21_433, 0);
+        assert!((cua_usd - 0.001478).abs() < 0.0005, "{cua_usd}");
+        assert!(pricing_available_for_key("grok-bot-default"));
+        assert!(pricing_available_for_key("grok-bot-cua"));
+    }
+
+    #[test]
     fn unsupported_family_defaults_to_zero_until_priced() {
         assert!(approx_eq(cost("totally-unknown-model", M, M), 0.00));
         assert!(!pricing_available_for_key("totally-unknown-model"));
@@ -649,7 +678,7 @@ mod tests {
 
     #[test]
     fn pricing_version_is_set() {
-        assert_eq!(PRICING_VERSION, "2026-09-14");
+        assert_eq!(PRICING_VERSION, "2026-09-16");
     }
 
     #[test]
