@@ -24,12 +24,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      # Pin Node so npm matches the version that writes package-lock.json;
-      # runner-default npm disagrees on optional peer deps and `npm ci` fails.
+      # Pin Node to the exact version on the dev machine (npm 11.6.2) so the
+      # lockfile written by a plain local `npm install` is what `npm ci` reads;
+      # npm minors disagree on optional peer entries and fail otherwise.
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 24.12.0
 
       - name: Cache node_modules
         uses: actions/cache@v5
