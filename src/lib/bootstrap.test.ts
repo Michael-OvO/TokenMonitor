@@ -67,6 +67,8 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     usageAccessEnabled: true,
     autoExportEnabled: false,
     autoExportFolder: null,
+    weekStart: "mon",
+    rollingPeriods: false,
     ...overrides,
   };
 }
@@ -151,6 +153,7 @@ describe("initializeRuntimeFromSettings", () => {
     expect(invokeFn).toHaveBeenCalledWith("set_enabled_integrations", {
       ids: effectiveIntegrationIds(saved.headerTabs),
     });
+    expect(invokeFn).toHaveBeenCalledWith("set_period_config", { weekStart: "mon", rolling: false });
     expect(invokeFn).toHaveBeenCalledWith("set_usage_access_enabled", { enabled: true });
     expect(invokeFn).toHaveBeenCalledWith("set_cursor_auth_config", {
       apiKey: "",

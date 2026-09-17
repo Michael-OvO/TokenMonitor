@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { settings } from "../stores/settings.js";
+  import { settings, SUPPORTED_WEEK_STARTS } from "../stores/settings.js";
   import { activeProvider } from "../stores/usage.js";
   import { formatCost } from "../utils/format.js";
   import { intensityLevel, computeEarned, heatmapColor } from "../utils/calendar.js";
@@ -23,6 +23,8 @@
   let loading = $state(false);
   let provider = $state<UsageProvider>("claude");
   let brandTheming = $state(true);
+  // 0 = Monday … 6 = Sunday; mirrors the Week Starts setting.
+  let weekStartIndex = $state(0);
   let dismissedWarningText = $state<string | null>(null);
   let rateLimits = $state<RateLimitsPayload | null>(null);
 
@@ -30,7 +32,10 @@
   // Subscribe to stores
   $effect(() => {
     const unsub1 = activeProvider.subscribe((p) => (provider = p));
-    const unsub2 = settings.subscribe((s) => { brandTheming = s.brandTheming; });
+    const unsub2 = settings.subscribe((s) => {
+      brandTheming = s.brandTheming;
+      weekStartIndex = Math.max(0, SUPPORTED_WEEK_STARTS.indexOf(s.weekStart));
+    });
     const unsub3 = rateLimitsData.subscribe((r) => { rateLimits = r; });
     return () => { unsub1(); unsub2(); unsub3(); };
   });
@@ -104,11 +109,14 @@
 
   let daysInMonth = $derived(new Date(viewYear, viewMonth, 0).getDate());
 
-  // Monday = 0, ..., Sunday = 6
+  // Blank cells before the 1st, counted from the configured week start.
   let firstDayOffset = $derived.by(() => {
     const jsDay = new Date(viewYear, viewMonth - 1, 1).getDay(); // 0=Sun
-    return jsDay === 0 ? 6 : jsDay - 1; // convert to Mon-start
+    const monBased = (jsDay + 6) % 7; // Monday = 0 … Sunday = 6
+    return (monBased - weekStartIndex + 7) % 7;
   });
+  const DAY_LETTERS = ["M", "T", "W", "T", "F", "S", "S"];
+  let dayHeaders = $derived([...DAY_LETTERS.slice(weekStartIndex), ...DAY_LETTERS.slice(0, weekStartIndex)]);
 
   // Build cost lookup from data
   let costByDay = $derived.by(() => {
@@ -195,7 +203,7 @@
 
     <!-- Day-of-week headers -->
     <div class="day-headers">
-      {#each ["M", "T", "W", "T", "F", "S", "S"] as day}
+      {#each dayHeaders as day}
         <span class="day-header">{day}</span>
       {/each}
     </div>

@@ -1,5 +1,32 @@
 use crate::models::RateLimitsPayload;
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Duration, Local, Months, NaiveDate, TimeZone, Weekday};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Week/month/year window config pushed from Settings (`set_period_config`).
+/// Bits 0-2: week start (`Weekday::num_days_from_monday`); bit 3: rolling
+/// windows ending today instead of calendar-aligned ones.
+// ponytail: one atomic like money::ACTIVE_CURRENCY; move into AppState if a
+// second per-window option ever appears.
+static PERIOD_CONFIG: AtomicU8 = AtomicU8::new(0);
+
+pub(crate) fn set_period_config(week_start: Weekday, rolling: bool) {
+    let bits = week_start.num_days_from_monday() as u8 | if rolling { 8 } else { 0 };
+    PERIOD_CONFIG.store(bits, Ordering::Relaxed);
+}
+
+fn period_config() -> (Weekday, bool) {
+    let bits = PERIOD_CONFIG.load(Ordering::Relaxed);
+    let week_start = match bits & 7 {
+        1 => Weekday::Tue,
+        2 => Weekday::Wed,
+        3 => Weekday::Thu,
+        4 => Weekday::Fri,
+        5 => Weekday::Sat,
+        6 => Weekday::Sun,
+        _ => Weekday::Mon,
+    };
+    (week_start, bits & 8 != 0)
+}
 
 pub(crate) fn parse_bucket_start_date(sort_key: &str) -> Result<NaiveDate, chrono::ParseError> {
     NaiveDate::parse_from_str(sort_key, "%Y-%m-%d")
@@ -139,7 +166,15 @@ pub(crate) fn resolve_period_bounds_with_reset(
     offset: i32,
     five_hour_reset: Option<DateTime<Local>>,
 ) -> Result<PeriodBounds, String> {
-    resolve_period_bounds_at(period, offset, Local::now(), five_hour_reset)
+    let (week_start, rolling) = period_config();
+    resolve_period_bounds_configured(
+        period,
+        offset,
+        Local::now(),
+        five_hour_reset,
+        week_start,
+        rolling,
+    )
 }
 
 fn five_hour_range(
@@ -158,13 +193,55 @@ fn five_hour_range(
     (end - window, end)
 }
 
+/// Test-only: calendar-aligned, Monday-start bounds at a fixed `now`.
+#[cfg(test)]
 pub(crate) fn resolve_period_bounds_at(
     period: &str,
     offset: i32,
     now: DateTime<Local>,
     five_hour_reset: Option<DateTime<Local>>,
 ) -> Result<PeriodBounds, String> {
+    resolve_period_bounds_configured(period, offset, now, five_hour_reset, Weekday::Mon, false)
+}
+
+/// Rolling week/month/year: today is the last day (window ends at tomorrow's
+/// midnight) and it starts one unit earlier; offset shifts by whole units.
+fn rolling_bounds(period: &str, offset: i32, today: NaiveDate) -> Option<PeriodBounds> {
+    let shift = |d: NaiveDate, units: i32| -> Option<NaiveDate> {
+        match period {
+            "week" => Some(d + Duration::days(7 * units as i64)),
+            "month" => shift_months(d, units),
+            "year" => shift_months(d, units.checked_mul(12)?),
+            _ => None,
+        }
+    };
+    let end = shift(today + Duration::days(1), offset)?;
+    let start = shift(end, -1)?;
+    let label = format_week_label(start, end - Duration::days(1));
+    Some(PeriodBounds::from_dates(start, end, label))
+}
+
+fn shift_months(d: NaiveDate, months: i32) -> Option<NaiveDate> {
+    if months >= 0 {
+        d.checked_add_months(Months::new(months as u32))
+    } else {
+        d.checked_sub_months(Months::new(months.unsigned_abs()))
+    }
+}
+
+fn resolve_period_bounds_configured(
+    period: &str,
+    offset: i32,
+    now: DateTime<Local>,
+    five_hour_reset: Option<DateTime<Local>>,
+    week_start: Weekday,
+    rolling: bool,
+) -> Result<PeriodBounds, String> {
     let today = now.date_naive();
+    if rolling && matches!(period, "week" | "month" | "year") {
+        return rolling_bounds(period, offset, today)
+            .ok_or_else(|| format!("Rolling {period} offset out of range: {offset}"));
+    }
     match period {
         "5h" => {
             let (range_start, range_end) = five_hour_range(offset, now, five_hour_reset);
@@ -183,8 +260,9 @@ pub(crate) fn resolve_period_bounds_at(
             ))
         }
         "week" => {
-            let current_monday =
-                today - Duration::days(now.weekday().num_days_from_monday() as i64);
+            let days_since_start =
+                (now.weekday().num_days_from_monday() + 7 - week_start.num_days_from_monday()) % 7;
+            let current_monday = today - Duration::days(days_since_start as i64);
             let target_monday = current_monday + Duration::days((offset * 7) as i64);
             let end = target_monday + Duration::days(7);
             let target_sunday = end - Duration::days(1);
@@ -310,6 +388,43 @@ mod tests {
             cursor: None,
             kimi: None,
         }
+    }
+
+    fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn week_start_shifts_calendar_week() {
+        // 2026-09-16 is a Wednesday.
+        let now = local(2026, 9, 16, 12, 0);
+        let sun =
+            resolve_period_bounds_configured("week", 0, now, None, Weekday::Sun, false).unwrap();
+        assert_eq!((sun.start, sun.end), (ymd(2026, 9, 13), ymd(2026, 9, 20)));
+        let sat =
+            resolve_period_bounds_configured("week", -1, now, None, Weekday::Sat, false).unwrap();
+        assert_eq!((sat.start, sat.end), (ymd(2026, 9, 5), ymd(2026, 9, 12)));
+    }
+
+    #[test]
+    fn rolling_windows_end_today() {
+        let now = local(2026, 3, 31, 12, 0);
+        let week =
+            resolve_period_bounds_configured("week", 0, now, None, Weekday::Mon, true).unwrap();
+        assert_eq!((week.start, week.end), (ymd(2026, 3, 25), ymd(2026, 4, 1)));
+        let month =
+            resolve_period_bounds_configured("month", 0, now, None, Weekday::Mon, true).unwrap();
+        assert_eq!((month.start, month.end), (ymd(2026, 3, 1), ymd(2026, 4, 1)));
+        let prev =
+            resolve_period_bounds_configured("month", -1, now, None, Weekday::Mon, true).unwrap();
+        assert_eq!((prev.start, prev.end), (ymd(2026, 2, 1), ymd(2026, 3, 1)));
+        let year =
+            resolve_period_bounds_configured("year", 0, now, None, Weekday::Mon, true).unwrap();
+        assert_eq!((year.start, year.end), (ymd(2025, 4, 1), ymd(2026, 4, 1)));
+        // Day/5h ignore rolling mode.
+        let day =
+            resolve_period_bounds_configured("day", 0, now, None, Weekday::Mon, true).unwrap();
+        assert_eq!(day.start, ymd(2026, 3, 31));
     }
 
     #[test]
