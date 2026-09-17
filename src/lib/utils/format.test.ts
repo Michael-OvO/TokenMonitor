@@ -195,59 +195,32 @@ describe("formatDuration", () => {
 // ── modelColor ──────────────────────────────────────────────────────
 
 describe("modelColor", () => {
-  it.each([
-    ["opus", "var(--opus)"],
-    ["opus-4-6", "var(--opus)"],
-    ["sonnet", "var(--sonnet)"],
-    ["sonnet-4-6", "var(--sonnet)"],
-    ["haiku", "var(--haiku)"],
-    ["haiku-4-5", "var(--haiku)"],
-    ["gpt54", "var(--gpt54)"],
-    ["gpt53", "var(--gpt53)"],
-    ["gpt52", "var(--gpt52)"],
-    ["gpt-5.4", "var(--gpt54)"],
-    ["gpt-5.3-codex", "var(--gpt53)"],
-    ["gpt-5.2", "var(--gpt52)"],
-    ["codex", "var(--codex)"],
-    ["unknown", "var(--t3)"],
-    // ── Gemini: major>=3 deep, ==2 mid, else soft ──
-    ["gemini-3.0", "var(--gemini)"],
-    ["gemini-2.5-pro", "var(--gemini-mid)"],
-    ["gemini-1.5-flash", "var(--gemini-soft)"],
-    // ── GLM: >=5 deep, ==4 mid, else soft ──
-    ["glm-5", "var(--glm)"],
-    ["glm-4.5", "var(--glm-mid)"],
-    ["glm-3-turbo", "var(--glm-soft)"],
-    // ── DeepSeek: >=3 deep, ==2 mid, else soft ──
-    ["deepseek-v3", "var(--deepseek)"],
-    ["deepseek-v2.5", "var(--deepseek-mid)"],
-    ["deepseek-chat", "var(--deepseek-soft)"], // no version → soft
-    // ── Kimi: K2+ deep, else mid ──
-    ["kimi-k2", "var(--kimi)"],
-    ["kimi-k1", "var(--kimi-mid)"],
-    // ── Kimi bare K-series (Kimi Code CLI logs "k3" without the prefix) ──
-    ["k3", "var(--kimi)"],
-    ["k3-instruct", "var(--kimi)"],
-    ["k2", "var(--kimi)"],
-    ["k1", "var(--kimi-mid)"],
-    // ── Qwen: >=3 deep, ==2 mid, else soft ──
-    ["qwen3-coder", "var(--qwen)"],
-    ["qwen2.5-max", "var(--qwen-mid)"],
-    // ── Composer: single tier ──
-    ["composer-1", "var(--composer)"],
-  ])("returns correct CSS var for %s", (key, expected) => {
-    expect(modelColor(key)).toBe(expected);
+  const hue = (c: string) => Number(c.match(/^hsl\((-?\d+)/)![1]);
+
+  it("keeps every model of a vendor inside that vendor's hue band", () => {
+    const anthropic = ["opus", "opus-4-6", "sonnet-4-6", "haiku-4-5", "claude-fable-5-1", "mythos-9"];
+    const openai = ["gpt-5.4", "gpt-5.3-codex", "gpt-5", "o3-mini", "o4-mini-2025-04-16", "codex-mini-latest"];
+    for (const k of anthropic) expect(Math.abs(hue(modelColor(k)) - 22)).toBeLessThanOrEqual(10);
+    for (const k of openai) expect(Math.abs(hue(modelColor(k)) - 207)).toBeLessThanOrEqual(10);
+    expect(Math.abs(hue(modelColor("gemini-2.5-pro")) - 262)).toBeLessThanOrEqual(10);
+    expect(Math.abs(hue(modelColor("kimi-k2")) - 318)).toBeLessThanOrEqual(10);
+    // Bare K-series keys from the Kimi Code CLI stay in the Kimi band.
+    for (const k of ["k3", "k3-instruct", "k2"]) expect(Math.abs(hue(modelColor(k)) - 318)).toBeLessThanOrEqual(10);
+    expect(Math.abs(hue(modelColor("qwen3-coder")) - 345)).toBeLessThanOrEqual(10);
+    expect(Math.abs(hue(modelColor("glm-4.5")) - 145)).toBeLessThanOrEqual(10);
+    expect(Math.abs(hue(modelColor("deepseek-v3")) - 235)).toBeLessThanOrEqual(10);
+    expect(Math.abs(hue(modelColor("composer-1")) - 290)).toBeLessThanOrEqual(10);
   });
 
-  it("keeps palette colors deterministic for raw codex model names", () => {
-    expect(modelColor("gpt-5.4")).toBe(modelColor("gpt-5.4"));
-    expect(modelColor("gpt-5.2")).toBe(modelColor("gpt-5.2"));
-    expect(modelColor("gpt-5.4")).toBe("var(--gpt54)");
-    expect(modelColor("gpt-5.2")).toBe("var(--gpt52)");
+  it("is deterministic and gives siblings distinct shades", () => {
+    expect(modelColor("gpt-5.4")).toBe(modelColor("GPT-5.4 "));
+    expect(modelColor("gpt-5.4")).not.toBe(modelColor("gpt-5.2"));
+    expect(modelColor("opus-4-6")).not.toBe(modelColor("sonnet-4-6"));
   });
 
-  it("returns a hashed fallback for unrecognized keys", () => {
-    expect(modelColor("nonexistent")).toMatch(/^hsl\(/);
+  it("falls back to greys for unknown vendors", () => {
+    expect(modelColor("nonexistent")).toMatch(/^hsl\(0 0% /);
+    expect(modelColor("unknown")).toMatch(/^hsl\(0 0% /);
   });
 });
 
