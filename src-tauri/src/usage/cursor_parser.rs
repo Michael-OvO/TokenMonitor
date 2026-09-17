@@ -656,15 +656,25 @@ pub(crate) fn parse_cursor_official_usage_events(
     since: Option<NaiveDate>,
     session_key: &str,
 ) -> Result<Vec<ParsedEntry>, String> {
-    let rows = data
+    let map = data.as_object().ok_or_else(|| {
+        format!("Cursor API payload is not a JSON object (session_key={session_key})")
+    })?;
+    // api2 speaks protobuf-JSON: a page with zero events comes back as `{}`
+    // (empty repeated fields are omitted), so a missing array means no rows,
+    // not a malformed payload.
+    let empty = Vec::new();
+    let rows = map
         .get("usageEvents")
-        .or_else(|| data.get("usageEventsDisplay"))
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            format!(
-                "Cursor API payload missing usageEvents/usageEventsDisplay array (session_key={session_key})"
-            )
-        })?;
+        .or_else(|| map.get("usageEventsDisplay"))
+        .map(|value| {
+            value.as_array().ok_or_else(|| {
+                format!(
+                    "Cursor API usageEvents/usageEventsDisplay is not an array (session_key={session_key})"
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(&empty);
     let mut entries = Vec::new();
     for (idx, row) in rows.iter().enumerate() {
         let Some(map) = row.as_object() else {

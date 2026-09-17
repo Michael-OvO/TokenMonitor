@@ -2840,14 +2840,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_cursor_official_usage_events_errors_when_neither_array_present() {
-        let data = serde_json::json!({"someOtherField": []});
-        match parse_cursor_official_usage_events(&data, None, "cursor-admin") {
-            Ok(_) => panic!("expected error when payload is missing the events array"),
-            Err(err) => assert!(
-                err.contains("usageEvents/usageEventsDisplay"),
-                "error should mention both array names so users can debug, got: {err}"
-            ),
+    fn parse_cursor_official_usage_events_treats_missing_array_as_empty_page() {
+        // api2 (protobuf-JSON) answers an empty page with `{}`.
+        for data in [
+            serde_json::json!({}),
+            serde_json::json!({"someOtherField": []}),
+        ] {
+            let entries = parse_cursor_official_usage_events(&data, None, "cursor-ide").unwrap();
+            assert!(entries.is_empty());
+        }
+    }
+
+    #[test]
+    fn parse_cursor_official_usage_events_errors_on_non_object_payload() {
+        let data = serde_json::json!([1, 2, 3]);
+        match parse_cursor_official_usage_events(&data, None, "cursor-ide") {
+            Ok(_) => panic!("expected error for a non-object payload"),
+            Err(err) => assert!(err.contains("not a JSON object"), "got: {err}"),
         }
     }
 
