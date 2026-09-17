@@ -451,7 +451,18 @@ pub fn normalize_claude_model(raw: &str) -> (String, String) {
                     format!("{family_lower}-preview{suffix_key}"),
                 );
             }
-            if let Some((major, minor)) = extract_claude_version(after) {
+            // Anthropic puts the version after the family ("claude-sonnet-4-5");
+            // Cursor puts it before ("claude-4.5-sonnet").
+            let before_version = base[..pos]
+                .trim_end_matches('-')
+                .rsplit_once("claude-")
+                .map(|(_, v)| format!("-{}", v.replace('.', "-")));
+            let version = extract_claude_version(after).or_else(|| {
+                before_version
+                    .as_deref()
+                    .and_then(extract_claude_version)
+            });
+            if let Some((major, minor)) = version {
                 if let Some(minor) = minor {
                     return (
                         format!("{family_display} {major}.{minor}{suffix_display}"),
@@ -671,7 +682,13 @@ mod tests {
         let (d, k) = normalize_model("cursor-grok-4.6-xhigh-fast");
         assert_eq!(d, "grok 4.6 xhigh fast");
         assert_eq!(k, normalize_model_by_family("cursor-grok-4.6-xhigh-fast").1);
-        assert_eq!(normalize_model("Cursor-claude-4.5-sonnet").0, "Sonnet");
+        assert_eq!(normalize_model("Cursor-claude-4.5-sonnet").0, "Sonnet 4.5");
+        assert_eq!(normalize_model("claude-3-7-sonnet-thinking").0, "Sonnet 3.7");
+        assert_eq!(normalize_model("claude-4-opus").0, "Opus 4");
+        assert_eq!(
+            normalize_claude_model("claude-4.5-sonnet").1,
+            normalize_claude_model("claude-sonnet-4-5").1
+        );
         assert_eq!(normalize_model("mistral-large-2").0, "mistral large 2");
         assert_eq!(detect_model_family("cursor-gpt-5-codex"), ModelFamily::OpenAI);
         assert_eq!(detect_model_family("cursor-gemini-2.5-pro"), ModelFamily::Google);
@@ -759,20 +776,20 @@ mod tests {
     #[test]
     fn claude_haiku_generic() {
         let (d, k) = normalize_claude_model("claude-3-haiku-20240307");
-        assert_eq!((d.as_str(), k.as_str()), ("Haiku", "haiku"));
+        assert_eq!((d.as_str(), k.as_str()), ("Haiku 3", "haiku-3"));
     }
 
     #[test]
     fn claude_sonnet_generic() {
         let (d, k) = normalize_claude_model("claude-3-5-sonnet-20241022");
-        assert_eq!((d.as_str(), k.as_str()), ("Sonnet", "sonnet"));
+        assert_eq!((d.as_str(), k.as_str()), ("Sonnet 3.5", "sonnet-3-5"));
     }
 
     #[test]
     fn claude_opus_generic() {
-        // A bare "opus" without version digits should match the generic opus alias.
+        // Legacy names put the version before the family.
         let (d, k) = normalize_claude_model("claude-3-opus-20240229");
-        assert_eq!((d.as_str(), k.as_str()), ("Opus", "opus"));
+        assert_eq!((d.as_str(), k.as_str()), ("Opus 3", "opus-3"));
     }
 
     #[test]
