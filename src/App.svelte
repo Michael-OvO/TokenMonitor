@@ -15,6 +15,7 @@
     fetchData,
     warmCache,
     warmAllPeriods,
+    usageRefreshError,
   } from "./lib/stores/usage.js";
   import {
     ALL_USAGE_PROVIDER_ID,
@@ -51,22 +52,16 @@
   } from "./lib/stores/settings.js";
   import { initializeRuntimeFromSettings } from "./lib/bootstrap.js";
   import { syncTrayConfig } from "./lib/tray/sync.js";
-  import { DEFAULT_MAX_WINDOW_HEIGHT } from "./lib/windowSizing.js";
-  import { createResizeOrchestrator, type ResizeOrchestrator } from "./lib/resizeOrchestrator.js";
+  import { DEFAULT_MAX_WINDOW_HEIGHT, WINDOW_WIDTH } from "./lib/window/sizing.js";
+  import { createResizeOrchestrator, type ResizeOrchestrator } from "./lib/window/resizeOrchestrator.js";
   import { syncNativeWindowSurface } from "./lib/window/appearance.js";
   import {
-    captureResizeDebugSnapshot,
     formatDebugError,
     initResizeDebug,
-    isResizeDebugEnabled,
     logResizeDebug,
-  } from "./lib/uiStability.js";
+  } from "./lib/window/uiStability.js";
   import { setupAppEventListeners } from "./lib/appEventListeners.js";
-  import { isMacOS, isWindows } from "./lib/utils/platform.js";
-  import {
-    markClaudeKeychainAccessHandled,
-    requestClaudeKeychainAccessOnce,
-  } from "./lib/permissions/keychain.js";
+  import { isWindows } from "./lib/utils/platform.js";
   import { installStatusline, checkStatusline, type InstalledState } from "./lib/permissions/statusline.js";
 
   import Toggle from "./lib/components/Toggle.svelte";
@@ -78,13 +73,12 @@
   import Footer from "./lib/components/Footer.svelte";
   import SetupScreen from "./lib/components/SetupScreen.svelte";
   import SplashScreen from "./lib/components/SplashScreen.svelte";
-  import Settings from "./lib/components/Settings.svelte";
+  import Settings from "./lib/components/settings/Settings.svelte";
   import Calendar from "./lib/components/Calendar.svelte";
   import DateNav from "./lib/components/DateNav.svelte";
   import DevicesView from "./lib/components/DevicesView.svelte";
   import SingleDeviceView from "./lib/components/SingleDeviceView.svelte";
   import UpdateBanner from "./lib/components/UpdateBanner.svelte";
-  import PermissionDisclosure from "./lib/components/PermissionDisclosure.svelte";
   import PermissionsOnboarding from "./lib/components/PermissionsOnboarding.svelte";
   import type { HeaderTabs, UsagePeriod, UsageProvider, RateLimitsPayload } from "./lib/types/index.js";
 
@@ -100,6 +94,7 @@
   let data = $state($usageData);
   let loading = $state(false);
   let placeholderLoading = $state(false);
+  let refreshError = $state<string | null>(null);
   let showRefresh = $state(false);
   let rateLimits = $state<RateLimitsPayload | null>(null);
   let rateLimitsRequest = $state({
@@ -108,8 +103,7 @@
     error: null as string | null,
     deferredUntil: null as string | null,
   });
-  let showKeychainPermissionPanel = $state(false);
-  let keychainPermissionBusy = $state(false);
+  let rateLimitsEnableBusy = $state(false);
   let statuslineBusy = $state(false);
   let statuslineInstalled = $state<boolean | null>(null);
   let statuslineProbeStatus = $state<InstalledState["status"] | null>(null);
@@ -199,6 +193,11 @@
     dataTransitionCounter = untrack(() => dataTransitionCounter) + 1;
   });
 
+  // Footer mounts outside the measured scroll body — remeasure when it appears/leaves.
+  $effect(() => {
+    tick().then(() => resizeOrch?.syncSizeAndVerify("footer-chrome"));
+  });
+
   let headerToggleOptions = $derived.by(() =>
     getVisibleHeaderProviders(headerTabs).map((value) => ({
       value,
@@ -214,6 +213,9 @@
   $effect(() => {
     const unsub1 = usageData.subscribe((v) => (data = v));
     const unsub2 = isLoading.subscribe((v) => (loading = v));
+    const unsubRefreshErr = usageRefreshError.subscribe((v) => (refreshError = v));
+    const unsubProvider = activeProvider.subscribe((v) => (provider = v));
+    const unsubPeriod = activePeriod.subscribe((v) => (period = v));
     const unsubPL = isPlaceholderLoading.subscribe((v) => {
       placeholderLoading = v;
       tick().then(() => resizeOrch?.syncSizeAndVerify(v ? "content-loading" : "content-loaded"));
@@ -229,7 +231,7 @@
     });
     const unsub4 = rateLimitsData.subscribe((v) => (rateLimits = v));
     const unsub5 = rateLimitsRequestState.subscribe((v) => (rateLimitsRequest = v));
-    return () => { unsub1(); unsub2(); unsubPL(); unsub3(); unsub4(); unsub5(); };
+    return () => { unsub1(); unsub2(); unsubRefreshErr(); unsubProvider(); unsubPeriod(); unsubPL(); unsub3(); unsub4(); unsub5(); };
   });
 
   // Apply/remove data-provider attribute reactively
@@ -301,7 +303,6 @@
   }
 
   async function enableRateLimits() {
-    showKeychainPermissionPanel = false;
     await updateSetting("rateLimitsEnabled", true);
     await invoke("set_rate_limits_enabled", { enabled: true });
     // Force the fetch — the cached payload may carry a cooldownUntil from a
@@ -313,41 +314,12 @@
   }
 
   async function handleEnableRateLimits() {
-    if (keychainPermissionBusy) return;
-    keychainPermissionBusy = true;
+    if (rateLimitsEnableBusy) return;
+    rateLimitsEnableBusy = true;
     try {
       await enableRateLimits();
     } finally {
-      keychainPermissionBusy = false;
-    }
-  }
-
-  async function handleShowKeychainFallback() {
-    if (keychainPermissionBusy) return;
-    showKeychainPermissionPanel = true;
-    await tick();
-    syncSizeAndVerify("keychain-permission-open");
-  }
-
-  async function handleAllowKeychainForRateLimits() {
-    if (keychainPermissionBusy) return;
-    keychainPermissionBusy = true;
-    try {
-      await requestClaudeKeychainAccessOnce("rate-limits");
-      await enableRateLimits();
-    } finally {
-      keychainPermissionBusy = false;
-    }
-  }
-
-  async function handleSkipKeychainForRateLimits() {
-    if (keychainPermissionBusy) return;
-    keychainPermissionBusy = true;
-    try {
-      await markClaudeKeychainAccessHandled();
-      await enableRateLimits();
-    } finally {
-      keychainPermissionBusy = false;
+      rateLimitsEnableBusy = false;
     }
   }
 
@@ -513,7 +485,7 @@
     syncSizeAndVerify("device-back");
   }
 
-  // ── Window resize (delegated to resizeOrchestrator.ts) ──
+  // ── Window resize ──
   //
   // All resize state, measurement, throttling, and animation logic lives in
   // the orchestrator closure. App.svelte only holds the reactive Svelte state
@@ -535,6 +507,10 @@
     let onViewportPointerEnter: (() => void) | undefined;
     let onViewportPointerLeave: (() => void) | undefined;
     let onViewportPointerMove: (() => void) | undefined;
+    let monitorRecalibrationTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastViewportWidth = typeof window === "undefined" ? WINDOW_WIDTH : Math.round(window.innerWidth);
+    let lastDevicePixelRatio = typeof window === "undefined" ? 1 : window.devicePixelRatio;
+    let lastTauriWindowWidth: number | null = null;
 
     // Create the resize orchestrator (all resize state lives in its closure)
     let persistedWindowHeight = 0;
@@ -557,43 +533,78 @@
       },
       currentMonitor: () => currentMonitor(),
       logDebug: logResizeDebug,
-      captureDebugSnapshot: (reason) =>
-        captureResizeDebugSnapshot(reason, popEl, {
-          maxWindowH: resizeOrch?.getMaxWindowH() ?? DEFAULT_MAX_WINDOW_HEIGHT,
-          scrollThresholdH: resizeOrch?.getScrollThresholdH() ?? DEFAULT_MAX_WINDOW_HEIGHT,
-          isScrollLocked: resizeOrch?.getIsScrollLocked() ?? false,
-        }),
       formatDebugError,
-      isDebugEnabled: isResizeDebugEnabled,
       onHeightApplied: persistWindowHeight,
     });
 
-    /** Local snapshot helper for event handlers that need debug snapshots. */
-    const captureSnapshot = (reason: string) =>
-      isResizeDebugEnabled()
-        ? captureResizeDebugSnapshot(reason, popEl, {
-            maxWindowH: resizeOrch?.getMaxWindowH() ?? DEFAULT_MAX_WINDOW_HEIGHT,
-            scrollThresholdH: resizeOrch?.getScrollThresholdH() ?? DEFAULT_MAX_WINDOW_HEIGHT,
-            isScrollLocked: resizeOrch?.getIsScrollLocked() ?? false,
-          })
-        : {};
+    const applyMonitorMetricsToView = () => {
+      const fixedH = resizeOrch?.getFixedWindowH() ?? 0;
+      const rawThreshold = resizeOrch?.getScrollThresholdH() ?? DEFAULT_MAX_WINDOW_HEIGHT;
+      scrollThresholdH = fixedH > 0 ? Math.min(rawThreshold, fixedH) : rawThreshold;
+    };
+
+    async function recalibrateWindowGeometry(source: string) {
+      if (!resizeOrch) return;
+      try {
+        logResizeDebug("resize:monitor-recalibration-start", {
+          source,
+          viewportWidth: Math.round(window.innerWidth),
+          devicePixelRatio: window.devicePixelRatio,
+        });
+        await resizeOrch.refreshWindowMetrics();
+        if (cancelled) return;
+        applyMonitorMetricsToView();
+        await tick();
+        if (cancelled) return;
+        resizeOrch.reconcileWindowGeometry(source);
+      } catch (error) {
+        logResizeDebug("resize:monitor-recalibration-failed", {
+          source,
+          error: formatDebugError(error),
+        });
+      }
+    }
+
+    function scheduleWindowGeometryRecalibration(source: string, delayMs = 120) {
+      if (!isWindows()) return;
+      if (monitorRecalibrationTimer) clearTimeout(monitorRecalibrationTimer);
+      monitorRecalibrationTimer = setTimeout(() => {
+        monitorRecalibrationTimer = null;
+        void recalibrateWindowGeometry(source);
+      }, delayMs);
+    }
 
     initResizeDebug();
 
     const cleanupListeners = setupAppEventListeners({
       onResize: () => {
-        logResizeDebug("browser:resize", captureSnapshot("browser-resize"));
+        const viewportWidth = Math.round(window.innerWidth);
+        const devicePixelRatio = window.devicePixelRatio;
+        const viewportChanged =
+          viewportWidth !== lastViewportWidth ||
+          devicePixelRatio !== lastDevicePixelRatio;
+        lastViewportWidth = viewportWidth;
+        lastDevicePixelRatio = devicePixelRatio;
+        logResizeDebug("browser:resize", {
+          viewportWidth,
+          devicePixelRatio,
+          viewportChanged,
+        });
+        if (viewportChanged) {
+          scheduleWindowGeometryRecalibration("browser-resize");
+        }
       },
       onFocus: () => {
-        logResizeDebug("window:focus", captureSnapshot("window-focus"));
-        void syncNativeWindowSurface(undefined, get(settings).glassEffect).catch((e) => logger.debug("appearance", `syncNativeWindowSurface failed: ${e}`));
+        logResizeDebug("window:focus", {});
+        void syncNativeWindowSurface().catch((e) => logger.debug("appearance", `syncNativeWindowSurface failed: ${e}`));
+        scheduleWindowGeometryRecalibration("window-focus", 0);
         syncSizeAndVerify("window-focus");
         // Refresh silently — never drop the live view back to the spinner.
         fetchData(provider, period, offset, { silent: true });
         if (period === "5h") fetchRateLimits(backendScope(provider));
       },
       onBlur: () => {
-        logResizeDebug("window:blur", captureSnapshot("window-blur"));
+        logResizeDebug("window:blur", {});
         // Safety net: if the popover is dismissed without a mouseleave firing,
         // treat blur as "pointer gone" so a queued shrink still flushes.
         resizeOrch?.setMouseOverWindow(false);
@@ -616,7 +627,6 @@
         logResizeDebug("document:visibility-change", {
           hidden: document.hidden,
           visibilityState: document.visibilityState,
-          ...captureSnapshot("document-visibility-change"),
         });
       },
       onColorSchemeChange: (matchesLight) => {
@@ -628,22 +638,17 @@
 
         const updates: Promise<unknown>[] = [syncTrayConfig(get(settings).trayConfig, null)];
         if (followsSystemTheme) {
-          updates.push(syncNativeWindowSurface(undefined, get(settings).glassEffect));
+          updates.push(syncNativeWindowSurface());
         }
 
         void Promise.allSettled(updates);
       },
     });
-    logResizeDebug("app:mount", captureSnapshot("mount"));
+    logResizeDebug("app:mount", {});
 
     const init = async () => {
-      const _t0 = performance.now();
-      console.log('[PROFILE] init:start');
       await resizeOrch!.refreshWindowMetrics();
-      const fixedH0 = resizeOrch!.getFixedWindowH();
-      const rawThreshold = resizeOrch!.getScrollThresholdH();
-      scrollThresholdH = fixedH0 > 0 ? Math.min(rawThreshold, fixedH0) : rawThreshold;
-      console.log(`[PROFILE] init:window-metrics = ${(performance.now() - _t0).toFixed(1)}ms`);
+      applyMonitorMetricsToView();
 
       // Load persisted settings and apply theme + defaults (non-blocking)
       try {
@@ -651,8 +656,6 @@
         if (cancelled) return;
         const runtime = await initializeRuntimeFromSettings(saved);
         if (cancelled) return;
-        provider = runtime.provider;
-        period = runtime.period;
         logResizeDebug("app:settings-loaded", {
           provider: runtime.provider,
           period: runtime.period,
@@ -661,7 +664,6 @@
         // Settings load failed — continue with defaults
         logResizeDebug("app:settings-load-failed", {});
       }
-      console.log(`[PROFILE] init:settings+bootstrap = ${(performance.now() - _t0).toFixed(1)}ms`);
 
       // Restore the window to its last-known height before the chart renders.
       // In fixed-height mode, don't restore persisted height — content will
@@ -672,7 +674,7 @@
         if (!cancelled && restoredHeight) {
           try {
             await invoke("set_window_size_and_align", {
-              width: 340,
+              width: WINDOW_WIDTH,
               height: restoredHeight,
             });
             persistedWindowHeight = restoredHeight;
@@ -684,13 +686,11 @@
           }
         }
       }
-      console.log(`[PROFILE] init:window-restore = ${(performance.now() - _t0).toFixed(1)}ms`);
 
       if (get(settings).hasSeenWelcome) {
         await loadInitialData();
         if (cancelled) return;
       }
-      console.log(`[PROFILE] init:loadInitialData = ${(performance.now() - _t0).toFixed(1)}ms`);
       if (isWindows()) {
         try {
           const edge = await invoke<string>("get_window_anchor_edge");
@@ -705,7 +705,6 @@
 
       void refreshStatuslineProbe();
       appReady = true;
-      console.log(`[PROFILE] init:appReady = ${(performance.now() - _t0).toFixed(1)}ms`);
 
       if (popEl) {
         observer = new ResizeObserver((entries) => {
@@ -714,7 +713,6 @@
               width: entry.contentRect.width,
               height: entry.contentRect.height,
             })),
-            ...captureSnapshot("resize-observer"),
           });
           resizeOrch?.resizeToContent("resize-observer");
         });
@@ -747,7 +745,6 @@
         await tick();
         resizeOrch?.markInitialContentReady();
       }
-      console.log(`[PROFILE] init:TOTAL = ${(performance.now() - _t0).toFixed(1)}ms`);
 
       unlisten = await listen("data-updated", () => {
         logResizeDebug("app:data-updated-event", {
@@ -763,11 +760,19 @@
       });
 
       unlistenWindowResize = await tauriWindow.onResized(({ payload }) => {
+        const resizedWidth = Math.round(payload.width);
+        const widthChanged =
+          lastTauriWindowWidth !== null &&
+          resizedWidth !== lastTauriWindowWidth;
+        lastTauriWindowWidth = resizedWidth;
         logResizeDebug("tauri:window-resized", {
           width: payload.width,
           height: payload.height,
-          ...captureSnapshot("tauri-window-resized"),
+          widthChanged,
         });
+        if (widthChanged) {
+          scheduleWindowGeometryRecalibration("tauri-window-resized");
+        }
       });
 
       if (cancelled) {
@@ -794,6 +799,7 @@
       if (onViewportPointerEnter) docEl.removeEventListener("mouseenter", onViewportPointerEnter);
       if (onViewportPointerLeave) docEl.removeEventListener("mouseleave", onViewportPointerLeave);
       if (onViewportPointerMove) window.removeEventListener("mousemove", onViewportPointerMove);
+      if (monitorRecalibrationTimer) clearTimeout(monitorRecalibrationTimer);
       observer?.disconnect();
       window.removeEventListener("chart-hover", onChartHover);
       resizeOrch?.destroy();
@@ -810,222 +816,195 @@
     style:max-height="{scrollThresholdH}px"
     style:overflow-y={scrollThresholdH < DEFAULT_MAX_WINDOW_HEIGHT ? 'auto' : 'visible'}
   >
-    {#if !showSettings}<UpdateBanner />{/if}
-    {#if showSplash}
-      <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
-    {:else if showPermissionsOnboarding}
-      <PermissionsOnboarding
-        onFinish={handleOnboardingFinish}
-      />
-    {:else if appReady && !data}
-      <div class={viewTransitionClass}><SetupScreen /></div>
-    {:else if showSettings}
-      <div class={viewTransitionClass}><Settings onBack={handleSettingsClose} /></div>
-    {:else if showCalendar}
-      <div class={viewTransitionClass}><Calendar onBack={handleCalendarClose} /></div>
-    {:else if selectedDevice}
-      <div class={viewTransitionClass}><SingleDeviceView device={selectedDevice} onBack={handleDeviceBack} /></div>
-    {:else if showDevices}
-      <div class={viewTransitionClass}><DevicesView onBack={() => { showDevices = false; }} onDeviceSelect={handleDeviceSelect} onSettings={handleSettingsOpen} /></div>
-    {:else if data}
-      <div class={viewTransitionClass}>
-      {#if showRefresh}<div class="refresh-bar" aria-hidden="true"></div>{/if}
-      <div class="app-header">
-        <Toggle
-          active={provider}
-          options={headerToggleOptions}
-          onChange={handleProviderChange}
-          {brandTheming}
+      {#if !showSettings}<UpdateBanner />{/if}
+      {#if showSplash}
+        <SplashScreen ready={appReady} onComplete={() => { showSplash = false; tick().then(() => syncSizeAndVerify("splash-complete")); }} />
+      {:else if showPermissionsOnboarding}
+        <PermissionsOnboarding
+          onFinish={handleOnboardingFinish}
         />
-      </div>
-      <TimeTabs active={period} onChange={handlePeriodChange} />
-      {#if period !== "5h" && data}
-        <DateNav
-          periodLabel={data.period_label}
-          hasEarlierData={data.has_earlier_data}
-          isAtPresent={offset === 0}
-          onBack={() => handleOffsetChange(-1)}
-          onForward={() => handleOffsetChange(1)}
-          onReset={handleOffsetReset}
-        />
-      {/if}
-      {#if placeholderLoading}
-        <div class="loading">
-          <div class="spinner"></div>
-          <div class="loading-text">Loading data...</div>
+      {:else if appReady && !data}
+        <div class={viewTransitionClass}><SetupScreen /></div>
+      {:else if showSettings}
+        <div class={viewTransitionClass}><Settings onBack={handleSettingsClose} /></div>
+      {:else if showCalendar}
+        <div class={viewTransitionClass}><Calendar onBack={handleCalendarClose} /></div>
+      {:else if selectedDevice}
+        <div class={viewTransitionClass}><SingleDeviceView device={selectedDevice} onBack={handleDeviceBack} /></div>
+      {:else if showDevices}
+        <div class={viewTransitionClass}><DevicesView onBack={() => { showDevices = false; }} onDeviceSelect={handleDeviceSelect} onSettings={handleSettingsOpen} /></div>
+      {:else if data}
+        <div class={viewTransitionClass}>
+        {#if showRefresh}<div class="refresh-bar" aria-hidden="true"></div>{/if}
+        <div class="app-header">
+          <Toggle
+            active={provider}
+            options={headerToggleOptions}
+            onChange={handleProviderChange}
+            {brandTheming}
+          />
+          <TimeTabs active={period} onChange={handlePeriodChange} />
         </div>
-      {:else}
-        <div class="data-content" style:animation-name={dataTransitionCounter > 1 ? 'contentFade' : 'none'}>
-        <MetricsRow {data} />
-        {#if data.usage_warning && data.usage_warning !== dismissedWarningText}
-          <div class="usage-warning">
-            <div class="usage-warning-header">
-              <div class="usage-warning-title">Usage warning</div>
-              <button
-                class="usage-warning-dismiss"
-                onclick={() => { dismissedWarningText = data?.usage_warning ?? null; }}
-                aria-label="Dismiss warning"
-              >&times;</button>
-            </div>
-            <div class="usage-warning-text">{data.usage_warning}</div>
-          </div>
-        {/if}
-        <div class="hr"></div>
-
-        {#if period === "5h"}
-          {#if showKeychainPermissionPanel && isMacOS() && !$settings.keychainAccessRequested}
-            <div class="rate-limit-permission" role="dialog" aria-labelledby="rate-limit-permission-title">
-              <div class="rate-limit-empty-title" id="rate-limit-permission-title">
-                Keychain fallback for live limits
-              </div>
-              <div class="rate-limit-empty-text">
-                TokenMonitor normally reads Claude live limits from your Claude
-                credentials file without any macOS prompt. If that file is missing
-                or unreadable, you can allow a one-time Keychain fallback.
-              </div>
-              <PermissionDisclosure mode="rate-limit" />
-              <div class="rate-limit-empty-text">
-                macOS may show a Keychain window after you continue. Choose
-                <strong>Always Allow</strong> if you want future fallback checks to stay silent.
-              </div>
-              <div class="rate-limit-actions">
-                <button
-                  type="button"
-                  class="rate-limit-secondary"
-                  onclick={handleSkipKeychainForRateLimits}
-                  disabled={keychainPermissionBusy}
-                >
-                  Do not use Keychain
-                </button>
-                <button
-                  type="button"
-                  class="rate-limit-cta"
-                  onclick={handleAllowKeychainForRateLimits}
-                  disabled={keychainPermissionBusy}
-                >
-                  Allow Keychain access
-                </button>
-              </div>
-            </div>
-          {:else if $settings.rateLimitsEnabled && visibleUsableRateLimitProviders.length > 0}
-            {#each visibleUsableRateLimitProviders as rateLimitProvider, index}
-              <UsageBars
-                providerLabel={provider === ALL_USAGE_PROVIDER_ID ? getUsageProviderLabel(rateLimitProvider) : undefined}
-                rateLimits={providerPayload(rateLimits, rateLimitProvider)!}
-              />
-              {#if index < visibleUsableRateLimitProviders.length - 1}
-                <div class="hr"></div>
-              {/if}
-            {/each}
-            {#if statuslineProbeStatus === "script_missing" || statuslineProbeStatus === "not_installed"}
-              <div class="rate-limit-stale-banner" data-state="warn">
-                <div class="rl-stale-row">
-                  <span class="rl-stale-dot" aria-hidden="true"></span>
-                  <span class="rl-stale-headline">Statusline needs attention</span>
-                </div>
-                <div class="rl-stale-body">
-                  Reinstall the statusline to restore live updates.
-                </div>
-                <button
-                  type="button"
-                  class="rate-limit-cta"
-                  onclick={handleInstallStatusline}
-                  disabled={statuslineBusy}
-                >
-                  {statuslineBusy ? "Reinstalling…" : "Reinstall statusline"}
-                </button>
-              </div>
-            {/if}
-          {:else if !$settings.rateLimitsEnabled}
-            <div class="rate-limit-empty">
-              <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
-                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
-              </svg>
-              <div class="rate-limit-empty-title">Live rate limits are off</div>
-              <div class="rate-limit-empty-text">
-                Turn this on to see live rate-limit percentages.
-                TokenMonitor uses your Claude credentials file first and does not open Keychain from this button.
-              </div>
-              <button
-                type="button"
-                class="rate-limit-cta"
-                onclick={handleEnableRateLimits}
-                disabled={keychainPermissionBusy}
-              >
-                Enable rate limits
-              </button>
-            </div>
-          {:else if rateLimitsRequest.loading}
-            <div class="rate-limit-skeleton" aria-busy="true">
-              {#each [1, 2] as _}
-                <div class="rate-limit-skeleton-row">
-                  <div class="skeleton" style="width: 50px; height: 8px"></div>
-                  <div class="skeleton" style="width: 100%; height: 14px; border-radius: 7px"></div>
-                </div>
-              {/each}
-            </div>
-          {:else}
-            <div class="rate-limit-empty">
-              <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-              </svg>
-              <div class="rate-limit-empty-title">Rate limits unavailable</div>
-              <div class="rate-limit-empty-text">
-                {#if isRateLimitProvider(provider) && (data.total_tokens > 0 || data.total_cost > 0)}
-                  {getRateLimitIdleSummary(provider)}
-                {:else}
-                  {rateLimitsRequest.error ?? "Unable to load rate limit data right now."}
-                {/if}
-              </div>
-              {#if isMacOS() && !$settings.keychainAccessRequested}
-                <button
-                  type="button"
-                  class="rate-limit-secondary"
-                  onclick={handleShowKeychainFallback}
-                  disabled={keychainPermissionBusy}
-                >
-                  Review Keychain fallback
-                </button>
-              {/if}
-            </div>
-          {/if}
-        {:else if data.total_cost === 0 && data.total_tokens === 0}
-          <div class="empty-period">
-            {#if data.provider_detected === false}
-              <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                <polyline points="7 10 12 15 17 10"></polyline>
-                <line x1="12" y1="15" x2="12" y2="3"></line>
-              </svg>
-              <span class="empty-title">{providerNotInstalledTitle(provider)}</span>
-              <span class="empty-subtitle">{providerNotInstalledHint(provider)}</span>
-            {:else}
-              <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
-                <path d="M2 17l10 5 10-5"></path>
-                <path d="M2 12l10 5 10-5"></path>
-              </svg>
-              <span>{emptyPeriodLabel(period, offset)}</span>
-            {/if}
-          </div>
-        {:else}
-          <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} />
-        {/if}
-
-        {#if (period !== "5h" && data.model_breakdown.length > 0) || data.subagent_stats || (data.device_breakdown && data.device_breakdown.length > 0)}
-          <div class="hr"></div>
-          <Breakdown
-            models={period !== "5h" ? data.model_breakdown : []}
-            onAccordionToggle={(detail) => resizeOrch?.handleBreakdownAccordionToggle(detail)}
-            subagentStats={data.subagent_stats}
-            deviceBreakdown={data.device_breakdown}
-            onDeviceSelect={handleDeviceSelect}
-            onShowAllDevices={() => { showDevices = true; }}
+        {#if period !== "5h" && data}
+          <DateNav
+            periodLabel={data.period_label}
+            hasEarlierData={data.has_earlier_data}
+            isAtPresent={offset === 0}
+            onBack={() => handleOffsetChange(-1)}
+            onForward={() => handleOffsetChange(1)}
+            onReset={handleOffsetReset}
           />
         {/if}
+        {#if placeholderLoading}
+          <div class="loading">
+            <div class="spinner"></div>
+            <div class="loading-text">Loading data...</div>
+          </div>
+        {:else}
+          <div class="data-content" style:animation-name={dataTransitionCounter > 1 ? 'contentFade' : 'none'}>
+          <MetricsRow {data} />
+          {#if data.usage_warning && data.usage_warning !== dismissedWarningText}
+            <div class="usage-warning">
+              <div class="usage-warning-header">
+                <div class="usage-warning-title">Usage warning</div>
+                <button
+                  class="usage-warning-dismiss"
+                  onclick={() => { dismissedWarningText = data?.usage_warning ?? null; }}
+                  aria-label="Dismiss warning"
+                >&times;</button>
+              </div>
+              <div class="usage-warning-text">{data.usage_warning}</div>
+            </div>
+          {/if}
+          {#if refreshError}
+            <div class="usage-warning">
+              <div class="usage-warning-header">
+                <div class="usage-warning-title">Refresh failed</div>
+                <button
+                  class="usage-warning-dismiss"
+                  onclick={() => usageRefreshError.set(null)}
+                  aria-label="Dismiss refresh error"
+                >&times;</button>
+              </div>
+              <div class="usage-warning-text">{refreshError}</div>
+              <button
+                class="usage-warning-retry"
+                onclick={() => fetchData(provider, period, offset, { silent: true })}
+              >Retry</button>
+            </div>
+          {/if}
+          <div class="hr"></div>
+
+          {#if period === "5h"}
+            {#if $settings.rateLimitsEnabled && visibleUsableRateLimitProviders.length > 0}
+              {#each visibleUsableRateLimitProviders as rateLimitProvider, index}
+                <UsageBars
+                  providerLabel={provider === ALL_USAGE_PROVIDER_ID ? getUsageProviderLabel(rateLimitProvider) : undefined}
+                  rateLimits={providerPayload(rateLimits, rateLimitProvider)!}
+                />
+                {#if index < visibleUsableRateLimitProviders.length - 1}
+                  <div class="hr"></div>
+                {/if}
+              {/each}
+              {#if statuslineProbeStatus === "script_missing" || statuslineProbeStatus === "not_installed"}
+                <div class="rate-limit-stale-banner" data-state="warn">
+                  <div class="rl-stale-row">
+                    <span class="rl-stale-dot" aria-hidden="true"></span>
+                    <span class="rl-stale-headline">Statusline needs attention</span>
+                  </div>
+                  <div class="rl-stale-body">
+                    Reinstall the statusline to restore live updates.
+                  </div>
+                  <button
+                    type="button"
+                    class="rate-limit-cta"
+                    onclick={handleInstallStatusline}
+                    disabled={statuslineBusy}
+                  >
+                    {statuslineBusy ? "Reinstalling…" : "Reinstall statusline"}
+                  </button>
+                </div>
+              {/if}
+            {:else if !$settings.rateLimitsEnabled}
+              <div class="rate-limit-empty">
+                <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                </svg>
+                <div class="rate-limit-empty-title">Live rate limits are off</div>
+                <div class="rate-limit-empty-text">
+                  Turn this on to see live rate-limit percentages.
+                  TokenMonitor asks Claude Code for them locally — no prompt, no extra API call.
+                </div>
+                <button
+                  type="button"
+                  class="rate-limit-cta"
+                  onclick={handleEnableRateLimits}
+                  disabled={rateLimitsEnableBusy}
+                >
+                  Enable rate limits
+                </button>
+              </div>
+            {:else if rateLimitsRequest.loading}
+              <div class="rate-limit-skeleton" aria-busy="true">
+                {#each [1, 2] as _}
+                  <div class="rate-limit-skeleton-row">
+                    <div class="skeleton" style="width: 50px; height: 8px"></div>
+                    <div class="skeleton" style="width: 100%; height: 14px; border-radius: 7px"></div>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <div class="rate-limit-empty">
+                <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="12" y1="8" x2="12" y2="12"></line>
+                  <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+                <div class="rate-limit-empty-title">Rate limits unavailable</div>
+                <div class="rate-limit-empty-text">
+                  {#if isRateLimitProvider(provider) && (data.total_tokens > 0 || data.total_cost > 0)}
+                    {getRateLimitIdleSummary(provider)}
+                  {:else}
+                    {rateLimitsRequest.error ?? "Unable to load rate limit data right now."}
+                  {/if}
+                </div>
+              </div>
+            {/if}
+          {:else if data.total_cost === 0 && data.total_tokens === 0}
+            <div class="empty-period">
+              {#if data.provider_detected === false}
+                <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span class="empty-title">{providerNotInstalledTitle(provider)}</span>
+                <span class="empty-subtitle">{providerNotInstalledHint(provider)}</span>
+              {:else}
+                <svg class="empty-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--t4)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                  <path d="M2 17l10 5 10-5"></path>
+                  <path d="M2 12l10 5 10-5"></path>
+                </svg>
+                <span>{emptyPeriodLabel(period, offset)}</span>
+              {/if}
+            </div>
+          {:else}
+            <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} />
+          {/if}
+
+          {#if (period !== "5h" && data.model_breakdown.length > 0) || data.subagent_stats || (data.device_breakdown && data.device_breakdown.length > 0)}
+            <div class="hr"></div>
+            <Breakdown
+              models={period !== "5h" ? data.model_breakdown : []}
+              onAccordionToggle={(detail) => resizeOrch?.handleBreakdownAccordionToggle(detail)}
+              subagentStats={data.subagent_stats}
+              deviceBreakdown={data.device_breakdown}
+              onDeviceSelect={handleDeviceSelect}
+              onShowAllDevices={() => { showDevices = true; }}
+            />
+          {/if}
       </div>
       {/if}
       <div class="app-footer">
@@ -1040,7 +1019,6 @@
     {/if}
   </div>
 </div>
-
 
 <style>
   .pop {
@@ -1083,9 +1061,9 @@
     top: 0;
     z-index: 3;
     background: var(--surface);
+    background-image: linear-gradient(var(--provider-bg), var(--provider-bg));
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
     /* No `transform: translateZ(0)` here. On `position: sticky`
        elements, that creates a new containing block which can throw
        off `popEl.scrollHeight` measurements while the layout is in
@@ -1129,7 +1107,6 @@
     padding: 24px 0;
   }
   .rate-limit-empty,
-  .rate-limit-permission,
   .rate-limit-stale-banner {
     display: flex;
     flex-direction: column;
@@ -1164,20 +1141,12 @@
     color: var(--t3);
     padding-left: 12px;
   }
-  .rate-limit-permission {
-    gap: 7px;
-  }
   .rate-limit-empty-title {
     font: 500 11px/1 'Inter', sans-serif;
     color: var(--t1);
   }
   .rate-limit-empty-text {
     font: 400 9px/1.4 'Inter', sans-serif;
-    color: var(--t3);
-  }
-  .rate-limit-note {
-    margin: 6px 14px 0;
-    font: 400 9px/1.35 'Inter', sans-serif;
     color: var(--t3);
   }
   .usage-warning {
@@ -1224,6 +1193,19 @@
     font: 400 8.5px/1.35 'Inter', sans-serif;
     color: var(--t2);
   }
+  .usage-warning-retry {
+    margin-top: 6px;
+    padding: 3px 8px;
+    border: 1px solid color-mix(in srgb, #d88d31 40%, transparent);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--t1);
+    font: 500 9px/1 'Inter', sans-serif;
+    cursor: pointer;
+  }
+  .usage-warning-retry:hover {
+    background: var(--surface-hover);
+  }
   .rate-limit-cta {
     margin-top: 10px;
     align-self: flex-start;
@@ -1237,8 +1219,7 @@
     transition: filter var(--t-fast) ease;
   }
   .rate-limit-cta:hover:not(:disabled) { filter: brightness(1.08); }
-  .rate-limit-cta:disabled,
-  .rate-limit-secondary:disabled {
+  .rate-limit-cta:disabled {
     cursor: default;
     opacity: .55;
   }
@@ -1281,29 +1262,6 @@
     width: 16px; height: 16px;
     color: var(--accent, var(--t1));
     opacity: 0.85;
-  }
-  .rate-limit-actions {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    margin-top: 7px;
-  }
-  .rate-limit-actions .rate-limit-cta {
-    margin-top: 0;
-  }
-  .rate-limit-secondary {
-    padding: 6px 8px;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--t2);
-    font: 500 10px/1 'Inter', sans-serif;
-    cursor: pointer;
-    transition: background var(--t-fast) ease, color var(--t-fast) ease;
-  }
-  .rate-limit-secondary:hover:not(:disabled) {
-    background: var(--surface-hover);
-    color: var(--t1);
   }
   .refresh-bar {
     position: absolute;

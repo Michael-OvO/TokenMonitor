@@ -45,7 +45,6 @@ describe("updater store", () => {
         lastCheck: "2026-04-18T00:00:00Z",
         lastCheckError: null,
         skippedVersions: [],
-        lastNotifiedVersion: null,
         autoCheckEnabled: true,
         progress: null,
         dismissedForSession: false,

@@ -4,7 +4,7 @@
     getRateLimitIdleSummary,
     isRateLimitProvider,
   } from "../providerMetadata.js";
-  import { formatRetryIn } from "../utils/format.js";
+  import { formatCreditAmount, formatDuration, formatRetryIn } from "../utils/format.js";
   import {
     currentRateLimitWindows,
     providerHasActiveCooldown,
@@ -94,9 +94,7 @@
     const etaMs = ((100 - w.utilization) * elapsedMs) / w.utilization;
     // Only warn if you'll exhaust before the window resets
     if (etaMs >= remainingMs || etaMs < 300_000) return "";
-    const hours = Math.floor(etaMs / 3_600_000);
-    const mins = Math.floor((etaMs % 3_600_000) / 60_000);
-    return hours > 0 ? `limit in ~${hours}h ${mins}m` : `limit in ~${mins}m`;
+    return `limit in ~${formatDuration(etaMs)}`;
   }
 
   function paceColor(w: RateLimitWindow, windowHours: number): string {
@@ -111,18 +109,9 @@
     if (windowId === "five_hour" || windowId === "primary") return 5;
     if (windowId === "secondary") return 168;
     if (windowId.startsWith("seven_day")) return 168;
-    if (windowId === "auto_composer" || windowId === "api") return 720;
+    // Cursor billing-cycle pools (monthly). Keep auto_composer for stale caches.
+    if (windowId === "first_party" || windowId === "auto_composer" || windowId === "api") return 720;
     return 5;
-  }
-
-  function formatUsdAmount(amount: number): string {
-    const wholeDollars = Math.abs(amount - Math.round(amount)) < 0.005;
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      minimumFractionDigits: wholeDollars ? 0 : 2,
-      maximumFractionDigits: 2,
-    }).format(amount);
   }
 
   function utilizationLabel(pct: number): string {
@@ -210,8 +199,8 @@
   {#if rateLimits.extraUsage?.isEnabled}
     <div class="ub-row">
       <div class="ub-head">
-        <span class="ub-label">Extra Usage</span>
-        <span class="ub-val">{formatUsdAmount(rateLimits.extraUsage.usedCredits)} / {formatUsdAmount(rateLimits.extraUsage.monthlyLimit)}</span>
+        <span class="ub-label">{rateLimits.provider === "cursor" ? "On-demand" : "Extra Usage"}</span>
+        <span class="ub-val">{formatCreditAmount(rateLimits.extraUsage.usedCredits)} / {formatCreditAmount(rateLimits.extraUsage.monthlyLimit)}</span>
       </div>
       <div class="ub-track">
         <div
@@ -219,7 +208,7 @@
           style="width: {Math.min((rateLimits.extraUsage.utilization ?? 0), 100)}%; background: {utilizationColor(rateLimits.extraUsage.utilization ?? 0)}; opacity: {utilizationFillOpacity(rateLimits.extraUsage.utilization ?? 0)}; --bar-delay: {rateLimits.windows.length * 0.09 + 0.04}s;"
         ></div>
       </div>
-      <div class="ub-sub">Monthly overuse budget</div>
+      <div class="ub-sub">{rateLimits.provider === "cursor" ? "On-demand spend limit" : "Monthly overuse budget"}</div>
     </div>
   {/if}
 

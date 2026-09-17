@@ -81,6 +81,7 @@ pub fn get_work_area(hwnd: HWND) -> Option<RECT> {
 // Removed apply_float_ball_region and FloatBallRegionDirection since
 // region clipping causes DWM artifacts on Windows 11 for layered windows.
 
+#[cfg(test)]
 fn aligned_window_origin(
     work: RECT,
     current_rect: RECT,
@@ -134,6 +135,10 @@ fn anchored_resize_origin(
 
 fn resize_window_pos_flags() -> windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS {
     SWP_NOZORDER | SWP_NOACTIVATE
+}
+
+fn clamp_window_height_to_work_area(work: RECT, height: i32) -> i32 {
+    height.min(work.bottom - work.top)
 }
 
 /// Position the window near the system tray area.
@@ -228,44 +233,6 @@ pub fn activate_window(window: &WebviewWindow) {
     }
 }
 
-/// Align window to the work area using the last detected anchor corner.
-/// Used after every window resize.
-pub fn align_to_work_area(window: &WebviewWindow) {
-    let Ok(hwnd_raw) = window.hwnd() else { return };
-    let hwnd = HWND(hwnd_raw.0 as *mut _);
-
-    let Some(work) = get_work_area(hwnd) else {
-        return;
-    };
-
-    let mut win_rect = RECT::default();
-    unsafe {
-        if GetWindowRect(hwnd, &mut win_rect).is_err() {
-            return;
-        }
-    }
-
-    let win_h = win_rect.bottom - win_rect.top;
-    let win_w = win_rect.right - win_rect.left;
-
-    let (target_x, clamped_y) =
-        aligned_window_origin(work, win_rect, win_w, win_h, current_anchor());
-
-    if target_x != win_rect.left || clamped_y != win_rect.top {
-        unsafe {
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                target_x,
-                clamped_y,
-                0,
-                0,
-                SWP_NOZORDER | SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE,
-            );
-        }
-    }
-}
-
 /// Atomically sets the physical size of the window and keeps the anchored edge
 /// pinned to the work area. The window grows away from the anchor corner.
 /// This prevents visual tearing when resizing heights on Windows.
@@ -285,7 +252,7 @@ pub fn set_size_and_align(window: &WebviewWindow, physical_width: u32, physical_
     }
 
     let win_w = physical_width as i32;
-    let win_h = physical_height as i32;
+    let win_h = clamp_window_height_to_work_area(work, physical_height as i32);
 
     let anchor = current_anchor();
     let (target_x, clamped_y) = anchored_resize_origin(work, win_rect, win_w, win_h, anchor);
@@ -482,5 +449,6 @@ mod tests {
             anchored_resize_origin(work, current, 340, 1200, AnchorCorner::BottomRight);
 
         assert_eq!(target_y, 0);
+        assert_eq!(clamp_window_height_to_work_area(work, 1200), 900);
     }
 }

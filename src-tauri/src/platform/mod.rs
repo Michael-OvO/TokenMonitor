@@ -19,7 +19,7 @@ use tauri::WebviewWindow;
 /// Clamp the window position so it stays fully within the monitor work area.
 ///
 /// Keeps the current position and only adjusts if the window exceeds work area bounds.
-/// Called after `move_window()` on macOS/Linux. Windows uses `align_to_work_area` instead.
+/// Called after `move_window()` on macOS/Linux. Windows uses `set_size_and_align` instead.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn clamp_window_to_work_area(window: &WebviewWindow) {
     let Some(monitor) = window.current_monitor().ok().flatten() else {

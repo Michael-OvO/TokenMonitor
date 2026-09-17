@@ -5,7 +5,7 @@
   import type { PermissionSurfaceId } from "../permissions/surfaces.js";
 
   interface Props {
-    mode?: "welcome" | "settings" | "rate-limit";
+    mode?: "settings";
     /** When provided (settings mode), actionable surfaces render a
      * "Manage →" link that routes the user to the section owning the real
      * control (Launch at Login → System, SSH remote devices → Visibility).
@@ -18,21 +18,7 @@
   /** Surfaces whose toggle lives in another Settings section. In settings
    * mode these get a "Manage →" link so the row is no longer a dead end. */
   const MANAGEABLE_SURFACES: PermissionSurfaceId[] = ["login_item", "ssh_config"];
-  let surfaces = $derived.by(() => {
-    const all = getPermissionSurfaces($settings, { macos: isMacOS() });
-    if (mode === "rate-limit") {
-      return all.filter((surface) => surface.id === "claude_statusline");
-    }
-    if (mode === "welcome") {
-      return all.filter((surface) =>
-        surface.id === "usage_logs" ||
-        surface.id === "claude_statusline" ||
-        surface.id === "login_item" ||
-        surface.id === "updates",
-      );
-    }
-    return all;
-  });
+  let surfaces = $derived.by(() => getPermissionSurfaces($settings, { macos: isMacOS() }));
 </script>
 
 <div class="permission-list permission-list-{mode}">
@@ -43,22 +29,18 @@
         <span class="permission-status status-{surface.tone}">{surface.status}</span>
       </div>
       <p class="permission-copy">{surface.why}</p>
-      {#if mode !== "welcome"}
-        <p class="permission-policy">{surface.requestCopy}</p>
-        {#if surface.paths.length > 0}
-          <div class="permission-paths">
-            {#each surface.paths as path}
-              <code>{path}</code>
-            {/each}
-          </div>
-        {/if}
-        {#if mode === "settings" && onManage && MANAGEABLE_SURFACES.includes(surface.id)}
-          <button type="button" class="permission-manage" onclick={() => onManage?.(surface.id)}>
-            Manage<span class="permission-manage-arrow" aria-hidden="true">→</span>
-          </button>
-        {/if}
-      {:else}
-        <p class="permission-policy compact">{surface.requestCopy}</p>
+      <p class="permission-policy">{surface.requestCopy}</p>
+      {#if surface.paths.length > 0}
+        <div class="permission-paths">
+          {#each surface.paths as path}
+            <code>{path}</code>
+          {/each}
+        </div>
+      {/if}
+      {#if mode === "settings" && onManage && MANAGEABLE_SURFACES.includes(surface.id)}
+        <button type="button" class="permission-manage" onclick={() => onManage?.(surface.id)}>
+          Manage<span class="permission-manage-arrow" aria-hidden="true">→</span>
+        </button>
       {/if}
     </div>
   {/each}
@@ -84,10 +66,6 @@
     padding: 8px 10px;
     background: var(--surface-2);
     min-width: 0;
-  }
-
-  .permission-list-welcome .permission-row {
-    padding: 7px 9px;
   }
 
   .permission-head {
@@ -122,10 +100,6 @@
 
   .permission-policy {
     color: var(--t4);
-  }
-
-  .permission-policy.compact {
-    display: none;
   }
 
   .permission-manage {

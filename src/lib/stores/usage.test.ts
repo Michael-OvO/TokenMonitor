@@ -22,7 +22,7 @@ vi.mock("@tauri-apps/plugin-store", () => ({
   load: vi.fn(),
 }));
 
-vi.mock("../uiStability.js", () => ({
+vi.mock("../window/uiStability.js", () => ({
   isResizeDebugEnabled: () => false,
   logResizeDebug: vi.fn(),
   formatDebugError: (e: unknown) => ({ message: String(e) }),
@@ -227,6 +227,22 @@ describe("fetchData", () => {
 
     expect(get(usageData)).toEqual(cached);
     expect(get(isLoading)).toBe(false);
+  });
+
+  it("surfaces a retryable error when a warm-cache background refresh fails", async () => {
+    const { usageData, usageRefreshError, fetchData } = await loadUsageModule();
+    const cached = makePayload({ total_cost: 1.0 });
+    mockInvoke.mockResolvedValueOnce(cached);
+    await fetchData("claude", "day");
+
+    mockInvoke.mockRejectedValueOnce(new Error("backend unavailable"));
+    await fetchData("claude", "day");
+
+    await vi.waitFor(() => {
+      expect(get(usageRefreshError)).toBe("Couldn't refresh usage. Showing last known data.");
+    });
+    expect(get(usageData)).toEqual(cached);
+    expect(mockLogger.error).toHaveBeenCalled();
   });
 
   it("dedupes concurrent IPC invokes for the same provider/period/offset", async () => {

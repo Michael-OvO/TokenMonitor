@@ -39,14 +39,19 @@ pub struct StatuslineWindow {
     pub resets_at_unix: i64,
 }
 
+/// Named rate-limit window from `payload.rate_limits.<id>`.
+#[derive(Debug, Clone)]
+pub struct NamedStatuslineWindow {
+    pub window_id: String,
+    pub window: StatuslineWindow,
+}
+
 /// What the rest of the app cares about: which session and model is currently
 /// active, when we last heard from CC, where its transcript lives, and the
 /// server-side rate-limit windows CC bundled with the statusline event.
 ///
 /// `transcript_path`, `model_id`, and `cwd` aren't consumed by the rate-limit
-/// pipeline yet, but they're plumbed through because the IPC
-/// `read_latest_statusline_ping` surfaces them to the onboarding UI for the
-/// "we just saw your prompt" confirmation.
+/// pipeline yet.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct LatestActiveSession {
@@ -62,11 +67,9 @@ pub struct LatestActiveSession {
     pub cwd: Option<String>,
     /// Timestamp the script wrote — i.e. when CC last fired its prompt hook.
     pub last_seen: DateTime<Utc>,
-    /// 5h window from `payload.rate_limits.five_hour`. Absent on very old
-    /// CC versions that don't ship the field.
-    pub five_hour: Option<StatuslineWindow>,
-    /// 7-day window from `payload.rate_limits.seven_day`.
-    pub seven_day: Option<StatuslineWindow>,
+    /// All windows from `payload.rate_limits` that look like utilization
+    /// meters. Count and ids track whatever Claude Code ships.
+    pub windows: Vec<NamedStatuslineWindow>,
 }
 
 impl LatestActiveSession {
@@ -124,8 +127,7 @@ pub fn latest_active_session(events_file: &Path) -> io::Result<Option<LatestActi
                 .map(str::to_string),
             cwd: string_field(payload, "cwd"),
             last_seen: ts,
-            five_hour: extract_window(payload, "five_hour"),
-            seven_day: extract_window(payload, "seven_day"),
+            windows: extract_rate_limit_windows(payload),
         }
     }))
 }
@@ -137,11 +139,61 @@ fn string_field(payload: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Pull `payload.rate_limits.<window>.{used_percentage, resets_at}` out of
-/// the CC envelope. Absent on older CC versions; the caller falls back to
-/// the JSONL aggregator in that case.
-fn extract_window(payload: &serde_json::Value, name: &str) -> Option<StatuslineWindow> {
-    let window = payload.get("rate_limits")?.get(name)?;
+/// Pull every `payload.rate_limits.<id>.{used_percentage, resets_at}` meter
+/// out of the CC envelope. Absent on older CC versions; the caller falls
+/// back to OAuth / other sources in that case.
+fn extract_rate_limit_windows(payload: &serde_json::Value) -> Vec<NamedStatuslineWindow> {
+    let Some(obj) = payload.get("rate_limits").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    // Prefer Claude's common ordering when present; append any new keys after.
+    const PREFERRED: &[&str] = &[
+        "five_hour",
+        "seven_day",
+        "seven_day_sonnet",
+        "seven_day_opus",
+        "seven_day_fable",
+        "seven_day_overage_included",
+        "seven_day_oauth_apps",
+        "seven_day_cowork",
+    ];
+
+    let mut windows = Vec::new();
+    let mut consumed = std::collections::HashSet::new();
+
+    for id in PREFERRED {
+        let Some(value) = obj.get(*id) else {
+            continue;
+        };
+        let Some(window) = parse_statusline_window(value) else {
+            continue;
+        };
+        consumed.insert(*id);
+        windows.push(NamedStatuslineWindow {
+            window_id: (*id).to_string(),
+            window,
+        });
+    }
+
+    let mut extras: Vec<(&String, StatuslineWindow)> = obj
+        .iter()
+        .filter(|(key, _)| !consumed.contains(key.as_str()))
+        .filter_map(|(key, value)| Some((key, parse_statusline_window(value)?)))
+        .collect();
+    extras.sort_by(|a, b| a.0.cmp(b.0));
+
+    for (id, window) in extras {
+        windows.push(NamedStatuslineWindow {
+            window_id: id.clone(),
+            window,
+        });
+    }
+
+    windows
+}
+
+fn parse_statusline_window(window: &serde_json::Value) -> Option<StatuslineWindow> {
     let used_percentage = window
         .get("used_percentage")
         .and_then(|v| v.as_f64())
@@ -150,7 +202,8 @@ fn extract_window(payload: &serde_json::Value, name: &str) -> Option<StatuslineW
                 .get("used_percentage")
                 .and_then(|v| v.as_u64())
                 .map(|n| n as f64)
-        })?;
+        })
+        .or_else(|| window.get("utilization").and_then(|v| v.as_f64()))?;
     let resets_at_unix = window.get("resets_at").and_then(|v| v.as_i64())?;
     Some(StatuslineWindow {
         used_percentage,
@@ -259,8 +312,7 @@ mod tests {
             model_display_name: None,
             cwd: None,
             last_seen: now - Duration::minutes(2),
-            five_hour: None,
-            seven_day: None,
+            windows: Vec::new(),
         };
         assert!(session.is_fresh(Duration::minutes(5), now));
         assert!(!session.is_fresh(Duration::minutes(1), now));
@@ -276,12 +328,29 @@ mod tests {
             ],
         );
         let session = latest_active_session(&path).unwrap().unwrap();
-        let five_hour = session.five_hour.expect("five_hour window");
-        assert_eq!(five_hour.used_percentage, 6.0);
-        assert_eq!(five_hour.resets_at_unix, 1_777_516_200);
-        let seven_day = session.seven_day.expect("seven_day window");
-        assert_eq!(seven_day.used_percentage, 21.0);
-        assert_eq!(seven_day.resets_at_unix, 1_777_622_400);
+        assert_eq!(session.windows.len(), 2);
+        assert_eq!(session.windows[0].window_id, "five_hour");
+        assert_eq!(session.windows[0].window.used_percentage, 6.0);
+        assert_eq!(session.windows[0].window.resets_at_unix, 1_777_516_200);
+        assert_eq!(session.windows[1].window_id, "seven_day");
+        assert_eq!(session.windows[1].window.used_percentage, 21.0);
+        assert_eq!(session.windows[1].window.resets_at_unix, 1_777_622_400);
+    }
+
+    #[test]
+    fn extracts_unknown_rate_limit_windows() {
+        let dir = tempdir().unwrap();
+        let path = write_events(
+            dir.path(),
+            &[
+                r#"{"ts":"2026-04-29T11:00:00Z","payload":{"session_id":"s1","rate_limits":{"seven_day":{"used_percentage":21,"resets_at":1777622400},"bonus_pool":{"used_percentage":5,"resets_at":1777700000}}}}"#,
+            ],
+        );
+        let session = latest_active_session(&path).unwrap().unwrap();
+        assert_eq!(session.windows.len(), 2);
+        assert_eq!(session.windows[0].window_id, "seven_day");
+        assert_eq!(session.windows[1].window_id, "bonus_pool");
+        assert_eq!(session.windows[1].window.used_percentage, 5.0);
     }
 
     #[test]
@@ -292,8 +361,7 @@ mod tests {
             &[r#"{"ts":"2026-04-29T11:00:00Z","payload":{"session_id":"s1"}}"#],
         );
         let session = latest_active_session(&path).unwrap().unwrap();
-        assert!(session.five_hour.is_none());
-        assert!(session.seven_day.is_none());
+        assert!(session.windows.is_empty());
     }
 
     #[test]

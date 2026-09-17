@@ -7,7 +7,7 @@ use crate::stats::change::{ChangeEventKind, FileCategory};
 use crate::usage::integrations::{
     provider_matches_model, UsageIntegrationId, UsageIntegrationSelection,
 };
-use chrono::{DateTime, Local, NaiveDate, Timelike};
+use chrono::{DateTime, Duration, Local, NaiveDate, Timelike};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -421,6 +421,13 @@ pub(crate) fn format_hour(h: u32) -> String {
     }
 }
 
+fn truncate_hour(ts: DateTime<Local>) -> DateTime<Local> {
+    ts.with_minute(0)
+        .and_then(|t| t.with_second(0))
+        .and_then(|t| t.with_nanosecond(0))
+        .unwrap_or(ts)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared aggregation utility — build segments map for a bucket
 // ─────────────────────────────────────────────────────────────────────────────
@@ -499,14 +506,19 @@ fn merge_archived_and_live_entries(
         let hour = entry_archive_hour(&entry);
         if frontier.covers(hour.0, hour.1) {
             let model_key = crate::models::normalized_model_key(&entry.model);
-            if let Some(archived_keys) = archived_keys_by_hour.get(&hour) {
-                if archived_keys.contains("unknown")
-                    && model_key != "unknown"
-                    && !archived_keys.contains(&model_key)
-                {
-                    replacement_hours.insert(hour);
-                    live_to_add.push(entry);
+            match archived_keys_by_hour.get(&hour) {
+                Some(archived_keys) => {
+                    if archived_keys.contains("unknown")
+                        && model_key != "unknown"
+                        && !archived_keys.contains(&model_key)
+                    {
+                        replacement_hours.insert(hour);
+                        live_to_add.push(entry);
+                    }
                 }
+                // Frontier can span empty hours between archived rows; keep
+                // later-arriving live data for hours that have no archive rows.
+                None => live_to_add.push(entry),
             }
         } else {
             live_to_add.push(entry);
@@ -551,6 +563,14 @@ fn segment_map_to_model_summaries(map: &HashMap<String, SegmentAgg>) -> Vec<Mode
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CACHE_TTL_SECS: u64 = 120;
+/// How long a failed Cursor remote fetch suppresses further fetch attempts.
+///
+/// A failed fetch stores no entries, so without this marker
+/// [`UsageParser::needs_cursor_remote_fetch`] stays `true` forever and every
+/// UI/tray refresh respawns the same failing fetch — a tight retry loop. Held
+/// at the cache TTL so a persistently failing endpoint is retried at most once
+/// per refresh interval, exactly like an expired cache.
+const CURSOR_REMOTE_FAILURE_COOLDOWN_SECS: u64 = CACHE_TTL_SECS;
 const MAX_PAYLOAD_CACHE_ENTRIES: usize = 256;
 const MAX_FILE_CACHE_ENTRIES: usize = 4096;
 
@@ -563,6 +583,10 @@ pub struct UsageParser {
     archive: Mutex<Option<super::archive::ArchiveManager>>,
     entries_cache: Mutex<HashMap<String, (Instant, Arc<LoadedEntries>)>>,
     cursor_remote_cache: Mutex<Option<CachedCursorRemote>>,
+    /// When the last background Cursor remote fetch failed. Gates
+    /// `needs_cursor_remote_fetch` for `CURSOR_REMOTE_FAILURE_COOLDOWN_SECS`
+    /// so a failing fetch cannot be respawned on every refresh.
+    cursor_remote_failure_at: Mutex<Option<Instant>>,
     /// Earliest entry date per provider string, cached so `has_entries_before`
     /// answers in O(1) instead of re-scanning every session file per query.
     /// Invalidated on source change (`invalidate_if_changed`) and `clear_cache`.
@@ -721,6 +745,7 @@ impl UsageParser {
             archive: Mutex::new(None),
             entries_cache: Mutex::new(HashMap::new()),
             cursor_remote_cache: Mutex::new(None),
+            cursor_remote_failure_at: Mutex::new(None),
             earliest_date_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -760,22 +785,53 @@ impl UsageParser {
                 covered_since,
             });
         }
+        drop(guard);
+        // The endpoint answered, so any earlier failure cooldown is obsolete —
+        // even when a wider concurrent fetch won the `replace` race.
+        self.clear_cursor_remote_failure();
+    }
+
+    /// Record that a background Cursor remote fetch failed (API error, bad
+    /// payload, or a panicked task).
+    ///
+    /// A failure stores no entries, so `needs_cursor_remote_fetch` would stay
+    /// `true` and the next refresh would respawn the same doomed fetch. This
+    /// marker suppresses retries for `CURSOR_REMOTE_FAILURE_COOLDOWN_SECS`,
+    /// cleared as soon as a fetch succeeds (or the cache is cleared).
+    pub(crate) fn note_cursor_remote_failure(&self) {
+        if let Ok(mut guard) = self.cursor_remote_failure_at.lock() {
+            *guard = Some(Instant::now());
+        }
+    }
+
+    fn clear_cursor_remote_failure(&self) {
+        if let Ok(mut guard) = self.cursor_remote_failure_at.lock() {
+            *guard = None;
+        }
+    }
+
+    /// True while a recent fetch failure still suppresses retries.
+    pub(crate) fn cursor_remote_failure_cooldown_active(&self) -> bool {
+        self.cursor_remote_failure_at
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+            .is_some_and(|at| at.elapsed().as_secs() < CURSOR_REMOTE_FAILURE_COOLDOWN_SECS)
     }
 
     /// Non-consuming read of the cursor remote cache for a requested `since`.
-    /// Returns `None` when there is no fresh cache covering the request (the
-    /// caller then triggers a background fetch); otherwise returns the cached
-    /// entries filtered to `timestamp.date_naive() >= since`. Because it does
-    /// not consume the cache, every period view can serve from one fetch.
+    ///
+    /// Returns cached entries even when the TTL has expired (stale-while-revalidate)
+    /// so tray/UI cost does not drop to `$0` during the refresh window. Freshness
+    /// is owned by [`Self::needs_cursor_remote_fetch`], which still triggers a
+    /// background refetch after `CACHE_TTL_SECS`. Returns `None` only when there
+    /// is no cache or the cache does not cover `req_since`.
     pub(crate) fn cursor_remote_for(
         &self,
         req_since: Option<NaiveDate>,
     ) -> Option<Vec<ParsedEntry>> {
         let guard = self.cursor_remote_cache.lock().unwrap();
         let cache = guard.as_ref()?;
-        if cache.stored_at.elapsed().as_secs() >= CACHE_TTL_SECS {
-            return None;
-        }
         if !cursor_range_covers(cache.covered_since, req_since) {
             return None;
         }
@@ -789,6 +845,34 @@ impl UsageParser {
             None => cache.entries.clone(),
         };
         Some(entries)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn age_cursor_remote_cache_for_test(&self, age: std::time::Duration) {
+        let mut guard = self.cursor_remote_cache.lock().unwrap();
+        if let Some(cache) = guard.as_mut() {
+            if let Some(aged) = Instant::now().checked_sub(age) {
+                cache.stored_at = aged;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn age_cursor_remote_failure_for_test(&self, age: std::time::Duration) {
+        let mut guard = self.cursor_remote_failure_at.lock().unwrap();
+        if let Some(at) = guard.as_mut() {
+            if let Some(aged) = Instant::now().checked_sub(age) {
+                *at = aged;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cursor_remote_ttl_expired_for_test(&self) -> bool {
+        let guard = self.cursor_remote_cache.lock().unwrap();
+        guard
+            .as_ref()
+            .is_some_and(|cache| cache.stored_at.elapsed().as_secs() >= CACHE_TTL_SECS)
     }
 
     /// Create with default home-directory paths.
@@ -851,6 +935,9 @@ impl UsageParser {
     pub fn clear_cache(&self) {
         self.clear_payload_cache();
         set_cursor_warning(None);
+        // An explicit cache clear is the user's escape hatch (e.g. after fixing
+        // Cursor auth) — let the next query retry immediately.
+        self.clear_cursor_remote_failure();
         if let Ok(mut c) = self.file_cache.lock() {
             c.clear();
         }
@@ -1565,9 +1652,16 @@ impl UsageParser {
     /// Returns `true` when Cursor remote auth is configured and the cache does
     /// not already cover the requested `since` range — indicating a background
     /// fetch should be spawned (adaptive widening: only fetch the part we lack).
+    ///
+    /// Returns `false` during the cooldown that follows a failed fetch: a
+    /// failure caches nothing, so without the cooldown every refresh triggered
+    /// by the previous failure would spawn the next one.
     pub(crate) fn needs_cursor_remote_fetch(&self, req_since: Option<NaiveDate>) -> bool {
         use super::cursor_parser::resolve_cursor_auth;
         if resolve_cursor_auth().is_none() {
+            return false;
+        }
+        if self.cursor_remote_failure_cooldown_active() {
             return false;
         }
         let guard = self.cursor_remote_cache.lock().unwrap();
@@ -2102,8 +2196,132 @@ impl UsageParser {
         }
     }
 
+    // ── Aggregation: official 5h window (or any [start, end) instant range) ──
+
+    pub fn get_time_range(
+        &self,
+        provider: &str,
+        start: DateTime<Local>,
+        end: DateTime<Local>,
+    ) -> UsagePayload {
+        let loaded = self.load_entries_cached(provider, Some(start.date_naive()));
+        let entries: Vec<&ParsedEntry> = loaded
+            .entries
+            .iter()
+            .filter(|entry| entry.timestamp >= start && entry.timestamp < end)
+            .collect();
+        self.set_last_query_debug(UsageQueryDebugReport {
+            provider: provider.to_string(),
+            aggregation: String::from("time_range"),
+            since: start.to_rfc3339(),
+            cache_key: format!(
+                "range:{}:{}:{}",
+                provider,
+                start.to_rfc3339(),
+                end.to_rfc3339()
+            ),
+            from_cache: false,
+            entry_count: entries.len(),
+            sources: loaded.reports.clone(),
+        });
+
+        let mut hour_map: HashMap<DateTime<Local>, Vec<&ParsedEntry>> = HashMap::new();
+        for entry in &entries {
+            hour_map
+                .entry(truncate_hour(entry.timestamp))
+                .or_default()
+                .push(*entry);
+        }
+
+        let mut chart_buckets: Vec<ChartBucket> = Vec::new();
+        let mut total_cost = 0.0f64;
+        let mut total_tokens = 0u64;
+        let mut total_input = 0u64;
+        let mut total_output = 0u64;
+        let mut global_model_map: HashMap<String, SegmentAgg> = HashMap::new();
+
+        let mut hour = truncate_hour(start);
+        while hour < end {
+            let hour_entries = hour_map.get(&hour).map(|v| v.as_slice()).unwrap_or(&[]);
+            let seg_map = build_segment_map(hour_entries);
+            let bucket_cost: f64 = seg_map.values().map(|agg| agg.cost).sum();
+            let bucket_tokens: u64 = seg_map.values().map(|agg| agg.tokens).sum();
+
+            total_cost += bucket_cost;
+            total_tokens += bucket_tokens;
+            for e in hour_entries.iter() {
+                total_input += e.input_tokens;
+                total_output += e.output_tokens;
+            }
+            for (key, agg) in &seg_map {
+                let gm = global_model_map.entry(key.clone()).or_insert(SegmentAgg {
+                    display_name: agg.display_name.clone(),
+                    cost: 0.0,
+                    tokens: 0,
+                    pricing_available: true,
+                });
+                gm.cost += agg.cost;
+                gm.tokens += agg.tokens;
+                gm.pricing_available &= agg.pricing_available;
+            }
+
+            chart_buckets.push(ChartBucket {
+                label: format_hour(hour.hour()),
+                sort_key: hour.format("%Y-%m-%dT%H:00:00%z").to_string(),
+                total: bucket_cost,
+                segments: segment_map_to_vec(seg_map),
+            });
+            hour += Duration::hours(1);
+        }
+
+        let now = Local::now();
+        let elapsed_hours = (now - start).num_milliseconds().max(1) as f64 / 3_600_000.0;
+        // Rolling fallback ends at resolve-time `now` (exclusive), so the live
+        // check needs a small grace for the aggregation that follows.
+        let active_block = if now >= start && now < end + Duration::seconds(2) {
+            let burn_rate_per_hour = total_cost / elapsed_hours;
+            Some(ActiveBlock {
+                cost: total_cost,
+                burn_rate_per_hour,
+                projected_cost: burn_rate_per_hour * 5.0,
+                is_active: true,
+            })
+        } else {
+            None
+        };
+
+        UsagePayload {
+            total_cost,
+            total_tokens,
+            session_count: chart_buckets.iter().filter(|b| b.total > 0.0).count() as u32,
+            input_tokens: total_input,
+            output_tokens: total_output,
+            cache_read_tokens: 0,
+            cache_write_5m_tokens: 0,
+            cache_write_1h_tokens: 0,
+            web_search_requests: 0,
+            chart_buckets,
+            model_breakdown: segment_map_to_model_summaries(&global_model_map),
+            active_block,
+            five_hour_cost: total_cost,
+            last_updated: now.to_rfc3339(),
+            from_cache: false,
+            usage_source: UsageSource::Parser,
+            usage_warning: Self::provider_usage_warning(provider),
+            period_label: String::new(),
+            has_earlier_data: false,
+            change_stats: None,
+            subagent_stats: None,
+            device_breakdown: None,
+            device_chart_buckets: None,
+            provider_detected: None,
+            cursor_loading: false,
+        }
+    }
+
     // ── Aggregation: blocks ──
 
+    #[cfg(test)]
     pub fn get_blocks(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("blocks:{}:{}", provider, since);
         let since_date = parse_since_date(since);
@@ -2304,6 +2522,36 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].model, "claude-fable-5");
+    }
+
+    #[test]
+    fn live_data_kept_for_frontier_hours_with_no_archive_rows() {
+        let archived = vec![test_entry("claude-sonnet-4-6", 10)];
+        let live = vec![
+            test_entry("claude-sonnet-4-6", 10),
+            test_entry("claude-sonnet-4-6", 11),
+            test_entry("claude-sonnet-4-6", 13),
+        ];
+        let frontier = crate::usage::archive::ArchiveFrontier {
+            date: archived[0].timestamp.date_naive(),
+            hour: 12,
+        };
+
+        let mut merged = Vec::new();
+        merge_archived_and_live_entries(&mut merged, archived, live, Some(frontier));
+
+        let hours: Vec<u32> = merged.iter().map(|e| e.timestamp.hour()).collect();
+        assert!(hours.contains(&10), "archived hour 10 should remain");
+        assert!(
+            hours.contains(&11),
+            "empty hour 11 under the frontier must keep later-arriving live data"
+        );
+        assert!(hours.contains(&13), "hours past the frontier stay live");
+        assert_eq!(
+            merged.iter().filter(|e| e.timestamp.hour() == 10).count(),
+            1,
+            "hour 10 live must be dropped because archive has rows"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2830,6 +3078,28 @@ mod tests {
         );
         assert_eq!(entries[1].output_tokens, 100);
         assert_eq!(entries[1].cache_read_tokens, 20);
+    }
+
+    #[test]
+    fn parse_codex_reasoning_follows_total_tokens() {
+        let dir = TempDir::new().unwrap();
+        let session_dir = dir.path().join("workspace");
+        fs::create_dir_all(&session_dir).unwrap();
+        let content = r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}
+{"type":"event_msg","timestamp":"2026-03-15T12:00:00+00:00","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":110}}}}
+{"type":"event_msg","timestamp":"2026-03-15T12:00:01+00:00","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":115}}}}"#;
+        write_file(&session_dir.join("session.jsonl"), content);
+
+        let entries = read_codex_entries(dir.path(), parse_since_date("20260301"));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].output_tokens, 10,
+            "A: total=input+output, do not add reasoning"
+        );
+        assert_eq!(
+            entries[1].output_tokens, 15,
+            "B: total=input+output+reasoning, add"
+        );
     }
 
     #[test]
@@ -3520,6 +3790,28 @@ mod tests {
         assert!(payload.total_cost > 0.0);
     }
 
+    #[test]
+    fn time_range_keeps_cross_midnight_entries_inside_window() {
+        let now = Local::now();
+        let reset = now + chrono::Duration::hours(2);
+        let start = reset - chrono::Duration::hours(5);
+        let inside = start + chrono::Duration::minutes(30);
+        let outside = start - chrono::Duration::minutes(1);
+        let content = format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{{"input_tokens":1000,"output_tokens":500}}}}}}
+{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{{"input_tokens":2000,"output_tokens":1000}}}}}}"#,
+            outside.to_rfc3339(),
+            inside.to_rfc3339(),
+        );
+        let (_dir, parser) = make_parser_with_claude_data(&content);
+        let payload = parser.get_time_range("claude", start, reset);
+
+        assert_eq!(payload.session_count, 1);
+        assert!(payload.total_cost > 0.0);
+        assert!((payload.five_hour_cost - payload.total_cost).abs() < f64::EPSILON);
+        assert!(payload.active_block.is_some());
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Hourly aggregation — past day
     // ─────────────────────────────────────────────────────────────────────────
@@ -3788,7 +4080,10 @@ mod tests {
     }
 
     #[test]
-    fn load_claude_entries_prefers_subagent_scope_for_mirrored_change_events() {
+    fn load_claude_entries_prefers_main_scope_for_mirrored_change_events() {
+        // A message mirrored into a sidechain file with identical usage is the
+        // main agent's own turn (the sidechain copy is the spawn record), so the
+        // root copy wins an exact tie.
         let dir = TempDir::new().unwrap();
         let root = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","sessionId":"sess-1","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/main.rs","old_string":"old","new_string":"new"}}],"usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"user","timestamp":"2026-03-21T10:00:01+00:00","sessionId":"sess-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"Applied patch"}]},"toolUseResult":{"filePath":"src/main.rs","structuredPatch":[{"lines":["@@","-old","+new"]}]}}"#;
@@ -3803,12 +4098,12 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].agent_scope,
-            crate::stats::subagent::AgentScope::Subagent
+            crate::stats::subagent::AgentScope::Main
         );
         assert_eq!(change_events.len(), 1);
         assert_eq!(
             change_events[0].agent_scope,
-            crate::stats::subagent::AgentScope::Subagent
+            crate::stats::subagent::AgentScope::Main
         );
     }
 
@@ -4096,7 +4391,7 @@ diff --git a/src/main.rs b/src/main.rs
     }
 
     #[test]
-    fn claude_dedupe_collapses_root_and_sidechain_and_prefers_subagent_scope() {
+    fn claude_dedupe_collapses_root_and_sidechain_and_prefers_main_scope() {
         let dir = TempDir::new().unwrap();
         // Root and sidechain with same message.id and requestId
         let root = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","sessionId":"sess-1","requestId":"req-1","message":{"id":"msg-1","model":"claude-opus-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#;
@@ -4112,11 +4407,11 @@ diff --git a/src/main.rs b/src/main.rs
         );
         assert_eq!(
             entries[0].agent_scope,
-            crate::stats::subagent::AgentScope::Subagent
+            crate::stats::subagent::AgentScope::Main
         );
         assert!(
-            entries[0].session_key.contains("agt-1"),
-            "subagent mirror should keep the sidechain session_key"
+            !entries[0].session_key.contains("agt-1"),
+            "main-agent mirror should keep the root session_key"
         );
     }
 
@@ -4750,6 +5045,19 @@ mod cursor_remote_cache_tests {
     }
 
     #[test]
+    fn cursor_remote_for_serves_stale_entries_after_ttl() {
+        let parser = UsageParser::new();
+        let jun1 = date(2026, 6, 1);
+        parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
+        parser.age_cursor_remote_cache_for_test(std::time::Duration::from_secs(CACHE_TTL_SECS + 1));
+
+        // Stale-while-revalidate: still serve for cost/UI after TTL.
+        // (needs_cursor_remote_fetch also requires auth, so assert TTL aging directly.)
+        assert!(parser.cursor_remote_ttl_expired_for_test());
+        assert_eq!(parser.cursor_remote_for(Some(jun1)).unwrap().len(), 1);
+    }
+
+    #[test]
     fn store_keeps_widest_fresh_cache_against_late_narrow_fetch() {
         let parser = UsageParser::new();
         let jan1 = date(2026, 1, 1);
@@ -4761,5 +5069,77 @@ mod cursor_remote_cache_tests {
         parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
         // Year view still served fully from the retained wide cache.
         assert_eq!(parser.cursor_remote_for(Some(jan1)).unwrap().len(), 2);
+    }
+
+    /// A failed fetch caches nothing, so before the cooldown existed every
+    /// `data-updated` refresh re-entered spawn → fetch → fail → emit, ~4x/s.
+    /// Simulate that refresh storm: only the gate decides, and it must let
+    /// exactly one attempt through per cooldown window.
+    #[test]
+    fn failing_fetch_is_retried_at_most_once_per_refresh_interval() {
+        let parser = UsageParser::new();
+        let mut attempts = 0;
+
+        let run_refresh_storm = |attempts: &mut usize| {
+            for _ in 0..100 {
+                if !parser.cursor_remote_failure_cooldown_active() {
+                    *attempts += 1;
+                    // Every attempt fails, exactly as in the observed loop.
+                    parser.note_cursor_remote_failure();
+                }
+            }
+        };
+
+        run_refresh_storm(&mut attempts);
+        assert_eq!(attempts, 1, "100 refreshes must yield a single fetch");
+
+        // Still inside the window: no further attempts.
+        parser.age_cursor_remote_failure_for_test(std::time::Duration::from_secs(
+            CURSOR_REMOTE_FAILURE_COOLDOWN_SECS - 1,
+        ));
+        run_refresh_storm(&mut attempts);
+        assert_eq!(
+            attempts, 1,
+            "cooldown must suppress retries until it lapses"
+        );
+
+        // Next interval: exactly one more attempt, not a burst.
+        parser.age_cursor_remote_failure_for_test(std::time::Duration::from_secs(
+            CURSOR_REMOTE_FAILURE_COOLDOWN_SECS + 1,
+        ));
+        run_refresh_storm(&mut attempts);
+        assert_eq!(attempts, 2, "one retry per interval, not one per refresh");
+    }
+
+    #[test]
+    fn failure_cooldown_blocks_needs_fetch_and_clears_on_success() {
+        let parser = UsageParser::new();
+        let jun1 = date(2026, 6, 1);
+
+        parser.note_cursor_remote_failure();
+        assert!(parser.cursor_remote_failure_cooldown_active());
+        // The gate every spawn site (usage query + tray) goes through.
+        assert!(!parser.needs_cursor_remote_fetch(Some(jun1)));
+
+        // A successful fetch proves the endpoint works — drop the cooldown.
+        parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
+        assert!(!parser.cursor_remote_failure_cooldown_active());
+    }
+
+    #[test]
+    fn failure_cooldown_expires_and_clear_cache_resets_it() {
+        let parser = UsageParser::new();
+
+        parser.note_cursor_remote_failure();
+        parser.age_cursor_remote_failure_for_test(std::time::Duration::from_secs(
+            CURSOR_REMOTE_FAILURE_COOLDOWN_SECS + 1,
+        ));
+        assert!(!parser.cursor_remote_failure_cooldown_active());
+
+        // Explicit cache clear is the user's escape hatch from the cooldown.
+        parser.note_cursor_remote_failure();
+        assert!(parser.cursor_remote_failure_cooldown_active());
+        parser.clear_cache();
+        assert!(!parser.cursor_remote_failure_cooldown_active());
     }
 }

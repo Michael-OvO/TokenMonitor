@@ -1,6 +1,7 @@
 mod commands;
 mod logging;
 mod models;
+mod ops;
 mod paths;
 mod platform;
 mod rate_limits;
@@ -175,7 +176,6 @@ pub fn run() {
             Some(vec![]),
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
@@ -370,11 +370,19 @@ pub fn run() {
                 // Spawn async refresh if exchange rate cache is stale (>24h).
                 if usage::exchange_rates::should_refresh(&app_data) {
                     let data_dir = app_data.clone();
+                    let rates_app = app.handle().clone();
                     tauri::async_runtime::spawn(async move {
                         match usage::exchange_rates::fetch_and_cache(&data_dir).await {
                             Ok(rates) => {
                                 usage::exchange_rates::set_exchange_rates(rates);
                                 tracing::info!("Exchange rates refreshed (frankfurter.dev)");
+                                // The frontend asks for rates once during
+                                // bootstrap. On a first launch there is no
+                                // cache yet, so that call returns an empty map
+                                // and the webview would spend the whole session
+                                // on the hardcoded fallback table. Tell it the
+                                // real rates arrived.
+                                let _ = rates_app.emit("exchange-rates-updated", ());
                             }
                             Err(e) => {
                                 tracing::warn!("Exchange rate fetch failed (using fallback): {e}");
@@ -428,12 +436,11 @@ pub fn run() {
             commands::calendar::get_monthly_usage,
             commands::usage_query::get_known_models,
             commands::config::get_last_usage_debug,
-            commands::config::set_window_surface,
-            commands::config::set_glass_effect,
             commands::config::set_dock_icon_visible,
             commands::config::suppress_next_auto_hide,
             commands::config::set_auto_export_config,
             commands::config::set_refresh_interval,
+            commands::config::set_currency,
             commands::config::set_rate_limits_enabled,
             commands::config::set_usage_access_enabled,
             commands::config::set_cursor_auth_config,
@@ -441,24 +448,17 @@ pub fn run() {
             commands::config::open_cursor_app,
             commands::config::retry_cursor_auth,
             commands::config::get_cursor_auth_status,
-            commands::config::request_claude_keychain_access,
-            commands::config::check_claude_keychain_access,
-            commands::config::debug_force_oauth_refresh,
             commands::config::request_app_data_access,
             commands::config::check_app_data_access,
             commands::config::open_app_data_settings,
             commands::statusline::install_statusline,
             commands::statusline::check_statusline,
-            commands::statusline::uninstall_statusline,
             commands::statusline::set_claude_plan_tier,
-            commands::statusline::read_latest_statusline_ping,
             commands::tray::set_tray_config,
             commands::tray::set_enabled_integrations,
             commands::tray::get_status_widget_summary,
             commands::config::clear_cache,
             commands::config::clear_payload_cache,
-            commands::config::clear_usage_view_cache,
-            commands::config::reposition_window,
             commands::config::set_window_size_and_align,
             commands::config::get_window_anchor_edge,
             commands::config::get_rate_limits,
@@ -469,14 +469,11 @@ pub fn run() {
             commands::float_ball::move_float_ball_to,
             commands::float_ball::snap_float_ball,
             commands::float_ball::get_float_ball_position,
-            commands::float_ball::init_taskbar_panel,
-            commands::float_ball::destroy_taskbar_panel_cmd,
             commands::ssh::get_ssh_hosts,
             commands::ssh::get_ssh_host_statuses,
             commands::ssh::init_ssh_hosts,
             commands::ssh::init_remote_device_include_flags,
             commands::ssh::add_ssh_host,
-            commands::ssh::remove_ssh_host,
             commands::ssh::toggle_ssh_host,
             commands::ssh::test_ssh_connection,
             commands::ssh::sync_ssh_host,
@@ -486,7 +483,6 @@ pub fn run() {
             commands::logging::log_frontend_message,
             commands::logging::set_log_level,
             commands::logging::get_log_level,
-            commands::logging::get_log_dir,
             commands::updater::updater_status,
             commands::updater::updater_check_now,
             commands::updater::updater_install,
@@ -500,7 +496,6 @@ pub fn run() {
             commands::config::quit_app,
             commands::config::start_cache_warmup,
             commands::config::cancel_cache_warmup,
-            commands::config::get_warmup_status,
             commands::usage_io::export_usage_data,
             commands::usage_io::import_usage_data,
             commands::usage_io::sync_remote_devices,
@@ -622,6 +617,40 @@ async fn fast_statusline_poll(app: tauri::AppHandle) {
     }
 }
 
+/// Seconds past local midnight that every scheduled refresh is aligned to.
+/// One second rather than zero so the tick that re-dates the UI is
+/// unambiguously *on* the new day, never a hair before it.
+const REFRESH_ALIGN_OFFSET_SECS: i64 = 1;
+
+const SECS_PER_DAY: i64 = 86_400;
+
+/// How long to sleep so the next wake lands on the next aligned refresh tick:
+/// `local midnight + 1s + k * interval`.
+///
+/// Anchoring the phase to local midnight instead of to process start is what
+/// makes a refresh always land at 00:00:01 local. Every "current period" view
+/// (`offset = 0` = today) is date-relative, so without a tick right after
+/// midnight a window left open across the boundary keeps showing the previous
+/// day. Ticks that would overshoot the next midnight are clamped back to it,
+/// which also covers intervals that don't divide the day evenly.
+fn secs_until_next_refresh(now: chrono::DateTime<chrono::Local>, interval_secs: u64) -> f64 {
+    let interval = (interval_secs.max(1) as i64).min(SECS_PER_DAY);
+    let secs_of_day = now.num_seconds_from_midnight() as i64;
+    let elapsed = secs_of_day - REFRESH_ALIGN_OFFSET_SECS;
+
+    let next_secs_of_day = if elapsed < 0 {
+        // Between midnight and the day's first tick.
+        REFRESH_ALIGN_OFFSET_SECS
+    } else {
+        REFRESH_ALIGN_OFFSET_SECS + (elapsed / interval + 1) * interval
+    }
+    // Never step over the next midnight tick.
+    .min(SECS_PER_DAY + REFRESH_ALIGN_OFFSET_SECS);
+
+    let subsec = f64::from(now.nanosecond().min(999_999_999)) / 1e9;
+    ((next_secs_of_day - secs_of_day) as f64 - subsec).max(0.001)
+}
+
 async fn background_loop(app: tauri::AppHandle) {
     tokio::time::sleep(Duration::from_secs(1)).await;
     tracing::info!("Background refresh loop started");
@@ -679,6 +708,10 @@ async fn background_loop(app: tauri::AppHandle) {
     // changed — we emit `data-updated` to nudge the UI to re-fetch. Starts at 0
     // so the first cycle always emits once shortly after launch.
     let mut last_five_hour_bucket: u64 = 0;
+    // Local date this loop last woke up on. Ticks are aligned to 00:00:01, so
+    // the first tick of a new day sees this change and forces a refresh even
+    // when no source log moved.
+    let mut last_tick_date = chrono::Local::now().date_naive();
 
     loop {
         let interval_secs = {
@@ -696,7 +729,19 @@ async fn background_loop(app: tauri::AppHandle) {
             continue;
         }
 
-        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+        tokio::time::sleep(Duration::from_secs_f64(secs_until_next_refresh(
+            chrono::Local::now(),
+            interval_secs,
+        )))
+        .await;
+
+        let today = chrono::Local::now().date_naive();
+        let day_rolled = today != last_tick_date;
+        if day_rolled {
+            tracing::info!("Local date rolled over to {today}, forcing a refresh");
+            last_tick_date = today;
+        }
+
         update_counter += 1;
         ssh_sync_counter += 1;
         rate_limit_counter += 1;
@@ -755,6 +800,9 @@ async fn background_loop(app: tauri::AppHandle) {
                         Ok(rates) => {
                             usage::exchange_rates::set_exchange_rates(rates);
                             tracing::info!("Exchange rates refreshed (background)");
+                            // A session left open for days would otherwise keep
+                            // formatting with the rates it read at startup.
+                            let _ = app.emit("exchange-rates-updated", ());
                         }
                         Err(e) => {
                             tracing::warn!("Background exchange rate refresh failed: {e}");
@@ -815,7 +863,11 @@ async fn background_loop(app: tauri::AppHandle) {
             // the disk entries too so the next fetch recomputes from fresh logs.
             state.clear_payload_disk_cache().await;
             let _ = app.emit("data-updated", update_counter);
-        } else if five_hour_bucket_rolled && usage_access_enabled {
+        } else if day_rolled || (five_hour_bucket_rolled && usage_access_enabled) {
+            // `day_rolled` is unconditional: every date-relative label and
+            // period the UI renders is now wrong, whether or not any log moved,
+            // and a short clamped sleep into midnight may leave the 5h bucket
+            // unchanged so that check alone can't be relied on here.
             let _ = app.emit("data-updated", update_counter);
         }
     }
@@ -998,7 +1050,14 @@ pub(crate) async fn cleanup_duplicate_devices(state: &AppState) {
         now.date_naive(),
         now.hour() as u8,
     ));
-    if !removed.is_empty() {
+    let folded_cursor = archive.fold_shared_cursor_into_local(now.date_naive(), now.hour() as u8);
+    if folded_cursor > 0 {
+        tracing::info!(
+            folded = folded_cursor,
+            "Folded account-scoped Cursor rows from device archives into local:cursor"
+        );
+    }
+    if !removed.is_empty() || folded_cursor > 0 {
         tracing::info!(
             count = removed.len(),
             "Cleaned up {} duplicate device source(s) from the archive",
@@ -1056,4 +1115,96 @@ async fn sync_ssh_hosts(state: &AppState) -> bool {
     }
 
     any_synced
+}
+
+#[cfg(test)]
+mod refresh_schedule_tests {
+    use super::{secs_until_next_refresh, REFRESH_ALIGN_OFFSET_SECS, SECS_PER_DAY};
+    use chrono::{Local, TimeZone};
+
+    /// Local wall-clock instant. Panics on the DST gaps some zones have at
+    /// 00:00 — none of the times used below fall in one.
+    fn at(hour: u32, min: u32, sec: u32, milli: u32) -> chrono::DateTime<Local> {
+        Local
+            .with_ymd_and_hms(2026, 8, 11, hour, min, sec)
+            .single()
+            .expect("unambiguous local time")
+            + chrono::Duration::milliseconds(i64::from(milli))
+    }
+
+    /// Seconds-of-day the sleep computed at `now` will wake up on.
+    fn wake_secs_of_day(now: chrono::DateTime<Local>, interval: u64) -> f64 {
+        use chrono::Timelike;
+        f64::from(now.num_seconds_from_midnight())
+            + f64::from(now.nanosecond()) / 1e9
+            + secs_until_next_refresh(now, interval)
+    }
+
+    #[test]
+    fn ticks_land_on_the_aligned_second() {
+        for interval in [30_u64, 60, 120, 300, 600, 3600] {
+            for (h, m, s, ms) in [
+                (0, 0, 0, 0),
+                (7, 13, 44, 512),
+                (12, 0, 0, 0),
+                (23, 30, 0, 0),
+            ] {
+                let wake = wake_secs_of_day(at(h, m, s, ms), interval);
+                let offset_into_minute =
+                    (wake - REFRESH_ALIGN_OFFSET_SECS as f64) % interval as f64;
+                assert!(
+                    offset_into_minute.abs() < 1e-6,
+                    "interval={interval} at {h}:{m}:{s}.{ms} woke at {wake}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn always_stops_at_one_second_past_midnight() {
+        // Whatever the interval and however close to midnight, the next wake
+        // never steps over 00:00:01 — that is the tick that re-dates the UI.
+        for interval in [30_u64, 45, 60, 90, 120, 300, 3600] {
+            for (h, m, s) in [(23, 59, 59), (23, 59, 30), (23, 30, 0), (23, 0, 1)] {
+                let wake = wake_secs_of_day(at(h, m, s, 0), interval);
+                assert!(
+                    wake <= (SECS_PER_DAY + REFRESH_ALIGN_OFFSET_SECS) as f64 + 1e-6,
+                    "interval={interval} at {h}:{m}:{s} woke at {wake}",
+                );
+            }
+        }
+        // 23:59:30 with a 90s interval would overshoot to 00:01:01 unclamped.
+        let wake = wake_secs_of_day(at(23, 59, 30, 0), 90);
+        assert!((wake - (SECS_PER_DAY + REFRESH_ALIGN_OFFSET_SECS) as f64).abs() < 1e-6);
+    }
+
+    #[test]
+    fn first_tick_of_the_day_is_one_second_after_midnight() {
+        assert!((secs_until_next_refresh(at(0, 0, 0, 0), 300) - 1.0).abs() < 1e-6);
+        assert!((secs_until_next_refresh(at(0, 0, 0, 400), 300) - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn subsecond_drift_is_trimmed_not_accumulated() {
+        // Woken 250 ms late: the next sleep is short by that much so the
+        // schedule snaps back onto the aligned second instead of drifting.
+        let sleep = secs_until_next_refresh(at(10, 0, 1, 250), 30);
+        assert!((sleep - 29.75).abs() < 1e-6, "sleep={sleep}");
+    }
+
+    #[test]
+    fn never_returns_a_zero_sleep() {
+        // A zero would spin the loop; every path keeps a floor.
+        for interval in [0_u64, 1, 30] {
+            for (h, m, s, ms) in [(0, 0, 1, 0), (23, 59, 59, 999), (12, 0, 1, 0)] {
+                assert!(secs_until_next_refresh(at(h, m, s, ms), interval) > 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn interval_longer_than_a_day_still_ticks_daily() {
+        let wake = wake_secs_of_day(at(12, 0, 0, 0), SECS_PER_DAY as u64 * 3);
+        assert!((wake - (SECS_PER_DAY + REFRESH_ALIGN_OFFSET_SECS) as f64).abs() < 1e-6);
+    }
 }

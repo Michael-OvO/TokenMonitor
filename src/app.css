@@ -441,7 +441,7 @@ body {
 
 /* ── Settings section header (.group-label) ───────────────────────────
    Centralized here because every settings group sub-component
-   (PermissionSettings, ThemeSettings, HeaderTabsSettings, etc.) used
+   (settings subpanels, permission surfaces, etc.) used
    to define its own copy of these rules — six identical blocks
    diverging the moment one was tweaked. One global rule keeps the
    visual hierarchy consistent across every Settings card.

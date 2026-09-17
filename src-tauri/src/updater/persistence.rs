@@ -24,9 +24,6 @@ pub fn load<R: Runtime>(app: &AppHandle<R>) -> UpdaterState {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect::<HashSet<_>>();
     }
-    if let Some(Value::String(v)) = store.get("last_notified_version") {
-        state.last_notified_version = Some(v);
-    }
     if let Some(Value::String(ts)) = store.get("last_check_at") {
         state.last_check = chrono::DateTime::parse_from_rfc3339(&ts)
             .ok()
@@ -45,7 +42,6 @@ pub fn save<R: Runtime>(app: &AppHandle<R>, state: &UpdaterState) -> Result<(), 
     store.set("auto_check_enabled", json!(state.auto_check_enabled));
     let skipped: Vec<&String> = state.skipped_versions.iter().collect();
     store.set("skipped_versions", json!(skipped));
-    store.set("last_notified_version", json!(state.last_notified_version));
     store.set(
         "last_check_at",
         json!(state.last_check.map(|d| d.to_rfc3339())),

@@ -5,6 +5,8 @@
     "deepseek": "https://api-docs.deepseek.com/quick_start/pricing",
     "grok": "https://docs.x.ai/developers/pricing",
     "kimi": "https://platform.moonshot.ai/docs/pricing (K2.7 Code / K2.7 Code Highspeed / K3; cache writes billed as input)",
+    "grok_4_5_cursor": "https://cursor.com/docs/models/grok-4-3",
+    "grok_4_6_cursor": "https://cursor.com/docs/models/grok-4-6",
     "perplexity": "https://docs.perplexity.ai/docs/getting-started/pricing",
     "gemini": "https://cursor.com/docs/models (Cursor API pool rates)"
   },
@@ -17,6 +19,44 @@
     "deepseek-reasoner": "deepseek-v4-flash",
     "grok-4": "grok-4.3",
     "grok-latest": "grok-4.3",
+    "grok-4.5-latest": "grok-4.5",
+    "cursor-grok-4.5": "grok-4.5",
+    "cursor-grok-4.5-low": "grok-4.5",
+    "cursor-grok-4.5-medium": "grok-4.5",
+    "cursor-grok-4.5-high": "grok-4.5",
+    "grok-4.5-low": "grok-4.5",
+    "grok-4.5-medium": "grok-4.5",
+    "grok-4.5-high": "grok-4.5",
+    "grok-4.5-xhigh": "grok-4.5",
+    "cursor-grok-4.5-low-fast": "grok-4.5-fast",
+    "cursor-grok-4.5-medium-fast": "grok-4.5-fast",
+    "cursor-grok-4.5-high-fast": "grok-4.5-fast",
+    "grok-4.5-low-fast": "grok-4.5-fast",
+    "grok-4.5-medium-fast": "grok-4.5-fast",
+    "grok-4.5-high-fast": "grok-4.5-fast",
+    "grok-4.5-fast-medium": "grok-4.5-fast",
+    "grok-4.5-fast-high": "grok-4.5-fast",
+    "grok-4.5-fast-xhigh": "grok-4.5-fast",
+    "grok-4.6-latest": "grok-4.6",
+    "cursor-grok-4.6": "grok-4.6",
+    "cursor-grok-4.6-low": "grok-4.6",
+    "cursor-grok-4.6-medium": "grok-4.6",
+    "cursor-grok-4.6-high": "grok-4.6",
+    "cursor-grok-4.6-xhigh": "grok-4.6",
+    "grok-4.6-low": "grok-4.6",
+    "grok-4.6-medium": "grok-4.6",
+    "grok-4.6-high": "grok-4.6",
+    "grok-4.6-xhigh": "grok-4.6",
+    "cursor-grok-4.6-low-fast": "grok-4.6-fast",
+    "cursor-grok-4.6-medium-fast": "grok-4.6-fast",
+    "cursor-grok-4.6-high-fast": "grok-4.6-fast",
+    "cursor-grok-4.6-xhigh-fast": "grok-4.6-fast",
+    "grok-4.6-low-fast": "grok-4.6-fast",
+    "grok-4.6-medium-fast": "grok-4.6-fast",
+    "grok-4.6-high-fast": "grok-4.6-fast",
+    "grok-4.6-fast-medium": "grok-4.6-fast",
+    "grok-4.6-fast-high": "grok-4.6-fast",
+    "grok-4.6-fast-xhigh": "grok-4.6-fast",
     "pplx-sonar": "sonar"
   },
   "models": {
@@ -61,6 +101,26 @@
       "input": 1.25,
       "output": 2.5,
       "cache_read": 0.2
+    },
+    "grok-4.5": {
+      "input": 2.0,
+      "output": 6.0,
+      "cache_read": 0.5
+    },
+    "grok-4.5-fast": {
+      "input": 4.0,
+      "output": 18.0,
+      "cache_read": 1.0
+    },
+    "grok-4.6": {
+      "input": 2.0,
+      "output": 6.0,
+      "cache_read": 0.5
+    },
+    "grok-4.6-fast": {
+      "input": 4.0,
+      "output": 18.0,
+      "cache_read": 1.0
     },
     "grok-4.20": {
       "input": 2.0,

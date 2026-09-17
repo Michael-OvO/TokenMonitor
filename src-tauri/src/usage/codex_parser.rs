@@ -71,6 +71,28 @@ fn normalize_codex_raw_usage(value: Option<&Value>) -> Option<CodexRawUsage> {
     })
 }
 
+/// Billable output for one Codex usage record.
+///
+/// ponytail: logs mix two layouts. `total_tokens ≈ input+output` → reasoning is
+/// already inside `output_tokens` (A, do not add). `total_tokens ≈
+/// input+output+reasoning` → reasoning is extra (B, add). Missing total is
+/// treated as A (every fixture in this repo). Equal distance prefers A so we
+/// don't double-count.
+fn billed_output_tokens(usage: CodexRawUsage) -> u64 {
+    let without_reasoning = usage.input_tokens.saturating_add(usage.output_tokens);
+    let with_reasoning = without_reasoning.saturating_add(usage.reasoning_output_tokens);
+    if usage.reasoning_output_tokens > 0 && usage.total_tokens > 0 {
+        let dist_a = usage.total_tokens.abs_diff(without_reasoning);
+        let dist_b = usage.total_tokens.abs_diff(with_reasoning);
+        if dist_b < dist_a {
+            return usage
+                .output_tokens
+                .saturating_add(usage.reasoning_output_tokens);
+        }
+    }
+    usage.output_tokens
+}
+
 fn subtract_codex_raw_usage(
     current: CodexRawUsage,
     previous: Option<CodexRawUsage>,
@@ -532,7 +554,7 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
             timestamp: ts,
             model: entry_model,
             input_tokens: uncached_input_tokens,
-            output_tokens: raw_usage.output_tokens,
+            output_tokens: billed_output_tokens(raw_usage),
             cache_creation_5m_tokens: 0,
             cache_creation_1h_tokens: 0,
             cache_read_tokens: raw_usage.cached_input_tokens,
@@ -626,4 +648,29 @@ fn read_codex_entries_with_debug(
 #[allow(dead_code)]
 pub fn read_codex_entries(sessions_dir: &Path, since: Option<NaiveDate>) -> Vec<ParsedEntry> {
     read_codex_entries_with_debug(sessions_dir, since).0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage(input: u64, output: u64, reasoning: u64, total: u64) -> CodexRawUsage {
+        CodexRawUsage {
+            input_tokens: input,
+            cached_input_tokens: 0,
+            output_tokens: output,
+            reasoning_output_tokens: reasoning,
+            total_tokens: total,
+        }
+    }
+
+    #[test]
+    fn reasoning_billing_follows_total_tokens() {
+        // A: total = input+output → reasoning already in output.
+        assert_eq!(billed_output_tokens(usage(100, 10, 5, 110)), 10);
+        // B: total = input+output+reasoning → reasoning is extra.
+        assert_eq!(billed_output_tokens(usage(100, 10, 5, 115)), 15);
+        // Missing total (normalized to input+output elsewhere) → A.
+        assert_eq!(billed_output_tokens(usage(100, 10, 5, 110)), 10);
+    }
 }

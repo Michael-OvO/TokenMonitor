@@ -8,6 +8,7 @@ pub mod exchange_rates;
 pub mod integrations;
 pub mod kimi_parser;
 pub mod litellm;
+pub mod money;
 pub mod openrouter;
 pub mod parser;
 pub mod payload_disk_cache;

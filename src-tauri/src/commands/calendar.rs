@@ -1,33 +1,15 @@
 use super::period::{first_of_next_month, month_offset_from_now};
 use super::usage_query::get_provider_data;
 use super::{
-    maybe_capture_query_debug, parse_usage_selection, set_last_usage_debug, AppState,
-    UsageDebugReport,
+    maybe_capture_query_debug, merge_usage_source, merge_usage_warning, parse_usage_selection,
+    set_last_usage_debug, AppState, UsageDebugReport,
 };
 use crate::models::*;
 use crate::usage::integrations::UsageIntegrationSelection;
 use crate::usage::parser::UsageQueryDebugReport;
 use chrono::{Datelike, NaiveDate};
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use tauri::State;
-
-fn merge_usage_source(left: UsageSource, right: UsageSource) -> UsageSource {
-    if left == right {
-        left
-    } else {
-        UsageSource::Mixed
-    }
-}
-
-fn merge_usage_warning(left: Option<String>, right: Option<String>) -> Option<String> {
-    match (left, right) {
-        (None, None) => None,
-        (Some(warning), None) | (None, Some(warning)) => Some(warning),
-        (Some(left), Some(right)) if left == right => Some(left),
-        (Some(left), Some(right)) => Some(format!("{left}\n{right}")),
-    }
-}
 
 fn calendar_days_from_payload(
     payload: &UsagePayload,
@@ -204,7 +186,7 @@ pub async fn get_monthly_usage(
     month: u32,
     state: State<'_, AppState>,
 ) -> Result<MonthlyUsagePayload, String> {
-    if !state.usage_access_enabled.load(Ordering::SeqCst) {
+    if !state.usage_access_enabled() {
         return Ok(MonthlyUsagePayload {
             year,
             month,

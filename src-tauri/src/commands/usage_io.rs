@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Usage import / export — back up the usage archive and merge it back in with
-// idempotent dedup. See docs/ecl/usage-import-export.yaml.
+// idempotent dedup.
 //
 // Operates on the ArchivedHourly aggregate layer (the durable, provider-agnostic
 // record). The ARCHIVE dedups by bucket identity (source, d, h, mk, p) with
@@ -120,6 +120,8 @@ struct ExportRecordRef<'a> {
     h: u8,
     mk: &'a str,
     mn: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    raw_model: Option<&'a str>,
     #[serde(rename = "in")]
     input_tokens: u64,
     out: u64,
@@ -216,6 +218,8 @@ struct ImportRecord {
     mk: String,
     #[serde(default)]
     mn: String,
+    #[serde(default)]
+    raw_model: Option<String>,
     #[serde(rename = "in", default)]
     input_tokens: u64,
     #[serde(default)]
@@ -252,6 +256,7 @@ impl ImportRecord {
             h: self.h,
             mk: self.mk,
             mn: self.mn,
+            raw_model: self.raw_model,
             input_tokens: self.input_tokens,
             out: self.out,
             c5: self.c5,
@@ -346,13 +351,12 @@ fn is_valid_source_key(key: &str) -> bool {
 
 /// USD cost for one bucket, matching the query path's formula
 /// (`calculate_cost_for_key * provider_multiplier`). The archive stores the
-/// normalized model key (no Bedrock region prefix), so the multiplier is 1.0 in
-/// practice. Rounded to micro-dollars to avoid float noise; 0.0 when pricing for
-/// the model is unknown (same as the dashboard).
+/// normalized model key plus the original source ID when available. Rounded to
+/// micro-dollars to avoid float noise; 0.0 when pricing is unknown.
 fn bucket_cost_usd(r: &ArchivedHourly) -> f64 {
     use crate::usage::pricing::{calculate_cost_for_key, provider_multiplier};
     let raw = calculate_cost_for_key(&r.mk, r.input_tokens, r.out, r.c5, r.c1, r.cr, r.ws)
-        * provider_multiplier(&r.mk);
+        * provider_multiplier(r.raw_model.as_deref().unwrap_or(&r.mk));
     (raw * 1_000_000.0).round() / 1_000_000.0
 }
 
@@ -365,6 +369,7 @@ fn export_record<'a>(r: &'a ArchivedHourly, provider: Option<&'a str>) -> Export
         h: r.h,
         mk: &r.mk,
         mn: &r.mn,
+        raw_model: r.raw_model.as_deref(),
         input_tokens: r.input_tokens,
         out: r.out,
         c5: r.c5,
@@ -387,7 +392,7 @@ fn provider_label(record: &ArchivedHourly) -> &str {
         p @ ("claude" | "codex" | "cursor" | "kimi") => p,
         _ => {
             use crate::models::{detect_model_family, ModelFamily};
-            match detect_model_family(&record.mk) {
+            match detect_model_family(record.raw_model.as_deref().unwrap_or(&record.mk)) {
                 ModelFamily::OpenAI => "codex",
                 ModelFamily::Cursor => "cursor",
                 ModelFamily::Moonshot => "kimi",
@@ -797,13 +802,16 @@ fn is_own_source(source_key: &str, ssh_aliases: &HashSet<String>) -> bool {
     }
 }
 
-/// Remap a peer file's source into THIS archive: a peer's own `local:*` becomes
-/// a `device:<peerSlug>` source (so it stays attributed to that machine and its
-/// totals sum rather than colliding with our local); a peer's `device:*` (a
-/// machine IT syncs) is kept as-is and merges with ours if shared. Returns None
-/// for anything unrecognized.
+/// Remap a peer file's source into THIS archive.
+///
+/// Claude/Codex `local:*` becomes `device:<peerSlug>` so that machine's CLI
+/// logs sum with ours. Cursor is account-scoped (same cloud usage on every
+/// device), so a peer's `local:cursor` merges into our `local:cursor` instead
+/// of becoming a second copy. A peer's `device:*` (a machine it syncs) is kept
+/// as-is. Returns None for anything unrecognized.
 fn remap_peer_source(source_key: &str, peer_slug: &str) -> Option<String> {
     match source_key.split_once(':') {
+        Some(("local", "cursor")) => Some(String::from("local:cursor")),
         Some(("local", _)) => Some(format!("device:{peer_slug}")),
         Some(("device", _)) => Some(source_key.to_string()),
         _ => None,
@@ -914,7 +922,6 @@ fn merge_peer_files(
             let Some(target) = remap_peer_source(&source_key, slug) else {
                 continue;
             };
-            // remap_peer_source only yields device:* keys; re-validate defensively.
             if !is_valid_source_key(&target) {
                 continue;
             }
@@ -1432,6 +1439,7 @@ mod tests {
             h: hour,
             mk: "sonnet-4-6".to_string(),
             mn: "Sonnet 4.6".to_string(),
+            raw_model: None,
             input_tokens: 100,
             out: 200,
             c5: 0,
@@ -1523,6 +1531,23 @@ mod tests {
         assert!(
             v["record"].get("provider").is_none(),
             "JSONL line carries provider, not the record"
+        );
+    }
+
+    #[test]
+    fn raw_model_round_trips_through_jsonl() {
+        let mut rec = sample_record("claude", "2026-06-15", 10);
+        rec.raw_model = Some("claude-sonnet-4-6-20260301".to_string());
+        let line = jsonl_line("local:claude", &rec);
+
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["record"]["raw_model"], "claude-sonnet-4-6-20260301");
+
+        let (groups, skipped) = parse_import_payload(&line).unwrap();
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            groups[0].1[0].raw_model.as_deref(),
+            Some("claude-sonnet-4-6-20260301")
         );
     }
 
@@ -1623,8 +1648,9 @@ mod tests {
 
     #[test]
     fn peer_source_remaps_local_to_device() {
-        // A peer's own local:* becomes device:<peerSlug>; a device the peer syncs
-        // stays as-is (merges with ours if shared); anything else is dropped.
+        // Claude/Codex local:* becomes device:<peerSlug>; Cursor stays local
+        // (account-scoped); a device the peer syncs stays as-is; anything else
+        // is dropped.
         assert_eq!(
             remap_peer_source("local:claude", "PeerMac").as_deref(),
             Some("device:PeerMac")
@@ -1632,6 +1658,10 @@ mod tests {
         assert_eq!(
             remap_peer_source("local:codex", "PeerMac").as_deref(),
             Some("device:PeerMac")
+        );
+        assert_eq!(
+            remap_peer_source("local:cursor", "PeerMac").as_deref(),
+            Some("local:cursor")
         );
         assert_eq!(
             remap_peer_source("device:DukeServer", "PeerMac").as_deref(),

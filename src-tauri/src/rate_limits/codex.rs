@@ -1,11 +1,30 @@
 use crate::models::{ProviderRateLimits, RateLimitWindow};
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
+use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::SystemTime;
 
+use super::{as_f64, humanize_snake_case};
+
 const CODEX_FILE_STALE_SECS: u64 = 600;
+
+/// Non-window keys that appear alongside meters in Codex rate-limit payloads.
+const CODEX_META_KEYS: &[&str] = &[
+    "plan_type",
+    "planType",
+    "credits",
+    "rate_limit_reached_type",
+    "rateLimitReachedType",
+    "limit_id",
+    "limitId",
+    "limit_name",
+    "limitName",
+];
+
+/// Preferred display order for known Codex windows.
+const KNOWN_CODEX_WINDOWS: &[&str] = &["primary", "secondary"];
 
 #[derive(Deserialize)]
 struct CodexJsonlLine {
@@ -14,21 +33,7 @@ struct CodexJsonlLine {
 
 #[derive(Deserialize)]
 struct CodexPayload {
-    rate_limits: Option<CodexRateLimitData>,
-}
-
-#[derive(Deserialize)]
-struct CodexRateLimitData {
-    primary: Option<CodexWindowData>,
-    secondary: Option<CodexWindowData>,
-    plan_type: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct CodexWindowData {
-    used_percent: f64,
-    window_minutes: u64,
-    resets_at: u64,
+    rate_limits: Option<Value>,
 }
 
 pub(super) fn extract_codex_rate_limits(codex_dir: &Path) -> Result<ProviderRateLimits, String> {
@@ -45,7 +50,7 @@ pub(super) fn extract_codex_rate_limits(codex_dir: &Path) -> Result<ProviderRate
         std::fs::File::open(&file_path).map_err(|e| format!("Failed to open Codex file: {e}"))?;
     let reader = BufReader::new(file);
 
-    let mut last_rate_limits: Option<CodexRateLimitData> = None;
+    let mut last_rate_limits: Option<Value> = None;
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -66,20 +71,12 @@ pub(super) fn extract_codex_rate_limits(codex_dir: &Path) -> Result<ProviderRate
     let rl =
         last_rate_limits.ok_or_else(|| "No rate limit data in Codex session files".to_string())?;
 
-    let mut windows = Vec::new();
-    if let Some(primary) = &rl.primary {
-        windows.push(codex_window_to_rate_limit("primary", primary));
-    }
-    if let Some(secondary) = &rl.secondary {
-        windows.push(codex_window_to_rate_limit("secondary", secondary));
-    }
-
-    let plan_tier = rl.plan_type.as_ref().map(|p| match p.as_str() {
-        "pro" => "Pro".to_string(),
-        "plus" => "Plus".to_string(),
-        "free" => "Free".to_string(),
-        other => other.to_string(),
-    });
+    let windows = codex_windows_from_rate_limits(&rl);
+    let plan_tier = rl
+        .get("plan_type")
+        .or_else(|| rl.get("planType"))
+        .and_then(|v| v.as_str())
+        .map(normalize_plan_type_label);
 
     let stale = is_codex_data_stale(file_mtime, &windows, Utc::now());
 
@@ -95,6 +92,15 @@ pub(super) fn extract_codex_rate_limits(codex_dir: &Path) -> Result<ProviderRate
         cooldown_until: None,
         fetched_at: Local::now().to_rfc3339(),
     })
+}
+
+fn normalize_plan_type_label(plan_type: &str) -> String {
+    match plan_type {
+        "pro" => "Pro".to_string(),
+        "plus" => "Plus".to_string(),
+        "free" => "Free".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn is_codex_data_stale(
@@ -121,19 +127,107 @@ fn is_codex_data_stale(
     false
 }
 
-fn codex_window_to_rate_limit(id: &str, w: &CodexWindowData) -> RateLimitWindow {
-    let label = match (id, w.window_minutes) {
-        ("primary", 300) => "Session (5hr)".to_string(),
-        ("primary", _) => format!("Primary ({}m)", w.window_minutes),
-        ("secondary", 10080) => "Weekly (7 day)".to_string(),
-        ("secondary", _) => format!("Secondary ({}m)", w.window_minutes),
-        _ => id.to_string(),
+/// Build rate-limit windows from whatever meters Codex returns.
+///
+/// Known `primary` / `secondary` keep duration-aware labels; any additional
+/// object with `used_percent` / `usedPercent` becomes another bar so count
+/// changes track the source without a TokenMonitor release.
+pub(super) fn codex_windows_from_rate_limits(rl: &Value) -> Vec<RateLimitWindow> {
+    let Some(obj) = rl.as_object() else {
+        return Vec::new();
     };
 
-    let resets_at =
-        DateTime::<Utc>::from_timestamp(w.resets_at as i64, 0).map(|dt| dt.to_rfc3339());
+    let mut windows = Vec::new();
+    let mut consumed = std::collections::HashSet::new();
+    for key in CODEX_META_KEYS {
+        consumed.insert(*key);
+    }
 
-    RateLimitWindow::new(id.to_string(), label, w.used_percent, resets_at)
+    for id in KNOWN_CODEX_WINDOWS {
+        consumed.insert(*id);
+        let Some(value) = obj.get(*id) else {
+            continue;
+        };
+        if let Some(window) = codex_value_to_window(id, value) {
+            windows.push(window);
+        }
+    }
+
+    let mut extras: Vec<(&String, &Value)> = obj
+        .iter()
+        .filter(|(key, value)| !consumed.contains(key.as_str()) && looks_like_codex_window(value))
+        .collect();
+    extras.sort_by(|a, b| a.0.cmp(b.0));
+
+    for (id, value) in extras {
+        if let Some(window) = codex_value_to_window(id, value) {
+            windows.push(window);
+        }
+    }
+
+    windows
+}
+
+fn looks_like_codex_window(value: &Value) -> bool {
+    value
+        .get("used_percent")
+        .or_else(|| value.get("usedPercent"))
+        .and_then(as_f64)
+        .is_some()
+}
+
+fn codex_value_to_window(id: &str, value: &Value) -> Option<RateLimitWindow> {
+    let used_percent = value
+        .get("used_percent")
+        .or_else(|| value.get("usedPercent"))
+        .and_then(as_f64)?;
+    let window_minutes = value
+        .get("window_minutes")
+        .or_else(|| value.get("windowDurationMins"))
+        .or_else(|| value.get("window_duration_mins"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(if id == "primary" { 300 } else { 10_080 });
+    let resets_at = value
+        .get("resets_at")
+        .or_else(|| value.get("resetsAt"))
+        .and_then(|v| v.as_u64())
+        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts as i64, 0).map(|dt| dt.to_rfc3339()));
+
+    Some(RateLimitWindow::new(
+        id.to_string(),
+        codex_window_label(id, window_minutes),
+        used_percent,
+        resets_at,
+    ))
+}
+
+pub(super) fn codex_window_label(id: &str, minutes: u64) -> String {
+    match (id, minutes) {
+        ("primary", 300) => "Session (5hr)".to_string(),
+        ("secondary", 10080) => "Weekly (7 day)".to_string(),
+        ("primary", _) => format!("Primary ({})", format_window_duration(minutes)),
+        ("secondary", _) => format!("Secondary ({})", format_window_duration(minutes)),
+        _ => format!(
+            "{} ({})",
+            humanize_snake_case(id),
+            format_window_duration(minutes)
+        ),
+    }
+}
+
+fn format_window_duration(minutes: u64) -> String {
+    let days = minutes / 1_440;
+    let hours = minutes % 1_440 / 60;
+    let minutes = minutes % 60;
+
+    match (days, hours, minutes) {
+        (days, 0, 0) if days > 0 => format!("{days}d"),
+        (days, hours, 0) if days > 0 => format!("{days}d {hours}h"),
+        (days, hours, minutes) if days > 0 => format!("{days}d {hours}h {minutes}m"),
+        (0, hours, 0) if hours > 0 => format!("{hours}h"),
+        (0, hours, minutes) if hours > 0 => format!("{hours}h {minutes}m"),
+        _ => format!("{minutes}m"),
+    }
 }
 
 fn find_newest_jsonl(
@@ -179,70 +273,104 @@ fn find_newest_jsonl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::time::Duration;
 
     #[test]
     fn codex_window_preserves_used_percent_scale() {
-        let window = codex_window_to_rate_limit(
-            "primary",
-            &CodexWindowData {
-                used_percent: 1.0,
-                window_minutes: 300,
-                resets_at: 1_763_128_800,
+        let windows = codex_windows_from_rate_limits(&json!({
+            "primary": {
+                "used_percent": 1.0,
+                "window_minutes": 300,
+                "resets_at": 1_763_128_800_u64
+            }
+        }));
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Session (5hr)");
+        assert_eq!(windows[0].utilization, 1.0);
+        assert_eq!(windows[0].window_id, "primary");
+    }
+
+    #[test]
+    fn formats_long_primary_window_as_days_and_hours() {
+        assert_eq!(codex_window_label("primary", 10_080), "Primary (7d)");
+        assert_eq!(codex_window_label("secondary", 2_040), "Secondary (1d 10h)");
+    }
+
+    #[test]
+    fn unknown_codex_meters_become_extra_bars() {
+        let windows = codex_windows_from_rate_limits(&json!({
+            "primary": {
+                "usedPercent": 10.0,
+                "windowDurationMins": 300,
+                "resetsAt": 1_763_128_800_u64
             },
-        );
+            "bonus_pool": {
+                "used_percent": 5.0,
+                "window_minutes": 1440,
+                "resets_at": 1_763_215_200_u64
+            },
+            "plan_type": "plus"
+        }));
 
-        assert_eq!(window.label, "Session (5hr)");
-        assert_eq!(window.utilization, 1.0);
-        assert_eq!(window.window_id, "primary");
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].window_id, "primary");
+        assert_eq!(windows[1].window_id, "bonus_pool");
+        assert_eq!(windows[1].label, "Bonus Pool (1d)");
+        assert_eq!(windows[1].utilization, 5.0);
     }
 
     #[test]
-    fn stale_when_resets_at_in_the_past() {
-        let now = Utc::now();
-        let past_reset = (now - chrono::Duration::hours(1)).to_rfc3339();
+    fn omits_missing_codex_meters() {
+        let windows = codex_windows_from_rate_limits(&json!({
+            "secondary": {
+                "used_percent": 40.0,
+                "window_minutes": 10080,
+                "resets_at": 1_763_215_200_u64
+            }
+        }));
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].window_id, "secondary");
+        assert_eq!(windows[0].label, "Weekly (7 day)");
+    }
+
+    #[test]
+    fn marks_stale_when_any_window_has_reset() {
         let windows = vec![RateLimitWindow::new(
             "primary".into(),
             "Session (5hr)".into(),
-            50.0,
-            Some(past_reset),
+            10.0,
+            Some("2020-01-01T00:00:00Z".into()),
         )];
-        let recent_mtime = SystemTime::now();
-        assert!(is_codex_data_stale(recent_mtime, &windows, now));
+        let now = Utc::now();
+        let mtime = SystemTime::now();
+        assert!(is_codex_data_stale(mtime, &windows, now));
     }
 
     #[test]
-    fn not_stale_when_recent_file_and_future_reset() {
-        let now = Utc::now();
-        let future_reset = (now + chrono::Duration::hours(3)).to_rfc3339();
+    fn marks_stale_when_file_mtime_is_old() {
         let windows = vec![RateLimitWindow::new(
             "primary".into(),
             "Session (5hr)".into(),
-            23.0,
-            Some(future_reset),
+            10.0,
+            Some("2099-01-01T00:00:00Z".into()),
         )];
-        let recent_mtime = SystemTime::now();
-        assert!(!is_codex_data_stale(recent_mtime, &windows, now));
+        let now = Utc::now();
+        let mtime = SystemTime::now() - Duration::from_secs(CODEX_FILE_STALE_SECS + 1);
+        assert!(is_codex_data_stale(mtime, &windows, now));
     }
 
     #[test]
-    fn stale_when_file_is_old_even_with_future_reset() {
-        let now = Utc::now();
-        let future_reset = (now + chrono::Duration::hours(3)).to_rfc3339();
+    fn fresh_when_windows_active_and_file_recent() {
         let windows = vec![RateLimitWindow::new(
             "primary".into(),
             "Session (5hr)".into(),
-            23.0,
-            Some(future_reset),
+            10.0,
+            Some("2099-01-01T00:00:00Z".into()),
         )];
-        let old_mtime = SystemTime::now() - Duration::from_secs(CODEX_FILE_STALE_SECS + 60);
-        assert!(is_codex_data_stale(old_mtime, &windows, now));
-    }
-
-    #[test]
-    fn not_stale_with_empty_windows() {
         let now = Utc::now();
-        let recent_mtime = SystemTime::now();
-        assert!(!is_codex_data_stale(recent_mtime, &[], now));
+        let mtime = SystemTime::now();
+        assert!(!is_codex_data_stale(mtime, &windows, now));
     }
 }

@@ -32,29 +32,33 @@ pub enum ClaudePlanTier {
 }
 
 impl ClaudePlanTier {
-    /// Best-effort 5-hour budget in tokens. These constants are deliberate
-    /// underestimates derived from anecdotal Anthropic plan limits — better
+    /// Best-effort 5-hour budget in tokens. Numbers live in `ops.json` and
+    /// are deliberate underestimates of Anthropic's published plans — better
     /// to surface "100% used" early than to never warn the user.
     pub fn five_hour_budget_tokens(&self) -> u64 {
         match self {
-            Self::Free => 50_000,
-            Self::Pro => 200_000,
-            Self::Max5x => 1_000_000,
-            Self::Max20x => 4_000_000,
             Self::Custom {
                 five_hour_tokens, ..
             } => *five_hour_tokens,
+            named => crate::ops::claude_plan_budget(named.ops_id()).five_hour_tokens,
         }
     }
 
     /// Best-effort weekly budget in tokens (7 days).
     pub fn weekly_budget_tokens(&self) -> u64 {
         match self {
-            Self::Free => 1_000_000,
-            Self::Pro => 7_000_000,
-            Self::Max5x => 35_000_000,
-            Self::Max20x => 140_000_000,
             Self::Custom { weekly_tokens, .. } => *weekly_tokens,
+            named => crate::ops::claude_plan_budget(named.ops_id()).weekly_tokens,
+        }
+    }
+
+    fn ops_id(&self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Pro => "pro",
+            Self::Max5x => "max5x",
+            Self::Max20x => "max20x",
+            Self::Custom { .. } => unreachable!("Custom plans have no ops.json id"),
         }
     }
 
@@ -269,5 +273,17 @@ mod tests {
         let entries = vec![entry(recent, 1_000_000_000)];
         let (five_hour, _) = compute(&entries, ClaudePlanTier::Pro, now);
         assert!(five_hour.utilization_pct <= 999.9);
+    }
+
+    #[test]
+    fn named_plan_budgets_read_ops_json() {
+        assert_eq!(
+            ClaudePlanTier::Pro.five_hour_budget_tokens(),
+            crate::ops::claude_plan_budget("pro").five_hour_tokens
+        );
+        assert_eq!(
+            ClaudePlanTier::Max20x.weekly_budget_tokens(),
+            crate::ops::claude_plan_budget("max20x").weekly_tokens
+        );
     }
 }
