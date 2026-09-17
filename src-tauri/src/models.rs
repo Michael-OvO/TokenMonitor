@@ -457,11 +457,8 @@ pub fn normalize_claude_model(raw: &str) -> (String, String) {
                 .trim_end_matches('-')
                 .rsplit_once("claude-")
                 .map(|(_, v)| format!("-{}", v.replace('.', "-")));
-            let version = extract_claude_version(after).or_else(|| {
-                before_version
-                    .as_deref()
-                    .and_then(extract_claude_version)
-            });
+            let version = extract_claude_version(after)
+                .or_else(|| before_version.as_deref().and_then(extract_claude_version));
             if let Some((major, minor)) = version {
                 if let Some(minor) = minor {
                     return (
@@ -683,15 +680,24 @@ mod tests {
         assert_eq!(d, "grok 4.6 xhigh fast");
         assert_eq!(k, normalize_model_by_family("cursor-grok-4.6-xhigh-fast").1);
         assert_eq!(normalize_model("Cursor-claude-4.5-sonnet").0, "Sonnet 4.5");
-        assert_eq!(normalize_model("claude-3-7-sonnet-thinking").0, "Sonnet 3.7");
+        assert_eq!(
+            normalize_model("claude-3-7-sonnet-thinking").0,
+            "Sonnet 3.7"
+        );
         assert_eq!(normalize_model("claude-4-opus").0, "Opus 4");
         assert_eq!(
             normalize_claude_model("claude-4.5-sonnet").1,
             normalize_claude_model("claude-sonnet-4-5").1
         );
         assert_eq!(normalize_model("mistral-large-2").0, "mistral large 2");
-        assert_eq!(detect_model_family("cursor-gpt-5-codex"), ModelFamily::OpenAI);
-        assert_eq!(detect_model_family("cursor-gemini-2.5-pro"), ModelFamily::Google);
+        assert_eq!(
+            detect_model_family("cursor-gpt-5-codex"),
+            ModelFamily::OpenAI
+        );
+        assert_eq!(
+            detect_model_family("cursor-gemini-2.5-pro"),
+            ModelFamily::Google
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════════
