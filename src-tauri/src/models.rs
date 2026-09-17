@@ -238,11 +238,18 @@ fn looks_like_moonshot_k_series(normalized: &str) -> bool {
     if digits == 0 {
         return false;
     }
-    matches!(rest[digits..].chars().next(), None | Some('.') | Some('-'))
+    // `detect_model_family` has already turned dashes into spaces.
+    matches!(
+        rest[digits..].chars().next(),
+        None | Some('.') | Some('-') | Some(' ')
+    )
 }
 
 pub fn detect_model_family(raw: &str) -> ModelFamily {
-    let normalized = raw.trim().to_ascii_lowercase();
+    // Dashes read as spaces and a Cursor "cursor-" prefix is dropped, so
+    // "cursor-gpt-5" is detected as OpenAI like "gpt 5".
+    let spaced = raw.trim().to_ascii_lowercase().replace('-', " ");
+    let normalized = spaced.strip_prefix("cursor ").unwrap_or(&spaced);
     if normalized.is_empty() {
         return ModelFamily::Unknown;
     }
@@ -271,7 +278,7 @@ pub fn detect_model_family(raw: &str) -> ModelFamily {
 
     if normalized.starts_with("kimi")
         || normalized.contains("moonshot")
-        || looks_like_moonshot_k_series(&normalized)
+        || looks_like_moonshot_k_series(normalized)
     {
         return ModelFamily::Moonshot;
     }
@@ -448,7 +455,15 @@ pub fn normalize_claude_model(raw: &str) -> (String, String) {
                     format!("{family_lower}-preview{suffix_key}"),
                 );
             }
-            if let Some((major, minor)) = extract_claude_version(after) {
+            // Anthropic puts the version after the family ("claude-sonnet-4-5");
+            // Cursor puts it before ("claude-4.5-sonnet").
+            let before_version = base[..pos]
+                .trim_end_matches('-')
+                .rsplit_once("claude-")
+                .map(|(_, v)| format!("-{}", v.replace('.', "-")));
+            let version = extract_claude_version(after)
+                .or_else(|| before_version.as_deref().and_then(extract_claude_version));
+            if let Some((major, minor)) = version {
                 if let Some(minor) = minor {
                     return (
                         format!("{family_display} {major}.{minor}{suffix_display}"),
@@ -534,7 +549,23 @@ pub fn normalize_generic_model(raw: &str) -> (String, String) {
     }
 }
 
+/// Display names never show dashes, and Cursor slugs ("cursor-grok-4.6-fast")
+/// lose their "cursor" prefix. The key keeps coming from the raw name so
+/// archived history stays grouped under the same model.
 pub fn normalize_model(raw: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .get(..7)
+        .filter(|p| p.eq_ignore_ascii_case("cursor-"))
+        .map(|_| &trimmed[7..])
+        .filter(|s| !s.is_empty())
+        .unwrap_or(trimmed);
+    let (_, key) = normalize_model_by_family(raw);
+    let (display, _) = normalize_model_by_family(stripped);
+    (display.replace('-', " "), key)
+}
+
+fn normalize_model_by_family(raw: &str) -> (String, String) {
     match detect_model_family(raw) {
         ModelFamily::Anthropic => normalize_claude_model(raw),
         ModelFamily::OpenAI => normalize_codex_model(raw),
@@ -647,6 +678,32 @@ pub fn known_model_from_raw(raw: &str) -> KnownModel {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cursor_display_name_drops_prefix_and_dashes() {
+        let (d, k) = normalize_model("cursor-grok-4.6-xhigh-fast");
+        assert_eq!(d, "grok 4.6 xhigh fast");
+        assert_eq!(k, normalize_model_by_family("cursor-grok-4.6-xhigh-fast").1);
+        assert_eq!(normalize_model("Cursor-claude-4.5-sonnet").0, "Sonnet 4.5");
+        assert_eq!(
+            normalize_model("claude-3-7-sonnet-thinking").0,
+            "Sonnet 3.7"
+        );
+        assert_eq!(normalize_model("claude-4-opus").0, "Opus 4");
+        assert_eq!(
+            normalize_claude_model("claude-4.5-sonnet").1,
+            normalize_claude_model("claude-sonnet-4-5").1
+        );
+        assert_eq!(normalize_model("mistral-large-2").0, "mistral large 2");
+        assert_eq!(
+            detect_model_family("cursor-gpt-5-codex"),
+            ModelFamily::OpenAI
+        );
+        assert_eq!(
+            detect_model_family("cursor-gemini-2.5-pro"),
+            ModelFamily::Google
+        );
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // normalize_claude_model — every alias branch
     // ══════════════════════════════════════════════════════════════════════
@@ -729,20 +786,20 @@ mod tests {
     #[test]
     fn claude_haiku_generic() {
         let (d, k) = normalize_claude_model("claude-3-haiku-20240307");
-        assert_eq!((d.as_str(), k.as_str()), ("Haiku", "haiku"));
+        assert_eq!((d.as_str(), k.as_str()), ("Haiku 3", "haiku-3"));
     }
 
     #[test]
     fn claude_sonnet_generic() {
         let (d, k) = normalize_claude_model("claude-3-5-sonnet-20241022");
-        assert_eq!((d.as_str(), k.as_str()), ("Sonnet", "sonnet"));
+        assert_eq!((d.as_str(), k.as_str()), ("Sonnet 3.5", "sonnet-3-5"));
     }
 
     #[test]
     fn claude_opus_generic() {
-        // A bare "opus" without version digits should match the generic opus alias.
+        // Legacy names put the version before the family.
         let (d, k) = normalize_claude_model("claude-3-opus-20240229");
-        assert_eq!((d.as_str(), k.as_str()), ("Opus", "opus"));
+        assert_eq!((d.as_str(), k.as_str()), ("Opus 3", "opus-3"));
     }
 
     #[test]
@@ -1151,7 +1208,7 @@ mod tests {
         let (d, k) = normalize_model("my-custom-model");
         assert_eq!(
             (d.as_str(), k.as_str()),
-            ("my-custom-model", "my-custom-model")
+            ("my custom model", "my-custom-model")
         );
     }
 

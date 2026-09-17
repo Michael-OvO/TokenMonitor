@@ -500,7 +500,7 @@
           {#each bars as bar}
             <div class="usage-row">
               <span class="provider-tag" style:color={bar.color}>{bar.shortLabel}</span>
-              <div class="bar-track" class:idle={bar.utilization == null || bar.utilization <= 0}>
+              <div class="bar-track" class:idle={bar.utilization == null}>
                 {#if bar.utilization != null && bar.utilization > 0}
                   <div
                     class="bar-fill"
@@ -744,7 +744,7 @@
     box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.8), 0 1px 0 rgba(255, 255, 255, 0.05);
     transition: background 200ms ease, box-shadow 200ms ease;
   }
-  /* When there's no progress to show (no data yet, or 0% utilization),
+  /* When there's no progress to show (no data yet; 0% still shows the empty track),
      the track must be invisible — no painted background, no inset shadow
      that would otherwise read as a stuck black line. The grid cell stays
      so the row layout doesn't shift when data arrives. */

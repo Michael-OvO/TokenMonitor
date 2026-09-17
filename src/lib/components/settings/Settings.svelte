@@ -8,6 +8,7 @@
   import {
     getVisibleHeaderProviders,
     settings,
+    SUPPORTED_WEEK_STARTS,
     updateSetting,
     type Settings as SettingsType,
   } from "../../stores/settings.js";
@@ -161,6 +162,16 @@
 
   function handlePeriod(val: string) {
     updateSetting("defaultPeriod", val as SettingsType["defaultPeriod"]);
+  }
+
+  async function handleWeekStart(val: string) {
+    // "To date" is rolling mode; any weekday switches back to calendar weeks.
+    if (val === "todate") {
+      await updateSetting("rollingPeriods", true);
+      return;
+    }
+    await updateSetting("weekStart", val as SettingsType["weekStart"]);
+    await updateSetting("rollingPeriods", false);
   }
 
   function handleCurrency(val: string) {
@@ -597,6 +608,19 @@
             value={current.defaultPeriod}
             onChange={handlePeriod}
           />
+        </div>
+        <div class="row border">
+          <span class="label">Week Starts</span>
+          <select
+            class="currency-select"
+            value={current.rollingPeriods ? "todate" : current.weekStart}
+            onchange={(e) => handleWeekStart((e.target as HTMLSelectElement).value)}
+          >
+            {#each SUPPORTED_WEEK_STARTS as day}
+              <option value={day}>{day[0].toUpperCase() + day.slice(1)}</option>
+            {/each}
+            <option value="todate" title="Week/Month/Year end today and reach back one unit">To date</option>
+          </select>
         </div>
         <div class="row border">
           <span class="label">Currency</span>
@@ -1257,12 +1281,15 @@
     border-color: var(--t3);
   }
 
+  .cache-row {
+    flex-wrap: nowrap;
+  }
   .cache-row-actions {
     display: flex;
     align-items: center;
-    gap: 8px;
-    flex: 1 1 170px;
-    flex-wrap: wrap;
+    gap: 6px;
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
     justify-content: flex-end;
     min-width: 0;
   }

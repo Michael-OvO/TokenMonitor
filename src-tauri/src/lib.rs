@@ -441,6 +441,7 @@ pub fn run() {
             commands::config::set_auto_export_config,
             commands::config::set_refresh_interval,
             commands::config::set_currency,
+            commands::config::set_period_config,
             commands::config::set_rate_limits_enabled,
             commands::config::set_usage_access_enabled,
             commands::config::set_cursor_auth_config,

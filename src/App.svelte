@@ -133,8 +133,10 @@
   let popEl: HTMLDivElement | null = null;
   let resizeOrch: ResizeOrchestrator | null = null;
   let scrollThresholdH = $state(DEFAULT_MAX_WINDOW_HEIGHT);
-  // Written by orchestrator callback; read by future scroll-lock UI indicator.
-  // @ts-expect-error Assigned via callback, read access planned
+  // Written by the orchestrator callback. Drives both the scroll affordance on
+  // `.pop-scroll` and the bottom fade that tells the user there is more below —
+  // without it the window silently stops growing and the overflow is invisible,
+  // because `.pop-scroll` also hides the native scrollbar.
   let isScrollLocked = $state(false);
   let dismissedWarningText = $state<string | null>(null);
   let initialDataLoad: Promise<void> | null = null;
@@ -812,9 +814,10 @@
 <div class="pop">
   <div
     class="pop-content"
+    class:is-scroll-locked={isScrollLocked}
     bind:this={popEl}
     style:max-height="{scrollThresholdH}px"
-    style:overflow-y={scrollThresholdH < DEFAULT_MAX_WINDOW_HEIGHT ? 'auto' : 'visible'}
+    style:overflow-y={isScrollLocked || scrollThresholdH < DEFAULT_MAX_WINDOW_HEIGHT ? 'auto' : 'visible'}
   >
       {#if !showSettings}<UpdateBanner />{/if}
       {#if showSplash}
@@ -1041,6 +1044,18 @@
        `overscroll-behavior: contain`, so bounces don't chain to
        ancestors. */
     overscroll-behavior: none;
+  }
+  /* The only thing that tells the user the window stopped growing and the rest
+     is below. It has to be a mask, not an element: `.pop-content`'s height is
+     measured by the resize orchestrator and fed straight back into setSize, so
+     anything that participates in layout re-enters that loop (the one
+     RESIZE_HYSTERESIS_PX exists to damp). A mask is paint-only.
+     ponytail: the fade is static — it stays put once you scroll to the bottom.
+     Making it retract there needs a scroll listener plus a second piece of
+     state; add that only if the constant fade reads as noise. */
+  .pop-content.is-scroll-locked {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
   }
   .pop-content::-webkit-scrollbar {
     display: none;

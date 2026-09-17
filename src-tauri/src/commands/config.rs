@@ -12,6 +12,17 @@ pub async fn set_refresh_interval(interval: u64, state: State<'_, AppState>) -> 
     Ok(())
 }
 
+/// Push the week-start day and rolling-window toggle from Settings down to
+/// Rust, where every period window is resolved (`commands::period`).
+#[tauri::command]
+pub async fn set_period_config(week_start: String, rolling: bool) -> Result<(), String> {
+    let day: chrono::Weekday = week_start
+        .parse()
+        .map_err(|_| format!("Unknown weekday: {week_start}"))?;
+    super::period::set_period_config(day, rolling);
+    Ok(())
+}
+
 /// Push the display currency the user picked in Settings down to Rust.
 ///
 /// The tray title, the Cursor API meter label and the float-ball amount are all

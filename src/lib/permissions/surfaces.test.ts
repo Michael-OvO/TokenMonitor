@@ -47,6 +47,8 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     usageAccessEnabled: true,
     autoExportEnabled: false,
     autoExportFolder: null,
+    weekStart: "mon",
+    rollingPeriods: false,
     ...overrides,
   };
 }

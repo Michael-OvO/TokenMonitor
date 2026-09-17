@@ -209,6 +209,15 @@
     sshTestingHost = null;
   }
 
+  let sshTestingAll = $state(false);
+
+  // ponytail: tests hosts one at a time, reusing testSshHost; parallelize if host lists get long
+  async function testAllSshHosts() {
+    sshTestingAll = true;
+    for (const host of sshHosts) await testSshHost(host.alias);
+    sshTestingAll = false;
+  }
+
   async function persistSshHosts(hosts: ConfiguredSshHost[]) {
     await updateSetting(
       "sshHosts",
@@ -457,9 +466,13 @@
           {activeRemoteDeviceCount} device(s) enabled
         {/if}
       </span>
-      <button class="ssh-btn" type="button" onclick={syncAllRemoteDevices} disabled={sshSyncing}>
-        {sshSyncing ? "Syncing..." : "Sync All"}
-      </button>
+      <div class="ssh-sync-actions">
+        <button class="ssh-btn" type="button" onclick={testAllSshHosts} disabled={sshTestingAll || sshHosts.length === 0}>
+          {sshTestingAll ? "Testing..." : "Test All"}
+        </button><button class="ssh-btn" type="button" onclick={syncAllRemoteDevices} disabled={sshSyncing}>
+          {sshSyncing ? "Syncing..." : "Sync All"}
+        </button>
+      </div>
     </div>
   </SettingsDisclosure>
 </div>
@@ -584,6 +597,9 @@
     justify-content: space-between;
     padding: 4px 10px;
     border-top: 1px solid var(--border);
+  }
+  .ssh-sync-actions {
+    display: flex;
   }
   .ssh-sync-label {
     font: 400 8px/1 'Inter', sans-serif;

@@ -124,149 +124,6 @@ function hashString(value: string): number {
   return hash;
 }
 
-function hashedModelColor(key: string): string {
-  const hue = hashString(key) % 360;
-  return `hsl(${hue} 58% 56%)`;
-}
-
-const EXACT_COLORS: Record<string, string> = {
-  opus: "var(--opus)",
-  sonnet: "var(--sonnet)",
-  haiku: "var(--haiku)",
-  gpt54: "var(--gpt54)",
-  gpt53: "var(--gpt53)",
-  gpt52: "var(--gpt52)",
-  gpt51max: "var(--gpt53)",
-  gpt51mini: "var(--o3mini)",
-  gpt51: "var(--gpt52)",
-  gpt5codex: "var(--codex)",
-  codexmini: "var(--o4mini)",
-  gpt5mini: "var(--o3mini)",
-  gpt5nano: "var(--o1mini)",
-  gpt5: "var(--codex)",
-  o3: "var(--o3)",
-  o3mini: "var(--o3mini)",
-  o4mini: "var(--o4mini)",
-  o1: "var(--o1)",
-  o1mini: "var(--o1mini)",
-  codex: "var(--codex)",
-  unknown: "var(--t3)",
-};
-
-interface IncludesRule {
-  readonly pattern: string;
-  readonly color: string;
-}
-
-interface PrefixRule {
-  readonly prefix: string;
-  readonly color: string;
-}
-
-const INCLUDES_RULES: readonly IncludesRule[] = [
-  { pattern: "opus", color: EXACT_COLORS.opus },
-  { pattern: "sonnet", color: EXACT_COLORS.sonnet },
-  { pattern: "haiku", color: EXACT_COLORS.haiku },
-] as const;
-
-// Order matters: longer prefixes must come before shorter ones (e.g. "gpt-5.1-codex-mini" before "gpt-5.1")
-const PREFIX_RULES: readonly PrefixRule[] = [
-  { prefix: "gpt-5.4", color: EXACT_COLORS.gpt54 },
-  { prefix: "gpt-5.3", color: EXACT_COLORS.gpt53 },
-  { prefix: "gpt-5.2", color: EXACT_COLORS.gpt52 },
-  { prefix: "gpt-5.1-codex-mini", color: EXACT_COLORS.gpt51mini },
-  { prefix: "gpt-5.1-codex-max", color: EXACT_COLORS.gpt51max },
-  { prefix: "gpt-5.1-codex", color: EXACT_COLORS.codex },
-  { prefix: "gpt-5.1", color: EXACT_COLORS.codex },
-  { prefix: "gpt-5-mini", color: EXACT_COLORS.gpt5mini },
-  { prefix: "gpt-5-nano", color: EXACT_COLORS.gpt5nano },
-  { prefix: "gpt-5-codex", color: EXACT_COLORS.gpt5codex },
-  { prefix: "gpt-5", color: EXACT_COLORS.gpt5 },
-  { prefix: "codex-mini", color: EXACT_COLORS.codexmini },
-  { prefix: "o4-mini", color: EXACT_COLORS.o4mini },
-  { prefix: "o3-mini", color: EXACT_COLORS.o3mini },
-  { prefix: "o3", color: EXACT_COLORS.o3 },
-  { prefix: "o1-mini", color: EXACT_COLORS.o1mini },
-  { prefix: "o1", color: EXACT_COLORS.o1 },
-] as const;
-
-// Brand families beyond Anthropic/OpenAI. Each family maps to three shades
-// (deep/mid/soft) so same-brand models stay in the same hue but are
-// distinguishable by version tier. The version tier is picked by the major
-// version number extracted from the key — newer/flagship models get the
-// deepest shade so they stand out in charts.
-interface FamilyRule {
-  readonly prefix: string;
-  readonly shades: readonly [string, string, string];
-  readonly tier: (major: number) => 0 | 1 | 2;
-}
-
-const FAMILY_RULES: readonly FamilyRule[] = [
-  {
-    prefix: "gemini",
-    shades: ["var(--gemini)", "var(--gemini-mid)", "var(--gemini-soft)"],
-    tier: (m) => (m >= 3 ? 0 : m >= 2 ? 1 : 2),
-  },
-  {
-    prefix: "glm",
-    shades: ["var(--glm)", "var(--glm-mid)", "var(--glm-soft)"],
-    tier: (m) => (m >= 5 ? 0 : m >= 4 ? 1 : 2),
-  },
-  {
-    prefix: "deepseek",
-    shades: ["var(--deepseek)", "var(--deepseek-mid)", "var(--deepseek-soft)"],
-    tier: (m) => (m >= 3 ? 0 : m >= 2 ? 1 : 2),
-  },
-  {
-    prefix: "composer",
-    shades: ["var(--composer)", "var(--composer-mid)", "var(--composer-soft)"],
-    tier: () => 0,
-  },
-  {
-    prefix: "kimi",
-    shades: ["var(--kimi)", "var(--kimi-mid)", "var(--kimi-soft)"],
-    // Kimi K2 is the current flagship; earlier k-series fall to mid.
-    tier: (m) => (m >= 2 ? 0 : 1),
-  },
-  {
-    prefix: "qwen",
-    shades: ["var(--qwen)", "var(--qwen-mid)", "var(--qwen-soft)"],
-    tier: (m) => (m >= 3 ? 0 : m >= 2 ? 1 : 2),
-  },
-] as const;
-
-// Extract the first integer found after the brand prefix — covers
-// "glm-4.5" (→ 4), "kimi-k2" (→ 2), "qwen3-coder" (→ 3),
-// "gemini-2.5-pro" (→ 2), "deepseek-v3" (→ 3). Returns NaN if none.
-function extractMajor(suffix: string): number {
-  const match = suffix.match(/\d+/);
-  return match ? parseInt(match[0], 10) : NaN;
-}
-
-// Moonshot's bare K-series keys ("k2", "k3", "k3-instruct") — the Kimi Code
-// CLI logs these without the "kimi" prefix (mirrors
-// `looks_like_moonshot_k_series` in src-tauri/src/models.rs).
-function isMoonshotKSeries(key: string): boolean {
-  return /^k\d+([.-]|$)/.test(key);
-}
-
-function familyColor(key: string): string | null {
-  for (const rule of FAMILY_RULES) {
-    let major: number;
-    if (key.startsWith(rule.prefix)) {
-      major = extractMajor(key.slice(rule.prefix.length));
-    } else if (rule.prefix === "kimi" && isMoonshotKSeries(key)) {
-      // Bare K-series keys carry the version right after the "k".
-      major = extractMajor(key);
-    } else {
-      continue;
-    }
-    const tier = Number.isNaN(major) ? 2 : rule.tier(major);
-    return rule.shades[tier];
-  }
-  return null;
-}
-
 // ── Device colors ──
 // Palette chosen to be visually distinct from model colors and from each other.
 // Deterministic: same alias always maps to the same color.
@@ -386,22 +243,45 @@ export function deviceDisplayNames(rawNames: Iterable<string>): Map<string, stri
 }
 
 // ── Model colors ──
+// One hue per vendor family (mirrors `detect_model_family` in
+// src-tauri/src/models.rs); every model of that vendor lands somewhere inside
+// that hue band. The exact spot is a deterministic hash of the key spread over
+// 30 slots (5 hue nudges × 6 lightness steps), so new models never leave their
+// family's colour range and need no table entry.
+// ponytail: hash → slot can collide for two same-vendor models; assign slots
+// in first-seen order if that ever shows up in a real chart.
+const MODEL_SLOTS_PER_FAMILY = 30;
+const FAMILY_HUES: readonly { readonly test: RegExp; readonly hue: number }[] = [
+  { test: /claude|fable|mythos|opus|sonnet|haiku/, hue: 22 }, // warm orange
+  { test: /^gpt|^o\d|codex/, hue: 207 }, // blue
+  { test: /^gemini/, hue: 262 }, // indigo
+  // Bare K-series ("k3", "k3-instruct") is how the Kimi Code CLI logs Moonshot
+  // models (mirrors `looks_like_moonshot_k_series` in src-tauri/src/models.rs).
+  { test: /^kimi|moonshot|^k\d+([. ]|$)/, hue: 318 }, // magenta
+  { test: /^qwen/, hue: 345 }, // rose
+  { test: /^glm/, hue: 145 }, // green
+  { test: /^deepseek/, hue: 235 }, // cobalt
+  { test: /^composer/, hue: 290 }, // violet
+  { test: /^grok|xai/, hue: 100 }, // lime
+];
+// Hues ≥20° away from every family band, so an unknown vendor never reads as a
+// known one. Picked per key by hash, then nudged/lightened like family models.
+const UNCLAIMED_HUES = [50, 72, 122, 170, 185];
 
 export function modelColor(key: string): string {
-  const normalized = key.trim().toLowerCase();
-
-  const exact = EXACT_COLORS[normalized];
-  if (exact) return exact;
-
-  for (const rule of INCLUDES_RULES) {
-    if (normalized.includes(rule.pattern)) return rule.color;
-  }
-  for (const rule of PREFIX_RULES) {
-    if (normalized.startsWith(rule.prefix)) return rule.color;
-  }
-
-  const family = familyColor(normalized);
-  if (family) return family;
-
-  return hashedModelColor(normalized);
+  // Cursor slugs look like "cursor-claude-4.5-sonnet": drop the "cursor"
+  // prefix and dashes so the vendor name leads and the ^ anchors match.
+  const normalized = key
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, " ")
+    .replace(/^cursor\s+/, "")
+    .replace(/\s+/g, " ");
+  const family = FAMILY_HUES.find((f) => f.test.test(normalized));
+  const hash = hashString(normalized);
+  const slot = hash % MODEL_SLOTS_PER_FAMILY;
+  const base = family?.hue ?? UNCLAIMED_HUES[Math.floor(hash / MODEL_SLOTS_PER_FAMILY) % UNCLAIMED_HUES.length];
+  const hue = base + ((slot % 5) - 2) * 5; // −10…+10°
+  const light = 42 + Math.floor(slot / 5) * 5; // 42…67 %
+  return `hsl(${hue} 58% ${light}%)`;
 }

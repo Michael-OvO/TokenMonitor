@@ -37,7 +37,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 //     schedule; we just re-read state.vscdb before each remote call.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CURSOR_API_MAX_PAGES: usize = 20;
+// ponytail: 50 × 100 = 5000 events per fetch; raise again if a year view
+// ever truncates for heavy users.
+const CURSOR_API_MAX_PAGES: usize = 50;
 const CURSOR_API_PAGE_SIZE: usize = 100;
 const CURSOR_API_KEY_ENV: &str = "CURSOR_API_KEY";
 const CURSOR_SESSION_TOKEN_ENV: &str = "CURSOR_SESSION_TOKEN";
@@ -656,15 +658,25 @@ pub(crate) fn parse_cursor_official_usage_events(
     since: Option<NaiveDate>,
     session_key: &str,
 ) -> Result<Vec<ParsedEntry>, String> {
-    let rows = data
+    let map = data.as_object().ok_or_else(|| {
+        format!("Cursor API payload is not a JSON object (session_key={session_key})")
+    })?;
+    // api2 speaks protobuf-JSON: a page with zero events comes back as `{}`
+    // (empty repeated fields are omitted), so a missing array means no rows,
+    // not a malformed payload.
+    let empty = Vec::new();
+    let rows = map
         .get("usageEvents")
-        .or_else(|| data.get("usageEventsDisplay"))
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            format!(
-                "Cursor API payload missing usageEvents/usageEventsDisplay array (session_key={session_key})"
-            )
-        })?;
+        .or_else(|| map.get("usageEventsDisplay"))
+        .map(|value| {
+            value.as_array().ok_or_else(|| {
+                format!(
+                    "Cursor API usageEvents/usageEventsDisplay is not an array (session_key={session_key})"
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(&empty);
     let mut entries = Vec::new();
     for (idx, row) in rows.iter().enumerate() {
         let Some(map) = row.as_object() else {
@@ -1100,6 +1112,68 @@ mod tests {
                 Err(e) => format!("ERR {e}"),
             };
             println!("[STAGE3 remote {label}] elapsed={:?} {desc}", t.elapsed());
+        }
+    }
+
+    /// Probe: what do Cursor usage events *without* `tokenUsage` look like?
+    /// Grok Bot (Cursor "sand") usage lands in the same feed; this prints one
+    /// raw sample per `kind` so the parser can be taught to price them.
+    /// Run: TM_EMBED_TEST_MANIFEST=1 cargo test --lib cursor_remote_probe_event_shapes -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn cursor_remote_probe_event_shapes() {
+        prime_ide_access_token();
+        let Some(auth) = resolve_cursor_auth() else {
+            println!("no cursor auth on this machine");
+            return;
+        };
+        let since = Local::now().date_naive() - chrono::Duration::days(7);
+        let client = reqwest::blocking::Client::new();
+        let mut samples: std::collections::BTreeMap<String, (usize, Value)> = Default::default();
+        for page in 1..=5 {
+            let mut req = client
+                .post(cursor_request_url(&auth))
+                .header("Content-Type", "application/json")
+                .header("Connect-Protocol-Version", "1")
+                .json(&build_cursor_usage_request_payload(
+                    &auth,
+                    page,
+                    Some(since),
+                ));
+            req = apply_cursor_auth(req, &auth);
+            let data: Value = req.send().unwrap().json().unwrap();
+            let rows = data
+                .get("usageEvents")
+                .or_else(|| data.get("usageEventsDisplay"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for row in &rows {
+                let has_tokens = row.get("tokenUsage").is_some();
+                if let Some(u) = row.get("tokenUsage") {
+                    let g = |k: &str| u.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                    println!(
+                        "[CSV] {},{},{},{},{},{}",
+                        row.get("model").and_then(Value::as_str).unwrap_or(""),
+                        g("inputTokens"),
+                        g("outputTokens"),
+                        g("cacheWriteTokens"),
+                        g("cacheReadTokens"),
+                        g("totalCents")
+                    );
+                }
+                let kind = row.get("kind").and_then(Value::as_str).unwrap_or("<none>");
+                let model = row.get("model").and_then(Value::as_str).unwrap_or("<none>");
+                let key = format!("tokens={has_tokens} kind={kind} model={model}");
+                let slot = samples.entry(key).or_insert((0, row.clone()));
+                slot.0 += 1;
+            }
+            if !cursor_response_has_next_page(&data, page, CURSOR_API_PAGE_SIZE) {
+                break;
+            }
+        }
+        for (key, (n, sample)) in &samples {
+            println!("[PROBE] {n:>4}x {key}\n        {sample}");
         }
     }
 }

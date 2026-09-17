@@ -648,9 +648,11 @@ pub async fn move_float_ball_to(
 
     let (clamp_rule, clamped_ball_x, clamped_ball_y) = if float_state.expanded {
         let inner_bounds = inset_bounds(bounds, sizes.expand_margin);
+        // Clamp the window's left edge (x), not the ball: with a Left expand
+        // direction the ball sits `offset` px inside the window.
         (
             "expanded-inner-margin",
-            inner_bounds.clamp_x(ball_x, sizes.expanded_width),
+            inner_bounds.clamp_x(x, sizes.expanded_width) + offset,
             inner_bounds.clamp_y(ball_y, sizes.expanded_height),
         )
     } else {

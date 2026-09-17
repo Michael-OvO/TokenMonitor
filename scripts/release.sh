@@ -8,6 +8,12 @@
 set -e
 
 VERSION="$1"
+if [ -z "$VERSION" ]; then
+  git fetch --tags --quiet
+  echo "Latest tag: $(git tag -l 'v*' --sort=-v:refname | head -1)"
+  read -rp "New tag (e.g. 0.14.2 or v0.14.2): " VERSION
+fi
+VERSION="${VERSION#v}"
 
 # ── Validate ──────────────────────────────────────────────────────────────────
 
