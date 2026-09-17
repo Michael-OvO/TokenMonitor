@@ -37,7 +37,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 //     schedule; we just re-read state.vscdb before each remote call.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CURSOR_API_MAX_PAGES: usize = 20;
+// ponytail: 50 × 100 = 5000 events per fetch; raise again if a year view
+// ever truncates for heavy users.
+const CURSOR_API_MAX_PAGES: usize = 50;
 const CURSOR_API_PAGE_SIZE: usize = 100;
 const CURSOR_API_KEY_ENV: &str = "CURSOR_API_KEY";
 const CURSOR_SESSION_TOKEN_ENV: &str = "CURSOR_SESSION_TOKEN";
