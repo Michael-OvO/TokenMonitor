@@ -238,7 +238,11 @@ fn looks_like_moonshot_k_series(normalized: &str) -> bool {
     if digits == 0 {
         return false;
     }
-    matches!(rest[digits..].chars().next(), None | Some('.') | Some('-'))
+    // `detect_model_family` has already turned dashes into spaces.
+    matches!(
+        rest[digits..].chars().next(),
+        None | Some('.') | Some('-') | Some(' ')
+    )
 }
 
 pub fn detect_model_family(raw: &str) -> ModelFamily {
@@ -274,7 +278,7 @@ pub fn detect_model_family(raw: &str) -> ModelFamily {
 
     if normalized.starts_with("kimi")
         || normalized.contains("moonshot")
-        || looks_like_moonshot_k_series(&normalized)
+        || looks_like_moonshot_k_series(normalized)
     {
         return ModelFamily::Moonshot;
     }

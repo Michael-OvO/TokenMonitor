@@ -257,7 +257,7 @@ const FAMILY_HUES: readonly { readonly test: RegExp; readonly hue: number }[] = 
   { test: /^gemini/, hue: 262 }, // indigo
   // Bare K-series ("k3", "k3-instruct") is how the Kimi Code CLI logs Moonshot
   // models (mirrors `looks_like_moonshot_k_series` in src-tauri/src/models.rs).
-  { test: /^kimi|moonshot|^k\d+([.-]|$)/, hue: 318 }, // magenta
+  { test: /^kimi|moonshot|^k\d+([. ]|$)/, hue: 318 }, // magenta
   { test: /^qwen/, hue: 345 }, // rose
   { test: /^glm/, hue: 145 }, // green
   { test: /^deepseek/, hue: 235 }, // cobalt
