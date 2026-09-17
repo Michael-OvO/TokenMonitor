@@ -242,7 +242,10 @@ fn looks_like_moonshot_k_series(normalized: &str) -> bool {
 }
 
 pub fn detect_model_family(raw: &str) -> ModelFamily {
-    let normalized = raw.trim().to_ascii_lowercase();
+    // Dashes read as spaces and a Cursor "cursor-" prefix is dropped, so
+    // "cursor-gpt-5" is detected as OpenAI like "gpt 5".
+    let spaced = raw.trim().to_ascii_lowercase().replace('-', " ");
+    let normalized = spaced.strip_prefix("cursor ").unwrap_or(&spaced);
     if normalized.is_empty() {
         return ModelFamily::Unknown;
     }
@@ -534,7 +537,23 @@ pub fn normalize_generic_model(raw: &str) -> (String, String) {
     }
 }
 
+/// Display names never show dashes, and Cursor slugs ("cursor-grok-4.6-fast")
+/// lose their "cursor" prefix. The key keeps coming from the raw name so
+/// archived history stays grouped under the same model.
 pub fn normalize_model(raw: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .get(..7)
+        .filter(|p| p.eq_ignore_ascii_case("cursor-"))
+        .map(|_| &trimmed[7..])
+        .filter(|s| !s.is_empty())
+        .unwrap_or(trimmed);
+    let (_, key) = normalize_model_by_family(raw);
+    let (display, _) = normalize_model_by_family(stripped);
+    (display.replace('-', " "), key)
+}
+
+fn normalize_model_by_family(raw: &str) -> (String, String) {
     match detect_model_family(raw) {
         ModelFamily::Anthropic => normalize_claude_model(raw),
         ModelFamily::OpenAI => normalize_codex_model(raw),
@@ -646,6 +665,17 @@ pub fn known_model_from_raw(raw: &str) -> KnownModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_display_name_drops_prefix_and_dashes() {
+        let (d, k) = normalize_model("cursor-grok-4.6-xhigh-fast");
+        assert_eq!(d, "grok 4.6 xhigh fast");
+        assert_eq!(k, normalize_model_by_family("cursor-grok-4.6-xhigh-fast").1);
+        assert_eq!(normalize_model("Cursor-claude-4.5-sonnet").0, "Sonnet");
+        assert_eq!(normalize_model("mistral-large-2").0, "mistral large 2");
+        assert_eq!(detect_model_family("cursor-gpt-5-codex"), ModelFamily::OpenAI);
+        assert_eq!(detect_model_family("cursor-gemini-2.5-pro"), ModelFamily::Google);
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     // normalize_claude_model — every alias branch
@@ -1151,7 +1181,7 @@ mod tests {
         let (d, k) = normalize_model("my-custom-model");
         assert_eq!(
             (d.as_str(), k.as_str()),
-            ("my-custom-model", "my-custom-model")
+            ("my custom model", "my-custom-model")
         );
     }
 

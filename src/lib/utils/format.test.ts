@@ -218,9 +218,19 @@ describe("modelColor", () => {
     expect(modelColor("opus-4-6")).not.toBe(modelColor("sonnet-4-6"));
   });
 
-  it("falls back to greys for unknown vendors", () => {
-    expect(modelColor("nonexistent")).toMatch(/^hsl\(0 0% /);
-    expect(modelColor("unknown")).toMatch(/^hsl\(0 0% /);
+  it("reads Cursor slugs as their real vendor", () => {
+    expect(modelColor("cursor-claude-4.5-sonnet")).toBe(modelColor("claude 4.5 sonnet"));
+    expect(Math.abs(hue(modelColor("cursor-gpt-5-codex")) - 207)).toBeLessThanOrEqual(10);
+    expect(Math.abs(hue(modelColor("cursor-gemini-2.5-pro")) - 262)).toBeLessThanOrEqual(10);
+  });
+
+  it("gives unknown vendors a colour from an unused hue, never grey", () => {
+    const familyHues = [22, 207, 262, 318, 345, 145, 235, 290, 100];
+    for (const k of ["nonexistent", "unknown", "mistral-large", "llama-4"]) {
+      const c = modelColor(k);
+      expect(c).not.toMatch(/ 0% /);
+      for (const h of familyHues) expect(Math.abs(hue(c) - h)).toBeGreaterThan(10);
+    }
   });
 });
 

@@ -262,13 +262,26 @@ const FAMILY_HUES: readonly { readonly test: RegExp; readonly hue: number }[] = 
   { test: /^glm/, hue: 145 }, // green
   { test: /^deepseek/, hue: 235 }, // cobalt
   { test: /^composer/, hue: 290 }, // violet
+  { test: /^grok|xai/, hue: 100 }, // lime
 ];
+// Hues ≥20° away from every family band, so an unknown vendor never reads as a
+// known one. Picked per key by hash, then nudged/lightened like family models.
+const UNCLAIMED_HUES = [50, 72, 122, 170, 185];
 
 export function modelColor(key: string): string {
-  const normalized = key.trim().toLowerCase();
+  // Cursor slugs look like "cursor-claude-4.5-sonnet": drop the "cursor"
+  // prefix and dashes so the vendor name leads and the ^ anchors match.
+  const normalized = key
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, " ")
+    .replace(/^cursor\s+/, "")
+    .replace(/\s+/g, " ");
   const family = FAMILY_HUES.find((f) => f.test.test(normalized));
-  const slot = hashString(normalized) % MODEL_SLOTS_PER_FAMILY;
-  const hue = (family?.hue ?? 0) + ((slot % 5) - 2) * 5; // −10…+10°
+  const hash = hashString(normalized);
+  const slot = hash % MODEL_SLOTS_PER_FAMILY;
+  const base = family?.hue ?? UNCLAIMED_HUES[Math.floor(hash / MODEL_SLOTS_PER_FAMILY) % UNCLAIMED_HUES.length];
+  const hue = base + ((slot % 5) - 2) * 5; // −10…+10°
   const light = 42 + Math.floor(slot / 5) * 5; // 42…67 %
-  return family ? `hsl(${hue} 58% ${light}%)` : `hsl(0 0% ${light}%)`;
+  return `hsl(${hue} 58% ${light}%)`;
 }
