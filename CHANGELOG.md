@@ -5,6 +5,9 @@
 ### 修复
 - **macOS 27 左键点击菜单栏图标弹出菜单而不是面板**：tray-icon ≤ 0.24 在启动时把 NSMenu 挂在 NSStatusItem 上，而 macOS 27 在挂有菜单时不再把鼠标事件转发给托盘视图，导致 `show_menu_on_left_click(false)` 失效、`TrayIconEvent::Click` 不再触发。现在启动后把菜单从 status item 上摘下，仅在右键时临时挂回并弹出（与 tray-icon 0.25 的修复一致），左键恢复为直接显示 / 隐藏面板
 
+### UI
+- **图表悬停明细面板改为卷起**：鼠标离开柱状图后明细面板不再瞬间消失，而是保持行内容挂载、由 `disclosureMotion` 驱动高度卷起（展开 / 收起各 200ms，离开宽限 300→150ms）；`chart-hover` 事件附带 `durationMs`，窗口尺寸循环在动画期间按节流跟随内容高度并在结束时对齐到实测高度，不再追着 ResizeObserver 逐次重绘。手感可通过 `Chart.svelte` 的 `DETAIL_CONFIG` 调节
+
 ## v0.15.0 — Kimi Code 集成
 
 ### 新增

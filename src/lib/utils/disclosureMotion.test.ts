@@ -10,7 +10,7 @@ function setup(initiallyOpen = false, reduced = false) {
     removeEventListener: vi.fn(),
   };
   vi.stubGlobal("window", { matchMedia: () => preference });
-  const animations: Array<{ cancel: ReturnType<typeof vi.fn> }> = [];
+  const animations: Array<{ cancel: ReturnType<typeof vi.fn>; onfinish?: (() => void) | null }> = [];
   const node = {
     style: { height: "" },
     getBoundingClientRect: () => ({ height: currentHeight }),
@@ -102,5 +102,48 @@ describe("disclosureMotion", () => {
     action.update(true);
     action.destroy();
     expect(animations[0].cancel).toHaveBeenCalledOnce();
+  });
+
+  it("accepts custom durations and reports when the motion settles", () => {
+    const { action, node, animations, setCurrentHeight } = setup();
+    const onSettled = vi.fn();
+    action.update({ open: true, openMs: 200, closeMs: 160, onSettled });
+    expect(node.animate).toHaveBeenLastCalledWith(
+      [{ height: "0px" }, { height: "240px" }],
+      expect.objectContaining({ duration: 200 }),
+    );
+    expect(onSettled).not.toHaveBeenCalled();
+    animations[0].onfinish?.();
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(true);
+
+    setCurrentHeight(240);
+    action.update({ open: false, openMs: 200, closeMs: 160, onSettled });
+    expect(node.animate).toHaveBeenLastCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ duration: 160 }),
+    );
+    animations[1].onfinish?.();
+    expect(onSettled).toHaveBeenLastCalledWith(false);
+  });
+
+  it("does not report a settle for motion cut short by a reversal", () => {
+    const { action, animations, setCurrentHeight } = setup();
+    const onSettled = vi.fn();
+    action.update({ open: true, onSettled });
+    setCurrentHeight(84);
+    action.update({ open: false, onSettled });
+    expect(animations[0].cancel).toHaveBeenCalledOnce();
+    expect(animations[0].onfinish).toBeNull();
+    expect(onSettled).not.toHaveBeenCalled();
+    animations[1].onfinish?.();
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("reports an immediate settle when reduced motion skips the animation", () => {
+    const { action, node } = setup(false, true);
+    const onSettled = vi.fn();
+    action.update({ open: true, onSettled });
+    expect(node.animate).not.toHaveBeenCalled();
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(true);
   });
 });

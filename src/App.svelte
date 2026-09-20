@@ -80,7 +80,7 @@
   import SingleDeviceView from "./lib/components/SingleDeviceView.svelte";
   import UpdateBanner from "./lib/components/UpdateBanner.svelte";
   import PermissionsOnboarding from "./lib/components/PermissionsOnboarding.svelte";
-  import type { HeaderTabs, UsagePeriod, UsageProvider, RateLimitsPayload } from "./lib/types/index.js";
+  import type { ChartHoverDetail, HeaderTabs, UsagePeriod, UsageProvider, RateLimitsPayload } from "./lib/types/index.js";
 
   let showSplash = $state(true);
   let appReady = $state(false);
@@ -786,8 +786,8 @@
     };
 
     function onChartHover(e: Event) {
-      const active = (e as CustomEvent<{ active: boolean }>).detail.active;
-      resizeOrch?.setChartHoverActive(active);
+      const { active, durationMs } = (e as CustomEvent<ChartHoverDetail>).detail;
+      resizeOrch?.setChartHoverActive(active, durationMs);
     }
     window.addEventListener("chart-hover", onChartHover);
 

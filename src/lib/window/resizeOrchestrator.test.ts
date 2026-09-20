@@ -334,4 +334,127 @@ describe("createResizeOrchestrator", () => {
 
     orchestrator.destroy();
   });
+
+  it("follows the chart detail panel while it unrolls and snaps to its settled height", async () => {
+    const windowStub = installWindowStub(320);
+    const { runNextFrame } = installRafStub();
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const popEl = createPopEl(320);
+    const invoke = vi.fn((_cmd: string, args: Record<string, unknown>) => {
+      windowStub.innerHeight = args.height as number;
+      return Promise.resolve();
+    });
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: popEl.element,
+    });
+
+    orchestrator.markInitialContentReady();
+    await flushMicrotasks();
+    expect(invoke).not.toHaveBeenCalled();
+
+    // The panel animates its height over 80ms. The window tracks it with at
+    // most one native resize per throttle interval — instead of chasing every
+    // ResizeObserver notification — and then lands exactly on the final height.
+    orchestrator.setChartHoverActive(true, 80);
+    const frames: Array<[number, number]> = [
+      [0, 320], [16, 344], [32, 362], [48, 374], [64, 380], [80, 384], [112, 384], [144, 384],
+    ];
+    for (const [frameNow, height] of frames) {
+      popEl.setHeight(height);
+      now = frameNow;
+      runNextFrame(frameNow);
+      await flushMicrotasks();
+    }
+
+    expect(invoke.mock.calls.length).toBeLessThan(frames.length);
+    expect(invoke).toHaveBeenLastCalledWith("set_window_size_and_align", {
+      width: WINDOW_WIDTH,
+      height: 384,
+    });
+    expect(() => runNextFrame(160)).toThrow("No queued animation frame to run");
+
+    // While the panel stays open, observer-driven shrinks remain blocked so
+    // sweeping across shorter buckets does not jitter the window.
+    popEl.setHeight(350);
+    orchestrator.resizeToContent("resize-observer");
+    runNextFrame(176);
+    await flushMicrotasks();
+    expect(invoke).toHaveBeenLastCalledWith("set_window_size_and_align", {
+      width: WINDOW_WIDTH,
+      height: 384,
+    });
+
+    orchestrator.destroy();
+  });
+
+  it("follows the chart detail panel as it rolls up instead of snapping after it vanishes", async () => {
+    const windowStub = installWindowStub(384);
+    const { runNextFrame } = installRafStub();
+    let now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    const popEl = createPopEl(384);
+    const invoke = vi.fn((_cmd: string, args: Record<string, unknown>) => {
+      windowStub.innerHeight = args.height as number;
+      return Promise.resolve();
+    });
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: popEl.element,
+    });
+
+    orchestrator.markInitialContentReady();
+    orchestrator.setAnchorEdge("top");
+    await flushMicrotasks();
+    expect(invoke).not.toHaveBeenCalled();
+
+    orchestrator.setChartHoverActive(false, 80);
+    const frames: Array<[number, number]> = [
+      [0, 384], [32, 352], [64, 328], [96, 320], [144, 320],
+    ];
+    for (const [frameNow, height] of frames) {
+      popEl.setHeight(height);
+      now = frameNow;
+      runNextFrame(frameNow);
+      await flushMicrotasks();
+    }
+
+    const heights = invoke.mock.calls.map(([, args]) => (args as { height: number }).height);
+    expect(heights).toEqual([352, 328, 320]);
+    expect(() => runNextFrame(160)).toThrow("No queued animation frame to run");
+
+    orchestrator.destroy();
+  });
+
+  it("keeps the single-measure chart hover path when the panel does not animate", async () => {
+    installWindowStub(384);
+    const { runNextFrame } = installRafStub();
+    const popEl = createPopEl(384);
+    const invoke = vi.fn(() => Promise.resolve());
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: popEl.element,
+    });
+
+    orchestrator.markInitialContentReady();
+    orchestrator.setAnchorEdge("top");
+    await flushMicrotasks();
+
+    // Reduced motion: the panel disappears at once, so one measured resize
+    // on the next frame is all that is needed.
+    popEl.setHeight(320);
+    orchestrator.setChartHoverActive(false);
+    runNextFrame(16);
+    await flushMicrotasks();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenLastCalledWith("set_window_size_and_align", {
+      width: WINDOW_WIDTH,
+      height: 320,
+    });
+    expect(() => runNextFrame(32)).toThrow("No queued animation frame to run");
+
+    orchestrator.destroy();
+  });
 });
