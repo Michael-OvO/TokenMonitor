@@ -6,7 +6,9 @@
   import { logger } from "../utils/logger.js";
   import type { ChartBucket, ChartHoverDetail } from "../types/index.js";
   import { filterVisibleChartBuckets, getXAxisLabels } from "./chartBuckets.js";
+  import { pieHitSectorPaths } from "./pieHitAreas.js";
   import { disclosureMotion } from "../utils/disclosureMotion.js";
+  import { createStickyHover } from "../utils/stickyHover.js";
 
   import { isWindows } from "../utils/platform.js";
   import { invoke } from "@tauri-apps/api/core";
@@ -213,6 +215,7 @@
     return () => {
       if (hoverTimer) clearTimeout(hoverTimer);
       if (leaveTimer) clearTimeout(leaveTimer);
+      sliceHover.dispose();
       // Unmounting mid-hover must not leave the window's shrink gate closed.
       if (detailOpen) dispatchChartHover(false, 0);
     };
@@ -311,6 +314,15 @@
   });
   let pieTotal = $derived(pieSlices().reduce((sum, s) => sum + s.cost, 0));
   let hoveredSlice = $state(-1);
+  /** Grace before the centre falls back to the total after the pointer leaves
+   * a slice or row. Slices and rows are hit-tested without gaps (see the hit
+   * sectors and the row borders), so this only covers the stretch between the
+   * donut and the list and a pointer skimming past the ring's outer edge. */
+  const PIE_LEAVE_DELAY_MS = 150;
+  const sliceHover = createStickyHover({
+    leaveDelayMs: PIE_LEAVE_DELAY_MS,
+    onChange: (i) => { hoveredSlice = i; },
+  });
 
   // Donut geometry: square viewBox, laid out as a fixed square on the left of
   // a flex row with the breakdown panel filling the rest.
@@ -320,24 +332,30 @@
   const PIE_R_OUTER = 44;
   const PIE_R_INNER = 34;
   const PIE_GAP_RAD = 0.018;
+  /** The hit sectors reach a little past the ring so a pointer skimming its
+   * outer edge stays on the slice. */
+  const PIE_HIT_PAD = 2;
 
-  interface PieArc { key: string; name: string; cost: number; path: string; pct: number; }
+  /** `path` draws the ring segment; `hit` is its gapless sector for hover. */
+  interface PieArc { key: string; name: string; cost: number; path: string; hit: string; pct: number; }
 
   let pieArcs = $derived((): PieArc[] => {
     const slices = pieSlices();
     const total = pieTotal;
     if (total <= 0 || slices.length === 0) return [];
+    const hits = pieHitSectorPaths(slices.map((s) => s.cost), PIE_CX, PIE_CY, PIE_R_OUTER + PIE_HIT_PAD);
     if (slices.length === 1) {
       return [{
         key: slices[0].key,
         name: slices[0].name,
         cost: slices[0].cost,
         path: donutFullRing(),
+        hit: hits[0],
         pct: 1,
       }];
     }
     let angle = -Math.PI / 2;
-    return slices.map((s) => {
+    return slices.map((s, i) => {
       const span = (s.cost / total) * Math.PI * 2;
       const a0 = angle + PIE_GAP_RAD / 2;
       const a1 = angle + span - PIE_GAP_RAD / 2;
@@ -346,6 +364,7 @@
         name: s.name,
         cost: s.cost,
         path: donutArc(a0, a1),
+        hit: hits[i],
         pct: s.cost / total,
       };
       angle += span;
@@ -551,7 +570,12 @@
           <!-- PIE / DONUT CHART -->
           {@const arcs = pieArcs()}
           {@const total = pieTotal}
-          <div class="pie-wrap">
+          <div
+            class="pie-wrap"
+            role="group"
+            aria-label="Cost share by {$chartSegmentMode === "device" ? "device" : "model"}"
+            onmouseleave={() => sliceHover.clear()}
+          >
             {#if arcs.length === 0}
               <div class="pie-empty-state">No data</div>
             {:else}
@@ -568,8 +592,6 @@
                       style="--delay: {i * 0.05}s"
                       role="img"
                       aria-label={sliceAriaLabel(arc)}
-                      onmouseenter={() => (hoveredSlice = i)}
-                      onmouseleave={() => (hoveredSlice = -1)}
                     />
                   {/each}
                 </g>
@@ -579,6 +601,22 @@
                 <text x={PIE_CX} y={PIE_CY + 7} text-anchor="middle" dominant-baseline="central" class="pie-center-value">
                   {focus ? `${(focus.pct * 100).toFixed(1)}%` : formatCost(total)}
                 </text>
+                <!-- Gapless hit sectors over the whole disc: inside it the
+                     pointer is always on exactly one slice, so sliding between
+                     two categories never crosses a spot nobody owns (the ring
+                     gaps, the hole) and the centre never flashes the total on
+                     the way. -->
+                <g class="pie-hit" aria-hidden="true">
+                  {#each arcs as arc, i}
+                    <path
+                      d={arc.hit}
+                      class="pie-hit-sector"
+                      role="presentation"
+                      onmouseenter={() => sliceHover.enter(i)}
+                      onmouseleave={() => sliceHover.leave()}
+                    />
+                  {/each}
+                </g>
               </svg>
 
               <ul class="pie-breakdown" role="list">
@@ -587,8 +625,8 @@
                     class="pie-row"
                     class:active={hoveredSlice === i}
                     style="--delay: {i * 0.04 + 0.08}s"
-                    onmouseenter={() => (hoveredSlice = i)}
-                    onmouseleave={() => (hoveredSlice = -1)}
+                    onmouseenter={() => sliceHover.enter(i)}
+                    onmouseleave={() => sliceHover.leave()}
                   >
                     <span class="pie-row-dot" style="background:{segmentColorFn(arc.key)}"></span>
                     <span class="pie-row-name" title={arc.name}>{arc.name}</span>
@@ -865,7 +903,7 @@
     to   { opacity: 1; transform: rotate(0) scale(1); }
   }
   .pie-slice {
-    cursor: pointer;
+    pointer-events: none;
     opacity: 0.92;
     transition: opacity var(--t-fast) ease, filter var(--t-fast) ease;
     will-change: opacity, filter;
@@ -878,11 +916,18 @@
   .pie-center-label {
     font: 500 9px/1 "Inter", sans-serif;
     fill: var(--t3);
+    pointer-events: none;
   }
   .pie-center-value {
     font: 600 11px/1 "Inter", sans-serif;
     fill: var(--t1);
     font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
+  .pie-hit-sector {
+    fill: transparent;
+    pointer-events: fill;
+    cursor: pointer;
   }
   .pie-breakdown {
     flex: 1 1 auto;
@@ -892,9 +937,30 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    /* Rows touch: the 4px they used to be apart is a transparent border on
+       each row now, so the pointer is never between two categories. */
+    gap: 0;
     max-height: 108px;
     overflow-y: auto;
+    padding-right: 2px;
+  }
+  /* When more models than fit: a 4px hairline thumb on a bare track instead
+     of the native bar. Only the -webkit- pseudo-elements are set on purpose:
+     engines drop them as soon as the standard `scrollbar-width` /
+     `scrollbar-color` properties are present, and fall back to their own
+     "thin" bar, which is still ~11px with a track. */
+  .pie-breakdown::-webkit-scrollbar { width: 4px; }
+  .pie-breakdown::-webkit-scrollbar-track { background: transparent; }
+  .pie-breakdown::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.12);
+    border-radius: 2px;
+  }
+  .pie-breakdown:hover::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.22); }
+  :global([data-theme="light"]) .pie-breakdown::-webkit-scrollbar-thumb {
+    background: rgba(0,0,0,0.16);
+  }
+  :global([data-theme="light"]) .pie-breakdown:hover::-webkit-scrollbar-thumb {
+    background: rgba(0,0,0,0.28);
   }
   .pie-row {
     display: grid;
@@ -902,7 +968,11 @@
     align-items: center;
     column-gap: 8px;
     padding: 3px 6px;
-    border-radius: 5px;
+    border: solid transparent;
+    border-width: 2px 0;
+    background-clip: padding-box;
+    /* Outer radius that leaves the highlight's padding-box corners at 5px. */
+    border-radius: 5px / 7px;
     cursor: default;
     opacity: 0;
     animation: pieRowIn var(--t-slow) var(--ease-out) forwards;
