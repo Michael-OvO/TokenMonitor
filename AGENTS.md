@@ -64,7 +64,11 @@ are persisted to the usage archive so history survives log deletion. Models miss
 table (`usage/pricing.rs`, bump `PRICING_VERSION` when editing) resolve via LiteLLM/OpenRouter with 24h TTL.
 
 Platform notes (verified in code): tray cost text uses `set_title()` beside the icon on macOS; on
-Windows/Linux `set_title` is a noop and the cost goes in the tooltip (`commands/tray.rs`). Glass effect is set
+Windows/Linux `set_title` is a noop and the cost goes in the tooltip (`commands/tray.rs`). On macOS the tray
+menu is detached from the NSStatusItem right after the tray is built and re-attached only while a right-click
+presents it (`platform/macos/tray_menu.rs`): macOS 27 stops forwarding clicks to the tray view while a menu is
+attached, which made left-click open the menu instead of the popover. Drop that module once Tauri ships
+tray-icon >= 0.25, which does the same upstream. Glass effect is set
 from the frontend through Tauri's window-effects API (`setNativeGlassEffect` in `lib/window/appearance.ts`):
 HudWindow on macOS, Mica/Acrylic on Windows, noop on Linux. The old Rust `set_glass_effect` and
 `set_window_surface` commands were no-ops and are gone.

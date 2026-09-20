@@ -5,6 +5,10 @@
 /// for why an in-process write pops a modal password panel.
 pub mod keychain;
 
+/// Detaches the tray menu from the status item and presents it on right click,
+/// because macOS 27 swallows left clicks while a menu is attached.
+pub mod tray_menu;
+
 /// Set Dock icon visibility via activation policy.
 pub fn set_dock_icon_visible(app: &tauri::AppHandle, visible: bool) -> Result<(), String> {
     use tauri::ActivationPolicy;

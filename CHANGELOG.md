@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## Unreleased
+
+### 修复
+- **macOS 27 左键点击菜单栏图标弹出菜单而不是面板**：tray-icon ≤ 0.24 在启动时把 NSMenu 挂在 NSStatusItem 上，而 macOS 27 在挂有菜单时不再把鼠标事件转发给托盘视图，导致 `show_menu_on_left_click(false)` 失效、`TrayIconEvent::Click` 不再触发。现在启动后把菜单从 status item 上摘下，仅在右键时临时挂回并弹出（与 tray-icon 0.25 的修复一致），左键恢复为直接显示 / 隐藏面板
+
 ## v0.15.0 — Kimi Code 集成
 
 ### 新增
