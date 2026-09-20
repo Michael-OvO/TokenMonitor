@@ -21,15 +21,18 @@ use commands::{
     AppState,
 };
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use tauri::tray::TrayIconEvent;
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::TrayIconBuilder,
     Emitter, Manager, WindowEvent,
 };
 use tauri_plugin_autostart::MacosLauncher;
 #[cfg(target_os = "macos")]
 use tauri_plugin_positioner::{Position, WindowExt};
+use tray::click::{gesture_for, TrayGesture};
 
 /// Extract (x, y) from a `tauri::Position` enum as physical-pixel f64.
 #[cfg(target_os = "macos")]
@@ -234,50 +237,60 @@ pub fn run() {
                 .on_tray_icon_event(|tray, event| {
                     tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
 
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        #[cfg(target_os = "macos")]
-                        rect,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
-                            } else {
-                                #[cfg(target_os = "windows")]
-                                {
-                                    platform::windows::window::position_near_tray(&window);
-                                    let _ = window.show();
+                    match gesture_for(&event) {
+                        Some(TrayGesture::PresentMenu) => {
+                            // Windows/Linux: tray-icon pops the attached menu itself.
+                            // macOS: the menu is detached (see `platform::macos::tray_menu`),
+                            // so present it here.
+                            #[cfg(target_os = "macos")]
+                            platform::macos::tray_menu::present(tray);
+                        }
+                        Some(TrayGesture::TogglePopover) => {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                if window.is_visible().unwrap_or(false) {
+                                    let _ = window.hide();
+                                } else {
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        platform::windows::window::position_near_tray(&window);
+                                        let _ = window.show();
+                                    }
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        // Pre-hint position before show (WM may respect this).
+                                        platform::linux::position_top_right(&window);
+                                        let _ = window.show();
+                                        // Immediate re-position (works if WM realized fast enough).
+                                        platform::linux::position_top_right(&window);
+                                        platform::clamp_window_to_work_area(&window);
+                                        // Deferred re-position to catch slow WM realization.
+                                        platform::linux::deferred_reposition(window.clone());
+                                    }
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        if let TrayIconEvent::Click { rect, .. } = &event {
+                                            move_window_below_tray(&window, rect);
+                                        }
+                                        platform::clamp_window_to_work_area(&window);
+                                        let _ = window.show();
+                                    }
+                                    #[cfg(target_os = "windows")]
+                                    platform::windows::window::activate_window(&window);
+                                    #[cfg(not(target_os = "windows"))]
+                                    let _ = window.set_focus();
                                 }
-                                #[cfg(target_os = "linux")]
-                                {
-                                    // Pre-hint position before show (WM may respect this).
-                                    platform::linux::position_top_right(&window);
-                                    let _ = window.show();
-                                    // Immediate re-position (works if WM realized fast enough).
-                                    platform::linux::position_top_right(&window);
-                                    platform::clamp_window_to_work_area(&window);
-                                    // Deferred re-position to catch slow WM realization.
-                                    platform::linux::deferred_reposition(window.clone());
-                                }
-                                #[cfg(target_os = "macos")]
-                                {
-                                    move_window_below_tray(&window, &rect);
-                                    platform::clamp_window_to_work_area(&window);
-                                    let _ = window.show();
-                                }
-                                #[cfg(target_os = "windows")]
-                                platform::windows::window::activate_window(&window);
-                                #[cfg(not(target_os = "windows"))]
-                                let _ = window.set_focus();
                             }
                         }
+                        None => {}
                     }
                 })
                 .build(app)?;
+            // macOS 27 stops delivering left clicks to the tray view while an
+            // NSMenu is attached to the status item, so keep the menu detached
+            // and present it ourselves on right click.
+            #[cfg(target_os = "macos")]
+            platform::macos::tray_menu::detach(&_tray);
             tracing::info!("[PROFILE] setup:tray+window = {:?}", setup_t0.elapsed());
 
             // Hide window on focus loss (popover behavior), but not when

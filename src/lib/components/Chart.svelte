@@ -4,8 +4,9 @@
   import { settings } from "../stores/settings.js";
   import { activeOffset, activePeriod, chartMode, chartSegmentMode } from "../stores/usage.js";
   import { logger } from "../utils/logger.js";
-  import type { ChartBucket } from "../types/index.js";
+  import type { ChartBucket, ChartHoverDetail } from "../types/index.js";
   import { filterVisibleChartBuckets, getXAxisLabels } from "./chartBuckets.js";
+  import { disclosureMotion } from "../utils/disclosureMotion.js";
 
   import { isWindows } from "../utils/platform.js";
   import { invoke } from "@tauri-apps/api/core";
@@ -19,7 +20,15 @@
   }
   const DETAIL_CONFIG = {
     HOVER_DELAY_MS: 50,
-    LEAVE_DELAY_MS: 300,
+    /** Grace period after the pointer leaves the chart before the panel rolls
+     * up; long enough to re-enter after an overshoot, short enough that the
+     * dismissal does not read as lag. */
+    LEAVE_DELAY_MS: 150,
+    /** Height animation of the detail panel (see disclosureMotion). The
+     * window follows the content for the same duration, so keep these in
+     * step with what the resize loop can track smoothly. */
+    OPEN_MS: 200,
+    CLOSE_MS: 200,
   } as const;
 
   interface Props {
@@ -82,7 +91,13 @@
   let maxCost = $derived($chartMode === "line" ? maxCostSingle : maxCostStacked);
   let hoveredIdx = $state(-1);
 
+  // The detail panel has two pieces of state: `displayedIdx` says which
+  // bucket's rows are in the DOM, `detailOpen` says whether the panel is
+  // unrolled. They diverge only while the panel rolls up — the rows stay
+  // mounted (at a shrinking height) until the motion settles, otherwise the
+  // collapse has nothing to show and the panel just vanishes.
   let displayedIdx = $state(-1);
+  let detailOpen = $state(false);
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let leaveTimer: ReturnType<typeof setTimeout> | null = null;
   let previousDataKey = $state("");
@@ -94,29 +109,61 @@
     return Boolean(chartContainerEl?.matches(":hover"));
   }
 
+  function prefersReducedMotion(): boolean {
+    return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+  }
+
+  /** Tell the window sizing loop the panel is opening/closing and for how
+   * long its height animates (0 = it changed at once). */
+  function dispatchChartHover(active: boolean, durationMs?: number) {
+    const animated = durationMs ?? (active ? DETAIL_CONFIG.OPEN_MS : DETAIL_CONFIG.CLOSE_MS);
+    const detail: ChartHoverDetail = {
+      active,
+      durationMs: prefersReducedMotion() ? 0 : animated,
+    };
+    window.dispatchEvent(new CustomEvent<ChartHoverDetail>("chart-hover", { detail }));
+  }
+
+  async function openDetail(i: number) {
+    const wasOpen = detailOpen;
+    displayedIdx = i;
+    // Let the rows mount before the action measures them for the unroll.
+    await tick();
+    detailOpen = true;
+    await tick();
+    // Swapping rows while open changes the height at once (no motion), so the
+    // window takes one measured resize; a fresh open follows the unroll.
+    dispatchChartHover(true, wasOpen ? 0 : undefined);
+  }
+
+  function closeDetail(durationMs?: number) {
+    if (!detailOpen) return;
+    detailOpen = false;
+    dispatchChartHover(false, durationMs);
+  }
+
+  /** disclosureMotion reports the roll-up finished: now the rows can go. */
+  function onDetailSettled(open: boolean) {
+    if (!open && !detailOpen) displayedIdx = -1;
+  }
+
   function onEnter(i: number) {
     if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
     hoveredIdx = i;
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
     const hasDetail = (visibleBuckets[i]?.total ?? 0) > 0;
+    if (!hasDetail) {
+      closeDetail();
+      return;
+    }
 
     if (DETAIL_CONFIG.HOVER_DELAY_MS > 0) {
-      hoverTimer = setTimeout(async () => {
-        if (hoveredIdx === i) {
-          displayedIdx = hasDetail ? i : -1;
-          if (hasDetail) {
-            await tick();
-            window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: true } }));
-          }
-        }
+      hoverTimer = setTimeout(() => {
+        hoverTimer = null;
+        if (hoveredIdx === i) void openDetail(i);
       }, DETAIL_CONFIG.HOVER_DELAY_MS);
     } else {
-      displayedIdx = hasDetail ? i : -1;
-      if (hasDetail) {
-        tick().then(() => {
-          window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: true } }));
-        });
-      }
+      void openDetail(i);
     }
   }
 
@@ -125,10 +172,10 @@
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
     if (leaveTimer) clearTimeout(leaveTimer);
     leaveTimer = setTimeout(() => {
+      leaveTimer = null;
       if (hoveredIdx >= 0) return;
       if (isPointerInsideChartContainer()) return;
-      displayedIdx = -1;
-      window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: false } }));
+      closeDetail();
     }, DETAIL_CONFIG.LEAVE_DELAY_MS);
   }
 
@@ -136,8 +183,15 @@
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
     if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
     hoveredIdx = -1;
+    // The buckets changed underneath the panel, so its rows are stale: drop
+    // them now rather than rolling up someone else's data.
     displayedIdx = -1;
-    window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: false } }));
+    if (detailOpen) {
+      closeDetail();
+    } else {
+      // Keeps the sizing loop's hover flag in sync and remeasures the view.
+      dispatchChartHover(false, 0);
+    }
   }
 
   // Reset on tab / provider / offset change.
@@ -159,6 +213,8 @@
     return () => {
       if (hoverTimer) clearTimeout(hoverTimer);
       if (leaveTimer) clearTimeout(leaveTimer);
+      // Unmounting mid-hover must not leave the window's shrink gate closed.
+      if (detailOpen) dispatchChartHover(false, 0);
     };
   });
 
@@ -444,16 +500,21 @@
     </div>
   </div>
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="detail"
-    class:visible={displayed != null}
+    class:open={detailOpen}
+    aria-hidden={!detailOpen}
+    use:disclosureMotion={{
+      open: detailOpen,
+      openMs: DETAIL_CONFIG.OPEN_MS,
+      closeMs: DETAIL_CONFIG.CLOSE_MS,
+      onSettled: onDetailSettled,
+    }}
   >
-    <div class="collapse-inner">
-      {#if displayed}
-        {@const segs = sortedSegments(displayed)}
-        <div class="detail-inner">
-          <div class="detail-head">
+    {#if displayed}
+      {@const segs = sortedSegments(displayed)}
+      <div class="detail-inner">
+        <div class="detail-head">
           <span class="detail-label">{displayed.label}</span>
           <span class="detail-total">{formatCost(displayed.total)}</span>
         </div>
@@ -470,7 +531,6 @@
         {/if}
       </div>
     {/if}
-    </div>
   </div>
 
   <div class="chart-body" class:pie-mode={$chartMode === "pie"}>
@@ -718,18 +778,11 @@
     width: 16px;
   }
 
+  /* Height is driven by disclosureMotion (0 → measured px → auto), so the
+     unroll and roll-up are real layout motion the window can follow. The
+     margins sit outside the animated box so the chart's footprint is stable. */
   .detail {
-    display: grid;
-    grid-template-rows: 0fr;
-    opacity: 0;
-    will-change: opacity, grid-template-rows;
-    transition: grid-template-rows 0.15s ease, opacity 0.15s ease;
-  }
-  .detail.visible {
-    opacity: 1;
-    grid-template-rows: 1fr;
-  }
-  .collapse-inner {
+    height: 0;
     overflow: hidden;
   }
   .ch.detail-above .detail { margin-bottom: 10px; }
@@ -924,6 +977,17 @@
     overflow: hidden;
     background: var(--surface-2);
     border-radius: 8px;
+    /* Rows fade slightly faster than the box rolls up, so the collapse reads
+       as the panel folding away rather than text being sliced off. */
+    opacity: 0;
+    transition: opacity var(--t-fast) ease;
+  }
+  .detail.open .detail-inner {
+    opacity: 1;
+    transition-duration: var(--t-normal);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .detail-inner { transition: none; }
   }
   .detail-head {
     display: flex; justify-content: space-between; align-items: baseline;
