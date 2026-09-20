@@ -1,3 +1,4 @@
+mod auto_hide;
 mod commands;
 mod logging;
 mod models;
@@ -249,8 +250,10 @@ pub fn run() {
                             let app = tray.app_handle();
                             if let Some(window) = app.get_webview_window("main") {
                                 if window.is_visible().unwrap_or(false) {
+                                    tracing::info!("tray click: hiding the popover");
                                     let _ = window.hide();
                                 } else {
+                                    tracing::info!("tray click: showing the popover");
                                     #[cfg(target_os = "windows")]
                                     {
                                         platform::windows::window::position_near_tray(&window);
@@ -299,6 +302,9 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let window_clone = window.clone();
                 window.on_window_event(move |event| {
+                    if let WindowEvent::Focused(true) = event {
+                        tracing::info!("popover gained focus");
+                    }
                     if let WindowEvent::Focused(false) = event {
                         let handle = window_clone.app_handle().clone();
                         let win = window_clone.clone();
@@ -307,21 +313,28 @@ pub fn run() {
                             std::thread::sleep(Duration::from_millis(150));
 
                             // A command (create_float_ball, set_dock_icon_visible, etc.)
-                            // requested that the next blur be ignored.
-                            let state = handle.state::<AppState>();
-                            if state
-                                .suppress_auto_hide
-                                .swap(false, std::sync::atomic::Ordering::SeqCst)
-                            {
+                            // armed the gate because it was about to cause this blur.
+                            if handle.state::<AppState>().auto_hide_gate.take() {
+                                tracing::info!(
+                                    "popover blur ignored: a command armed the auto-hide gate"
+                                );
                                 return;
                             }
 
-                            let any_app_window_focused = handle
-                                .webview_windows()
-                                .values()
-                                .any(|w| w.is_focused().unwrap_or(false));
-                            if !any_app_window_focused {
+                            let windows = handle.webview_windows();
+                            let focused: Vec<&str> = windows
+                                .iter()
+                                .filter(|(_, w)| w.is_focused().unwrap_or(false))
+                                .map(|(label, _)| label.as_str())
+                                .collect();
+                            if focused.is_empty() {
+                                tracing::info!("popover blur: no app window focused, hiding");
                                 let _ = win.hide();
+                            } else {
+                                tracing::info!(
+                                    "popover blur: focus stayed in the app ({}), keeping it",
+                                    focused.join(", ")
+                                );
                             }
                         });
                     }
