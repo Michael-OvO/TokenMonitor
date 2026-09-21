@@ -1,5 +1,5 @@
 #[cfg_attr(not(test), allow(dead_code))]
-pub const PRICING_VERSION: &str = "2026-09-16";
+pub const PRICING_VERSION: &str = "2026-09-21";
 
 use crate::models::{detect_model_family, ModelFamily};
 use crate::usage::litellm::DynamicModelRates;
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn pricing_version_is_set() {
-        assert_eq!(PRICING_VERSION, "2026-09-16");
+        assert_eq!(PRICING_VERSION, "2026-09-21");
     }
 
     #[test]

@@ -678,12 +678,18 @@ impl ArchiveManager {
         // second copy that would sum with this machine's Cursor archive.
         let redirected: Vec<ArchivedHourly>;
         let records = if device_source {
-            let (cursor, rest): (Vec<_>, Vec<_>) = records
+            let (cursor, mut rest): (Vec<_>, Vec<_>) = records
                 .iter()
                 .cloned()
                 .partition(ArchivedHourly::is_shared_cursor);
             if !cursor.is_empty() {
                 self.import_source("local:cursor", &cursor, current_date, current_hour);
+            }
+            // Device rows always live under p="all" (the SSH archiver's tag), so
+            // a peer's copy of the same server shares our bucket instead of
+            // summing beside it. Provider is recovered from the model on export.
+            for r in &mut rest {
+                r.p = String::from("all");
             }
             redirected = rest;
             redirected.as_slice()
@@ -859,7 +865,10 @@ impl ArchiveManager {
                 continue;
             }
             let records = self.read_raw(&source_key);
-            if !records.iter().any(|r| r.p != "all" && !r.is_shared_cursor()) {
+            if !records
+                .iter()
+                .any(|r| r.p != "all" && !r.is_shared_cursor())
+            {
                 continue;
             }
             let mut buckets: HashMap<(String, u8, String, String), ArchivedHourly> = HashMap::new();
@@ -921,10 +930,13 @@ impl ArchiveManager {
     /// outright as a second guard. Returns the removed source keys.
     pub fn remove_self_duplicate_devices(&self, configured: &HashSet<String>) -> Vec<String> {
         // Index this machine's own local buckets (claude + codex + cursor).
-        let mut local: HashMap<(String, u8, String, String), ArchivedHourly> = HashMap::new();
+        // Keyed WITHOUT the provider tag: device rows are stored as p="all"
+        // while local rows carry claude/codex, so `p` can never match; the
+        // exact token equality on every bucket is the actual safety.
+        let mut local: HashMap<(String, u8, String), ArchivedHourly> = HashMap::new();
         for provider in ["claude", "codex", "cursor"] {
             for r in self.read_raw(&format!("local:{provider}")) {
-                local.entry(r.bucket_key()).or_insert(r);
+                local.entry((r.d.clone(), r.h, r.mk.clone())).or_insert(r);
             }
         }
         if local.is_empty() {
@@ -944,17 +956,20 @@ impl ArchiveManager {
             if records.is_empty() {
                 continue;
             }
-            let subsumed = records.iter().all(|r| match local.get(&r.bucket_key()) {
-                Some(l) => {
-                    l.input_tokens == r.input_tokens
-                        && l.out == r.out
-                        && l.c5 == r.c5
-                        && l.c1 == r.c1
-                        && l.cr == r.cr
-                        && l.ws == r.ws
-                }
-                None => false,
-            });
+            let subsumed =
+                records
+                    .iter()
+                    .all(|r| match local.get(&(r.d.clone(), r.h, r.mk.clone())) {
+                        Some(l) => {
+                            l.input_tokens == r.input_tokens
+                                && l.out == r.out
+                                && l.c5 == r.c5
+                                && l.c1 == r.c1
+                                && l.cr == r.cr
+                                && l.ws == r.ws
+                        }
+                        None => false,
+                    });
             if subsumed {
                 tracing::info!(
                     source = source_key.as_str(),
@@ -1570,8 +1585,8 @@ mod tests {
             fd,
             0,
         );
-        // A configured SSH device whose data happens to equal local → kept (guard
-        // + it's archived as p="all" so it wouldn't match anyway).
+        // A configured SSH device whose data happens to equal local → kept (the
+        // `configured` guard is what protects it).
         let mut ssh = arch("2026-04-10", 9, "sonnet-4-6", 1000, 500);
         ssh.p = "all".to_string();
         mgr.import_source("device:myserver", &[ssh], fd, 0);
@@ -1717,6 +1732,25 @@ mod tests {
 
         let device_raw = mgr.read_raw("device:peer-mac");
         assert!(device_raw.iter().all(|r| r.p != "cursor"));
+    }
+
+    #[test]
+    fn import_retags_device_rows_to_all_so_peer_copy_shares_bucket() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let fd = future_date();
+        let mut own = arch("2026-04-10", 9, "sonnet-4-6", 1000, 500);
+        own.p = "all".to_string();
+        mgr.import_source("device:srv", &[own], fd, 0);
+        // Peer's export of the same hour arrives tagged claude.
+        let peer = arch("2026-04-10", 9, "sonnet-4-6", 1200, 400);
+        mgr.import_source("device:srv", &[peer], fd, 0);
+        let rows = mgr.read_raw("device:srv");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].p, "all");
+        assert_eq!((rows[0].input_tokens, rows[0].out), (1200, 500));
+        // Nothing left for the cleanup fold to do.
+        assert_eq!(mgr.fold_device_providers_into_all(), 0);
     }
 
     #[test]

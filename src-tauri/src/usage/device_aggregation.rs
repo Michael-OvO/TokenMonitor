@@ -161,7 +161,11 @@ pub(crate) fn build_device_summary_from_parsed(
             entry.cache_read_tokens,
             0,
         ) * provider_multiplier(&entry.model);
-        let tokens = entry.input_tokens + entry.output_tokens;
+        let tokens = entry.input_tokens
+            + entry.output_tokens
+            + entry.cache_creation_5m_tokens
+            + entry.cache_creation_1h_tokens
+            + entry.cache_read_tokens;
 
         let agg = model_map
             .entry(model_key)
@@ -208,7 +212,11 @@ pub(crate) fn build_device_summary_from_compact(
             record.cache_read,
             0,
         ) * provider_multiplier(&record.model);
-        let tokens = record.input_tokens + record.output_tokens;
+        let tokens = record.input_tokens
+            + record.output_tokens
+            + record.cache_5m
+            + record.cache_1h
+            + record.cache_read;
 
         let agg = model_map
             .entry(model_key)
@@ -250,7 +258,11 @@ pub(crate) fn build_device_summary_merged(
             entry.cache_read_tokens,
             0,
         ) * provider_multiplier(&entry.model);
-        let tokens = entry.input_tokens + entry.output_tokens;
+        let tokens = entry.input_tokens
+            + entry.output_tokens
+            + entry.cache_creation_5m_tokens
+            + entry.cache_creation_1h_tokens
+            + entry.cache_read_tokens;
         let agg = model_map
             .entry(model_key)
             .or_insert_with(|| (display_name, 0.0, 0, true));
@@ -277,7 +289,11 @@ pub(crate) fn build_device_summary_merged(
             record.cache_read,
             0,
         ) * provider_multiplier(&record.model);
-        let tokens = record.input_tokens + record.output_tokens;
+        let tokens = record.input_tokens
+            + record.output_tokens
+            + record.cache_5m
+            + record.cache_1h
+            + record.cache_read;
         let agg = model_map
             .entry(model_key)
             .or_insert_with(|| (display_name, 0.0, 0, true));
@@ -496,6 +512,9 @@ pub(crate) async fn build_included_devices_payload(
     )> = Vec::new();
     let mut input_tokens = 0_u64;
     let mut output_tokens = 0_u64;
+    let mut cache_read_tokens = 0_u64;
+    let mut cache_write_5m_tokens = 0_u64;
+    let mut cache_write_1h_tokens = 0_u64;
 
     for dev in &agg_devices {
         // Only devices flagged "include in stats" contribute to the MAIN total.
@@ -530,9 +549,19 @@ pub(crate) async fn build_included_devices_payload(
                     entry.cache_read_tokens,
                     0,
                 ) * provider_multiplier(&entry.model);
-                let tokens = entry.input_tokens + entry.output_tokens;
+                // Same definition as the local payload (parser::entry_total_tokens):
+                // cache counts, otherwise a peer's cache-heavy usage vanishes
+                // from the Tokens card while still being priced into Cost.
+                let tokens = entry.input_tokens
+                    + entry.output_tokens
+                    + entry.cache_creation_5m_tokens
+                    + entry.cache_creation_1h_tokens
+                    + entry.cache_read_tokens;
                 input_tokens += entry.input_tokens;
                 output_tokens += entry.output_tokens;
+                cache_write_5m_tokens += entry.cache_creation_5m_tokens;
+                cache_write_1h_tokens += entry.cache_creation_1h_tokens;
+                cache_read_tokens += entry.cache_read_tokens;
 
                 let agg = model_map
                     .entry(model_key.clone())
@@ -594,9 +623,16 @@ pub(crate) async fn build_included_devices_payload(
                 record.cache_read,
                 0,
             ) * provider_multiplier(&record.model);
-            let tokens = record.input_tokens + record.output_tokens;
+            let tokens = record.input_tokens
+                + record.output_tokens
+                + record.cache_5m
+                + record.cache_1h
+                + record.cache_read;
             input_tokens += record.input_tokens;
             output_tokens += record.output_tokens;
+            cache_write_5m_tokens += record.cache_5m;
+            cache_write_1h_tokens += record.cache_1h;
+            cache_read_tokens += record.cache_read;
 
             let agg = model_map
                 .entry(model_key.clone())
@@ -688,6 +724,9 @@ pub(crate) async fn build_included_devices_payload(
         total_tokens,
         input_tokens,
         output_tokens,
+        cache_read_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
         chart_buckets,
         model_breakdown,
         usage_source: UsageSource::Parser,

@@ -1313,21 +1313,6 @@ fn peer_slug_from_export_filename(name: &str) -> Option<String> {
 /// Parse an import payload in either supported shape into `(source_key, records)`
 /// groups plus the number of malformed JSONL lines skipped.
 fn parse_import_payload(input: &str) -> Result<(ImportGroups, usize), String> {
-    let (mut groups, skipped) = parse_import_payload_inner(input)?;
-    // SSH-device rows are archived locally under p="all", but the export resolves
-    // them to claude/codex. Restore "all" so a server synced by several devices
-    // lands in the SAME bucket (field-wise max) instead of summing twice.
-    for (source_key, records) in &mut groups {
-        if source_key.starts_with("device:") {
-            for r in records.iter_mut().filter(|r| r.p != "cursor") {
-                r.p = String::from("all");
-            }
-        }
-    }
-    Ok((groups, skipped))
-}
-
-fn parse_import_payload_inner(input: &str) -> Result<(ImportGroups, usize), String> {
     // Strip a leading UTF-8 BOM (also fixes the pre-existing snapshot BOM case).
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
 
@@ -1754,18 +1739,16 @@ mod tests {
 
     #[test]
     fn import_reconstructs_provider_from_jsonl_line() {
-        // A device:* row round-trips back to p="all" so it shares a bucket with
-        // this machine's own archive of the same SSH server (no double count).
+        // New JSONL: record has no p; the bucket p is rebuilt from the line-level
+        // provider (here derived from the gpt model → codex). The archive layer
+        // re-tags device:* rows to "all" on import (see import_source).
         let mut rec = sample_record("all", "2026-06-15", 10);
         rec.mk = "gpt-5".to_string();
         let body = format!("{}\n", record_line("device:srv", "srv", &rec).unwrap());
         let (groups, skipped) = parse_import_payload(&body).unwrap();
         assert_eq!(skipped, 0);
         assert_eq!(groups[0].0, "device:srv");
-        assert_eq!(groups[0].1[0].p, "all");
-        // local:* rows keep their resolved provider.
-        let body = format!("{}\n", record_line("local:codex", "me", &rec).unwrap());
-        assert_eq!(parse_import_payload(&body).unwrap().0[0].1[0].p, "codex");
+        assert_eq!(groups[0].1[0].p, "codex");
     }
 
     #[test]
