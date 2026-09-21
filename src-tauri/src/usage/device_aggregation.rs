@@ -1597,6 +1597,7 @@ mod tests {
             cache_1h: 0,
             cache_read: 0,
             speed: None,
+            dedupe_key: None,
         }];
 
         let local_date = parse_remote_ts_to_local_date(&records[0].ts);

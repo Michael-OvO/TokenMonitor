@@ -79,9 +79,15 @@ pub struct CompactUsageRecord {
     pub cache_read: u64,
     #[serde(rename = "sp", default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<String>,
+    /// Claude `message.id:requestId`. Streamed chunks share it; the one with most output wins.
+    #[serde(rename = "k", default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
 }
 
 fn compact_record_key(r: &CompactUsageRecord) -> String {
+    if let Some(k) = &r.dedupe_key {
+        return k.clone();
+    }
     format!(
         "{}:{}:{}:{}",
         r.ts, r.model, r.input_tokens, r.output_tokens
@@ -104,6 +110,33 @@ fn max_remote_epoch(
         .filter(|r| crate::models::detect_model_family(&r.model) == family)
         .filter_map(|r| compact_ts_epoch(&r.ts))
         .max()
+}
+
+/// Merge freshly fetched records into the cache. A record sharing a key with a
+/// cached one replaces it when it carries more output (a later streamed chunk).
+/// Returns how many records were inserted or replaced.
+fn merge_records(cached: &mut Vec<CompactUsageRecord>, fresh: &[CompactUsageRecord]) -> u32 {
+    let mut index: std::collections::HashMap<String, usize> = cached
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (compact_record_key(r), i))
+        .collect();
+    let mut changed = 0;
+    for r in fresh {
+        match index.get(&compact_record_key(r)) {
+            Some(&i) if r.output_tokens > cached[i].output_tokens => {
+                cached[i] = r.clone();
+                changed += 1;
+            }
+            Some(_) => {}
+            None => {
+                index.insert(compact_record_key(r), cached.len());
+                cached.push(r.clone());
+                changed += 1;
+            }
+        }
+    }
+    changed
 }
 
 /// ponytail: 2s back-margin so exclusive `ts>S` / `-newer` doesn't skip
@@ -237,7 +270,7 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
     // Rust's trailing-backslash line continuation eating the leading spaces.
     let claude_py = concat!(
         "import json,sys\n",
-        "seen=set()\n",
+        "best={}\n",
         "for f in sys.argv[1:]:\n",
         " try:\n",
         "  for line in open(f):\n",
@@ -248,8 +281,6 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
         "     mid=msg.get('id','')\n",
         "     rid=d.get('requestId','')\n",
         "     dk=mid+':'+rid if rid else mid\n",
-        "     if dk and dk in seen:continue\n",
-        "     if dk:seen.add(dk)\n",
         "     u=msg.get('usage')\n",
         "     if u:\n",
         "      cc=u.get('cache_creation')\n",
@@ -261,9 +292,12 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
         "'c1':((cc.get('ephemeral_1h_input_tokens') or 0) if isinstance(cc,dict) else u.get('cache_creation_input_tokens',0)),",
         "'cr':u.get('cache_read_input_tokens',0)}\n",
         "      if u.get('speed')=='fast':r['sp']='fast'\n",
-        "      print(json.dumps(r))\n",
+        "      if not dk:print(json.dumps(r));continue\n",
+        "      r['k']=dk\n",
+        "      if dk not in best or r['out']>=best[dk]['out']:best[dk]=r\n",
         "   except Exception:pass\n",
         " except Exception as e:import sys;print('PARSE_ERR:'+str(e),file=sys.stderr)\n",
+        "for r in best.values():print(json.dumps(r))\n",
     );
 
     // Codex python extraction — stateful: tracks model from turn_context,
@@ -471,6 +505,12 @@ fn parse_full_entry_to_compact(line: &str) -> Option<CompactUsageRecord> {
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
         speed,
+        dedupe_key: message.get("id").and_then(|v| v.as_str()).map(|mid| {
+            match value.get("requestId").and_then(|v| v.as_str()) {
+                Some(rid) => format!("{mid}:{rid}"),
+                None => mid.to_string(),
+            }
+        }),
     })
 }
 
@@ -748,54 +788,29 @@ impl SshCacheManager {
         let dir = self.host_cache_dir(alias)?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
 
-        // Build a set of existing record keys for dedup.
-        let mut existing_keys = std::collections::HashSet::new();
-        if let Ok(file) = std::fs::File::open(&cache_path) {
-            for line in std::io::BufReader::new(file).lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => continue,
-                };
-                if let Ok(r) = serde_json::from_str::<CompactUsageRecord>(&line) {
-                    existing_keys.insert(compact_record_key(&r));
+        let mut cached = self.load_cached_records(alias)?;
+        let new_count = merge_records(&mut cached, &records);
+
+        use crate::models::{detect_model_family, ModelFamily};
+        let has_claude = records
+            .iter()
+            .any(|r| detect_model_family(&r.model) == ModelFamily::Anthropic);
+        let has_codex = records
+            .iter()
+            .any(|r| detect_model_family(&r.model) == ModelFamily::OpenAI);
+
+        if new_count > 0 {
+            let mut lines = String::new();
+            for record in &cached {
+                if let Ok(json) = serde_json::to_string(record) {
+                    lines.push_str(&json);
+                    lines.push('\n');
                 }
             }
+            let tmp = cache_path.with_extension("jsonl.tmp");
+            std::fs::write(&tmp, lines).map_err(|e| format!("write cache: {e}"))?;
+            std::fs::rename(&tmp, &cache_path).map_err(|e| format!("write cache: {e}"))?;
         }
-
-        let mut lines = String::new();
-        let mut has_claude = false;
-        let mut has_codex = false;
-        let mut new_count = 0u32;
-        for record in &records {
-            let key = compact_record_key(record);
-            if existing_keys.contains(&key) {
-                continue;
-            }
-            existing_keys.insert(key);
-            if let Ok(json) = serde_json::to_string(record) {
-                lines.push_str(&json);
-                lines.push('\n');
-                new_count += 1;
-            }
-            // Detect provider by model family.
-            use crate::models::{detect_model_family, ModelFamily};
-            match detect_model_family(&record.model) {
-                ModelFamily::Anthropic => has_claude = true,
-                ModelFamily::OpenAI => has_codex = true,
-                _ => {} // Other models don't affect provider timestamps.
-            }
-        }
-
-        use std::io::Write;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&cache_path)
-            .map_err(|e| format!("open cache: {e}"))?;
-        let mut writer = std::io::BufWriter::new(file);
-        writer
-            .write_all(lines.as_bytes())
-            .map_err(|e| format!("write cache: {e}"))?;
 
         // Only advance a provider's timestamp when that provider had data.
         // Use max remote record time, not local now — clock skew would skip forever.
@@ -861,7 +876,23 @@ mod tests {
             cache_1h: 0,
             cache_read: 0,
             speed: None,
+            dedupe_key: None,
         }
+    }
+
+    #[test]
+    fn merge_keeps_final_streamed_chunk() {
+        let mut partial = rec("2026-01-01T00:00:00Z", "claude-sonnet-4");
+        partial.dedupe_key = Some("msg_1:req_1".into());
+        let mut fin = partial.clone();
+        fin.output_tokens = 500;
+        let mut cached = vec![partial.clone()];
+        assert_eq!(merge_records(&mut cached, &[fin.clone()]), 1);
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].output_tokens, 500);
+        // Re-seeing the partial chunk (another sync) must not downgrade or duplicate.
+        assert_eq!(merge_records(&mut cached, &[partial]), 0);
+        assert_eq!(cached[0].output_tokens, 500);
     }
 
     #[test]
