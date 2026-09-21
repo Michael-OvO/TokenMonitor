@@ -846,6 +846,44 @@ impl ArchiveManager {
         folded
     }
 
+    /// Collapse every non-cursor row of a `device:*` source onto `p = "all"`.
+    /// Older builds imported a peer's copy of an SSH server under `p = claude/
+    /// codex`, which sat beside this machine's own `p = "all"` rows for the same
+    /// hour and summed. Same (d, h, mk) buckets merge field-wise max, so this is
+    /// lossless and idempotent. Only sources with stray rows are rewritten.
+    /// Returns the number of rows folded.
+    pub fn fold_device_providers_into_all(&self) -> usize {
+        let mut folded = 0;
+        for source_key in self.list_sources() {
+            if !source_key.starts_with("device:") {
+                continue;
+            }
+            let records = self.read_raw(&source_key);
+            if !records.iter().any(|r| r.p != "all" && !r.is_shared_cursor()) {
+                continue;
+            }
+            let mut buckets: HashMap<(String, u8, String, String), ArchivedHourly> = HashMap::new();
+            for mut r in records {
+                if !r.is_shared_cursor() && r.p != "all" {
+                    folded += 1;
+                    r.p = String::from("all");
+                }
+                match buckets.get_mut(&r.bucket_key()) {
+                    Some(existing) => {
+                        existing.merge_max_from(&r);
+                    }
+                    None => {
+                        buckets.insert(r.bucket_key(), r);
+                    }
+                }
+            }
+            let mut rows: Vec<ArchivedHourly> = buckets.into_values().collect();
+            rows.sort_by(|a, b| (&a.d, a.h, &a.mk, &a.p).cmp(&(&b.d, b.h, &b.mk, &b.p)));
+            self.rewrite_source(&source_key, rows.iter());
+        }
+        folded
+    }
+
     /// Permanently remove a source: delete its archive directory and drop its
     /// frontier state. Used to clean up a PHANTOM `device:<slug>` source — this
     /// machine's own data that an older build duplicated under a stale device
@@ -1679,6 +1717,33 @@ mod tests {
 
         let device_raw = mgr.read_raw("device:peer-mac");
         assert!(device_raw.iter().all(|r| r.p != "cursor"));
+    }
+
+    #[test]
+    fn fold_device_providers_collapses_ssh_double_count() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let fd = future_date();
+
+        // Our own SSH archive of the server (p=all) + a peer's copy of the same
+        // hour imported by an older build (p=claude) + a cursor row to leave alone.
+        let mut own = arch("2026-04-10", 9, "sonnet-4-6", 1000, 500);
+        own.p = "all".to_string();
+        let peer = arch("2026-04-10", 9, "sonnet-4-6", 1200, 500);
+        let mut cursor = arch("2026-04-10", 9, "grok-4.6", 7, 7);
+        cursor.p = "cursor".to_string();
+        mgr.rewrite_source("device:srv", [&own, &peer, &cursor]);
+
+        assert_eq!(mgr.fold_device_providers_into_all(), 1);
+        let rows = mgr.read_raw("device:srv");
+        let all: Vec<_> = rows.iter().filter(|r| r.p == "all").collect();
+        assert_eq!(all.len(), 1, "one bucket, not two");
+        assert_eq!(all[0].input_tokens, 1200, "field-wise max, not sum");
+        assert_eq!(rows.iter().filter(|r| r.p == "cursor").count(), 1);
+
+        // Idempotent: nothing left to fold, source untouched.
+        assert_eq!(mgr.fold_device_providers_into_all(), 0);
+        let _ = fd;
     }
 
     #[test]

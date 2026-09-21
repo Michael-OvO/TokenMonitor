@@ -1058,7 +1058,14 @@ pub(crate) async fn cleanup_duplicate_devices(state: &AppState) {
             "Folded account-scoped Cursor rows from device archives into local:cursor"
         );
     }
-    if !removed.is_empty() || folded_cursor > 0 {
+    let folded_all = archive.fold_device_providers_into_all();
+    if folded_all > 0 {
+        tracing::info!(
+            folded = folded_all,
+            "Folded provider-tagged device rows into p=all (removes SSH double count)"
+        );
+    }
+    if !removed.is_empty() || folded_cursor > 0 || folded_all > 0 {
         tracing::info!(
             count = removed.len(),
             "Cleaned up {} duplicate device source(s) from the archive",
