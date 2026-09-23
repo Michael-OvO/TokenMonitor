@@ -12,6 +12,8 @@ use crate::statusline;
 use crate::usage::integrations::UsageIntegrationId;
 use chrono::{DateTime, Duration, Utc};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Instant;
 
 pub(crate) fn command_in_path(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -137,6 +139,69 @@ const KIMI_MIN_REFETCH_SECS: i64 = 300;
 /// IDE's token, then an HTTPS round trip), and until it had this gate it ran
 /// on every statusline event, several times a minute while Claude Code works.
 const CURSOR_MIN_REFETCH_SECS: i64 = 300;
+/// Claude Code's statusline only reports the plan-wide 5h and 7d windows. The
+/// model-specific weekly windows (Weekly Fable, Weekly Opus, ...) exist only in
+/// the CLI probe and the OAuth API, so while the statusline is live those are
+/// refreshed on this cadence and carried forward in between.
+const CLAUDE_MODEL_WINDOWS_REFRESH_SECS: u64 = 900;
+
+/// When the model-specific Claude windows were last probed (or attempted).
+static CLAUDE_MODEL_WINDOWS_REFRESHED_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn last_model_windows_refresh() -> Option<Instant> {
+    *CLAUDE_MODEL_WINDOWS_REFRESHED_AT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn mark_model_windows_refreshed(now: Instant) {
+    *CLAUDE_MODEL_WINDOWS_REFRESHED_AT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(now);
+}
+
+/// Whether the model-specific windows should be probed again: never done yet,
+/// or the refresh interval has passed since the last attempt.
+fn model_windows_refresh_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.duration_since(at).as_secs() >= CLAUDE_MODEL_WINDOWS_REFRESH_SECS)
+}
+
+fn window_expired(window: &RateLimitWindow, now: DateTime<Utc>) -> bool {
+    window
+        .resets_at
+        .as_deref()
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .is_some_and(|resets_at| resets_at.with_timezone(&Utc) < now)
+}
+
+/// Lay the live statusline windows over the richer `base` payload: a window
+/// the statusline reports replaces the base one, every other base window that
+/// has not already reset is kept, and plan details stay with the base. The
+/// result is timestamped by the live source.
+fn overlay_live_windows(
+    base: Option<ProviderRateLimits>,
+    live: ProviderRateLimits,
+    now: DateTime<Utc>,
+) -> ProviderRateLimits {
+    let Some(base) = base else {
+        return live;
+    };
+    let mut windows = live.windows.clone();
+    for window in base.windows {
+        let already_live = windows.iter().any(|w| w.window_id == window.window_id);
+        if already_live || window_expired(&window, now) {
+            continue;
+        }
+        windows.push(window);
+    }
+    ProviderRateLimits {
+        windows,
+        plan_tier: base.plan_tier.or(live.plan_tier),
+        extra_usage: base.extra_usage.or(live.extra_usage),
+        credits: base.credits.or(live.credits),
+        ..live
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct RateLimitFetchError {
@@ -229,6 +294,43 @@ fn oauth_cooldown_hold(
     provider_cooldown_is_active(cached, now).then(|| mark_rate_limits_stale(cached.clone()))
 }
 
+/// The two sources that know every Claude window: `claude -p "/usage"`
+/// first (no tokens, credentials handled by the CLI), then the OAuth API
+/// behind its server cooldown. Failure yields an error payload, as before.
+async fn probe_claude_rich(
+    cached: Option<&ProviderRateLimits>,
+    now: DateTime<Utc>,
+) -> ProviderRateLimits {
+    match claude_cli::fetch_claude_rate_limits_via_cli().await {
+        Ok(rate_limits) => {
+            tracing::debug!("Claude rate limits served from CLI /usage");
+            return rate_limits;
+        }
+        Err(error) => {
+            tracing::debug!(error = %error.message, "Claude CLI /usage probe failed");
+        }
+    }
+
+    // Last resort: call Anthropic's OAuth API ourselves. This is the only
+    // path that spends the account's rate-limit budget, so it is the only
+    // one the server cooldown holds back.
+    if let Some(held) = oauth_cooldown_hold(cached, now) {
+        return held;
+    }
+
+    match fetch_claude_rate_limits().await {
+        Ok(rate_limits) => rate_limits,
+        Err(error) => {
+            tracing::debug!(error = %error.message, "Claude OAuth API failed");
+            tracing::warn!(
+                error = %error.message,
+                "Claude rate-limit: statusline + API both failed"
+            );
+            provider_rate_limit_error("claude", error)
+        }
+    }
+}
+
 pub fn merge_rate_limits(
     fresh: RateLimitsPayload,
     cached: Option<&RateLimitsPayload>,
@@ -275,56 +377,41 @@ pub async fn fetch_selected_rate_limits(
             let now = Utc::now();
 
             // Primary: statusline — CC pushes server-authoritative used_percentage
-            // on every prompt, no network call, no budget cost.
-            if let Some(sl) = tokio::task::spawn_blocking(fetch_claude_from_statusline)
+            // on every prompt, no network call, no budget cost. It carries only
+            // the plan-wide 5h and 7d windows, so it does not stand alone: the
+            // model-specific weekly windows come from the richer probe, refreshed
+            // every CLAUDE_MODEL_WINDOWS_REFRESH_SECS and carried forward from the
+            // cache in between, with the live values laid on top.
+            if let Some(live) = tokio::task::spawn_blocking(fetch_claude_from_statusline)
                 .await
                 .ok()
                 .flatten()
             {
                 tracing::debug!("Claude rate limits served from statusline");
-                return Some(sl);
+                let base =
+                    if model_windows_refresh_due(last_model_windows_refresh(), Instant::now()) {
+                        // Mark the attempt whatever it yields, so a failing probe
+                        // retries on the same cadence instead of every event.
+                        mark_model_windows_refreshed(Instant::now());
+                        let rich = probe_claude_rich(cached_claude.as_ref(), now).await;
+                        if rich.windows.is_empty() {
+                            cached_claude.clone()
+                        } else {
+                            Some(rich)
+                        }
+                    } else {
+                        cached_claude.clone()
+                    };
+                return Some(overlay_live_windows(base, live, now));
             }
 
-            // Shared throttle for both remaining paths. The windows we track are
-            // 5h and 7d, so a 5-minute floor loses nothing visible and keeps us
+            // Shared throttle for the remaining paths: a 5-minute floor keeps us
             // from spawning a CLI (or spending API budget) every 2.5 min.
             if is_fresh(cached_claude.as_ref(), CLAUDE_MIN_REFETCH_SECS, now) {
                 return cached_claude;
             }
 
-            // Secondary: ask Claude Code itself via `claude -p "/usage"`. Costs no
-            // tokens (`num_turns: 0`) and leaves credentials, refresh, and
-            // rate-limit retry entirely to the CLI — same division of labour as
-            // the Codex app-server probe.
-            match claude_cli::fetch_claude_rate_limits_via_cli().await {
-                Ok(rate_limits) => {
-                    tracing::debug!("Claude rate limits served from CLI /usage");
-                    return Some(rate_limits);
-                }
-                Err(error) => {
-                    tracing::debug!(error = %error.message, "Claude CLI /usage probe failed");
-                }
-            }
-
-            // Last resort: call Anthropic's OAuth API ourselves. This is the only
-            // path that spends the account's rate-limit budget, so it is the only
-            // one the server cooldown holds back.
-            if let Some(held) = oauth_cooldown_hold(cached_claude.as_ref(), now) {
-                return Some(held);
-            }
-
-            match fetch_claude_rate_limits().await {
-                Ok(rate_limits) => Some(rate_limits),
-                Err(error) => {
-                    tracing::debug!(error = %error.message, "Claude OAuth API failed");
-
-                    tracing::warn!(
-                        error = %error.message,
-                        "Claude rate-limit: statusline + API both failed"
-                    );
-                    Some(provider_rate_limit_error("claude", error))
-                }
-            }
+            Some(probe_claude_rich(cached_claude.as_ref(), now).await)
         }
         .await;
         (result, provider_t0.elapsed())
@@ -444,6 +531,111 @@ pub async fn fetch_selected_rate_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn window(id: &str, utilization: f64, resets_at: Option<&str>) -> RateLimitWindow {
+        RateLimitWindow::new(
+            id.to_string(),
+            id.to_string(),
+            utilization,
+            resets_at.map(str::to_string),
+        )
+    }
+
+    fn limits(windows: Vec<RateLimitWindow>, fetched_at: &str) -> ProviderRateLimits {
+        ProviderRateLimits {
+            provider: "claude".to_string(),
+            plan_tier: None,
+            windows,
+            extra_usage: None,
+            credits: None,
+            stale: false,
+            error: None,
+            retry_after_seconds: None,
+            cooldown_until: None,
+            fetched_at: fetched_at.to_string(),
+        }
+    }
+
+    fn overlay_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-09-23T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn live_statusline_windows_overlay_the_cached_model_windows() {
+        let base = limits(
+            vec![
+                window("five_hour", 10.0, Some("2026-09-23T15:00:00Z")),
+                window("seven_day", 20.0, Some("2026-09-27T00:00:00Z")),
+                window("seven_day_fable", 30.0, Some("2026-09-27T00:00:00Z")),
+            ],
+            "2026-09-23T11:00:00Z",
+        );
+        let live = limits(
+            vec![
+                window("five_hour", 12.0, Some("2026-09-23T15:00:00Z")),
+                window("seven_day", 22.0, Some("2026-09-27T00:00:00Z")),
+            ],
+            "2026-09-23T11:59:00Z",
+        );
+        let merged = overlay_live_windows(Some(base), live, overlay_now());
+        let ids: Vec<&str> = merged
+            .windows
+            .iter()
+            .map(|w| w.window_id.as_str())
+            .collect();
+        assert_eq!(ids, ["five_hour", "seven_day", "seven_day_fable"]);
+        let pct: Vec<f64> = merged.windows.iter().map(|w| w.utilization).collect();
+        assert_eq!(pct, [12.0, 22.0, 30.0]);
+        assert_eq!(merged.fetched_at, "2026-09-23T11:59:00Z");
+    }
+
+    #[test]
+    fn model_windows_that_already_reset_are_not_carried_forward() {
+        let base = limits(
+            vec![window(
+                "seven_day_fable",
+                90.0,
+                Some("2026-09-23T00:00:00Z"),
+            )],
+            "2026-09-22T00:00:00Z",
+        );
+        let live = limits(vec![window("five_hour", 1.0, None)], "2026-09-23T11:59:00Z");
+        let merged = overlay_live_windows(Some(base), live, overlay_now());
+        let ids: Vec<&str> = merged
+            .windows
+            .iter()
+            .map(|w| w.window_id.as_str())
+            .collect();
+        assert_eq!(ids, ["five_hour"]);
+    }
+
+    #[test]
+    fn plan_details_come_from_the_richer_source() {
+        let mut base = limits(vec![], "2026-09-23T11:00:00Z");
+        base.plan_tier = Some("max20x".to_string());
+        let live = limits(vec![window("five_hour", 1.0, None)], "2026-09-23T11:59:00Z");
+        let merged = overlay_live_windows(Some(base), live, overlay_now());
+        assert_eq!(merged.plan_tier.as_deref(), Some("max20x"));
+    }
+
+    #[test]
+    fn without_a_cache_the_live_windows_stand_alone() {
+        let live = limits(vec![window("five_hour", 1.0, None)], "2026-09-23T11:59:00Z");
+        let merged = overlay_live_windows(None, live.clone(), overlay_now());
+        assert_eq!(merged.windows.len(), 1);
+        assert_eq!(merged.fetched_at, live.fetched_at);
+    }
+
+    #[test]
+    fn model_windows_refresh_is_due_at_first_and_after_the_interval() {
+        let now = Instant::now();
+        assert!(model_windows_refresh_due(None, now));
+        assert!(!model_windows_refresh_due(Some(now), now));
+        let later = now + std::time::Duration::from_secs(CLAUDE_MODEL_WINDOWS_REFRESH_SECS);
+        assert!(model_windows_refresh_due(Some(now), later));
+    }
 
     #[test]
     fn enabled_selection_probes_only_the_listed_providers() {

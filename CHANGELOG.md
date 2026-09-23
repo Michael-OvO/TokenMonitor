@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## Unreleased
+
+### 修复
+- **Claude 的 Weekly Fable / Weekly Opus 窗口消失**：Claude Code statusline 事件只带 `five_hour` 与 `seven_day` 两个全局窗口，而按模型划分的每周窗口只有 `claude -p "/usage"` 与 OAuth 接口会给出；此前只要 statusline 事件新鲜（活跃会话中一直如此）就直接采用它，模型窗口便消失。现在 statusline 只覆盖它报告的窗口，其余窗口从更完整的来源叠加保留，且每 15 分钟（`CLAUDE_MODEL_WINDOWS_REFRESH_SECS`）通过 CLI / OAuth 刷新一次，已过重置时间的旧窗口不再沿用
+
 ## v0.16.0 — macOS 27 兼容、饼图交互与性能修复
 
 ### 修复
