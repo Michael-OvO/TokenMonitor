@@ -5,7 +5,7 @@ This guide describes the current repository. User-facing setup and features live
 
 ## Prerequisites
 
-- Node.js 18 or newer and npm
+- Node.js 18 or newer and npm (CI and the lockfile use Node 26 / npm 11)
 - A current stable Rust toolchain
 - Tauri system dependencies for your platform:
   - macOS: Xcode Command Line Tools
