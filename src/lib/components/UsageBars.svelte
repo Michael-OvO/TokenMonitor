@@ -10,8 +10,10 @@
     providerHasActiveCooldown,
     providerRateLimitViewState,
     rateLimitWindowResetLabel,
+    resetTimelineLayout,
   } from "../views/rateLimits.js";
   import type { ProviderRateLimits, RateLimitWindow } from "../types/index.js";
+  import ResetTimeline from "./ResetTimeline.svelte";
 
   interface Props {
     providerLabel?: string;
@@ -21,6 +23,10 @@
 
   // Refresh "Resets in" + pace every 30s
   let refreshTick = $state(0);
+  let resetTimeline = $derived.by(() => {
+    void refreshTick;
+    return resetTimelineLayout(rateLimits.credits?.usageLimitResets);
+  });
   $effect(() => {
     const interval = setInterval(() => { refreshTick += 1; }, 30_000);
     return () => clearInterval(interval);
@@ -228,6 +234,18 @@
           {/if}
         </span>
       </div>
+    </div>
+  {/if}
+
+  {#if resetTimeline}
+    <div class="ub-row">
+      <div class="ub-head">
+        <span class="ub-label">Resets</span>
+        <span class="ub-val">{resetTimeline.available} available</span>
+      </div>
+      {#if resetTimeline.markers.length > 0}
+        <ResetTimeline layout={resetTimeline} />
+      {/if}
     </div>
   {/if}
 </div>

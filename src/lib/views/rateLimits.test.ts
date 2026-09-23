@@ -5,8 +5,25 @@ import {
   providerHasActiveCooldown,
   providerRateLimitViewState,
   rateLimitWindowResetLabel,
+  resetTimelineLayout,
 } from "./rateLimits.js";
-import type { ProviderRateLimits } from "../types/index.js";
+import type { ProviderRateLimits, UsageLimitReset, UsageLimitResets } from "../types/index.js";
+
+const NOW = Date.parse("2026-09-23T12:00:00Z");
+const DAY = 86_400_000;
+const shortDate = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
+
+function reset(daysFromNow: number, title = "Full reset"): UsageLimitReset {
+  return {
+    title,
+    grantedAt: new Date(NOW - 20 * DAY).toISOString(),
+    expiresAt: new Date(NOW + daysFromNow * DAY).toISOString(),
+  };
+}
+
+function resets(days: number[], available = days.length): UsageLimitResets {
+  return { available, resets: days.map((d) => reset(d)) };
+}
 
 function providerRateLimits(
   overrides: Partial<ProviderRateLimits> = {},
@@ -32,6 +49,53 @@ function providerRateLimits(
     ...overrides,
   };
 }
+
+describe("resetTimelineLayout", () => {
+  it("is absent when the provider reports no resets", () => {
+    expect(resetTimelineLayout(null, NOW)).toBeNull();
+    expect(resetTimelineLayout(undefined, NOW)).toBeNull();
+  });
+
+  it("places dots proportionally on a four-week strip with weekly ticks", () => {
+    const layout = resetTimelineLayout(resets([14]), NOW)!;
+    expect(layout.available).toBe(1);
+    expect(layout.horizonDays).toBe(28);
+    expect(layout.horizonLabel).toBe("+4w");
+    expect(layout.weekTickPcts).toEqual([25, 50, 75]);
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.markers[0].leftPct).toBeCloseTo(50, 6);
+    expect(layout.markers[0].dateLabel).toBe(shortDate.format(NOW + 14 * DAY));
+    expect(layout.markers[0].title).toContain("Full reset · expires ");
+    expect(layout.markers[0].title).toContain("granted ");
+  });
+
+  it("grows the horizon to whole weeks past the last expiry", () => {
+    const layout = resetTimelineLayout(resets([33, 5]), NOW)!;
+    expect(layout.horizonDays).toBe(35);
+    expect(layout.markers.map((m) => m.daysLeft)).toEqual([5, 33]);
+    expect(layout.markers[1].leftPct).toBeCloseTo((33 / 35) * 100, 6);
+  });
+
+  it("flags resets expiring within three days", () => {
+    const layout = resetTimelineLayout(resets([2, 10]), NOW)!;
+    expect(layout.markers.map((m) => m.urgent)).toEqual([true, false]);
+  });
+
+  it("drops a colliding label to the second baseline, including against the caps", () => {
+    const close = resetTimelineLayout(resets([10, 11]), NOW)!;
+    expect(close.markers.map((m) => m.labelRow)).toEqual([0, 1]);
+    const apart = resetTimelineLayout(resets([10, 20]), NOW)!;
+    expect(apart.markers.map((m) => m.labelRow)).toEqual([0, 0]);
+    const atCaps = resetTimelineLayout(resets([1, 27]), NOW)!;
+    expect(atCaps.markers.map((m) => m.labelRow)).toEqual([1, 1]);
+  });
+
+  it("ignores expired resets but keeps the provider's count", () => {
+    const layout = resetTimelineLayout(resets([-1, 5], 2), NOW)!;
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.available).toBe(2);
+  });
+});
 
 describe("hasRateLimitWindows", () => {
   it("returns false when the provider payload is missing", () => {

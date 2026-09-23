@@ -94,6 +94,13 @@ export interface ChangeStats {
   rewrite_ratio: number | null;
   churn_ratio: number | null;
   dominant_extension: string | null;
+  // Conversations that edited files, out of all with usage in the period.
+  edit_sessions: number;
+  total_sessions: number;
+  // Share (0..1) of the period's cost spent in those conversations; the
+  // efficiency figures above are scoped to it. Null when edits can't be
+  // tied to sessions.
+  edit_cost_share: number | null;
 }
 
 export interface ModelChangeSummary {
@@ -184,6 +191,21 @@ export interface CreditsInfo {
   balance: number | null;
   hasCredits: boolean;
   unlimited: boolean;
+  /** Usage-limit resets still redeemable (Codex); null when not reported. */
+  usageLimitResets: UsageLimitResets | null;
+}
+
+export interface UsageLimitResets {
+  /** Count reported by the provider; the list may be shorter. */
+  available: number;
+  /** Still-available resets, soonest expiry first. */
+  resets: UsageLimitReset[];
+}
+
+export interface UsageLimitReset {
+  title: string | null;
+  grantedAt: string | null;
+  expiresAt: string | null;
 }
 
 export interface ProviderRateLimits {

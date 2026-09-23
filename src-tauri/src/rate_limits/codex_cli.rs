@@ -1,4 +1,4 @@
-use crate::models::{CreditsInfo, ProviderRateLimits};
+use crate::models::{CreditsInfo, ProviderRateLimits, UsageLimitReset, UsageLimitResets};
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 use serde_json::Value;
@@ -127,6 +127,8 @@ struct AppServerError {
 #[serde(rename_all = "camelCase")]
 struct RateLimitsReadResult {
     rate_limits: Value,
+    #[serde(default)]
+    rate_limit_reset_credits: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -160,7 +162,48 @@ fn credits_from_snapshot(snapshot: CreditsSnapshot) -> CreditsInfo {
             .and_then(|s| s.parse::<f64>().ok()),
         has_credits: snapshot.has_credits,
         unlimited: snapshot.unlimited,
+        usage_limit_resets: None,
     }
+}
+
+/// The usage-limit resets an account can redeem, from the read result's
+/// `rateLimitResetCredits` block: the provider's available count and the
+/// still-available resets, soonest expiry first.
+fn usage_limit_resets_from_value(value: &Value) -> UsageLimitResets {
+    let rfc3339 = |credit: &Value, key: &str| {
+        credit
+            .get(key)
+            .and_then(Value::as_i64)
+            .and_then(|secs| DateTime::from_timestamp(secs, 0))
+            .map(|at| at.to_rfc3339())
+    };
+    let mut resets: Vec<(Option<i64>, UsageLimitReset)> = value
+        .get("credits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|credit| credit.get("status").and_then(Value::as_str) == Some("available"))
+        .map(|credit| {
+            (
+                credit.get("expiresAt").and_then(Value::as_i64),
+                UsageLimitReset {
+                    title: credit
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    granted_at: rfc3339(credit, "grantedAt"),
+                    expires_at: rfc3339(credit, "expiresAt"),
+                },
+            )
+        })
+        .collect();
+    resets.sort_by_key(|(expires_at, _)| expires_at.unwrap_or(i64::MAX));
+    let resets: Vec<UsageLimitReset> = resets.into_iter().map(|(_, reset)| reset).collect();
+    let available = value
+        .get("availableCount")
+        .and_then(Value::as_u64)
+        .map_or(resets.len() as u32, |count| count as u32);
+    UsageLimitResets { available, resets }
 }
 
 pub(super) fn parse_rate_limits_response(
@@ -195,6 +238,14 @@ pub(super) fn parse_rate_limits_response(
         .cloned()
         .and_then(|v| serde_json::from_value::<CreditsSnapshot>(v).ok())
         .map(credits_from_snapshot);
+    let usage_limit_resets = result
+        .rate_limit_reset_credits
+        .as_ref()
+        .map(usage_limit_resets_from_value);
+    let credits = credits.map(|credits| CreditsInfo {
+        usage_limit_resets,
+        ..credits
+    });
 
     let rate_limit_reached = snapshot
         .get("rateLimitReachedType")
@@ -408,6 +459,42 @@ mod tests {
         assert!(credits.has_credits);
         assert!(!credits.unlimited);
         assert!((credits.balance.unwrap() - 2116.0215).abs() < 0.001);
+    }
+
+    #[test]
+    fn parses_usage_limit_resets_available_first_soonest_first() {
+        let json = r#"{"id":1,"result":{"rateLimits":{"primary":{"usedPercent":15,"windowDurationMins":10080,"resetsAt":1790518213},"secondary":null,"credits":{"hasCredits":true,"unlimited":false,"balance":"498.41"},"planType":"pro","rateLimitReachedType":null},"rateLimitResetCredits":{"availableCount":3,"credits":[{"id":"c","resetType":"codexRateLimits","status":"available","grantedAt":1790110409,"expiresAt":1792702409,"title":"Full reset"},{"id":"b","resetType":"codexRateLimits","status":"redeemed","grantedAt":1788499978,"expiresAt":1780000000,"title":"Full reset"},{"id":"a","resetType":"codexRateLimits","status":"available","grantedAt":1788499978,"expiresAt":1791091978,"title":"Full reset"}]}}}"#;
+        let resets = parse_rate_limits_response(json)
+            .unwrap()
+            .credits
+            .unwrap()
+            .usage_limit_resets
+            .unwrap();
+        assert_eq!(resets.available, 3);
+        // The redeemed credit is dropped; the rest are ordered by expiry.
+        let expiries: Vec<Option<&str>> = resets
+            .resets
+            .iter()
+            .map(|reset| reset.expires_at.as_deref())
+            .collect();
+        assert_eq!(
+            expiries,
+            [
+                Some("2026-10-04T05:32:58+00:00"),
+                Some("2026-10-22T20:53:29+00:00")
+            ]
+        );
+        assert_eq!(resets.resets[0].title.as_deref(), Some("Full reset"));
+        assert!(resets.resets[0].granted_at.is_some());
+    }
+
+    #[test]
+    fn a_response_without_reset_credits_leaves_them_unset() {
+        let credits = parse_rate_limits_response(SAMPLE_RESPONSE)
+            .unwrap()
+            .credits
+            .unwrap();
+        assert!(credits.usage_limit_resets.is_none());
     }
 
     #[test]
