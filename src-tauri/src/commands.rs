@@ -39,9 +39,9 @@ pub struct AppState {
     pub remote_device_include_flags: Arc<RwLock<HashMap<String, bool>>>,
     pub ssh_cache: Arc<RwLock<Option<SshCacheManager>>>,
     pub updater: Arc<RwLock<crate::updater::UpdaterState>>,
-    /// When true, the main window blur handler skips hiding once.
-    /// Set by commands that cause transient focus loss (float ball, dock icon, etc.).
-    pub suppress_auto_hide: Arc<AtomicBool>,
+    /// Lets commands that knowingly cost the popover its focus (dialogs, Dock
+    /// policy, float ball) tell the blur handler to skip hiding once.
+    pub auto_hide_gate: Arc<crate::auto_hide::AutoHideGate>,
     /// When false, the background loop skips rate-limit refresh. The flag
     /// is retained for backwards compatibility with the existing toggle in
     /// Settings, but rate-limit fetches no longer touch any system credential
@@ -89,7 +89,7 @@ impl AppState {
             remote_device_include_flags: Arc::new(RwLock::new(HashMap::new())),
             ssh_cache: Arc::new(RwLock::new(None)),
             updater: Arc::new(RwLock::new(crate::updater::UpdaterState::new())),
-            suppress_auto_hide: Arc::new(AtomicBool::new(false)),
+            auto_hide_gate: Arc::new(crate::auto_hide::AutoHideGate::default()),
             rate_limits_enabled: Arc::new(AtomicBool::new(false)),
             usage_access_enabled: Arc::new(AtomicBool::new(false)),
             last_tray_daily_cost: Arc::new(Mutex::new(None)),
