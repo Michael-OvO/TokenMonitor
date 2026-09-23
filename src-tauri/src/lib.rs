@@ -1,3 +1,4 @@
+mod auto_hide;
 mod commands;
 mod logging;
 mod models;
@@ -21,15 +22,18 @@ use commands::{
     AppState,
 };
 use std::time::Duration;
+#[cfg(target_os = "macos")]
+use tauri::tray::TrayIconEvent;
 use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::TrayIconBuilder,
     Emitter, Manager, WindowEvent,
 };
 use tauri_plugin_autostart::MacosLauncher;
 #[cfg(target_os = "macos")]
 use tauri_plugin_positioner::{Position, WindowExt};
+use tray::click::{gesture_for, TrayGesture};
 
 /// Extract (x, y) from a `tauri::Position` enum as physical-pixel f64.
 #[cfg(target_os = "macos")]
@@ -234,50 +238,62 @@ pub fn run() {
                 .on_tray_icon_event(|tray, event| {
                     tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
 
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        #[cfg(target_os = "macos")]
-                        rect,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            if window.is_visible().unwrap_or(false) {
-                                let _ = window.hide();
-                            } else {
-                                #[cfg(target_os = "windows")]
-                                {
-                                    platform::windows::window::position_near_tray(&window);
-                                    let _ = window.show();
+                    match gesture_for(&event) {
+                        Some(TrayGesture::PresentMenu) => {
+                            // Windows/Linux: tray-icon pops the attached menu itself.
+                            // macOS: the menu is detached (see `platform::macos::tray_menu`),
+                            // so present it here.
+                            #[cfg(target_os = "macos")]
+                            platform::macos::tray_menu::present(tray);
+                        }
+                        Some(TrayGesture::TogglePopover) => {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                if window.is_visible().unwrap_or(false) {
+                                    tracing::info!("tray click: hiding the popover");
+                                    let _ = window.hide();
+                                } else {
+                                    tracing::info!("tray click: showing the popover");
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        platform::windows::window::position_near_tray(&window);
+                                        let _ = window.show();
+                                    }
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        // Pre-hint position before show (WM may respect this).
+                                        platform::linux::position_top_right(&window);
+                                        let _ = window.show();
+                                        // Immediate re-position (works if WM realized fast enough).
+                                        platform::linux::position_top_right(&window);
+                                        platform::clamp_window_to_work_area(&window);
+                                        // Deferred re-position to catch slow WM realization.
+                                        platform::linux::deferred_reposition(window.clone());
+                                    }
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        if let TrayIconEvent::Click { rect, .. } = &event {
+                                            move_window_below_tray(&window, rect);
+                                        }
+                                        platform::clamp_window_to_work_area(&window);
+                                        let _ = window.show();
+                                    }
+                                    #[cfg(target_os = "windows")]
+                                    platform::windows::window::activate_window(&window);
+                                    #[cfg(not(target_os = "windows"))]
+                                    let _ = window.set_focus();
                                 }
-                                #[cfg(target_os = "linux")]
-                                {
-                                    // Pre-hint position before show (WM may respect this).
-                                    platform::linux::position_top_right(&window);
-                                    let _ = window.show();
-                                    // Immediate re-position (works if WM realized fast enough).
-                                    platform::linux::position_top_right(&window);
-                                    platform::clamp_window_to_work_area(&window);
-                                    // Deferred re-position to catch slow WM realization.
-                                    platform::linux::deferred_reposition(window.clone());
-                                }
-                                #[cfg(target_os = "macos")]
-                                {
-                                    move_window_below_tray(&window, &rect);
-                                    platform::clamp_window_to_work_area(&window);
-                                    let _ = window.show();
-                                }
-                                #[cfg(target_os = "windows")]
-                                platform::windows::window::activate_window(&window);
-                                #[cfg(not(target_os = "windows"))]
-                                let _ = window.set_focus();
                             }
                         }
+                        None => {}
                     }
                 })
                 .build(app)?;
+            // macOS 27 stops delivering left clicks to the tray view while an
+            // NSMenu is attached to the status item, so keep the menu detached
+            // and present it ourselves on right click.
+            #[cfg(target_os = "macos")]
+            platform::macos::tray_menu::detach(&_tray);
             tracing::info!("[PROFILE] setup:tray+window = {:?}", setup_t0.elapsed());
 
             // Hide window on focus loss (popover behavior), but not when
@@ -286,6 +302,9 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let window_clone = window.clone();
                 window.on_window_event(move |event| {
+                    if let WindowEvent::Focused(true) = event {
+                        tracing::info!("popover gained focus");
+                    }
                     if let WindowEvent::Focused(false) = event {
                         let handle = window_clone.app_handle().clone();
                         let win = window_clone.clone();
@@ -294,21 +313,28 @@ pub fn run() {
                             std::thread::sleep(Duration::from_millis(150));
 
                             // A command (create_float_ball, set_dock_icon_visible, etc.)
-                            // requested that the next blur be ignored.
-                            let state = handle.state::<AppState>();
-                            if state
-                                .suppress_auto_hide
-                                .swap(false, std::sync::atomic::Ordering::SeqCst)
-                            {
+                            // armed the gate because it was about to cause this blur.
+                            if handle.state::<AppState>().auto_hide_gate.take() {
+                                tracing::info!(
+                                    "popover blur ignored: a command armed the auto-hide gate"
+                                );
                                 return;
                             }
 
-                            let any_app_window_focused = handle
-                                .webview_windows()
-                                .values()
-                                .any(|w| w.is_focused().unwrap_or(false));
-                            if !any_app_window_focused {
+                            let windows = handle.webview_windows();
+                            let focused: Vec<&str> = windows
+                                .iter()
+                                .filter(|(_, w)| w.is_focused().unwrap_or(false))
+                                .map(|(label, _)| label.as_str())
+                                .collect();
+                            if focused.is_empty() {
+                                tracing::info!("popover blur: no app window focused, hiding");
                                 let _ = win.hide();
+                            } else {
+                                tracing::info!(
+                                    "popover blur: focus stayed in the app ({}), keeping it",
+                                    focused.join(", ")
+                                );
                             }
                         });
                     }
@@ -511,9 +537,17 @@ async fn refresh_rate_limits(app: &tauri::AppHandle, state: &AppState) {
 
     let codex_dir = state.parser.codex_dir().to_path_buf();
     let cached = state.cached_rate_limits.read().await.clone();
+    // Only the integrations the user has switched on: the others would cost
+    // a probe (Cursor spawns sqlite3 and calls its API) for numbers nobody
+    // sees, on every statusline event.
+    let enabled = state
+        .enabled_integrations
+        .read()
+        .map(|ids| ids.clone())
+        .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
     let fresh = rate_limits::fetch_selected_rate_limits(
         &codex_dir,
-        rate_limits::RateLimitSelection::All,
+        rate_limits::RateLimitSelection::enabled(&enabled),
         cached.as_ref(),
     )
     .await;
@@ -598,6 +632,7 @@ async fn fast_statusline_poll(app: tauri::AppHandle) {
             continue;
         }
 
+        let tick_t0 = std::time::Instant::now();
         state.parser.clear_payload_cache();
         if parser_changed {
             // Source logs changed: drop the no-TTL disk cache too, otherwise the
@@ -605,7 +640,9 @@ async fn fast_statusline_poll(app: tauri::AppHandle) {
             // memory clear above (see AppState::clear_payload_disk_cache).
             state.clear_payload_disk_cache().await;
         }
+        let clear_elapsed = tick_t0.elapsed();
 
+        let rate_limits_t0 = std::time::Instant::now();
         if events_moved
             && state
                 .rate_limits_enabled
@@ -613,8 +650,16 @@ async fn fast_statusline_poll(app: tauri::AppHandle) {
         {
             refresh_rate_limits(&app, &state).await;
         }
+        let rate_limits_elapsed = rate_limits_t0.elapsed();
+
+        let tray_t0 = std::time::Instant::now();
         sync_tray_title(&app, &state).await;
+        let tray_elapsed = tray_t0.elapsed();
         let _ = app.emit("data-updated", 0u64);
+        tracing::info!(
+            "[PROFILE] statusline-poll: events_moved={events_moved} parser_changed={parser_changed} clear={clear_elapsed:?} rate_limits={rate_limits_elapsed:?} tray={tray_elapsed:?} total={:?}",
+            tick_t0.elapsed()
+        );
     }
 }
 

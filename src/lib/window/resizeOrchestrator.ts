@@ -47,7 +47,11 @@ export interface ResizeOrchestrator {
   resizeToContent: (source?: string) => void;
   handleBreakdownAccordionToggle: (detail: AccordionToggleDetail) => void;
   refreshWindowMetrics: () => Promise<void>;
-  setChartHoverActive: (active: boolean) => void;
+  /** Mirror the chart's hover detail panel. `transitionMs` > 0 means the panel
+   * animates its height for that long: the window follows the content
+   * (throttled) and snaps to the exact height once the motion ends. Zero means
+   * the panel changed at once, so one measured resize is enough. */
+  setChartHoverActive: (active: boolean, transitionMs?: number) => void;
   /** Track whether the pointer is over the popover. While true, shrink
    * requests are deferred and the latest desired height is flushed in a
    * single resize when the pointer leaves. */
@@ -661,9 +665,23 @@ export function createResizeOrchestrator(
     applyWindowHeight(measurement.nextHeight, `${source}:target`);
   }
 
-  function setChartHoverActive(active: boolean): void {
+  function setChartHoverActive(active: boolean, transitionMs = 0): void {
     chartHoverActive = active;
-    deps.logDebug("resize:chart-hover-active", { active });
+    deps.logDebug("resize:chart-hover-active", { active, transitionMs });
+    if (transitionMs > 0) {
+      // The detail panel unrolls / rolls up over `transitionMs`. Letting the
+      // ResizeObserver chase it issues a native resize per notification, and
+      // measuring once at the start sees the panel at height 0. The follow
+      // loop instead resizes at most once per interval, ignores the observer
+      // meanwhile, and ends on a measured snap. Shrinks stay blocked while
+      // hover is active (see applyWindowHeight), so an opening follow only
+      // ever grows.
+      followContentDuringTransition(
+        transitionMs,
+        active ? "chart-hover-open" : "chart-hover-close",
+      );
+      return;
+    }
     if (active) {
       // Apply one deterministic resize when detail panel appears,
       // then block observer-driven feedback while hover stays active.

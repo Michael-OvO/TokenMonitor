@@ -9,6 +9,7 @@ mod kimi;
 use crate::models::RateLimitWindow;
 use crate::models::{ProviderRateLimits, RateLimitsPayload};
 use crate::statusline;
+use crate::usage::integrations::UsageIntegrationId;
 use chrono::{DateTime, Duration, Utc};
 use std::path::{Path, PathBuf};
 
@@ -132,6 +133,10 @@ use kimi::fetch_kimi_rate_limits;
 const CLAUDE_MIN_REFETCH_SECS: i64 = 300;
 const CODEX_MIN_REFETCH_SECS: i64 = 300;
 const KIMI_MIN_REFETCH_SECS: i64 = 300;
+/// Cursor's probe is the dearest of the four (a `sqlite3` spawn to read the
+/// IDE's token, then an HTTPS round trip), and until it had this gate it ran
+/// on every statusline event, several times a minute while Claude Code works.
+const CURSOR_MIN_REFETCH_SECS: i64 = 300;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RateLimitFetchError {
@@ -150,30 +155,46 @@ impl RateLimitFetchError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RateLimitSelection {
-    All,
-    Claude,
-    Codex,
-    Cursor,
-    Kimi,
+/// Which providers a rate-limit fetch may probe; the others keep whatever
+/// is cached. Built from the integrations the user has enabled, so a provider
+/// that is switched off never costs a probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RateLimitSelection {
+    claude: bool,
+    codex: bool,
+    cursor: bool,
+    kimi: bool,
 }
 
 impl RateLimitSelection {
+    /// The selection that probes exactly the integrations in `ids`.
+    pub fn enabled(ids: &[UsageIntegrationId]) -> Self {
+        let mut selection = Self::default();
+        for id in ids {
+            match id {
+                UsageIntegrationId::Claude => selection.claude = true,
+                UsageIntegrationId::Codex => selection.codex = true,
+                UsageIntegrationId::Cursor => selection.cursor = true,
+                UsageIntegrationId::Kimi => selection.kimi = true,
+            }
+        }
+        selection
+    }
+
     pub fn includes_claude(self) -> bool {
-        matches!(self, Self::All | Self::Claude)
+        self.claude
     }
 
     pub fn includes_codex(self) -> bool {
-        matches!(self, Self::All | Self::Codex)
+        self.codex
     }
 
     pub fn includes_cursor(self) -> bool {
-        matches!(self, Self::All | Self::Cursor)
+        self.cursor
     }
 
     pub fn includes_kimi(self) -> bool {
-        matches!(self, Self::All | Self::Kimi)
+        self.kimi
     }
 }
 
@@ -245,66 +266,73 @@ pub async fn fetch_selected_rate_limits(
     let cached_kimi = cached.and_then(|payload| payload.kimi.clone());
 
     let claude_future = async {
-        if !selection.includes_claude() {
-            return cached_claude;
-        }
-
-        let now = Utc::now();
-
-        // Primary: statusline — CC pushes server-authoritative used_percentage
-        // on every prompt, no network call, no budget cost.
-        if let Some(sl) = tokio::task::spawn_blocking(fetch_claude_from_statusline)
-            .await
-            .ok()
-            .flatten()
-        {
-            tracing::debug!("Claude rate limits served from statusline");
-            return Some(sl);
-        }
-
-        // Shared throttle for both remaining paths. The windows we track are
-        // 5h and 7d, so a 5-minute floor loses nothing visible and keeps us
-        // from spawning a CLI (or spending API budget) every 2.5 min.
-        if is_fresh(cached_claude.as_ref(), CLAUDE_MIN_REFETCH_SECS, now) {
-            return cached_claude;
-        }
-
-        // Secondary: ask Claude Code itself via `claude -p "/usage"`. Costs no
-        // tokens (`num_turns: 0`) and leaves credentials, refresh, and
-        // rate-limit retry entirely to the CLI — same division of labour as
-        // the Codex app-server probe.
-        match claude_cli::fetch_claude_rate_limits_via_cli().await {
-            Ok(rate_limits) => {
-                tracing::debug!("Claude rate limits served from CLI /usage");
-                return Some(rate_limits);
+        let provider_t0 = std::time::Instant::now();
+        let result = async {
+            if !selection.includes_claude() {
+                return cached_claude;
             }
-            Err(error) => {
-                tracing::debug!(error = %error.message, "Claude CLI /usage probe failed");
+
+            let now = Utc::now();
+
+            // Primary: statusline — CC pushes server-authoritative used_percentage
+            // on every prompt, no network call, no budget cost.
+            if let Some(sl) = tokio::task::spawn_blocking(fetch_claude_from_statusline)
+                .await
+                .ok()
+                .flatten()
+            {
+                tracing::debug!("Claude rate limits served from statusline");
+                return Some(sl);
+            }
+
+            // Shared throttle for both remaining paths. The windows we track are
+            // 5h and 7d, so a 5-minute floor loses nothing visible and keeps us
+            // from spawning a CLI (or spending API budget) every 2.5 min.
+            if is_fresh(cached_claude.as_ref(), CLAUDE_MIN_REFETCH_SECS, now) {
+                return cached_claude;
+            }
+
+            // Secondary: ask Claude Code itself via `claude -p "/usage"`. Costs no
+            // tokens (`num_turns: 0`) and leaves credentials, refresh, and
+            // rate-limit retry entirely to the CLI — same division of labour as
+            // the Codex app-server probe.
+            match claude_cli::fetch_claude_rate_limits_via_cli().await {
+                Ok(rate_limits) => {
+                    tracing::debug!("Claude rate limits served from CLI /usage");
+                    return Some(rate_limits);
+                }
+                Err(error) => {
+                    tracing::debug!(error = %error.message, "Claude CLI /usage probe failed");
+                }
+            }
+
+            // Last resort: call Anthropic's OAuth API ourselves. This is the only
+            // path that spends the account's rate-limit budget, so it is the only
+            // one the server cooldown holds back.
+            if let Some(held) = oauth_cooldown_hold(cached_claude.as_ref(), now) {
+                return Some(held);
+            }
+
+            match fetch_claude_rate_limits().await {
+                Ok(rate_limits) => Some(rate_limits),
+                Err(error) => {
+                    tracing::debug!(error = %error.message, "Claude OAuth API failed");
+
+                    tracing::warn!(
+                        error = %error.message,
+                        "Claude rate-limit: statusline + API both failed"
+                    );
+                    Some(provider_rate_limit_error("claude", error))
+                }
             }
         }
-
-        // Last resort: call Anthropic's OAuth API ourselves. This is the only
-        // path that spends the account's rate-limit budget, so it is the only
-        // one the server cooldown holds back.
-        if let Some(held) = oauth_cooldown_hold(cached_claude.as_ref(), now) {
-            return Some(held);
-        }
-
-        match fetch_claude_rate_limits().await {
-            Ok(rate_limits) => Some(rate_limits),
-            Err(error) => {
-                tracing::debug!(error = %error.message, "Claude OAuth API failed");
-
-                tracing::warn!(
-                    error = %error.message,
-                    "Claude rate-limit: statusline + API both failed"
-                );
-                Some(provider_rate_limit_error("claude", error))
-            }
-        }
+        .await;
+        (result, provider_t0.elapsed())
     };
 
     let codex_future = async move {
+        let provider_t0 = std::time::Instant::now();
+        let result = async {
         if !selection.includes_codex() {
             return cached_codex;
         }
@@ -333,59 +361,78 @@ pub async fn fetch_selected_rate_limits(
                 }
             }
         }
+        }
+        .await;
+        (result, provider_t0.elapsed())
     };
 
     let cursor_future = async {
-        if !selection.includes_cursor() {
-            return cached_cursor;
-        }
+        let provider_t0 = std::time::Instant::now();
+        let result = async {
+            if !selection.includes_cursor() {
+                return cached_cursor;
+            }
 
-        let now = Utc::now();
+            let now = Utc::now();
+            if is_fresh(cached_cursor.as_ref(), CURSOR_MIN_REFETCH_SECS, now) {
+                return cached_cursor;
+            }
 
-        if let Some(rate_limits) = cached_cursor.clone() {
-            if provider_cooldown_is_active(&rate_limits, now) {
-                return Some(mark_rate_limits_stale(rate_limits));
+            if let Some(rate_limits) = cached_cursor.clone() {
+                if provider_cooldown_is_active(&rate_limits, now) {
+                    return Some(mark_rate_limits_stale(rate_limits));
+                }
+            }
+
+            match fetch_cursor_rate_limits().await {
+                Ok(rate_limits) => Some(rate_limits),
+                Err(error) => {
+                    tracing::warn!(error = %error.message, "Cursor rate-limit fetch failed");
+                    Some(provider_rate_limit_error("cursor", error))
+                }
             }
         }
-
-        match fetch_cursor_rate_limits().await {
-            Ok(rate_limits) => Some(rate_limits),
-            Err(error) => {
-                tracing::warn!(error = %error.message, "Cursor rate-limit fetch failed");
-                Some(provider_rate_limit_error("cursor", error))
-            }
-        }
+        .await;
+        (result, provider_t0.elapsed())
     };
 
     let kimi_future = async {
-        if !selection.includes_kimi() {
-            return cached_kimi;
-        }
+        let provider_t0 = std::time::Instant::now();
+        let result = async {
+            if !selection.includes_kimi() {
+                return cached_kimi;
+            }
 
-        let now = Utc::now();
-        if is_fresh(cached_kimi.as_ref(), KIMI_MIN_REFETCH_SECS, now) {
-            return cached_kimi;
-        }
+            let now = Utc::now();
+            if is_fresh(cached_kimi.as_ref(), KIMI_MIN_REFETCH_SECS, now) {
+                return cached_kimi;
+            }
 
-        // Honor a 429 cooldown: error payloads have no windows, so `is_fresh`
-        // never trips and we'd otherwise re-hit the API every refresh cycle.
-        if let Some(rate_limits) = cached_kimi.clone() {
-            if provider_cooldown_is_active(&rate_limits, now) {
-                return Some(mark_rate_limits_stale(rate_limits));
+            // Honor a 429 cooldown: error payloads have no windows, so `is_fresh`
+            // never trips and we'd otherwise re-hit the API every refresh cycle.
+            if let Some(rate_limits) = cached_kimi.clone() {
+                if provider_cooldown_is_active(&rate_limits, now) {
+                    return Some(mark_rate_limits_stale(rate_limits));
+                }
+            }
+
+            match fetch_kimi_rate_limits().await {
+                Ok(rate_limits) => Some(rate_limits),
+                Err(error) => {
+                    tracing::warn!(error = %error.message, "Kimi rate-limit fetch failed");
+                    Some(provider_rate_limit_error("kimi", error))
+                }
             }
         }
-
-        match fetch_kimi_rate_limits().await {
-            Ok(rate_limits) => Some(rate_limits),
-            Err(error) => {
-                tracing::warn!(error = %error.message, "Kimi rate-limit fetch failed");
-                Some(provider_rate_limit_error("kimi", error))
-            }
-        }
+        .await;
+        (result, provider_t0.elapsed())
     };
 
-    let (claude, codex, cursor, kimi) =
+    let ((claude, claude_took), (codex, codex_took), (cursor, cursor_took), (kimi, kimi_took)) =
         tokio::join!(claude_future, codex_future, cursor_future, kimi_future);
+    tracing::info!(
+        "[PROFILE] rate-limits: selection={selection:?} claude={claude_took:?} codex={codex_took:?} cursor={cursor_took:?} kimi={kimi_took:?}"
+    );
     RateLimitsPayload {
         claude,
         codex,
@@ -397,6 +444,39 @@ pub async fn fetch_selected_rate_limits(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enabled_selection_probes_only_the_listed_providers() {
+        let selection =
+            RateLimitSelection::enabled(&[UsageIntegrationId::Claude, UsageIntegrationId::Codex]);
+        assert!(selection.includes_claude());
+        assert!(selection.includes_codex());
+        assert!(!selection.includes_cursor());
+        assert!(!selection.includes_kimi());
+    }
+
+    #[test]
+    fn enabled_selection_with_nothing_enabled_probes_nobody() {
+        let selection = RateLimitSelection::enabled(&[]);
+        assert!(!selection.includes_claude());
+        assert!(!selection.includes_codex());
+        assert!(!selection.includes_cursor());
+        assert!(!selection.includes_kimi());
+    }
+
+    #[test]
+    fn enabled_selection_with_every_integration_probes_everyone() {
+        let selection = RateLimitSelection::enabled(&[
+            UsageIntegrationId::Claude,
+            UsageIntegrationId::Codex,
+            UsageIntegrationId::Cursor,
+            UsageIntegrationId::Kimi,
+        ]);
+        assert!(selection.includes_claude());
+        assert!(selection.includes_codex());
+        assert!(selection.includes_cursor());
+        assert!(selection.includes_kimi());
+    }
     use chrono::Duration;
 
     use crate::models::RateLimitWindow;
