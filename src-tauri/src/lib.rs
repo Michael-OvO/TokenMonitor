@@ -537,9 +537,17 @@ async fn refresh_rate_limits(app: &tauri::AppHandle, state: &AppState) {
 
     let codex_dir = state.parser.codex_dir().to_path_buf();
     let cached = state.cached_rate_limits.read().await.clone();
+    // Only the integrations the user has switched on: the others would cost
+    // a probe (Cursor spawns sqlite3 and calls its API) for numbers nobody
+    // sees, on every statusline event.
+    let enabled = state
+        .enabled_integrations
+        .read()
+        .map(|ids| ids.clone())
+        .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
     let fresh = rate_limits::fetch_selected_rate_limits(
         &codex_dir,
-        rate_limits::RateLimitSelection::All,
+        rate_limits::RateLimitSelection::enabled(&enabled),
         cached.as_ref(),
     )
     .await;
@@ -624,6 +632,7 @@ async fn fast_statusline_poll(app: tauri::AppHandle) {
             continue;
         }
 
+        let tick_t0 = std::time::Instant::now();
         state.parser.clear_payload_cache();
         if parser_changed {
             // Source logs changed: drop the no-TTL disk cache too, otherwise the
@@ -631,7 +640,9 @@ async fn fast_statusline_poll(app: tauri::AppHandle) {
             // memory clear above (see AppState::clear_payload_disk_cache).
             state.clear_payload_disk_cache().await;
         }
+        let clear_elapsed = tick_t0.elapsed();
 
+        let rate_limits_t0 = std::time::Instant::now();
         if events_moved
             && state
                 .rate_limits_enabled
@@ -639,8 +650,16 @@ async fn fast_statusline_poll(app: tauri::AppHandle) {
         {
             refresh_rate_limits(&app, &state).await;
         }
+        let rate_limits_elapsed = rate_limits_t0.elapsed();
+
+        let tray_t0 = std::time::Instant::now();
         sync_tray_title(&app, &state).await;
+        let tray_elapsed = tray_t0.elapsed();
         let _ = app.emit("data-updated", 0u64);
+        tracing::info!(
+            "[PROFILE] statusline-poll: events_moved={events_moved} parser_changed={parser_changed} clear={clear_elapsed:?} rate_limits={rate_limits_elapsed:?} tray={tray_elapsed:?} total={:?}",
+            tick_t0.elapsed()
+        );
     }
 }
 

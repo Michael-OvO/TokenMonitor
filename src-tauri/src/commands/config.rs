@@ -617,13 +617,24 @@ pub async fn get_rate_limits(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RateLimitsPayload, String> {
+    // "all" follows the enabled header tabs, like the usage views do; a
+    // `+`-joined scope names its providers explicitly. Providers outside the
+    // selection keep their cached value instead of costing a probe.
     let selection = match provider.as_deref() {
-        None | Some("all") => crate::rate_limits::RateLimitSelection::All,
-        Some("claude") => crate::rate_limits::RateLimitSelection::Claude,
-        Some("codex") => crate::rate_limits::RateLimitSelection::Codex,
-        Some("cursor") => crate::rate_limits::RateLimitSelection::Cursor,
-        Some("kimi") => crate::rate_limits::RateLimitSelection::Kimi,
-        Some(other) => return Err(format!("Invalid provider for rate limits: {other}")),
+        None | Some("all") => {
+            let enabled = state
+                .enabled_integrations
+                .read()
+                .map(|ids| ids.clone())
+                .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+            crate::rate_limits::RateLimitSelection::enabled(&enabled)
+        }
+        Some(scope) => match crate::usage::integrations::UsageIntegrationSelection::parse(scope) {
+            Some(parsed) => {
+                crate::rate_limits::RateLimitSelection::enabled(&parsed.integration_ids())
+            }
+            None => return Err(format!("Invalid provider for rate limits: {scope}")),
+        },
     };
 
     if !state
