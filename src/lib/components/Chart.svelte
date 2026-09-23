@@ -8,6 +8,7 @@
   import { filterVisibleChartBuckets, getXAxisLabels } from "./chartBuckets.js";
   import { pieHitSectorPaths } from "./pieHitAreas.js";
   import { disclosureMotion } from "../utils/disclosureMotion.js";
+  import { scrollFade } from "../utils/scrollFade.js";
   import { createStickyHover } from "../utils/stickyHover.js";
 
   import { isWindows } from "../utils/platform.js";
@@ -619,7 +620,7 @@
                 </g>
               </svg>
 
-              <ul class="pie-breakdown" role="list">
+              <ul class="pie-breakdown" role="list" use:scrollFade>
                 {#each arcs as arc, i}
                   <li
                     class="pie-row"
@@ -942,25 +943,15 @@
     gap: 0;
     max-height: 108px;
     overflow-y: auto;
-    padding-right: 2px;
+    /* No scrollbar: the list is rebuilt on every tab switch and WebKit showed
+       the bar for a moment each time, right beside the costs. Like the rest of
+       the popover it still scrolls; a fade marks the hidden rows instead. */
+    scrollbar-width: none;
   }
-  /* When more models than fit: a 4px hairline thumb on a bare track instead
-     of the native bar. Only the -webkit- pseudo-elements are set on purpose:
-     engines drop them as soon as the standard `scrollbar-width` /
-     `scrollbar-color` properties are present, and fall back to their own
-     "thin" bar, which is still ~11px with a track. */
-  .pie-breakdown::-webkit-scrollbar { width: 4px; }
-  .pie-breakdown::-webkit-scrollbar-track { background: transparent; }
-  .pie-breakdown::-webkit-scrollbar-thumb {
-    background: rgba(255,255,255,0.12);
-    border-radius: 2px;
-  }
-  .pie-breakdown:hover::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.22); }
-  :global([data-theme="light"]) .pie-breakdown::-webkit-scrollbar-thumb {
-    background: rgba(0,0,0,0.16);
-  }
-  :global([data-theme="light"]) .pie-breakdown:hover::-webkit-scrollbar-thumb {
-    background: rgba(0,0,0,0.28);
+  .pie-breakdown::-webkit-scrollbar { display: none; }
+  .pie-breakdown:global([data-more-below]) {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 16px), transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 16px), transparent 100%);
   }
   .pie-row {
     display: grid;
