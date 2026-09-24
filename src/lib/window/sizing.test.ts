@@ -127,8 +127,8 @@ describe("resolveFixedWindowHeight", () => {
   });
 
   it("computes floor(logicalWidth * ratio) for normal inputs", () => {
-    // 2560 physical / 2 scale = 1280 logical * 0.392 = 501.76 → capped at 500
-    expect(resolveFixedWindowHeight(2560, 2)).toBe(FIXED_HEIGHT_CAP);
+    // 2560 physical / 2 scale = 1280 logical * 0.392 = 501.76 → floor = 501, under the cap
+    expect(resolveFixedWindowHeight(2560, 2)).toBe(501);
   });
 
   it("returns ratio-based value when below cap", () => {
@@ -146,7 +146,7 @@ describe("resolveFixedWindowHeight", () => {
   });
 
   it("handles scale factor of 1 (non-retina)", () => {
-    // 1440 / 1 = 1440 * 0.392 = 564.48 → capped at 500
+    // 1440 / 1 = 1440 * 0.392 = 564.48 → capped at 560
     expect(resolveFixedWindowHeight(1440, 1)).toBe(FIXED_HEIGHT_CAP);
     // 1000 / 1 = 1000 * 0.392 = 392 → below cap
     expect(resolveFixedWindowHeight(1000, 1)).toBe(392);

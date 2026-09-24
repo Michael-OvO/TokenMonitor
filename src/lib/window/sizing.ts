@@ -7,7 +7,9 @@ export const DEFAULT_MAX_WINDOW_HEIGHT = 2400;
 export const WINDOW_MONITOR_MARGIN = 24;
 /** When content height exceeds this ratio of screen work area, enable scrolling. */
 export const SCROLL_THRESHOLD_RATIO = 0.75;
-export const SCROLL_THRESHOLD_CAP = 500;
+/* 560 rather than 500: the 5h view with two providers, their windows, and the
+   Codex reset timeline runs past 500 and the tail hid under the sticky footer. */
+export const SCROLL_THRESHOLD_CAP = 560;
 export const RESIZE_SETTLE_DELAY_MS = 100;
 /** Ignore sub-pixel / 1px oscillation between ResizeObserver and setSize (feedback loop). */
 export const RESIZE_HYSTERESIS_PX = 3;
@@ -114,7 +116,7 @@ export function classifyResize(
 
 // ── Fixed window height ──
 
-export const FIXED_HEIGHT_CAP = 500;
+export const FIXED_HEIGHT_CAP = 560;
 export const FIXED_HEIGHT_SCREEN_RATIO = 0.392;
 
 export function resolveFixedWindowHeight(

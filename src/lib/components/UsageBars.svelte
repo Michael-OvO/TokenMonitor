@@ -12,7 +12,7 @@
     rateLimitWindowResetLabel,
     resetTimelineLayout,
   } from "../views/rateLimits.js";
-  import type { ProviderRateLimits, RateLimitWindow } from "../types/index.js";
+  import type { CreditsInfo, ProviderRateLimits, RateLimitWindow } from "../types/index.js";
   import ResetTimeline from "./ResetTimeline.svelte";
 
   interface Props {
@@ -23,6 +23,13 @@
 
   // Refresh "Resets in" + pace every 30s
   let refreshTick = $state(0);
+  /** Credits sit in the header as a pill, like the plan, so they do not cost a row. */
+  function creditsLabel(credits: CreditsInfo): string {
+    if (credits.unlimited) return "Unlimited credits";
+    if (credits.balance != null) return `${Math.round(credits.balance).toLocaleString()} credits`;
+    return credits.hasCredits ? "Credits available" : "No credits";
+  }
+
   let resetTimeline = $derived.by(() => {
     void refreshTick;
     return resetTimelineLayout(rateLimits.credits?.usageLimitResets);
@@ -151,6 +158,9 @@
       {#if rateLimits.planTier}
         <span class="ub-plan">{rateLimits.planTier}</span>
       {/if}
+      {#if rateLimits.credits}
+        <span class="ub-plan">{creditsLabel(rateLimits.credits)}</span>
+      {/if}
     </div>
   {/if}
 
@@ -215,25 +225,6 @@
         ></div>
       </div>
       <div class="ub-sub">{rateLimits.provider === "cursor" ? "On-demand spend limit" : "Monthly overuse budget"}</div>
-    </div>
-  {/if}
-
-  {#if rateLimits.credits}
-    <div class="ub-row">
-      <div class="ub-head">
-        <span class="ub-label">Credits</span>
-        <span class="ub-val">
-          {#if rateLimits.credits.unlimited}
-            Unlimited
-          {:else if rateLimits.credits.balance != null}
-            {Math.round(rateLimits.credits.balance).toLocaleString()} credits
-          {:else if rateLimits.credits.hasCredits}
-            Available
-          {:else}
-            Depleted
-          {/if}
-        </span>
-      </div>
     </div>
   {/if}
 

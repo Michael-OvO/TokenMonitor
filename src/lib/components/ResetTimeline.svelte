@@ -44,7 +44,8 @@
   .rt {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 5px;
+    padding-top: 2px;
   }
   .rt-track {
     position: relative;
@@ -63,10 +64,12 @@
   .rt-dot {
     position: absolute;
     top: 50%;
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
     background: var(--accent);
+    /* A ring in the card colour keeps neighbouring dots apart. */
+    box-shadow: 0 0 0 2px var(--surface);
     transform: translate(-50%, -50%);
     cursor: default;
   }
@@ -75,13 +78,13 @@
   }
   .rt-labels {
     position: relative;
-    height: 9px;
+    height: 10px;
     font: 400 9px/1 'Inter', sans-serif;
     color: var(--t3);
     font-variant-numeric: tabular-nums;
   }
   .rt.staggered .rt-labels {
-    height: 20px;
+    height: 21px;
   }
   .rt-date {
     position: absolute;
