@@ -128,7 +128,7 @@ describe("resetTimelineLayout", () => {
   it("grows the horizon to whole weeks past the last expiry", () => {
     const layout = resetTimelineLayout(resets([33, 5]), NOW)!;
     expect(layout.horizonDays).toBe(35);
-    expect(layout.markers.map((m) => m.daysLeft)).toEqual([5, 33]);
+    expect(layout.markers.map((m) => m.leftLabel)).toEqual(["5d", "33d"]);
     expect(layout.markers[1].leftPct).toBeCloseTo((33 / 35) * 100, 6);
   });
 

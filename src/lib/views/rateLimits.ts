@@ -44,7 +44,6 @@ export interface ResetTimelineMarker {
   dateLabel: string;
   /** Compact countdown: "11d", "18h", "40m". */
   leftLabel: string;
-  daysLeft: number;
   /** Expires within three days. */
   urgent: boolean;
   /** Native tooltip text. */
@@ -129,7 +128,6 @@ export function resetTimelineLayout(
       dotPct,
       dateLabel: shortDate.format(expiresMs),
       leftLabel: formatCompactTimeLeft(expiresMs - now),
-      daysLeft,
       urgent: daysLeft <= URGENT_DAYS,
       title,
     };
