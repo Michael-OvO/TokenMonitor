@@ -211,6 +211,16 @@ export function placeChips(
   return anchorsPx.map((_, i) => ({ leftPx: left[i], row: rowOf(i) }));
 }
 
+/**
+ * Where a leader line meets its chip: straight below (or above) the dot
+ * whenever the chip spans the dot's x, which includes a chip clamped at the
+ * strip's edge; otherwise the nearest point on the chip, inset from its end.
+ */
+export function leaderTargetX(anchorPx: number, chipLeftPx: number, chipWidthPx: number, insetPx = 6): number {
+  const inset = Math.min(insetPx, chipWidthPx / 2);
+  return Math.min(Math.max(anchorPx, chipLeftPx + inset), chipLeftPx + chipWidthPx - inset);
+}
+
 function fallbackProviderWindow(
   rateLimits: ProviderRateLimits | null | undefined,
   now: number,
