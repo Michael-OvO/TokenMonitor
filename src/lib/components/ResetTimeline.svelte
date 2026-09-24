@@ -21,6 +21,7 @@
       <span
         class="rt-dot"
         class:urgent={marker.urgent}
+        class:cluster={marker.count > 1}
         style="left: {marker.leftPct}%"
         title={marker.title}
       ></span>
@@ -35,7 +36,7 @@
         class:row1={marker.labelRow === 1}
         style="left: {marker.leftPct}%"
         title={marker.title}
-      ><span class="rt-abs">{marker.dateLabel}</span><span class="rt-rel">in {marker.leftLabel}</span></span>
+      ><span class="rt-abs">{marker.dateLabel}</span><span class="rt-rel">in {marker.leftLabel}</span>{#if marker.count > 1}<span class="rt-count">×{marker.count}</span>{/if}</span>
     {/each}
     <span class="rt-cap rt-cap-end">{layout.horizonLabel}</span>
   </div>
@@ -76,6 +77,14 @@
   }
   .rt-dot.urgent {
     background: var(--alert, #B05A52);
+  }
+  .rt-dot.cluster {
+    width: 8px;
+    height: 8px;
+  }
+  .rt-count {
+    margin-left: 3px;
+    color: var(--t4);
   }
   .rt-labels {
     position: relative;

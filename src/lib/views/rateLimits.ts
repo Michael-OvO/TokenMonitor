@@ -36,18 +36,22 @@ function isExpiredProviderWindow(
 }
 
 export interface ResetTimelineMarker {
-  /** Position along the strip, 0..100. */
+  /** Position along the strip, 0..100 (the mean for a cluster). */
   leftPct: number;
+  /** "Oct 4", or a range for a cluster: "Oct 4–5", "Sep 30–Oct 2". */
   dateLabel: string;
-  /** Compact countdown: "11d", "18h", "40m". */
+  /** Compact countdown: "11d", "18h"; a range for a cluster: "10–11d". */
   leftLabel: string;
+  /** Days to the earliest expiry in the marker. */
   daysLeft: number;
-  /** Expires within three days. */
+  /** Any member expires within three days. */
   urgent: boolean;
-  /** Native tooltip text. */
+  /** Native tooltip text, one line per reset. */
   title: string;
-  /** A label that would collide with the one before it drops to the second baseline. */
+  /** A label sitting under the "today" or horizon cap drops to the second baseline. */
   labelRow: 0 | 1;
+  /** Resets merged into this marker; more than one when their labels would collide. */
+  count: number;
 }
 
 export interface ResetTimelineLayout {
@@ -62,13 +66,12 @@ export interface ResetTimelineLayout {
 }
 
 const DAY_MS = 86_400_000;
-const MIN_HORIZON_DAYS = 28;
-const URGENT_DAYS = 3;
-/** Labels closer than this share a column, so the later one drops a row. */
-const LABEL_MIN_GAP_PCT = 11;
-
 const HOUR_MS = 3_600_000;
 const MINUTE_MS = 60_000;
+const MIN_HORIZON_DAYS = 28;
+const URGENT_DAYS = 3;
+/** Labels closer than this would overlap, so the resets behind them merge into one marker. */
+const LABEL_MIN_GAP_PCT = 11;
 
 /** One coarse unit, rounded up so a reset never reads as already gone: "11d", "18h", "40m". */
 export function formatCompactTimeLeft(ms: number): string {
@@ -78,6 +81,8 @@ export function formatCompactTimeLeft(ms: number): string {
 }
 
 const shortDate = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
+const dayOfMonth = new Intl.DateTimeFormat("en-US", { day: "numeric" });
+const monthOf = new Intl.DateTimeFormat("en-US", { month: "short" });
 const fullDateTime = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
@@ -85,11 +90,30 @@ const fullDateTime = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
+/** "Oct 4" for one day, "Oct 4–5" within a month, "Sep 30–Oct 2" across months. */
+function dateRangeLabel(firstMs: number, lastMs: number): string {
+  const first = shortDate.format(firstMs);
+  const last = shortDate.format(lastMs);
+  if (first === last) return first;
+  if (monthOf.format(firstMs) === monthOf.format(lastMs)) return `${first}–${dayOfMonth.format(lastMs)}`;
+  return `${first}–${last}`;
+}
+
+/** "11d" for one, "10–11d" when both share a unit, "17h–2d" otherwise. */
+function countdownRangeLabel(firstMs: number, lastMs: number): string {
+  const first = formatCompactTimeLeft(firstMs);
+  const last = formatCompactTimeLeft(lastMs);
+  if (first === last) return first;
+  const unit = (label: string) => label.slice(-1);
+  if (unit(first) === unit(last)) return `${first.slice(0, -1)}–${last}`;
+  return `${first}–${last}`;
+}
+
 /**
  * Lay the still-valid usage-limit resets on a strip from today to the last
- * expiry rounded up to whole weeks, never under four: dot position, date
- * label with a second baseline for near-collisions (the "today" and horizon
- * caps count as neighbours), urgency inside three days, and a tooltip. Null
+ * expiry rounded up to whole weeks, never under four. Resets whose labels
+ * would overlap merge into one marker with a range label; a label that would
+ * sit under the "today" or horizon cap drops to the second baseline. Null
  * when the provider reports no resets at all.
  */
 export function resetTimelineLayout(
@@ -110,39 +134,54 @@ export function resetTimelineLayout(
   const weekTickPcts: number[] = [];
   for (let day = 7; day < horizonDays; day += 7) weekTickPcts.push((day / horizonDays) * 100);
 
-  // The "today" cap sits at 0 and the horizon cap at 100.
-  let lastRow0Pct = 0;
-  const markers = live.map(({ reset, expiresMs }) => {
-    const daysLeft = (expiresMs - now) / DAY_MS;
-    const leftPct = Math.min(100, (daysLeft / horizonDays) * 100);
-    let labelRow: 0 | 1 = 0;
-    if (leftPct - lastRow0Pct >= LABEL_MIN_GAP_PCT && leftPct <= 100 - LABEL_MIN_GAP_PCT) {
-      lastRow0Pct = leftPct;
+  const pctOf = (expiresMs: number) => Math.min(100, ((expiresMs - now) / DAY_MS / horizonDays) * 100);
+
+  // Group resets whose labels would collide with the first of the group.
+  const clusters: Array<typeof live> = [];
+  for (const entry of live) {
+    const current = clusters[clusters.length - 1];
+    if (current && pctOf(entry.expiresMs) - pctOf(current[0].expiresMs) < LABEL_MIN_GAP_PCT) {
+      current.push(entry);
     } else {
-      labelRow = 1;
+      clusters.push([entry]);
     }
-    const grantedMs = resetAtMs(reset.grantedAt);
-    const title = [
-      reset.title ?? "Reset",
-      `expires ${fullDateTime.format(expiresMs)}`,
-      grantedMs !== null ? `granted ${shortDate.format(grantedMs)}` : null,
-    ]
-      .filter(Boolean)
-      .join(" · ");
+  }
+
+  const markers = clusters.map((members) => {
+    const firstMs = members[0].expiresMs;
+    const lastMs = members[members.length - 1].expiresMs;
+    const leftPct = members.reduce((sum, m) => sum + pctOf(m.expiresMs), 0) / members.length;
+    const daysLeft = (firstMs - now) / DAY_MS;
+    // The "today" cap sits at 0 and the horizon cap at 100.
+    const labelRow: 0 | 1 =
+      leftPct < LABEL_MIN_GAP_PCT || leftPct > 100 - LABEL_MIN_GAP_PCT ? 1 : 0;
+    const title = members
+      .map(({ reset, expiresMs }) => {
+        const grantedMs = resetAtMs(reset.grantedAt);
+        return [
+          reset.title ?? "Reset",
+          `expires ${fullDateTime.format(expiresMs)}`,
+          grantedMs !== null ? `granted ${shortDate.format(grantedMs)}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+      })
+      .join("\n");
     return {
       leftPct,
-      dateLabel: shortDate.format(expiresMs),
-      leftLabel: formatCompactTimeLeft(expiresMs - now),
+      dateLabel: dateRangeLabel(firstMs, lastMs),
+      leftLabel: countdownRangeLabel(firstMs - now, lastMs - now),
       daysLeft,
       urgent: daysLeft <= URGENT_DAYS,
       title,
       labelRow,
+      count: members.length,
     };
   });
 
   return {
     available: resets.available,
-    nextLeftLabel: markers.length > 0 ? markers[0].leftLabel : null,
+    nextLeftLabel: live.length > 0 ? formatCompactTimeLeft(live[0].expiresMs - now) : null,
     horizonDays,
     horizonLabel: `+${horizonDays / 7}w`,
     weekTickPcts,
