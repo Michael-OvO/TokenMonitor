@@ -144,6 +144,75 @@ export function resetTimelineLayout(
   };
 }
 
+export type ChipSide = "above" | "below";
+
+/**
+ * Which side of the bar each chip goes on. Below by default; a chip that
+ * would overlap its predecessor below goes above instead, so a close pair
+ * splits across the bar with both chips still centred on their dots. Only
+ * when both sides are taken does a chip join the less crowded side and get
+ * pushed sideways by `placeChips`.
+ */
+export function assignChipSides(anchorsPx: number[], widthsPx: number[], gapPx = 4): ChipSide[] {
+  const rightEdge: Record<ChipSide, number> = { below: -Infinity, above: -Infinity };
+  return anchorsPx.map((anchor, i) => {
+    const left = anchor - widthsPx[i] / 2;
+    const fits = (side: ChipSide) => left >= rightEdge[side] + gapPx;
+    const side: ChipSide = fits("below")
+      ? "below"
+      : fits("above")
+        ? "above"
+        : rightEdge.below <= rightEdge.above
+          ? "below"
+          : "above";
+    rightEdge[side] = Math.max(left, rightEdge[side] + gapPx) + widthsPx[i];
+    return side;
+  });
+}
+
+export interface ChipPlacement {
+  leftPx: number;
+  /** 0, or 1 when the chips do not all fit on one row and this one drops to the second. */
+  row: number;
+}
+
+/**
+ * Place one chip under each anchor: centred on it when possible, pushed
+ * sideways (order preserved, never overlapping, never outside the strip)
+ * when neighbours are too close. When the chips cannot all fit in one row
+ * they alternate between two rows.
+ */
+export function placeChips(
+  anchorsPx: number[],
+  widthsPx: number[],
+  stripWidthPx: number,
+  gapPx = 4,
+): ChipPlacement[] {
+  const n = anchorsPx.length;
+  const total = widthsPx.reduce((sum, w) => sum + w, 0) + Math.max(0, n - 1) * gapPx;
+  const rowOf = (i: number) => (total <= stripWidthPx ? 0 : i % 2);
+  const left = new Array<number>(n).fill(0);
+  for (const row of [0, 1]) {
+    const members = anchorsPx.map((_, i) => i).filter((i) => rowOf(i) === row);
+    // Forward from the left edge: centred when possible, else just past the neighbour.
+    let cursor = 0;
+    for (const i of members) {
+      left[i] = Math.max(anchorsPx[i] - widthsPx[i] / 2, cursor);
+      cursor = left[i] + widthsPx[i] + gapPx;
+    }
+    // Backward from the right edge: pull anything that overhangs back inside.
+    let limit = stripWidthPx;
+    for (const i of [...members].reverse()) {
+      left[i] = Math.min(left[i], limit - widthsPx[i]);
+      limit = left[i] - gapPx;
+    }
+    // A row wider than the strip cannot satisfy both; keep the order and let it overhang right.
+    const overhang = members.length > 0 ? Math.max(0, -left[members[0]]) : 0;
+    for (const i of members) left[i] += overhang;
+  }
+  return anchorsPx.map((_, i) => ({ leftPx: left[i], row: rowOf(i) }));
+}
+
 function fallbackProviderWindow(
   rateLimits: ProviderRateLimits | null | undefined,
   now: number,

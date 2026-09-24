@@ -4,7 +4,9 @@ import {
   hasRateLimitWindows,
   providerHasActiveCooldown,
   providerRateLimitViewState,
+  assignChipSides,
   formatCompactTimeLeft,
+  placeChips,
   rateLimitWindowResetLabel,
   resetTimelineLayout,
 } from "./rateLimits.js";
@@ -58,6 +60,49 @@ describe("formatCompactTimeLeft", () => {
     expect(formatCompactTimeLeft(17.5 * 3_600_000)).toBe("18h");
     expect(formatCompactTimeLeft(40 * 60_000)).toBe("40m");
     expect(formatCompactTimeLeft(10)).toBe("1m");
+  });
+});
+
+describe("assignChipSides", () => {
+  it("keeps every chip below the bar while they fit", () => {
+    expect(assignChipSides([50, 150, 250], [60, 60, 60])).toEqual(["below", "below", "below"]);
+  });
+
+  it("splits a close pair across the bar", () => {
+    expect(assignChipSides([100, 110], [60, 60])).toEqual(["below", "above"]);
+  });
+
+  it("falls back to the less crowded side once both are taken", () => {
+    expect(assignChipSides([100, 110, 120], [60, 60, 60])).toEqual(["below", "above", "below"]);
+  });
+});
+
+describe("placeChips", () => {
+  it("centres each chip under its anchor when there is room", () => {
+    expect(placeChips([50, 200], [60, 60], 300)).toEqual([
+      { leftPx: 20, row: 0 },
+      { leftPx: 170, row: 0 },
+    ]);
+  });
+
+  it("pushes a chip sideways just far enough to clear its neighbour", () => {
+    const [first, second] = placeChips([100, 110], [60, 60], 300);
+    expect(first.leftPx).toBe(70);
+    expect(second.leftPx).toBe(134);
+  });
+
+  it("keeps chips inside the strip, pulling earlier ones left if needed", () => {
+    const [first, second] = placeChips([280, 295], [60, 60], 300);
+    expect(second.leftPx).toBe(240);
+    expect(first.leftPx).toBe(176);
+    expect(placeChips([5], [60], 300)[0].leftPx).toBe(0);
+  });
+
+  it("alternates rows when the chips cannot all fit in one", () => {
+    const placements = placeChips([20, 60, 100, 140, 180], [70, 70, 70, 70, 70], 300);
+    expect(placements.map((p) => p.row)).toEqual([0, 1, 0, 1, 0]);
+    const rowZero = placements.filter((p) => p.row === 0).map((p) => p.leftPx);
+    expect(rowZero[1]).toBeGreaterThanOrEqual(rowZero[0] + 70 + 4);
   });
 });
 
