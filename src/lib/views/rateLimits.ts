@@ -36,7 +36,7 @@ function isExpiredProviderWindow(
 }
 
 export interface ResetTimelineMarker {
-  /** True position along the strip, 0..100. */
+  /** True position along the strip, inside its end margins. */
   leftPct: number;
   /** Where the dot is drawn: nudged right of `leftPct` when a neighbour is too close. */
   dotPct: number;
@@ -68,6 +68,9 @@ const MIN_HORIZON_DAYS = 28;
 const URGENT_DAYS = 3;
 /** Dots closer than this (percent of the strip) would touch, so the later one is nudged right. */
 const MIN_DOT_GAP_PCT = 4;
+/** Margin kept free at both ends of the strip so a dot never sits on the rounded corner of a
+ * chip clamped at the edge, and its leader can stay vertical. */
+const STRIP_PAD_PCT = 4;
 
 /** One coarse unit, rounded up so a reset never reads as already gone: "11d", "18h", "40m". */
 export function formatCompactTimeLeft(ms: number): string {
@@ -106,14 +109,16 @@ export function resetTimelineLayout(
 
   const lastDays = live.length > 0 ? (live[live.length - 1].expiresMs - now) / DAY_MS : 0;
   const horizonDays = Math.max(MIN_HORIZON_DAYS, Math.ceil(lastDays / 7) * 7);
+  const pctOf = (days: number) =>
+    STRIP_PAD_PCT + (Math.min(days, horizonDays) / horizonDays) * (100 - 2 * STRIP_PAD_PCT);
   const weekTickPcts: number[] = [];
-  for (let day = 7; day < horizonDays; day += 7) weekTickPcts.push((day / horizonDays) * 100);
+  for (let day = 7; day < horizonDays; day += 7) weekTickPcts.push(pctOf(day));
 
   let previousDotPct = -Infinity;
   const markers = live.map(({ reset, expiresMs }) => {
     const daysLeft = (expiresMs - now) / DAY_MS;
-    const leftPct = Math.min(100, (daysLeft / horizonDays) * 100);
-    const dotPct = Math.min(100, Math.max(leftPct, previousDotPct + MIN_DOT_GAP_PCT));
+    const leftPct = pctOf(daysLeft);
+    const dotPct = Math.min(100 - STRIP_PAD_PCT, Math.max(leftPct, previousDotPct + MIN_DOT_GAP_PCT));
     previousDotPct = dotPct;
     const grantedMs = resetAtMs(reset.grantedAt);
     const title = [

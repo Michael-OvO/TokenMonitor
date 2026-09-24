@@ -131,7 +131,8 @@ describe("resetTimelineLayout", () => {
     const layout = resetTimelineLayout(resets([14]), NOW)!;
     expect(layout.available).toBe(1);
     expect(layout.horizonDays).toBe(28);
-    expect(layout.weekTickPcts).toEqual([25, 50, 75]);
+    // Week ticks and dots share a 4% margin at each end of the strip.
+    expect(layout.weekTickPcts).toEqual([27, 50, 73]);
     expect(layout.markers).toHaveLength(1);
     expect(layout.markers[0].leftPct).toBeCloseTo(50, 6);
     expect(layout.markers[0].dotPct).toBeCloseTo(50, 6);
@@ -144,7 +145,7 @@ describe("resetTimelineLayout", () => {
     const layout = resetTimelineLayout(resets([33, 5]), NOW)!;
     expect(layout.horizonDays).toBe(35);
     expect(layout.markers.map((m) => m.leftLabel)).toEqual(["5d", "33d"]);
-    expect(layout.markers[1].leftPct).toBeCloseTo((33 / 35) * 100, 6);
+    expect(layout.markers[1].leftPct).toBeCloseTo(4 + (33 / 35) * 92, 6);
   });
 
   it("flags resets expiring within three days", () => {
@@ -155,16 +156,17 @@ describe("resetTimelineLayout", () => {
   it("keeps every reset as its own marker and nudges touching dots apart", () => {
     const close = resetTimelineLayout(resets([10, 10.5]), NOW)!;
     expect(close.markers).toHaveLength(2);
-    expect(close.markers[0].dotPct).toBeCloseTo((10 / 28) * 100, 6);
-    expect(close.markers[1].leftPct).toBeCloseTo((10.5 / 28) * 100, 6);
-    expect(close.markers[1].dotPct).toBeCloseTo((10 / 28) * 100 + 4, 6);
+    expect(close.markers[0].dotPct).toBeCloseTo(4 + (10 / 28) * 92, 6);
+    expect(close.markers[1].leftPct).toBeCloseTo(4 + (10.5 / 28) * 92, 6);
+    expect(close.markers[1].dotPct).toBeCloseTo(4 + (10 / 28) * 92 + 4, 6);
     const apart = resetTimelineLayout(resets([10, 20]), NOW)!;
     expect(apart.markers.map((m) => m.dotPct)).toEqual(apart.markers.map((m) => m.leftPct));
   });
 
-  it("never pushes a nudged dot past the end of the strip", () => {
+  it("keeps dots inside the strip end margins, nudged or not", () => {
     const layout = resetTimelineLayout(resets([27.9, 28]), NOW)!;
-    expect(layout.markers[1].dotPct).toBe(100);
+    expect(layout.markers[1].dotPct).toBe(96);
+    expect(resetTimelineLayout(resets([0.001]), NOW)!.markers[0].leftPct).toBeCloseTo(4, 2);
   });
 
   it("labels each reset with a compact countdown and surfaces the nearest one", () => {
