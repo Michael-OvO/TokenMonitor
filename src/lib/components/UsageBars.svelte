@@ -10,8 +10,10 @@
     providerHasActiveCooldown,
     providerRateLimitViewState,
     rateLimitWindowResetLabel,
+    resetTimelineLayout,
   } from "../views/rateLimits.js";
-  import type { ProviderRateLimits, RateLimitWindow } from "../types/index.js";
+  import type { CreditsInfo, ProviderRateLimits, RateLimitWindow } from "../types/index.js";
+  import ResetTimeline from "./ResetTimeline.svelte";
 
   interface Props {
     providerLabel?: string;
@@ -21,6 +23,17 @@
 
   // Refresh "Resets in" + pace every 30s
   let refreshTick = $state(0);
+  /** Credits sit in the header as a pill, like the plan, so they do not cost a row. */
+  function creditsLabel(credits: CreditsInfo): string {
+    if (credits.unlimited) return "Unlimited credits";
+    if (credits.balance != null) return `${Math.round(credits.balance).toLocaleString()} credits`;
+    return credits.hasCredits ? "Credits available" : "No credits";
+  }
+
+  let resetTimeline = $derived.by(() => {
+    void refreshTick;
+    return resetTimelineLayout(rateLimits.credits?.usageLimitResets);
+  });
   $effect(() => {
     const interval = setInterval(() => { refreshTick += 1; }, 30_000);
     return () => clearInterval(interval);
@@ -145,6 +158,9 @@
       {#if rateLimits.planTier}
         <span class="ub-plan">{rateLimits.planTier}</span>
       {/if}
+      {#if rateLimits.credits}
+        <span class="ub-plan">{creditsLabel(rateLimits.credits)}</span>
+      {/if}
     </div>
   {/if}
 
@@ -212,22 +228,17 @@
     </div>
   {/if}
 
-  {#if rateLimits.credits}
+  {#if resetTimeline}
     <div class="ub-row">
       <div class="ub-head">
-        <span class="ub-label">Credits</span>
+        <span class="ub-label">Resets</span>
         <span class="ub-val">
-          {#if rateLimits.credits.unlimited}
-            Unlimited
-          {:else if rateLimits.credits.balance != null}
-            {Math.round(rateLimits.credits.balance).toLocaleString()} credits
-          {:else if rateLimits.credits.hasCredits}
-            Available
-          {:else}
-            Depleted
-          {/if}
+          {resetTimeline.available} available{#if resetTimeline.nextLeftLabel}<span class="ub-val-dim">· next in {resetTimeline.nextLeftLabel}</span>{/if}
         </span>
       </div>
+      {#if resetTimeline.markers.length > 0}
+        <ResetTimeline layout={resetTimeline} />
+      {/if}
     </div>
   {/if}
 </div>
@@ -287,6 +298,11 @@
   }
   .ub-val.stale {
     opacity: 0.55;
+  }
+  .ub-val-dim {
+    margin-left: 0.4em;
+    color: var(--t3);
+    font-weight: 400;
   }
   .ub-track {
     position: relative;

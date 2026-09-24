@@ -4,9 +4,29 @@ import {
   hasRateLimitWindows,
   providerHasActiveCooldown,
   providerRateLimitViewState,
+  assignChipSides,
+  formatCompactTimeLeft,
+  placeChips,
   rateLimitWindowResetLabel,
+  resetTimelineLayout,
 } from "./rateLimits.js";
-import type { ProviderRateLimits } from "../types/index.js";
+import type { ProviderRateLimits, UsageLimitReset, UsageLimitResets } from "../types/index.js";
+
+const NOW = Date.parse("2026-09-23T12:00:00Z");
+const DAY = 86_400_000;
+const shortDate = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
+
+function reset(daysFromNow: number, title = "Full reset"): UsageLimitReset {
+  return {
+    title,
+    grantedAt: new Date(NOW - 20 * DAY).toISOString(),
+    expiresAt: new Date(NOW + daysFromNow * DAY).toISOString(),
+  };
+}
+
+function resets(days: number[], available = days.length): UsageLimitResets {
+  return { available, resets: days.map((d) => reset(d)) };
+}
 
 function providerRateLimits(
   overrides: Partial<ProviderRateLimits> = {},
@@ -32,6 +52,119 @@ function providerRateLimits(
     ...overrides,
   };
 }
+
+describe("formatCompactTimeLeft", () => {
+  it("uses one coarse unit, rounded up", () => {
+    expect(formatCompactTimeLeft(11 * DAY)).toBe("11d");
+    expect(formatCompactTimeLeft(1.2 * DAY)).toBe("2d");
+    expect(formatCompactTimeLeft(17.5 * 3_600_000)).toBe("18h");
+    expect(formatCompactTimeLeft(40 * 60_000)).toBe("40m");
+    expect(formatCompactTimeLeft(10)).toBe("1m");
+  });
+});
+
+describe("assignChipSides", () => {
+  it("keeps every chip below the bar while they fit", () => {
+    expect(assignChipSides([50, 150, 250], [60, 60, 60])).toEqual(["below", "below", "below"]);
+  });
+
+  it("splits a close pair across the bar", () => {
+    expect(assignChipSides([100, 110], [60, 60])).toEqual(["below", "above"]);
+  });
+
+  it("falls back to the less crowded side once both are taken", () => {
+    expect(assignChipSides([100, 110, 120], [60, 60, 60])).toEqual(["below", "above", "below"]);
+  });
+});
+
+describe("placeChips", () => {
+  it("centres each chip under its anchor when there is room", () => {
+    expect(placeChips([50, 200], [60, 60], 300)).toEqual([
+      { leftPx: 20, row: 0 },
+      { leftPx: 170, row: 0 },
+    ]);
+  });
+
+  it("pushes a chip sideways just far enough to clear its neighbour", () => {
+    const [first, second] = placeChips([100, 110], [60, 60], 300);
+    expect(first.leftPx).toBe(70);
+    expect(second.leftPx).toBe(134);
+  });
+
+  it("keeps chips inside the strip, pulling earlier ones left if needed", () => {
+    const [first, second] = placeChips([280, 295], [60, 60], 300);
+    expect(second.leftPx).toBe(240);
+    expect(first.leftPx).toBe(176);
+    expect(placeChips([5], [60], 300)[0].leftPx).toBe(0);
+  });
+
+  it("alternates rows when the chips cannot all fit in one", () => {
+    const placements = placeChips([20, 60, 100, 140, 180], [70, 70, 70, 70, 70], 300);
+    expect(placements.map((p) => p.row)).toEqual([0, 1, 0, 1, 0]);
+    const rowZero = placements.filter((p) => p.row === 0).map((p) => p.leftPx);
+    expect(rowZero[1]).toBeGreaterThanOrEqual(rowZero[0] + 70 + 4);
+  });
+});
+
+describe("resetTimelineLayout", () => {
+  it("is absent when the provider reports no resets", () => {
+    expect(resetTimelineLayout(null, NOW)).toBeNull();
+    expect(resetTimelineLayout(undefined, NOW)).toBeNull();
+  });
+
+  it("places dots proportionally on a four-week strip with weekly ticks", () => {
+    const layout = resetTimelineLayout(resets([14]), NOW)!;
+    expect(layout.available).toBe(1);
+    expect(layout.horizonDays).toBe(28);
+    expect(layout.weekTickPcts).toEqual([25, 50, 75]);
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.markers[0].leftPct).toBeCloseTo(50, 6);
+    expect(layout.markers[0].dotPct).toBeCloseTo(50, 6);
+    expect(layout.markers[0].dateLabel).toBe(shortDate.format(NOW + 14 * DAY));
+    expect(layout.markers[0].title).toContain("Full reset · expires ");
+    expect(layout.markers[0].title).toContain("granted ");
+  });
+
+  it("grows the horizon to whole weeks past the last expiry", () => {
+    const layout = resetTimelineLayout(resets([33, 5]), NOW)!;
+    expect(layout.horizonDays).toBe(35);
+    expect(layout.markers.map((m) => m.leftLabel)).toEqual(["5d", "33d"]);
+    expect(layout.markers[1].leftPct).toBeCloseTo((33 / 35) * 100, 6);
+  });
+
+  it("flags resets expiring within three days", () => {
+    const layout = resetTimelineLayout(resets([2, 10]), NOW)!;
+    expect(layout.markers.map((m) => m.urgent)).toEqual([true, false]);
+  });
+
+  it("keeps every reset as its own marker and nudges touching dots apart", () => {
+    const close = resetTimelineLayout(resets([10, 10.5]), NOW)!;
+    expect(close.markers).toHaveLength(2);
+    expect(close.markers[0].dotPct).toBeCloseTo((10 / 28) * 100, 6);
+    expect(close.markers[1].leftPct).toBeCloseTo((10.5 / 28) * 100, 6);
+    expect(close.markers[1].dotPct).toBeCloseTo((10 / 28) * 100 + 4, 6);
+    const apart = resetTimelineLayout(resets([10, 20]), NOW)!;
+    expect(apart.markers.map((m) => m.dotPct)).toEqual(apart.markers.map((m) => m.leftPct));
+  });
+
+  it("never pushes a nudged dot past the end of the strip", () => {
+    const layout = resetTimelineLayout(resets([27.9, 28]), NOW)!;
+    expect(layout.markers[1].dotPct).toBe(100);
+  });
+
+  it("labels each reset with a compact countdown and surfaces the nearest one", () => {
+    const layout = resetTimelineLayout(resets([10.4, 29]), NOW)!;
+    expect(layout.markers.map((m) => m.leftLabel)).toEqual(["11d", "29d"]);
+    expect(layout.nextLeftLabel).toBe("11d");
+    expect(resetTimelineLayout(resets([-1]), NOW)!.nextLeftLabel).toBeNull();
+  });
+
+  it("ignores expired resets but keeps the provider's count", () => {
+    const layout = resetTimelineLayout(resets([-1, 5], 2), NOW)!;
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.available).toBe(2);
+  });
+});
 
 describe("hasRateLimitWindows", () => {
   it("returns false when the provider payload is missing", () => {
