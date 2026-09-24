@@ -10,7 +10,8 @@
 </script>
 
 <!-- A strip from today to the horizon: one dot per usage-limit reset at its
-     expiry, week ticks for scale, the date under each dot. -->
+     expiry, week ticks for scale, the date under each dot. Hovering the strip
+     flips every date to its countdown, so both readings fit in one row. -->
 <div class="rt" class:staggered>
   <div class="rt-track">
     {#each layout.weekTickPcts as pct}
@@ -34,7 +35,7 @@
         class:row1={marker.labelRow === 1}
         style="left: {marker.leftPct}%"
         title={marker.title}
-      >{marker.dateLabel}</span>
+      ><span class="rt-abs">{marker.dateLabel}</span><span class="rt-rel">in {marker.leftLabel}</span></span>
     {/each}
     <span class="rt-cap rt-cap-end">{layout.horizonLabel}</span>
   </div>
@@ -98,6 +99,15 @@
   }
   .rt-date.urgent {
     color: var(--alert, #B05A52);
+  }
+  .rt-rel {
+    display: none;
+  }
+  .rt:hover .rt-abs {
+    display: none;
+  }
+  .rt:hover .rt-rel {
+    display: inline;
   }
   .rt-cap {
     position: absolute;

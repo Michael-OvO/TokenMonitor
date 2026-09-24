@@ -232,7 +232,9 @@
     <div class="ub-row">
       <div class="ub-head">
         <span class="ub-label">Resets</span>
-        <span class="ub-val">{resetTimeline.available} available</span>
+        <span class="ub-val">
+          {resetTimeline.available} available{#if resetTimeline.nextLeftLabel}<span class="ub-val-dim">· next in {resetTimeline.nextLeftLabel}</span>{/if}
+        </span>
       </div>
       {#if resetTimeline.markers.length > 0}
         <ResetTimeline layout={resetTimeline} />
@@ -296,6 +298,11 @@
   }
   .ub-val.stale {
     opacity: 0.55;
+  }
+  .ub-val-dim {
+    margin-left: 0.4em;
+    color: var(--t3);
+    font-weight: 400;
   }
   .ub-track {
     position: relative;

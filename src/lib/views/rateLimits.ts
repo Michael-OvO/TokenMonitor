@@ -39,6 +39,8 @@ export interface ResetTimelineMarker {
   /** Position along the strip, 0..100. */
   leftPct: number;
   dateLabel: string;
+  /** Compact countdown: "11d", "18h", "40m". */
+  leftLabel: string;
   daysLeft: number;
   /** Expires within three days. */
   urgent: boolean;
@@ -50,6 +52,8 @@ export interface ResetTimelineMarker {
 
 export interface ResetTimelineLayout {
   available: number;
+  /** Countdown to the soonest expiry, for the row header; null with no live resets. */
+  nextLeftLabel: string | null;
   horizonDays: number;
   horizonLabel: string;
   /** Week boundaries along the strip, 0..100, excluding the ends. */
@@ -62,6 +66,16 @@ const MIN_HORIZON_DAYS = 28;
 const URGENT_DAYS = 3;
 /** Labels closer than this share a column, so the later one drops a row. */
 const LABEL_MIN_GAP_PCT = 11;
+
+const HOUR_MS = 3_600_000;
+const MINUTE_MS = 60_000;
+
+/** One coarse unit, rounded up so a reset never reads as already gone: "11d", "18h", "40m". */
+export function formatCompactTimeLeft(ms: number): string {
+  if (ms >= DAY_MS) return `${Math.ceil(ms / DAY_MS)}d`;
+  if (ms >= HOUR_MS) return `${Math.ceil(ms / HOUR_MS)}h`;
+  return `${Math.max(1, Math.ceil(ms / MINUTE_MS))}m`;
+}
 
 const shortDate = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
 const fullDateTime = new Intl.DateTimeFormat("en-US", {
@@ -118,6 +132,7 @@ export function resetTimelineLayout(
     return {
       leftPct,
       dateLabel: shortDate.format(expiresMs),
+      leftLabel: formatCompactTimeLeft(expiresMs - now),
       daysLeft,
       urgent: daysLeft <= URGENT_DAYS,
       title,
@@ -127,6 +142,7 @@ export function resetTimelineLayout(
 
   return {
     available: resets.available,
+    nextLeftLabel: markers.length > 0 ? markers[0].leftLabel : null,
     horizonDays,
     horizonLabel: `+${horizonDays / 7}w`,
     weekTickPcts,

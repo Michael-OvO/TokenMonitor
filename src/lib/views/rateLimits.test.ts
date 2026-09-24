@@ -4,6 +4,7 @@ import {
   hasRateLimitWindows,
   providerHasActiveCooldown,
   providerRateLimitViewState,
+  formatCompactTimeLeft,
   rateLimitWindowResetLabel,
   resetTimelineLayout,
 } from "./rateLimits.js";
@@ -50,6 +51,16 @@ function providerRateLimits(
   };
 }
 
+describe("formatCompactTimeLeft", () => {
+  it("uses one coarse unit, rounded up", () => {
+    expect(formatCompactTimeLeft(11 * DAY)).toBe("11d");
+    expect(formatCompactTimeLeft(1.2 * DAY)).toBe("2d");
+    expect(formatCompactTimeLeft(17.5 * 3_600_000)).toBe("18h");
+    expect(formatCompactTimeLeft(40 * 60_000)).toBe("40m");
+    expect(formatCompactTimeLeft(10)).toBe("1m");
+  });
+});
+
 describe("resetTimelineLayout", () => {
   it("is absent when the provider reports no resets", () => {
     expect(resetTimelineLayout(null, NOW)).toBeNull();
@@ -88,6 +99,13 @@ describe("resetTimelineLayout", () => {
     expect(apart.markers.map((m) => m.labelRow)).toEqual([0, 0]);
     const atCaps = resetTimelineLayout(resets([1, 27]), NOW)!;
     expect(atCaps.markers.map((m) => m.labelRow)).toEqual([1, 1]);
+  });
+
+  it("labels each reset with a compact countdown and surfaces the nearest one", () => {
+    const layout = resetTimelineLayout(resets([10.4, 29]), NOW)!;
+    expect(layout.markers.map((m) => m.leftLabel)).toEqual(["11d", "29d"]);
+    expect(layout.nextLeftLabel).toBe("11d");
+    expect(resetTimelineLayout(resets([-1]), NOW)!.nextLeftLabel).toBeNull();
   });
 
   it("ignores expired resets but keeps the provider's count", () => {
