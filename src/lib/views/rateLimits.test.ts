@@ -6,6 +6,7 @@ import {
   providerRateLimitViewState,
   assignChipSides,
   formatCompactTimeLeft,
+  leaderTargetX,
   placeChips,
   rateLimitWindowResetLabel,
   resetTimelineLayout,
@@ -74,6 +75,20 @@ describe("assignChipSides", () => {
 
   it("falls back to the less crowded side once both are taken", () => {
     expect(assignChipSides([100, 110, 120], [60, 60, 60])).toEqual(["below", "above", "below"]);
+  });
+});
+
+describe("leaderTargetX", () => {
+  it("drops straight to the chip whenever the chip spans the dot", () => {
+    expect(leaderTargetX(100, 70, 60)).toBe(100);
+    // A chip clamped at the strip's left edge still covers a dot near it.
+    expect(leaderTargetX(18, 0, 60)).toBe(18);
+  });
+
+  it("aims at the nearest inset end of a chip pushed clear of its dot", () => {
+    expect(leaderTargetX(50, 70, 60)).toBe(76);
+    expect(leaderTargetX(150, 70, 60)).toBe(124);
+    expect(leaderTargetX(0, 4, 8, 6)).toBe(8);
   });
 });
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     assignChipSides,
+    leaderTargetX,
     placeChips,
     type ChipSide,
     type ResetTimelineLayout,
@@ -82,7 +83,7 @@
         class:urgent={marker.urgent}
         x1={anchors[i]}
         y1={trackTop + TRACK_H / 2}
-        x2={p.leftPx + widths[i] / 2}
+        x2={leaderTargetX(anchors[i], p.leftPx, widths[i])}
         y2={chipEdgeY(p)}
       />
     {/each}
