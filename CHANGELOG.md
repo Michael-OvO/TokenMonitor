@@ -6,7 +6,7 @@
 - **Claude 的 Weekly Fable / Weekly Opus 窗口消失**：Claude Code statusline 事件只带 `five_hour` 与 `seven_day` 两个全局窗口，而按模型划分的每周窗口只有 `claude -p "/usage"` 与 OAuth 接口会给出；此前只要 statusline 事件新鲜（活跃会话中一直如此）就直接采用它，模型窗口便消失。现在 statusline 只覆盖它报告的窗口，其余窗口从更完整的来源叠加保留，且每 15 分钟（`CLAUDE_MODEL_WINDOWS_REFRESH_SECS`）通过 CLI / OAuth 刷新一次，已过重置时间的旧窗口不再沿用
 
 ### 新增
-- **Codex 可用的 usage limit reset 次数**：Codex app-server 的 `account/rateLimits/read` 会一并返回 `rateLimitResetCredits`（OpenAI 发放的、可一次性清空当前用量限制的 reset），此前被丢弃。现在解析可用数量与每个 reset 的到期 / 发放时间，挂在 Codex 的 credits 上，5h 页 Credits 下方新增「Resets」行：右侧显示可用数量，下方是一条从今天到最后到期日（按整周向上取整、至少四周）的迷你时间轴，每个 reset 一个圆点并标注到期日期，三天内到期的用警示色，到期日相近、标签会重叠的 reset 合并为一个圆点并以区间标注（"Oct 4–5 ×2"，悬停为 "in 10–11d"），仅贴近「today」/ 时间轴末端的标签错行显示；标题行同时给出最近一次到期的倒计时（"3 available · next in 11d"），鼠标悬停在时间轴上时所有日期切换为倒计时（"in 11d"），悬停单个圆点可见完整到期与发放时间。Codex 的 credits 余额改为与套餐一样以标签形式放在提供方标题行，不再单独占一行
+- **Codex 可用的 usage limit reset 次数**：Codex app-server 的 `account/rateLimits/read` 会一并返回 `rateLimitResetCredits`（OpenAI 发放的、可一次性清空当前用量限制的 reset），此前被丢弃。现在解析可用数量与每个 reset 的到期 / 发放时间，挂在 Codex 的 credits 上，5h 页 Credits 下方新增「Resets」行：右侧显示可用数量，下方是一条从今天到最后到期日（按整周向上取整、至少四周）的迷你时间轴，每个 reset 一个圆点（相邻过近时略微错开、不再重叠），时间轴下方按同样顺序为每个 reset 显示一枚小标签，同时写出到期日与倒计时（"Oct 5 · 11d"），三天内到期的用警示色；标题行给出最近一次到期的倒计时（"3 available · next in 11d"），悬停圆点或标签可见完整到期与发放时间。Codex 的 credits 余额改为与套餐一样以标签形式放在提供方标题行，不再单独占一行
 
 ### UI
 - **弹窗最大高度 500 → 560**：5h 页同时展示两个提供方的窗口、credits 与 Codex reset 时间轴后内容超过 500px，末尾被固定在底部的页脚遮住；固定高度与滚动阈值的上限一并提高到 560（仍受屏幕尺寸比例约束）

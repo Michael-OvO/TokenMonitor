@@ -36,22 +36,19 @@ function isExpiredProviderWindow(
 }
 
 export interface ResetTimelineMarker {
-  /** Position along the strip, 0..100 (the mean for a cluster). */
+  /** True position along the strip, 0..100. */
   leftPct: number;
-  /** "Oct 4", or a range for a cluster: "Oct 4–5", "Sep 30–Oct 2". */
+  /** Where the dot is drawn: nudged right of `leftPct` when a neighbour is too close. */
+  dotPct: number;
+  /** "Oct 5". */
   dateLabel: string;
-  /** Compact countdown: "11d", "18h"; a range for a cluster: "10–11d". */
+  /** Compact countdown: "11d", "18h", "40m". */
   leftLabel: string;
-  /** Days to the earliest expiry in the marker. */
   daysLeft: number;
-  /** Any member expires within three days. */
+  /** Expires within three days. */
   urgent: boolean;
-  /** Native tooltip text, one line per reset. */
+  /** Native tooltip text. */
   title: string;
-  /** A label sitting under the "today" or horizon cap drops to the second baseline. */
-  labelRow: 0 | 1;
-  /** Resets merged into this marker; more than one when their labels would collide. */
-  count: number;
 }
 
 export interface ResetTimelineLayout {
@@ -59,9 +56,9 @@ export interface ResetTimelineLayout {
   /** Countdown to the soonest expiry, for the row header; null with no live resets. */
   nextLeftLabel: string | null;
   horizonDays: number;
-  horizonLabel: string;
   /** Week boundaries along the strip, 0..100, excluding the ends. */
   weekTickPcts: number[];
+  /** One per live reset, soonest first; the chips below the strip follow the same order. */
   markers: ResetTimelineMarker[];
 }
 
@@ -70,8 +67,8 @@ const HOUR_MS = 3_600_000;
 const MINUTE_MS = 60_000;
 const MIN_HORIZON_DAYS = 28;
 const URGENT_DAYS = 3;
-/** Labels closer than this would overlap, so the resets behind them merge into one marker. */
-const LABEL_MIN_GAP_PCT = 11;
+/** Dots closer than this (percent of the strip) would touch, so the later one is nudged right. */
+const MIN_DOT_GAP_PCT = 4;
 
 /** One coarse unit, rounded up so a reset never reads as already gone: "11d", "18h", "40m". */
 export function formatCompactTimeLeft(ms: number): string {
@@ -81,8 +78,6 @@ export function formatCompactTimeLeft(ms: number): string {
 }
 
 const shortDate = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" });
-const dayOfMonth = new Intl.DateTimeFormat("en-US", { day: "numeric" });
-const monthOf = new Intl.DateTimeFormat("en-US", { month: "short" });
 const fullDateTime = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
@@ -90,31 +85,12 @@ const fullDateTime = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-/** "Oct 4" for one day, "Oct 4–5" within a month, "Sep 30–Oct 2" across months. */
-function dateRangeLabel(firstMs: number, lastMs: number): string {
-  const first = shortDate.format(firstMs);
-  const last = shortDate.format(lastMs);
-  if (first === last) return first;
-  if (monthOf.format(firstMs) === monthOf.format(lastMs)) return `${first}–${dayOfMonth.format(lastMs)}`;
-  return `${first}–${last}`;
-}
-
-/** "11d" for one, "10–11d" when both share a unit, "17h–2d" otherwise. */
-function countdownRangeLabel(firstMs: number, lastMs: number): string {
-  const first = formatCompactTimeLeft(firstMs);
-  const last = formatCompactTimeLeft(lastMs);
-  if (first === last) return first;
-  const unit = (label: string) => label.slice(-1);
-  if (unit(first) === unit(last)) return `${first.slice(0, -1)}–${last}`;
-  return `${first}–${last}`;
-}
-
 /**
  * Lay the still-valid usage-limit resets on a strip from today to the last
- * expiry rounded up to whole weeks, never under four. Resets whose labels
- * would overlap merge into one marker with a range label; a label that would
- * sit under the "today" or horizon cap drops to the second baseline. Null
- * when the provider reports no resets at all.
+ * expiry rounded up to whole weeks, never under four. Every reset keeps its
+ * own dot (nudged apart when two would touch) and its own chip with date
+ * and countdown, in the same order. Null when the provider reports no
+ * resets at all.
  */
 export function resetTimelineLayout(
   resets: UsageLimitResets | null | undefined,
@@ -134,56 +110,35 @@ export function resetTimelineLayout(
   const weekTickPcts: number[] = [];
   for (let day = 7; day < horizonDays; day += 7) weekTickPcts.push((day / horizonDays) * 100);
 
-  const pctOf = (expiresMs: number) => Math.min(100, ((expiresMs - now) / DAY_MS / horizonDays) * 100);
-
-  // Group resets whose labels would collide with the first of the group.
-  const clusters: Array<typeof live> = [];
-  for (const entry of live) {
-    const current = clusters[clusters.length - 1];
-    if (current && pctOf(entry.expiresMs) - pctOf(current[0].expiresMs) < LABEL_MIN_GAP_PCT) {
-      current.push(entry);
-    } else {
-      clusters.push([entry]);
-    }
-  }
-
-  const markers = clusters.map((members) => {
-    const firstMs = members[0].expiresMs;
-    const lastMs = members[members.length - 1].expiresMs;
-    const leftPct = members.reduce((sum, m) => sum + pctOf(m.expiresMs), 0) / members.length;
-    const daysLeft = (firstMs - now) / DAY_MS;
-    // The "today" cap sits at 0 and the horizon cap at 100.
-    const labelRow: 0 | 1 =
-      leftPct < LABEL_MIN_GAP_PCT || leftPct > 100 - LABEL_MIN_GAP_PCT ? 1 : 0;
-    const title = members
-      .map(({ reset, expiresMs }) => {
-        const grantedMs = resetAtMs(reset.grantedAt);
-        return [
-          reset.title ?? "Reset",
-          `expires ${fullDateTime.format(expiresMs)}`,
-          grantedMs !== null ? `granted ${shortDate.format(grantedMs)}` : null,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-      })
-      .join("\n");
+  let previousDotPct = -Infinity;
+  const markers = live.map(({ reset, expiresMs }) => {
+    const daysLeft = (expiresMs - now) / DAY_MS;
+    const leftPct = Math.min(100, (daysLeft / horizonDays) * 100);
+    const dotPct = Math.min(100, Math.max(leftPct, previousDotPct + MIN_DOT_GAP_PCT));
+    previousDotPct = dotPct;
+    const grantedMs = resetAtMs(reset.grantedAt);
+    const title = [
+      reset.title ?? "Reset",
+      `expires ${fullDateTime.format(expiresMs)}`,
+      grantedMs !== null ? `granted ${shortDate.format(grantedMs)}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
     return {
       leftPct,
-      dateLabel: dateRangeLabel(firstMs, lastMs),
-      leftLabel: countdownRangeLabel(firstMs - now, lastMs - now),
+      dotPct,
+      dateLabel: shortDate.format(expiresMs),
+      leftLabel: formatCompactTimeLeft(expiresMs - now),
       daysLeft,
       urgent: daysLeft <= URGENT_DAYS,
       title,
-      labelRow,
-      count: members.length,
     };
   });
 
   return {
     available: resets.available,
-    nextLeftLabel: live.length > 0 ? formatCompactTimeLeft(live[0].expiresMs - now) : null,
+    nextLeftLabel: markers.length > 0 ? markers[0].leftLabel : null,
     horizonDays,
-    horizonLabel: `+${horizonDays / 7}w`,
     weekTickPcts,
     markers,
   };

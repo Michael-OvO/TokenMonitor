@@ -5,14 +5,12 @@
     layout: ResetTimelineLayout;
   }
   let { layout }: Props = $props();
-
-  let staggered = $derived(layout.markers.some((marker) => marker.labelRow === 1));
 </script>
 
-<!-- A strip from today to the horizon: one dot per usage-limit reset at its
-     expiry, week ticks for scale, the date under each dot. Hovering the strip
-     flips every date to its countdown, so both readings fit in one row. -->
-<div class="rt" class:staggered>
+<!-- A strip from today to the horizon with one dot per usage-limit reset at
+     its expiry and week ticks for scale, then one chip per reset, in the
+     same order, carrying its date and countdown. -->
+<div class="rt">
   <div class="rt-track">
     {#each layout.weekTickPcts as pct}
       <span class="rt-tick" style="left: {pct}%"></span>
@@ -21,24 +19,17 @@
       <span
         class="rt-dot"
         class:urgent={marker.urgent}
-        class:cluster={marker.count > 1}
-        style="left: {marker.leftPct}%"
+        style="left: {marker.dotPct}%"
         title={marker.title}
       ></span>
     {/each}
   </div>
-  <div class="rt-labels">
-    <span class="rt-cap rt-cap-start">today</span>
+  <div class="rt-chips">
     {#each layout.markers as marker}
-      <span
-        class="rt-date"
-        class:urgent={marker.urgent}
-        class:row1={marker.labelRow === 1}
-        style="left: {marker.leftPct}%"
-        title={marker.title}
-      ><span class="rt-abs">{marker.dateLabel}</span><span class="rt-rel">in {marker.leftLabel}</span>{#if marker.count > 1}<span class="rt-count">×{marker.count}</span>{/if}</span>
+      <span class="rt-chip" class:urgent={marker.urgent} title={marker.title}>
+        {marker.dateLabel}<span class="rt-chip-left">· {marker.leftLabel}</span>
+      </span>
     {/each}
-    <span class="rt-cap rt-cap-end">{layout.horizonLabel}</span>
   </div>
 </div>
 
@@ -46,7 +37,7 @@
   .rt {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 6px;
     padding-top: 2px;
   }
   .rt-track {
@@ -78,55 +69,28 @@
   .rt-dot.urgent {
     background: var(--alert, #B05A52);
   }
-  .rt-dot.cluster {
-    width: 8px;
-    height: 8px;
+  .rt-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
   }
-  .rt-count {
-    margin-left: 3px;
-    color: var(--t4);
-  }
-  .rt-labels {
-    position: relative;
-    height: 10px;
-    font: 400 9px/1 'Inter', sans-serif;
-    color: var(--t3);
+  .rt-chip {
+    font: 500 9px/1 'Inter', sans-serif;
     font-variant-numeric: tabular-nums;
-  }
-  .rt.staggered .rt-labels {
-    height: 21px;
-  }
-  .rt-date {
-    position: absolute;
-    top: 0;
-    transform: translateX(-50%);
+    color: var(--t2);
+    background: var(--surface-2);
+    border-radius: 4px;
+    padding: 3px 6px;
     white-space: nowrap;
     cursor: default;
   }
-  .rt-date.row1 {
-    top: 11px;
+  .rt-chip-left {
+    margin-left: 0.35em;
+    color: var(--t3);
+    font-weight: 400;
   }
-  .rt-date.urgent {
+  .rt-chip.urgent,
+  .rt-chip.urgent .rt-chip-left {
     color: var(--alert, #B05A52);
-  }
-  .rt-rel {
-    display: none;
-  }
-  .rt:hover .rt-abs {
-    display: none;
-  }
-  .rt:hover .rt-rel {
-    display: inline;
-  }
-  .rt-cap {
-    position: absolute;
-    top: 0;
-    color: var(--t4);
-  }
-  .rt-cap-start {
-    left: 0;
-  }
-  .rt-cap-end {
-    right: 0;
   }
 </style>

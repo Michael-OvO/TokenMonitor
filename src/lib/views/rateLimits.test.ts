@@ -71,10 +71,10 @@ describe("resetTimelineLayout", () => {
     const layout = resetTimelineLayout(resets([14]), NOW)!;
     expect(layout.available).toBe(1);
     expect(layout.horizonDays).toBe(28);
-    expect(layout.horizonLabel).toBe("+4w");
     expect(layout.weekTickPcts).toEqual([25, 50, 75]);
     expect(layout.markers).toHaveLength(1);
     expect(layout.markers[0].leftPct).toBeCloseTo(50, 6);
+    expect(layout.markers[0].dotPct).toBeCloseTo(50, 6);
     expect(layout.markers[0].dateLabel).toBe(shortDate.format(NOW + 14 * DAY));
     expect(layout.markers[0].title).toContain("Full reset · expires ");
     expect(layout.markers[0].title).toContain("granted ");
@@ -92,49 +92,19 @@ describe("resetTimelineLayout", () => {
     expect(layout.markers.map((m) => m.urgent)).toEqual([true, false]);
   });
 
-  it("marks a cluster urgent when its earliest member is", () => {
-    const layout = resetTimelineLayout(resets([2, 3.5]), NOW)!;
-    expect(layout.markers).toHaveLength(1);
-    expect(layout.markers[0].urgent).toBe(true);
-  });
-
-  it("merges resets whose labels would collide into one ranged marker", () => {
-    const close = resetTimelineLayout(resets([10, 11]), NOW)!;
-    expect(close.markers).toHaveLength(1);
-    const [cluster] = close.markers;
-    expect(cluster.count).toBe(2);
-    expect(cluster.leftPct).toBeCloseTo(((10 + 11) / 2 / 28) * 100, 6);
-    expect(cluster.dateLabel).toBe(
-      `${shortDate.format(NOW + 10 * DAY)}–${new Intl.DateTimeFormat("en-US", { day: "numeric" }).format(NOW + 11 * DAY)}`,
-    );
-    expect(cluster.leftLabel).toBe("10–11d");
-    expect(cluster.title.split("\n")).toHaveLength(2);
-    expect(close.nextLeftLabel).toBe("10d");
+  it("keeps every reset as its own marker and nudges touching dots apart", () => {
+    const close = resetTimelineLayout(resets([10, 10.5]), NOW)!;
+    expect(close.markers).toHaveLength(2);
+    expect(close.markers[0].dotPct).toBeCloseTo((10 / 28) * 100, 6);
+    expect(close.markers[1].leftPct).toBeCloseTo((10.5 / 28) * 100, 6);
+    expect(close.markers[1].dotPct).toBeCloseTo((10 / 28) * 100 + 4, 6);
     const apart = resetTimelineLayout(resets([10, 20]), NOW)!;
-    expect(apart.markers.map((m) => m.count)).toEqual([1, 1]);
+    expect(apart.markers.map((m) => m.dotPct)).toEqual(apart.markers.map((m) => m.leftPct));
   });
 
-  it("spells a cluster's countdown range across units and its dates across months", () => {
-    const mixed = resetTimelineLayout(resets([0.5, 1.5]), NOW)!;
-    expect(mixed.markers[0].leftLabel).toBe("12h–2d");
-    const sep30 = Date.parse("2026-09-30T12:00:00Z");
-    const spanning: UsageLimitResets = {
-      available: 2,
-      resets: [0.2, 2].map((d) => ({
-        title: "Full reset",
-        grantedAt: null,
-        expiresAt: new Date(sep30 + d * DAY).toISOString(),
-      })),
-    };
-    const acrossMonths = resetTimelineLayout(spanning, sep30)!;
-    expect(acrossMonths.markers[0].dateLabel).toBe(
-      `${shortDate.format(sep30)}–${shortDate.format(sep30 + 2 * DAY)}`,
-    );
-  });
-
-  it("drops a label under the today or horizon cap to the second baseline", () => {
-    const layout = resetTimelineLayout(resets([1, 15, 27]), NOW)!;
-    expect(layout.markers.map((m) => m.labelRow)).toEqual([1, 0, 1]);
+  it("never pushes a nudged dot past the end of the strip", () => {
+    const layout = resetTimelineLayout(resets([27.9, 28]), NOW)!;
+    expect(layout.markers[1].dotPct).toBe(100);
   });
 
   it("labels each reset with a compact countdown and surfaces the nearest one", () => {
