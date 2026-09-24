@@ -4,8 +4,12 @@
   import { settings } from "../stores/settings.js";
   import { activeOffset, activePeriod, chartMode, chartSegmentMode } from "../stores/usage.js";
   import { logger } from "../utils/logger.js";
-  import type { ChartBucket } from "../types/index.js";
+  import type { ChartBucket, ChartHoverDetail } from "../types/index.js";
   import { filterVisibleChartBuckets, getXAxisLabels } from "./chartBuckets.js";
+  import { pieHitSectorPaths } from "./pieHitAreas.js";
+  import { disclosureMotion } from "../utils/disclosureMotion.js";
+  import { scrollFade } from "../utils/scrollFade.js";
+  import { createStickyHover } from "../utils/stickyHover.js";
 
   import { isWindows } from "../utils/platform.js";
   import { invoke } from "@tauri-apps/api/core";
@@ -19,7 +23,15 @@
   }
   const DETAIL_CONFIG = {
     HOVER_DELAY_MS: 50,
-    LEAVE_DELAY_MS: 300,
+    /** Grace period after the pointer leaves the chart before the panel rolls
+     * up; long enough to re-enter after an overshoot, short enough that the
+     * dismissal does not read as lag. */
+    LEAVE_DELAY_MS: 150,
+    /** Height animation of the detail panel (see disclosureMotion). The
+     * window follows the content for the same duration, so keep these in
+     * step with what the resize loop can track smoothly. */
+    OPEN_MS: 200,
+    CLOSE_MS: 200,
   } as const;
 
   interface Props {
@@ -82,7 +94,13 @@
   let maxCost = $derived($chartMode === "line" ? maxCostSingle : maxCostStacked);
   let hoveredIdx = $state(-1);
 
+  // The detail panel has two pieces of state: `displayedIdx` says which
+  // bucket's rows are in the DOM, `detailOpen` says whether the panel is
+  // unrolled. They diverge only while the panel rolls up — the rows stay
+  // mounted (at a shrinking height) until the motion settles, otherwise the
+  // collapse has nothing to show and the panel just vanishes.
   let displayedIdx = $state(-1);
+  let detailOpen = $state(false);
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let leaveTimer: ReturnType<typeof setTimeout> | null = null;
   let previousDataKey = $state("");
@@ -94,29 +112,61 @@
     return Boolean(chartContainerEl?.matches(":hover"));
   }
 
+  function prefersReducedMotion(): boolean {
+    return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+  }
+
+  /** Tell the window sizing loop the panel is opening/closing and for how
+   * long its height animates (0 = it changed at once). */
+  function dispatchChartHover(active: boolean, durationMs?: number) {
+    const animated = durationMs ?? (active ? DETAIL_CONFIG.OPEN_MS : DETAIL_CONFIG.CLOSE_MS);
+    const detail: ChartHoverDetail = {
+      active,
+      durationMs: prefersReducedMotion() ? 0 : animated,
+    };
+    window.dispatchEvent(new CustomEvent<ChartHoverDetail>("chart-hover", { detail }));
+  }
+
+  async function openDetail(i: number) {
+    const wasOpen = detailOpen;
+    displayedIdx = i;
+    // Let the rows mount before the action measures them for the unroll.
+    await tick();
+    detailOpen = true;
+    await tick();
+    // Swapping rows while open changes the height at once (no motion), so the
+    // window takes one measured resize; a fresh open follows the unroll.
+    dispatchChartHover(true, wasOpen ? 0 : undefined);
+  }
+
+  function closeDetail(durationMs?: number) {
+    if (!detailOpen) return;
+    detailOpen = false;
+    dispatchChartHover(false, durationMs);
+  }
+
+  /** disclosureMotion reports the roll-up finished: now the rows can go. */
+  function onDetailSettled(open: boolean) {
+    if (!open && !detailOpen) displayedIdx = -1;
+  }
+
   function onEnter(i: number) {
     if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
     hoveredIdx = i;
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
     const hasDetail = (visibleBuckets[i]?.total ?? 0) > 0;
+    if (!hasDetail) {
+      closeDetail();
+      return;
+    }
 
     if (DETAIL_CONFIG.HOVER_DELAY_MS > 0) {
-      hoverTimer = setTimeout(async () => {
-        if (hoveredIdx === i) {
-          displayedIdx = hasDetail ? i : -1;
-          if (hasDetail) {
-            await tick();
-            window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: true } }));
-          }
-        }
+      hoverTimer = setTimeout(() => {
+        hoverTimer = null;
+        if (hoveredIdx === i) void openDetail(i);
       }, DETAIL_CONFIG.HOVER_DELAY_MS);
     } else {
-      displayedIdx = hasDetail ? i : -1;
-      if (hasDetail) {
-        tick().then(() => {
-          window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: true } }));
-        });
-      }
+      void openDetail(i);
     }
   }
 
@@ -125,10 +175,10 @@
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
     if (leaveTimer) clearTimeout(leaveTimer);
     leaveTimer = setTimeout(() => {
+      leaveTimer = null;
       if (hoveredIdx >= 0) return;
       if (isPointerInsideChartContainer()) return;
-      displayedIdx = -1;
-      window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: false } }));
+      closeDetail();
     }, DETAIL_CONFIG.LEAVE_DELAY_MS);
   }
 
@@ -136,8 +186,15 @@
     if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
     if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
     hoveredIdx = -1;
+    // The buckets changed underneath the panel, so its rows are stale: drop
+    // them now rather than rolling up someone else's data.
     displayedIdx = -1;
-    window.dispatchEvent(new CustomEvent("chart-hover", { detail: { active: false } }));
+    if (detailOpen) {
+      closeDetail();
+    } else {
+      // Keeps the sizing loop's hover flag in sync and remeasures the view.
+      dispatchChartHover(false, 0);
+    }
   }
 
   // Reset on tab / provider / offset change.
@@ -159,6 +216,9 @@
     return () => {
       if (hoverTimer) clearTimeout(hoverTimer);
       if (leaveTimer) clearTimeout(leaveTimer);
+      sliceHover.dispose();
+      // Unmounting mid-hover must not leave the window's shrink gate closed.
+      if (detailOpen) dispatchChartHover(false, 0);
     };
   });
 
@@ -255,6 +315,15 @@
   });
   let pieTotal = $derived(pieSlices().reduce((sum, s) => sum + s.cost, 0));
   let hoveredSlice = $state(-1);
+  /** Grace before the centre falls back to the total after the pointer leaves
+   * a slice or row. Slices and rows are hit-tested without gaps (see the hit
+   * sectors and the row borders), so this only covers the stretch between the
+   * donut and the list and a pointer skimming past the ring's outer edge. */
+  const PIE_LEAVE_DELAY_MS = 150;
+  const sliceHover = createStickyHover({
+    leaveDelayMs: PIE_LEAVE_DELAY_MS,
+    onChange: (i) => { hoveredSlice = i; },
+  });
 
   // Donut geometry: square viewBox, laid out as a fixed square on the left of
   // a flex row with the breakdown panel filling the rest.
@@ -264,24 +333,30 @@
   const PIE_R_OUTER = 44;
   const PIE_R_INNER = 34;
   const PIE_GAP_RAD = 0.018;
+  /** The hit sectors reach a little past the ring so a pointer skimming its
+   * outer edge stays on the slice. */
+  const PIE_HIT_PAD = 2;
 
-  interface PieArc { key: string; name: string; cost: number; path: string; pct: number; }
+  /** `path` draws the ring segment; `hit` is its gapless sector for hover. */
+  interface PieArc { key: string; name: string; cost: number; path: string; hit: string; pct: number; }
 
   let pieArcs = $derived((): PieArc[] => {
     const slices = pieSlices();
     const total = pieTotal;
     if (total <= 0 || slices.length === 0) return [];
+    const hits = pieHitSectorPaths(slices.map((s) => s.cost), PIE_CX, PIE_CY, PIE_R_OUTER + PIE_HIT_PAD);
     if (slices.length === 1) {
       return [{
         key: slices[0].key,
         name: slices[0].name,
         cost: slices[0].cost,
         path: donutFullRing(),
+        hit: hits[0],
         pct: 1,
       }];
     }
     let angle = -Math.PI / 2;
-    return slices.map((s) => {
+    return slices.map((s, i) => {
       const span = (s.cost / total) * Math.PI * 2;
       const a0 = angle + PIE_GAP_RAD / 2;
       const a1 = angle + span - PIE_GAP_RAD / 2;
@@ -290,6 +365,7 @@
         name: s.name,
         cost: s.cost,
         path: donutArc(a0, a1),
+        hit: hits[i],
         pct: s.cost / total,
       };
       angle += span;
@@ -444,16 +520,21 @@
     </div>
   </div>
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="detail"
-    class:visible={displayed != null}
+    class:open={detailOpen}
+    aria-hidden={!detailOpen}
+    use:disclosureMotion={{
+      open: detailOpen,
+      openMs: DETAIL_CONFIG.OPEN_MS,
+      closeMs: DETAIL_CONFIG.CLOSE_MS,
+      onSettled: onDetailSettled,
+    }}
   >
-    <div class="collapse-inner">
-      {#if displayed}
-        {@const segs = sortedSegments(displayed)}
-        <div class="detail-inner">
-          <div class="detail-head">
+    {#if displayed}
+      {@const segs = sortedSegments(displayed)}
+      <div class="detail-inner">
+        <div class="detail-head">
           <span class="detail-label">{displayed.label}</span>
           <span class="detail-total">{formatCost(displayed.total)}</span>
         </div>
@@ -470,7 +551,6 @@
         {/if}
       </div>
     {/if}
-    </div>
   </div>
 
   <div class="chart-body" class:pie-mode={$chartMode === "pie"}>
@@ -491,7 +571,12 @@
           <!-- PIE / DONUT CHART -->
           {@const arcs = pieArcs()}
           {@const total = pieTotal}
-          <div class="pie-wrap">
+          <div
+            class="pie-wrap"
+            role="group"
+            aria-label="Cost share by {$chartSegmentMode === "device" ? "device" : "model"}"
+            onmouseleave={() => sliceHover.clear()}
+          >
             {#if arcs.length === 0}
               <div class="pie-empty-state">No data</div>
             {:else}
@@ -508,8 +593,6 @@
                       style="--delay: {i * 0.05}s"
                       role="img"
                       aria-label={sliceAriaLabel(arc)}
-                      onmouseenter={() => (hoveredSlice = i)}
-                      onmouseleave={() => (hoveredSlice = -1)}
                     />
                   {/each}
                 </g>
@@ -519,16 +602,32 @@
                 <text x={PIE_CX} y={PIE_CY + 7} text-anchor="middle" dominant-baseline="central" class="pie-center-value">
                   {focus ? `${(focus.pct * 100).toFixed(1)}%` : formatCost(total)}
                 </text>
+                <!-- Gapless hit sectors over the whole disc: inside it the
+                     pointer is always on exactly one slice, so sliding between
+                     two categories never crosses a spot nobody owns (the ring
+                     gaps, the hole) and the centre never flashes the total on
+                     the way. -->
+                <g class="pie-hit" aria-hidden="true">
+                  {#each arcs as arc, i}
+                    <path
+                      d={arc.hit}
+                      class="pie-hit-sector"
+                      role="presentation"
+                      onmouseenter={() => sliceHover.enter(i)}
+                      onmouseleave={() => sliceHover.leave()}
+                    />
+                  {/each}
+                </g>
               </svg>
 
-              <ul class="pie-breakdown" role="list">
+              <ul class="pie-breakdown" role="list" use:scrollFade>
                 {#each arcs as arc, i}
                   <li
                     class="pie-row"
                     class:active={hoveredSlice === i}
                     style="--delay: {i * 0.04 + 0.08}s"
-                    onmouseenter={() => (hoveredSlice = i)}
-                    onmouseleave={() => (hoveredSlice = -1)}
+                    onmouseenter={() => sliceHover.enter(i)}
+                    onmouseleave={() => sliceHover.leave()}
                   >
                     <span class="pie-row-dot" style="background:{segmentColorFn(arc.key)}"></span>
                     <span class="pie-row-name" title={arc.name}>{arc.name}</span>
@@ -718,18 +817,11 @@
     width: 16px;
   }
 
+  /* Height is driven by disclosureMotion (0 → measured px → auto), so the
+     unroll and roll-up are real layout motion the window can follow. The
+     margins sit outside the animated box so the chart's footprint is stable. */
   .detail {
-    display: grid;
-    grid-template-rows: 0fr;
-    opacity: 0;
-    will-change: opacity, grid-template-rows;
-    transition: grid-template-rows 0.15s ease, opacity 0.15s ease;
-  }
-  .detail.visible {
-    opacity: 1;
-    grid-template-rows: 1fr;
-  }
-  .collapse-inner {
+    height: 0;
     overflow: hidden;
   }
   .ch.detail-above .detail { margin-bottom: 10px; }
@@ -812,7 +904,7 @@
     to   { opacity: 1; transform: rotate(0) scale(1); }
   }
   .pie-slice {
-    cursor: pointer;
+    pointer-events: none;
     opacity: 0.92;
     transition: opacity var(--t-fast) ease, filter var(--t-fast) ease;
     will-change: opacity, filter;
@@ -825,11 +917,18 @@
   .pie-center-label {
     font: 500 9px/1 "Inter", sans-serif;
     fill: var(--t3);
+    pointer-events: none;
   }
   .pie-center-value {
     font: 600 11px/1 "Inter", sans-serif;
     fill: var(--t1);
     font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
+  .pie-hit-sector {
+    fill: transparent;
+    pointer-events: fill;
+    cursor: pointer;
   }
   .pie-breakdown {
     flex: 1 1 auto;
@@ -839,9 +938,20 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    /* Rows touch: the 4px they used to be apart is a transparent border on
+       each row now, so the pointer is never between two categories. */
+    gap: 0;
     max-height: 108px;
     overflow-y: auto;
+    /* No scrollbar: the list is rebuilt on every tab switch and WebKit showed
+       the bar for a moment each time, right beside the costs. Like the rest of
+       the popover it still scrolls; a fade marks the hidden rows instead. */
+    scrollbar-width: none;
+  }
+  .pie-breakdown::-webkit-scrollbar { display: none; }
+  .pie-breakdown:global([data-more-below]) {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 16px), transparent 100%);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 16px), transparent 100%);
   }
   .pie-row {
     display: grid;
@@ -849,7 +959,11 @@
     align-items: center;
     column-gap: 8px;
     padding: 3px 6px;
-    border-radius: 5px;
+    border: solid transparent;
+    border-width: 2px 0;
+    background-clip: padding-box;
+    /* Outer radius that leaves the highlight's padding-box corners at 5px. */
+    border-radius: 5px / 7px;
     cursor: default;
     opacity: 0;
     animation: pieRowIn var(--t-slow) var(--ease-out) forwards;
@@ -924,6 +1038,17 @@
     overflow: hidden;
     background: var(--surface-2);
     border-radius: 8px;
+    /* Rows fade slightly faster than the box rolls up, so the collapse reads
+       as the panel folding away rather than text being sliced off. */
+    opacity: 0;
+    transition: opacity var(--t-fast) ease;
+  }
+  .detail.open .detail-inner {
+    opacity: 1;
+    transition-duration: var(--t-normal);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .detail-inner { transition: none; }
   }
   .detail-head {
     display: flex; justify-content: space-between; align-items: baseline;

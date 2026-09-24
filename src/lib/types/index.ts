@@ -142,6 +142,14 @@ export type AccordionToggleDetail = {
   scope: "main" | "subagents" | "devices";
 };
 
+/** Payload of the window-level `chart-hover` event the Chart dispatches when
+ * its hover detail panel opens or closes. `durationMs` is how long the panel
+ * animates its height; 0 means it changed at once (e.g. reduced motion). */
+export type ChartHoverDetail = {
+  active: boolean;
+  durationMs: number;
+};
+
 export interface CalendarDay {
   day: number;
   cost: number;

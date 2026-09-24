@@ -329,10 +329,14 @@ pub async fn create_float_ball(app: tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    // Suppress main-window auto-hide: creating a new window may steal focus.
-    app.state::<AppState>()
-        .suppress_auto_hide
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // Creating a window may steal the popover's focus; that blur must not
+    // dismiss it. The gate only arms while the popover is showing (it is
+    // hidden while startup restores the float ball).
+    let popover_showing = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    app.state::<AppState>().auto_hide_gate.arm(popover_showing);
 
     let window = tauri::WebviewWindowBuilder::new(
         &app,

@@ -417,19 +417,23 @@ pub async fn set_dock_icon_visible(app: tauri::AppHandle, visible: bool) -> Resu
     #[cfg(target_os = "macos")]
     {
         use tauri::Manager;
-        // Changing the activation policy may deactivate the app, causing the
-        // main window to lose focus.  Suppress the resulting auto-hide.
-        app.state::<AppState>()
-            .suppress_auto_hide
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let main = app.get_webview_window("main");
+        let showing = main
+            .as_ref()
+            .and_then(|w| w.is_visible().ok())
+            .unwrap_or(false);
+        // Changing the activation policy may deactivate the app and blur the
+        // popover; that blur must not dismiss it. The gate only arms while the
+        // popover is showing: at startup it is hidden and cannot blur.
+        app.state::<AppState>().auto_hide_gate.arm(showing);
 
         crate::platform::macos::set_dock_icon_visible(&app, visible)?;
 
         // Re-focus main window after the policy change so it stays visible,
         // but only if it was already showing — avoid pulling a hidden window
         // to the center of the screen on startup.
-        if let Some(win) = app.get_webview_window("main") {
-            if win.is_visible().unwrap_or(false) {
+        if let Some(win) = main {
+            if showing {
                 let _ = win.show();
                 let _ = win.set_focus();
             }
@@ -447,10 +451,13 @@ pub async fn set_dock_icon_visible(app: tauri::AppHandle, visible: bool) -> Resu
 /// without it the blur handler hides the window while the dialog is up,
 /// leaving the user unable to click the originating button afterwards.
 #[tauri::command]
-pub fn suppress_next_auto_hide(state: State<'_, AppState>) {
-    state
-        .suppress_auto_hide
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+pub fn suppress_next_auto_hide(app: tauri::AppHandle, state: State<'_, AppState>) {
+    use tauri::Manager;
+    let showing = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    state.auto_hide_gate.arm(showing);
 }
 
 /// Update the background auto-export preferences. Mirrors the Settings toggle
@@ -610,13 +617,24 @@ pub async fn get_rate_limits(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RateLimitsPayload, String> {
+    // "all" follows the enabled header tabs, like the usage views do; a
+    // `+`-joined scope names its providers explicitly. Providers outside the
+    // selection keep their cached value instead of costing a probe.
     let selection = match provider.as_deref() {
-        None | Some("all") => crate::rate_limits::RateLimitSelection::All,
-        Some("claude") => crate::rate_limits::RateLimitSelection::Claude,
-        Some("codex") => crate::rate_limits::RateLimitSelection::Codex,
-        Some("cursor") => crate::rate_limits::RateLimitSelection::Cursor,
-        Some("kimi") => crate::rate_limits::RateLimitSelection::Kimi,
-        Some(other) => return Err(format!("Invalid provider for rate limits: {other}")),
+        None | Some("all") => {
+            let enabled = state
+                .enabled_integrations
+                .read()
+                .map(|ids| ids.clone())
+                .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+            crate::rate_limits::RateLimitSelection::enabled(&enabled)
+        }
+        Some(scope) => match crate::usage::integrations::UsageIntegrationSelection::parse(scope) {
+            Some(parsed) => {
+                crate::rate_limits::RateLimitSelection::enabled(&parsed.integration_ids())
+            }
+            None => return Err(format!("Invalid provider for rate limits: {scope}")),
+        },
     };
 
     if !state
