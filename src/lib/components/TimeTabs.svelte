@@ -55,7 +55,7 @@
   }
   button {
     flex: 1; min-width: 0; padding: 6px 8px; border: none; background: none;
-    font: 500 8.5px/1 'Inter', sans-serif;
+    font: 500 8.5px/1 system-ui, sans-serif;
     color: var(--t3); cursor: pointer; position: relative; z-index: 1;
     letter-spacing: .2px; transition: color var(--t-normal) ease;
     overflow: hidden;

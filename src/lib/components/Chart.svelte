@@ -784,7 +784,7 @@
   .ch.detail-above .xa { order: 4; }
 
   .ch-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 8px; }
-  .ch-t { font: 500 8px/1 "Inter", sans-serif; color: var(--t3); flex-shrink: 0; }
+  .ch-t { font: 500 8px/1 system-ui, sans-serif; color: var(--t3); flex-shrink: 0; }
   .ch-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
   /* Mode toggle */
@@ -813,7 +813,7 @@
     margin-right: 2px;
   }
   .seg-toggle button {
-    font: 600 7px/1 'Inter', sans-serif;
+    font: 600 7px/1 system-ui, sans-serif;
     width: 16px;
   }
 
@@ -839,7 +839,7 @@
   .y-label {
     position: absolute;
     right: 0;
-    font: 500 8px/1 "Inter", sans-serif;
+    font: 500 8px/1 system-ui, sans-serif;
     color: var(--t2);
     font-variant-numeric: tabular-nums;
     transform: translateY(-50%);
@@ -915,12 +915,12 @@
     filter: brightness(1.08);
   }
   .pie-center-label {
-    font: 500 9px/1 "Inter", sans-serif;
+    font: 500 9px/1 system-ui, sans-serif;
     fill: var(--t3);
     pointer-events: none;
   }
   .pie-center-value {
-    font: 600 11px/1 "Inter", sans-serif;
+    font: 600 11px/1 system-ui, sans-serif;
     fill: var(--t1);
     font-variant-numeric: tabular-nums;
     pointer-events: none;
@@ -979,21 +979,21 @@
   }
   .pie-row-dot { width: 6px; height: 6px; border-radius: 2px; }
   .pie-row-name {
-    font: 500 11px/1.2 "Inter", sans-serif;
+    font: 500 11px/1.2 system-ui, sans-serif;
     color: var(--t1);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .pie-row-pct {
-    font: 600 10px/1 "Inter", sans-serif;
+    font: 600 10px/1 system-ui, sans-serif;
     color: var(--t2);
     font-variant-numeric: tabular-nums;
     text-align: right;
     min-width: 28px;
   }
   .pie-row-cost {
-    font: 500 10px/1 "Inter", sans-serif;
+    font: 500 10px/1 system-ui, sans-serif;
     color: var(--t3);
     font-variant-numeric: tabular-nums;
     text-align: right;
@@ -1005,7 +1005,7 @@
     justify-content: center;
     width: 100%;
     height: 108px;
-    font: 500 10px/1 "Inter", sans-serif;
+    font: 500 10px/1 system-ui, sans-serif;
     color: var(--t3);
   }
 
@@ -1030,7 +1030,7 @@
   }
 
   .xa { display: flex; justify-content: space-between; margin-top: 8px; padding: 0 29px 0 32px; }
-  .xa span { font: 400 8px/1 "Inter", sans-serif; color: var(--t4); font-variant-numeric: tabular-nums; }
+  .xa span { font: 400 8px/1 system-ui, sans-serif; color: var(--t4); font-variant-numeric: tabular-nums; }
 
   .detail-inner {
     padding: 8px 10px;
@@ -1054,8 +1054,8 @@
     display: flex; justify-content: space-between; align-items: baseline;
     margin-bottom: 5px;
   }
-  .detail-label { font: 600 10px/1 "Inter", sans-serif; color: var(--t1); }
-  .detail-total { font: 600 10px/1 "Inter", sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }
+  .detail-label { font: 600 10px/1 system-ui, sans-serif; color: var(--t1); }
+  .detail-total { font: 600 10px/1 system-ui, sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }
   .detail-rows {
     display: flex;
     flex-direction: column;
@@ -1063,7 +1063,7 @@
   }
   .detail-row { display: flex; align-items: center; gap: 5px; }
   .detail-dot { width: 5px; height: 5px; border-radius: 1.5px; flex-shrink: 0; }
-  .detail-name { font: 400 10px/1 "Inter", sans-serif; color: var(--t2); flex: 1; }
-  .detail-cost { font: 500 10px/1 "Inter", sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }
+  .detail-name { font: 400 10px/1 system-ui, sans-serif; color: var(--t2); flex: 1; }
+  .detail-cost { font: 500 10px/1 system-ui, sans-serif; color: var(--t1); font-variant-numeric: tabular-nums; }
 
 </style>

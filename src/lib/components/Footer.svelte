@@ -1,6 +1,8 @@
 <script lang="ts">
   import { formatCost, formatTimeAgo } from "../utils/format.js";
+  import { untrack } from "svelte";
   import { footerFiveHourPct } from "../views/footer.js";
+  import { popoverVisible } from "../visibility.js";
   import type { UsagePayload, RateLimitsPayload, UsageProvider, UsagePeriod } from "../types/index.js";
 
   interface Props {
@@ -24,8 +26,10 @@
     return formatTimeAgo(data.last_updated);
   });
 
-  // Update "time ago" every 10 seconds
+  // Update "time ago" every 10 seconds while shown, and at once on show.
   $effect(() => {
+    if (!$popoverVisible) return;
+    refreshTick = untrack(() => refreshTick) + 1;
     const interval = setInterval(() => {
       refreshTick += 1;
     }, 10_000);
@@ -81,7 +85,7 @@
     display: flex; justify-content: space-between; align-items: center;
     animation: fadeUp var(--t-slow) var(--ease-out) both .14s;
   }
-  .ft-l { display: flex; align-items: center; gap: 4px; font: 400 9px/1 'Inter', sans-serif; color: var(--t2); }
+  .ft-l { display: flex; align-items: center; gap: 4px; font: 400 9px/1 system-ui, sans-serif; color: var(--t2); }
   .ft2 {
     padding: 4px 12px 8px;
     display: flex;
@@ -89,7 +93,7 @@
     align-items: center;
     animation: fadeUp var(--t-slow) var(--ease-out) both .16s;
   }
-  .ft-ts { font: 400 9px/1 'Inter', sans-serif; color: var(--t4); }
+  .ft-ts { font: 400 9px/1 system-ui, sans-serif; color: var(--t4); }
   .gear {
     background: none;
     border: none;

@@ -11,6 +11,7 @@
 use crate::models::{ProviderRateLimits, RateLimitWindow};
 use chrono::{DateTime, Datelike, Local, TimeZone};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
@@ -22,11 +23,59 @@ static CACHED_CLAUDE_CLI_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new
 const CLAUDE_CLI_PATH_ENV: &str = "CLAUDE_CLI_PATH";
 const CLAUDE_USAGE_TIMEOUT_SECONDS: u64 = 30;
 
-/// Fixed session id so repeated probes reuse one transcript instead of
-/// littering `~/.claude/projects` with an empty session per poll. Claude Code
-/// rejects `--session-id` once the session exists, so the steady-state call is
-/// `--resume` and `--session-id` only runs on the very first probe.
+/// Fixed session id for CLIs too old for `--no-session-persistence`, so their
+/// probes reuse one transcript instead of littering `~/.claude/projects` with
+/// an empty session per poll. Claude Code rejects `--session-id` once the
+/// session exists, so that form only runs when `--resume` finds nothing.
 const USAGE_SESSION_ID: &str = "7c9e6a1d-4b3f-4a2e-8d51-746f6b656e6d";
+
+/// The ways `/usage` can be asked, preferred first. The stateless forms write
+/// no transcript (a resumed one grew ~4 KB per probe, and each write counted
+/// as a log change that invalidated every cached view), and `--safe-mode`
+/// also skips the user's hooks, plugins and MCP servers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeForm {
+    SafeStateless = 0,
+    Stateless = 1,
+    Resume = 2,
+    CreateSession = 3,
+}
+
+impl ProbeForm {
+    fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::Stateless,
+            2 => Self::Resume,
+            3 => Self::CreateSession,
+            _ => Self::SafeStateless,
+        }
+    }
+
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::SafeStateless => &["--no-session-persistence", "--safe-mode"],
+            Self::Stateless => &["--no-session-persistence"],
+            Self::Resume => &["--resume", USAGE_SESSION_ID],
+            Self::CreateSession => &["--session-id", USAGE_SESSION_ID],
+        }
+    }
+
+    /// The form to try after this one printed no rows. The legacy session
+    /// forms are only reached when the CLI rejects the stateless flags; a
+    /// logged-out CLI stops after at most two spawns, as it did before.
+    fn next(self, unknown_option: bool) -> Option<Self> {
+        match (self, unknown_option) {
+            (Self::SafeStateless, _) => Some(Self::Stateless),
+            (Self::Stateless, true) => Some(Self::Resume),
+            (Self::Resume, _) => Some(Self::CreateSession),
+            _ => None,
+        }
+    }
+}
+
+/// The form that last produced rows, learned once per process so the probe
+/// does not re-detect flag support every cycle.
+static PROBE_FORM: AtomicU8 = AtomicU8::new(ProbeForm::SafeStateless as u8);
 
 // ── CLI path resolution ──
 
@@ -245,15 +294,15 @@ pub(super) fn parse_usage_output(output: &str, now: DateTime<Local>) -> Vec<Rate
 
 // ── Probe ──
 
-async fn run_usage_command(cli: &PathBuf, resume: bool) -> Result<String, RateLimitFetchError> {
+/// Run one probe and return its parsed rows, plus whether the CLI rejected a
+/// flag (`Error: unknown option '--safe-mode'`).
+async fn run_usage_command(
+    cli: &PathBuf,
+    form: ProbeForm,
+) -> Result<(Vec<RateLimitWindow>, bool), RateLimitFetchError> {
     let mut command = TokioCommand::new(cli);
     command.kill_on_drop(true);
-    command.arg("-p").arg("/usage");
-    if resume {
-        command.arg("--resume").arg(USAGE_SESSION_ID);
-    } else {
-        command.arg("--session-id").arg(USAGE_SESSION_ID);
-    }
+    command.arg("-p").arg("/usage").args(form.args());
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::piped());
     // Captured, not discarded: a bad session id or a logged-out CLI only
@@ -278,29 +327,39 @@ async fn run_usage_command(cli: &PathBuf, resume: bool) -> Result<String, RateLi
     .map_err(|_| RateLimitFetchError::message("Claude CLI /usage probe timed out"))?
     .map_err(|e| RateLimitFetchError::message(format!("Failed to run Claude CLI: {e}")))?;
 
-    if !output.stderr.is_empty() {
-        tracing::debug!(
-            resume,
-            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-            "Claude CLI /usage stderr"
-        );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.is_empty() {
+        tracing::debug!(?form, stderr = %stderr.trim(), "Claude CLI /usage stderr");
     }
+    let unknown_option = stderr.to_ascii_lowercase().contains("unknown option");
 
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok((
+        parse_usage_output(&String::from_utf8_lossy(&output.stdout), Local::now()),
+        unknown_option,
+    ))
 }
 
 pub(super) async fn fetch_claude_rate_limits_via_cli(
 ) -> Result<ProviderRateLimits, RateLimitFetchError> {
     let cli = resolve_claude_cli_path().map_err(RateLimitFetchError::message)?;
 
-    // Steady state is `--resume`; the fallback covers the first-ever probe and
-    // the case where the user cleaned out `~/.claude/projects`.
-    let mut stdout = run_usage_command(&cli, true).await?;
-    let mut windows = parse_usage_output(&stdout, Local::now());
-    if windows.is_empty() {
-        stdout = run_usage_command(&cli, false).await?;
-        windows = parse_usage_output(&stdout, Local::now());
-    }
+    let mut form = ProbeForm::from_u8(PROBE_FORM.load(Ordering::Relaxed));
+    let windows = loop {
+        let (windows, unknown_option) = run_usage_command(&cli, form).await?;
+        if !windows.is_empty() {
+            // A fresh session only exists once; the next probe resumes it.
+            let learned = match form {
+                ProbeForm::CreateSession => ProbeForm::Resume,
+                other => other,
+            };
+            PROBE_FORM.store(learned as u8, Ordering::Relaxed);
+            break windows;
+        }
+        match form.next(unknown_option) {
+            Some(next) => form = next,
+            None => break windows,
+        }
+    };
 
     if windows.is_empty() {
         return Err(RateLimitFetchError::message(
@@ -464,6 +523,22 @@ Last 24h · 827 requests · 8 sessions
             .as_ref()
             .unwrap()
             .starts_with("2027-01-01T00:00:00"));
+    }
+
+    #[test]
+    fn probe_falls_back_to_a_session_only_when_the_cli_rejects_the_flags() {
+        use ProbeForm::*;
+        assert_eq!(SafeStateless.next(false), Some(Stateless));
+        assert_eq!(SafeStateless.next(true), Some(Stateless));
+        // A logged-out CLI prints no rows either way; that must not start
+        // writing a transcript.
+        assert_eq!(Stateless.next(false), None);
+        assert_eq!(Stateless.next(true), Some(Resume));
+        assert_eq!(Resume.next(false), Some(CreateSession));
+        assert_eq!(CreateSession.next(false), None);
+        for form in [SafeStateless, Stateless, Resume, CreateSession] {
+            assert_eq!(ProbeForm::from_u8(form as u8), form);
+        }
     }
 
     #[test]

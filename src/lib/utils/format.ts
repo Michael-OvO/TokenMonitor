@@ -65,6 +65,16 @@ export function formatCreditAmount(value: number): string {
   })}`;
 }
 
+/** "$1,500–2,200": both ends in the display currency, 2 significant figures. */
+export function formatCostRange(lowUsd: number, highUsd: number): string {
+  const symbol = CURRENCY_SYMBOLS[activeCurrency] ?? "$";
+  const rate = rateFor(activeCurrency);
+  const [lo, hi] = [lowUsd, highUsd].map((v) =>
+    Number((v * rate).toPrecision(2)).toLocaleString("en-US"),
+  );
+  return lo === hi ? `${symbol}${lo}` : `${symbol}${lo}–${hi}`;
+}
+
 export function formatModelCost(value: number, pricingAvailable: boolean | undefined): string {
   if (pricingAvailable === false) return "N/A";
   if (value === 0) return "Free";

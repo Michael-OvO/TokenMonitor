@@ -1,7 +1,12 @@
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use tokio::process::Command;
+
+use crate::usage::device_aggregation::{local_zone_stamp, RecordIndex};
 
 /// Windows: CREATE_NO_WINDOW flag prevents a console window from flashing.
 #[cfg(target_os = "windows")]
@@ -163,7 +168,8 @@ pub async fn test_connection(alias: &str) -> SshTestResult {
         alias,
         "echo",
         "ok",
-    ]);
+    ])
+    .kill_on_drop(true);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let result = cmd.output().await;
@@ -528,6 +534,11 @@ async fn ssh_command(alias: &str, script: &str) -> Result<String, String> {
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=10",
+        // A connection that dies silently mid-sync ends in ~30 s, not never.
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=2",
         "-o",
         "LogLevel=ERROR",
         alias,
@@ -535,7 +546,8 @@ async fn ssh_command(alias: &str, script: &str) -> Result<String, String> {
     ])
     .stdin(std::process::Stdio::piped())
     .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped());
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let mut child = cmd
@@ -584,6 +596,23 @@ async fn ssh_command(alias: &str, script: &str) -> Result<String, String> {
     Err(format!("SSH command failed: {msg}"))
 }
 
+/// Whether an ssh failure needs the user before a retry can work: a changed or
+/// unknown host key. An unresolved hostname (offline, VPN down) or rejected
+/// keys (a locked agent) often clear by themselves, so they are retried.
+pub fn is_permanent_ssh_failure(error: &str) -> bool {
+    error
+        .to_ascii_lowercase()
+        .contains("host key verification failed")
+}
+
+/// Bound one host's sync, background or manual. Dropping the
+/// timed-out future kills its ssh child (`kill_on_drop`).
+pub async fn with_host_timeout<F: std::future::Future>(
+    fut: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    tokio::time::timeout(Duration::from_secs(60), fut).await
+}
+
 // ── Cache manager ───────────────────────────────────────────────────────────
 //
 // Stores compact usage records per host, not raw JSONL files.
@@ -593,15 +622,35 @@ async fn ssh_command(alias: &str, script: &str) -> Result<String, String> {
 //     .last-sync-codex     — epoch timestamp for Codex provider
 //     usage.jsonl           — compact records (appended on each sync)
 
+/// One host's parsed `usage.jsonl` and the file version it was read at.
+#[derive(Clone)]
+pub struct CachedRecords {
+    /// `cached_records_stamp` of the version read.
+    pub stamp: u64,
+    /// Its mtime: the sync that wrote it, so the remote rows of that hour and
+    /// later ones may be missing. `None` when there was no file.
+    pub written_at: Option<SystemTime>,
+    pub records: Arc<Vec<CompactUsageRecord>>,
+    /// The same records by time, each timestamp converted once.
+    pub index: Arc<RecordIndex>,
+}
+
+type RecordsMemo = HashMap<String, CachedRecords>;
+
 #[derive(Clone)]
 pub struct SshCacheManager {
     base_dir: PathBuf,
+    /// Shared by clones. Frozen between refresh samples: only
+    /// `revalidate_records_memo`, `invalidate_records` and `reset_all_caches`
+    /// drop entries, so a sync's rewrite shows up at the next sample.
+    records_memo: Arc<Mutex<RecordsMemo>>,
 }
 
 impl SshCacheManager {
     pub fn new(app_data_dir: &Path) -> Self {
         Self {
             base_dir: app_data_dir.join("remote-cache"),
+            records_memo: Arc::default(),
         }
     }
 
@@ -611,6 +660,8 @@ impl SshCacheManager {
                 tracing::warn!("Failed to remove remote cache dir {:?}: {e}", self.base_dir);
             }
         }
+        // After the removal, so a load racing it can't re-memoise deleted records.
+        self.records_memo.lock().unwrap().clear();
     }
 
     /// Get the cache directory for a specific host.
@@ -860,6 +911,84 @@ impl SshCacheManager {
             .filter_map(|line| serde_json::from_str::<CompactUsageRecord>(&line).ok())
             .collect())
     }
+
+    /// Content stamp of a host's usage cache (mtime nanos ^ length), 0 when missing.
+    pub fn cached_records_stamp(&self, alias: &str) -> u64 {
+        self.cached_records_version(alias).0
+    }
+
+    /// `cached_records_stamp` and the file's mtime, from one stat.
+    fn cached_records_version(&self, alias: &str) -> (u64, Option<SystemTime>) {
+        let Some(meta) = self
+            .usage_cache_path(alias)
+            .ok()
+            .and_then(|path| std::fs::metadata(path).ok())
+        else {
+            return (0, None);
+        };
+        let modified = meta.modified().ok();
+        let mtime = modified
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as u64);
+        (mtime ^ meta.len(), modified)
+    }
+
+    /// A host's cached records, parsed once and shared until the memo drops them.
+    pub fn load_cached_records_shared(
+        &self,
+        alias: &str,
+    ) -> Result<Arc<Vec<CompactUsageRecord>>, String> {
+        self.load_cached_records_stamped(alias)
+            .map(|cached| cached.records)
+    }
+
+    /// `load_cached_records_shared` plus the version those records were read
+    /// at, so a caller keying work by content sees the same version it reads.
+    pub fn load_cached_records_stamped(&self, alias: &str) -> Result<CachedRecords, String> {
+        if let Some(hit) = self.records_memo.lock().unwrap().get(alias) {
+            return Ok(hit.clone());
+        }
+        // Stat before reading: a rewrite in between leaves an older version
+        // that the next revalidation drops, never a current one on older records.
+        let (stamp, written_at) = self.cached_records_version(alias);
+        let records = Arc::new(self.load_cached_records(alias)?);
+        let cached = CachedRecords {
+            stamp,
+            written_at,
+            index: Arc::new(RecordIndex::new(records.clone())),
+            records,
+        };
+        self.records_memo
+            .lock()
+            .unwrap()
+            .insert(alias.to_string(), cached.clone());
+        Ok(cached)
+    }
+
+    /// `load_cached_records_shared`, indexed by time.
+    pub fn load_record_index(&self, alias: &str) -> Result<Arc<RecordIndex>, String> {
+        self.load_cached_records_stamped(alias)
+            .map(|cached| cached.index)
+    }
+
+    /// Drop memoised records whose cache file was rewritten, created or removed
+    /// since they were read, and all of them once the time zone changed: their
+    /// local times were converted in the old one. Returns whether any were
+    /// dropped.
+    pub fn revalidate_records_memo(&self) -> bool {
+        let zone = local_zone_stamp();
+        let mut memo = self.records_memo.lock().unwrap();
+        let before = memo.len();
+        memo.retain(|alias, cached| {
+            cached.index.zone == zone && self.cached_records_stamp(alias) == cached.stamp
+        });
+        memo.len() != before
+    }
+
+    /// Forget a host's memoised records (a manual sync just rewrote them).
+    pub fn invalidate_records(&self, alias: &str) {
+        self.records_memo.lock().unwrap().remove(alias);
+    }
 }
 
 #[cfg(test)]
@@ -926,5 +1055,119 @@ mod tests {
             next_last_sync_epoch(Some(expected + 100), claude),
             expected + 100
         );
+    }
+
+    #[test]
+    fn cached_records_stamp_tracks_the_cache_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mgr = SshCacheManager::new(tmp.path());
+        assert_eq!(mgr.cached_records_stamp("host"), 0);
+
+        let path = mgr.usage_cache_path("host").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "a\n").unwrap();
+        let first = mgr.cached_records_stamp("host");
+        assert_ne!(first, 0);
+        assert_eq!(mgr.cached_records_stamp("host"), first);
+
+        std::fs::write(&path, "a\nb\n").unwrap();
+        assert_ne!(mgr.cached_records_stamp("host"), first);
+    }
+
+    fn jsonl(records: &[CompactUsageRecord]) -> String {
+        records
+            .iter()
+            .map(|r| serde_json::to_string(r).unwrap() + "\n")
+            .collect()
+    }
+
+    #[test]
+    fn shared_records_are_reused_until_revalidated() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mgr = SshCacheManager::new(tmp.path());
+        let path = mgr.usage_cache_path("host").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let a = rec("2026-03-15T12:00:00+00:00", "claude-sonnet-4-6");
+        let b = rec("2026-03-15T13:00:00+00:00", "claude-opus-4-6");
+        std::fs::write(&path, jsonl(std::slice::from_ref(&a))).unwrap();
+
+        let first = mgr.load_cached_records_shared("host").unwrap();
+        assert_eq!(first.len(), 1);
+        // Clones share the memo.
+        let again = mgr.clone().load_cached_records_shared("host").unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+
+        // A sync's tmp+rename rewrite stays invisible until the next revalidation.
+        let tmp_path = path.with_extension("jsonl.tmp");
+        std::fs::write(&tmp_path, jsonl(&[a, b])).unwrap();
+        std::fs::rename(&tmp_path, &path).unwrap();
+        let still = mgr.load_cached_records_shared("host").unwrap();
+        assert!(Arc::ptr_eq(&first, &still));
+
+        assert!(mgr.revalidate_records_memo());
+        let second = mgr.load_cached_records_shared("host").unwrap();
+        assert_eq!(second.len(), 2);
+        assert!(!mgr.revalidate_records_memo());
+    }
+
+    #[test]
+    fn shared_records_of_a_missing_file_are_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mgr = SshCacheManager::new(tmp.path());
+        assert!(mgr.load_cached_records_shared("host").unwrap().is_empty());
+        // Still missing is not a change, or every sample would clear the caches.
+        assert!(!mgr.revalidate_records_memo());
+
+        // The first sync creating the file is.
+        let path = mgr.usage_cache_path("host").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, jsonl(&[rec("2026-03-15T12:00:00+00:00", "gpt-5.4")])).unwrap();
+        assert!(mgr.load_cached_records_shared("host").unwrap().is_empty());
+        assert!(mgr.revalidate_records_memo());
+        assert_eq!(mgr.load_cached_records_shared("host").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invalidate_and_reset_drop_shared_records() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mgr = SshCacheManager::new(tmp.path());
+        let path = mgr.usage_cache_path("host").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, jsonl(&[rec("2026-03-15T12:00:00+00:00", "gpt-5.4")])).unwrap();
+
+        let first = mgr.load_cached_records_shared("host").unwrap();
+        mgr.invalidate_records("host");
+        let reloaded = mgr.load_cached_records_shared("host").unwrap();
+        assert!(!Arc::ptr_eq(&first, &reloaded));
+        assert_eq!(reloaded.len(), 1);
+
+        mgr.reset_all_caches();
+        assert!(mgr.load_cached_records_shared("host").unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_failures_the_user_must_fix_are_permanent() {
+        assert!(is_permanent_ssh_failure(
+            "SSH command failed: Host key verification failed."
+        ));
+        for transient in [
+            "SSH command failed: ssh: connect to host 10.0.0.1 port 22: Connection timed out",
+            "SSH command failed: Connection closed by 10.0.0.1 port 22",
+            // Offline or off the VPN, and a locked agent: they clear by themselves.
+            "SSH command failed: ssh: Could not resolve hostname dukeserver: No such host is known.",
+            "SSH command failed: user@host: Permission denied (publickey).",
+        ] {
+            assert!(!is_permanent_ssh_failure(transient), "{transient}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn per_host_timeout_bounds_a_hung_sync() {
+        let start = tokio::time::Instant::now();
+        let result = with_host_timeout(std::future::pending::<()>()).await;
+        assert!(result.is_err());
+        let waited = start.elapsed();
+        assert!(waited >= std::time::Duration::from_secs(60));
+        assert!(waited < std::time::Duration::from_secs(61));
     }
 }

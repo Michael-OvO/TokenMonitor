@@ -27,7 +27,12 @@ struct OpenRouterPricing {
 
 /// Fetch model pricing from the OpenRouter API and parse into normalized rates.
 pub async fn fetch_openrouter() -> Result<HashMap<String, DynamicModelRates>, String> {
-    let body = reqwest::get(crate::ops::openrouter_models_url())
+    let body = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("OpenRouter HTTP client build failed: {e}"))?
+        .get(crate::ops::openrouter_models_url())
+        .send()
         .await
         .map_err(|e| format!("OpenRouter HTTP fetch failed: {e}"))?
         .text()

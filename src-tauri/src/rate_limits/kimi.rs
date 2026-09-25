@@ -33,7 +33,7 @@ const KIMI_OAUTH_TOKEN_PATH: &str = "/api/oauth/token";
 const KIMI_CODE_CLIENT_ID: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
 
 /// Hard cap on the refresh request so a hung auth server can't stall the
-/// provider join in `fetch_selected_rate_limits`.
+/// providers' turn in `fetch_selected_rate_limits_until`.
 const REFRESH_TIMEOUT_SECS: u64 = 12;
 
 /// Refresh this far ahead of `expires_at` so a token that is valid when we
@@ -110,8 +110,15 @@ fn now_epoch_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Kimi Code is not set up on this machine. Not a failure: the UI shows its
+/// idle summary for it, and the probe does not warn about it every cycle.
+pub(super) const NOT_SIGNED_IN: &str = "Kimi Code CLI is not signed in on this machine";
+
 fn load_kimi_credentials(path: &Path) -> Result<KimiCredentials, RateLimitFetchError> {
     let raw = std::fs::read_to_string(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            return RateLimitFetchError::message(NOT_SIGNED_IN);
+        }
         RateLimitFetchError::message(format!(
             "Failed to read Kimi credentials at {}: {e}",
             path.display()
@@ -127,9 +134,8 @@ fn load_kimi_credentials(path: &Path) -> Result<KimiCredentials, RateLimitFetchE
 }
 
 fn read_kimi_credentials() -> Result<(PathBuf, KimiCredentials), RateLimitFetchError> {
-    let path = crate::paths::kimi_credentials_file().ok_or_else(|| {
-        RateLimitFetchError::message("Kimi Code CLI is not signed in on this machine")
-    })?;
+    let path = crate::paths::kimi_credentials_file()
+        .ok_or_else(|| RateLimitFetchError::message(NOT_SIGNED_IN))?;
 
     let parsed = load_kimi_credentials(&path)?;
 
@@ -460,13 +466,25 @@ fn window_id(window: &Option<KimiWindow>) -> String {
     )
 }
 
+fn window_minutes(window: &Option<KimiWindow>) -> Option<u64> {
+    let window = window.as_ref()?;
+    let per_unit = match window.time_unit.as_deref()? {
+        "TIME_UNIT_MINUTE" => 1,
+        "TIME_UNIT_HOUR" => 60,
+        "TIME_UNIT_DAY" => 1_440,
+        "TIME_UNIT_WEEK" => 10_080,
+        _ => return None,
+    };
+    Some(window.duration.filter(|d| *d > 0)? * per_unit)
+}
+
 fn build_kimi_rate_limits(resp: KimiUsagesResponse) -> ProviderRateLimits {
     let mut windows = Vec::new();
 
     // The top-level `usage` object is the account-level (weekly) summary.
     if let Some(summary) = resp.usage.as_ref() {
         if let Some(window) = build_window("summary", "Weekly limit", summary) {
-            windows.push(window);
+            windows.push(window.with_minutes(Some(10_080)));
         }
     }
 
@@ -484,7 +502,7 @@ fn build_kimi_rate_limits(resp: KimiUsagesResponse) -> ProviderRateLimits {
                 reset_time: None,
             }),
         ) {
-            windows.push(window);
+            windows.push(window.with_minutes(window_minutes(&item.window)));
         }
     }
 
@@ -526,7 +544,10 @@ fn build_window(window_id: &str, label: &str, detail: &KimiUsageDetail) -> Optio
 }
 
 async fn request_kimi_usage(access_token: &str) -> Result<reqwest::Response, RateLimitFetchError> {
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .timeout(super::HTTP_TIMEOUT)
+        .build()
+        .map_err(|e| RateLimitFetchError::message(format!("HTTP client build failed: {e}")))?
         .get(KIMI_USAGE_URL)
         .header("Accept", "application/json")
         .bearer_auth(access_token)
@@ -762,6 +783,14 @@ mod tests {
         // No expires_in in the response: leave the stored expiry alone rather
         // than inventing one.
         assert_eq!(c.expires_at, Some(10.0));
+    }
+
+    #[test]
+    fn a_missing_credentials_file_reads_as_not_signed_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = load_kimi_credentials(&dir.path().join("kimi-code.json")).unwrap_err();
+        // The frontend maps this message to its idle summary.
+        assert_eq!(error.message, NOT_SIGNED_IN);
     }
 
     #[test]

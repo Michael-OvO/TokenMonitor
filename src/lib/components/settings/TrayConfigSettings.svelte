@@ -349,7 +349,7 @@
   .label {
     flex: 1 1 110px;
     min-width: 0;
-    font: 400 10px/1 'Inter', sans-serif;
+    font: 400 10px/1 system-ui, sans-serif;
     color: var(--t1);
   }
 
@@ -368,7 +368,7 @@
   }
   .preview-label {
     display: block;
-    font: 500 8px/1 'Inter', sans-serif;
+    font: 500 8px/1 system-ui, sans-serif;
     color: var(--t4);
     letter-spacing: 0.3px;
     margin-bottom: 6px;
@@ -381,7 +381,7 @@
     flex-wrap: wrap;
   }
   .chip {
-    font: 500 9px/1 'Inter', sans-serif;
+    font: 500 9px/1 system-ui, sans-serif;
     padding: 4px 8px;
     border-radius: 6px;
     border: 1px solid var(--border-subtle);
@@ -441,7 +441,7 @@
     gap: 5px;
   }
   .fb-tag {
-    font: 800 7px/1 'Inter', sans-serif;
+    font: 800 7px/1 system-ui, sans-serif;
     text-shadow: 0 0 5px currentColor;
     opacity: 0.9;
   }
@@ -457,7 +457,7 @@
     border-radius: inherit;
   }
   .fb-pct {
-    font: 700 8px/1 'Inter', sans-serif;
+    font: 700 8px/1 system-ui, sans-serif;
     font-variant-numeric: tabular-nums;
     text-align: right;
   }
@@ -472,7 +472,7 @@
     background: transparent;
   }
   .fb-cost {
-    font: 700 8px/1 'Inter', sans-serif;
+    font: 700 8px/1 system-ui, sans-serif;
     color: rgba(255, 255, 255, 0.95);
     font-variant-numeric: tabular-nums;
   }
@@ -518,7 +518,7 @@
     border-radius: inherit;
   }
   .tp-text {
-    font: 400 10px/1 'Inter', -apple-system, sans-serif;
+    font: 400 10px/1 system-ui, -apple-system, sans-serif;
     font-variant-numeric: tabular-nums;
     letter-spacing: -0.2px;
     color: rgba(255,255,255,0.88);

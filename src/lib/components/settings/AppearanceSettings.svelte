@@ -112,7 +112,7 @@
   .label {
     flex: 1 1 110px;
     min-width: 0;
-    font: 400 10px/1 'Inter', sans-serif;
+    font: 400 10px/1 system-ui, sans-serif;
     color: var(--t1);
   }
 </style>

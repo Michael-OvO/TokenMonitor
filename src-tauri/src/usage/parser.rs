@@ -13,6 +13,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -22,10 +23,7 @@ use super::claude_parser::{
     parse_claude_session_file, upsert_claude_change_event, upsert_claude_entry, ClaudeDedupeAction,
 };
 use super::codex_parser::parse_codex_session_file;
-use super::cursor_parser::{
-    cursor_last_warning, glob_cursor_chat_session_files, load_cursor_local_entries,
-    parse_cursor_session_file, set_cursor_warning,
-};
+use super::cursor_parser::{cursor_last_warning, parse_cursor_session_file, set_cursor_warning};
 use super::kimi_parser::parse_kimi_session_file;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -110,35 +108,62 @@ struct CachedRootFileList {
     last_accessed_at: Instant,
 }
 
-/// Per-root result of a content-only change scan: the fully re-stat'd stamp
-/// list (so the listing can be refreshed without a second stat sweep) plus the
-/// subset of files whose stamp differs from the cached one (so only those need
-/// re-parsing).
-struct RootContentChange {
+/// One root's files by path: the stamp each was last read at, and the
+/// earliest entry date it held.
+type FileEarliestDates = HashMap<PathBuf, (FileStamp, Option<NaiveDate>)>;
+
+/// One root's listing as a sweep found it, when a directory's or a file's
+/// stamp in it moved.
+#[derive(Default)]
+struct RootSweep {
     cache_key: String,
-    fresh_stamps: Vec<FileListStamp>,
+    directories: Vec<DirectoryStamp>,
+    file_stamps: Vec<FileListStamp>,
+    /// Files came or went.
+    set_changed: bool,
+    /// The files whose stamp moved, by cache key.
     changed_keys: Vec<String>,
+    /// When the earliest written of them had been written before.
+    changed_since: Option<SystemTime>,
+    /// One of them shrank: rewritten, not appended to.
+    shrunk: bool,
 }
 
-/// Outcome of one source-change scan. Distinguishes a file-SET change
-/// (add/remove/rename, detected via directory mtime) from in-place CONTENT
-/// changes (append, detected via file stamp). A set change forces a full
-/// invalidation; content changes are applied surgically.
+/// Outcome of one sweep over the cached listings.
 #[derive(Default)]
 struct SourceChangeScan {
+    /// Nothing listed yet (or a poisoned lock): every root is re-listed.
     listing_changed: bool,
-    content_changes: Vec<RootContentChange>,
+    /// Roots that are gone: their listings are dropped.
+    dropped: Vec<String>,
+    roots: Vec<RootSweep>,
 }
 
-impl SourceChangeScan {
-    fn any(&self) -> bool {
-        self.listing_changed
-            || self
-                .content_changes
-                .iter()
-                .any(|c| !c.changed_keys.is_empty())
-    }
+/// What a sweep found in the logs.
+#[derive(Debug, PartialEq)]
+pub(crate) enum LogChanges {
+    None,
+    /// Only lines appended to logs already listed.
+    Appended(LogAppends),
+    /// Anything else: files came, went or shrank, a Cursor chat (a JSON
+    /// document, written whole) changed, or nothing was listed yet.
+    Any,
 }
+
+/// Lines appended to the logs of `integrations`, none dated before `since`.
+#[derive(Debug, PartialEq)]
+pub(crate) struct LogAppends {
+    pub integrations: Vec<UsageIntegrationId>,
+    pub since: NaiveDate,
+}
+
+/// A line is dated when its request was made, which may come before the
+/// file's previous write, though not by this much.
+const APPEND_DATE_SLACK: Duration = Duration::hours(1);
+
+/// A file written within this long is stat'ed at every sweep; an older one
+/// only at a full sweep.
+const HOT_FILE_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 86_400);
 
 #[derive(Clone)]
 struct CachedFileEntries {
@@ -155,6 +180,32 @@ enum ProviderFileKind {
     Codex,
     Cursor,
     Kimi,
+}
+
+impl ProviderFileKind {
+    fn parse(self, path: &Path) -> SessionParseResult {
+        match self {
+            Self::Claude => parse_claude_session_file(path),
+            Self::Codex => parse_codex_session_file(path),
+            Self::Cursor => parse_cursor_session_file(path),
+            Self::Kimi => parse_kimi_session_file(path),
+        }
+    }
+
+    /// Whether the tree walk lists `path`: a `.jsonl` log, or for Cursor a
+    /// chat JSON in a workspace's `chatSessions` directory.
+    fn is_session_file(self, path: &Path) -> bool {
+        match self {
+            Self::Cursor => {
+                path.extension().is_some_and(|e| e == "json")
+                    && path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .is_some_and(|name| name == "chatSessions")
+            }
+            _ => path.extension().is_some_and(|e| e == "jsonl"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -215,7 +266,7 @@ struct CachedFileLoad {
 
 /// Shared result of a single `load_entries` call, cached for reuse within
 /// the same IPC request scope.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct LoadedEntries {
     pub entries: Vec<ParsedEntry>,
     pub change_events: Vec<ParsedChangeEvent>,
@@ -290,6 +341,7 @@ pub(crate) fn push_sample_path(sample_paths: &mut Vec<String>, path: &Path) {
 
 fn scan_jsonl_tree_into(
     dir: &Path,
+    kind: ProviderFileKind,
     files: &mut Vec<PathBuf>,
     directories: &mut Vec<DirectoryStamp>,
 ) {
@@ -333,20 +385,20 @@ fn scan_jsonl_tree_into(
             continue;
         }
         if file_type.is_dir() {
-            scan_jsonl_tree_into(&path, files, directories);
-        } else if path.extension().is_some_and(|e| e == "jsonl") {
+            scan_jsonl_tree_into(&path, kind, files, directories);
+        } else if kind.is_session_file(&path) {
             files.push(path);
         }
     }
 }
 
-fn scan_jsonl_tree(dir: &Path) -> (Vec<PathBuf>, Vec<DirectoryStamp>) {
+fn scan_jsonl_tree(dir: &Path, kind: ProviderFileKind) -> (Vec<PathBuf>, Vec<DirectoryStamp>) {
     let mut files = Vec::new();
     let mut directories = Vec::new();
     if !dir.exists() {
         return (files, directories);
     }
-    scan_jsonl_tree_into(dir, &mut files, &mut directories);
+    scan_jsonl_tree_into(dir, kind, &mut files, &mut directories);
     files.sort();
     (files, directories)
 }
@@ -357,6 +409,179 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
         modified: metadata.modified().ok()?,
         len: metadata.len(),
     })
+}
+
+/// Sweep one root's listing: stat its files, every one when `full`, else
+/// those written within [`HOT_FILE_AGE`], each by its own stat (on NTFS a
+/// directory entry lags behind a file a writer holds open); stat its
+/// directories, and read again those whose stamp moved ([`relist_dir`]), so
+/// a file that came or went costs one directory read, not a walk of the
+/// tree. `None` when `root` is gone, `Some(None)` when nothing moved.
+fn sweep_root(
+    root: &Path,
+    entry: &CachedRootFileList,
+    kind: ProviderFileKind,
+    full: bool,
+) -> Option<Option<RootSweep>> {
+    let now = SystemTime::now();
+    // The idle path allocates nothing: only what moved is collected.
+    let mut restat = Vec::new();
+    for (i, file) in entry.file_stamps.iter().enumerate() {
+        let cold = now
+            .duration_since(file.stamp.modified)
+            .is_ok_and(|age| age >= HOT_FILE_AGE);
+        if cold && !full {
+            continue;
+        }
+        let stamp = file_stamp(&file.path);
+        if stamp.is_none() && !is_gone(&file.path) {
+            continue;
+        }
+        if stamp.as_ref() != Some(&file.stamp) {
+            restat.push((i, stamp));
+        }
+    }
+    let mut moved = Vec::new();
+    for dir in entry.directories.iter() {
+        let modified = fs::metadata(&dir.path).and_then(|m| m.modified()).ok();
+        if modified.is_none() && !is_gone(&dir.path) {
+            continue;
+        }
+        if modified.is_none() && dir.path == root {
+            return None;
+        }
+        if modified != Some(dir.modified) {
+            moved.push((dir.path.clone(), modified));
+        }
+    }
+    if restat.is_empty() && moved.is_empty() {
+        return Some(None);
+    }
+
+    let mut sweep = RootSweep {
+        directories: entry.directories.to_vec(),
+        ..RootSweep::default()
+    };
+    let mut restat = restat.into_iter().peekable();
+    for (i, file) in entry.file_stamps.iter().enumerate() {
+        match restat.next_if(|(at, _)| *at == i) {
+            None => sweep.file_stamps.push(file.clone()),
+            // Gone without its directory's stamp moving (a race, or a coarse
+            // clock): it leaves the listing.
+            Some((_, None)) => sweep.set_changed = true,
+            Some((_, Some(stamp))) => {
+                sweep.shrunk |= stamp.len < file.stamp.len;
+                let before = file.stamp.modified;
+                sweep.changed_since = Some(sweep.changed_since.map_or(before, |at| at.min(before)));
+                sweep.changed_keys.push(path_to_string(&file.path));
+                sweep.file_stamps.push(FileListStamp {
+                    path: file.path.clone(),
+                    stamp,
+                });
+            }
+        }
+    }
+    // Parents first: a subdirectory that left with its parent is not read.
+    moved.sort_by_key(|(path, _)| path.components().count());
+    for (dir, modified) in &moved {
+        sweep.set_changed |= relist_dir(
+            dir,
+            *modified,
+            kind,
+            &mut sweep.directories,
+            &mut sweep.file_stamps,
+        );
+    }
+    if sweep.set_changed {
+        sweep.file_stamps.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    Some(Some(sweep))
+}
+
+/// Whether `path` is known to be gone. One that could not be read (a flaky
+/// network share, a lock) keeps its stamp and is tried again at the next sweep.
+fn is_gone(path: &Path) -> bool {
+    matches!(path.try_exists(), Ok(false))
+}
+
+/// Read `dir` again, its stamp now `modified` (`None`: gone): the session
+/// files and subdirectories it holds replace those listed under it. A new
+/// subdirectory is walked whole, and all under one that left leaves with
+/// it. Returns whether the listed files changed.
+fn relist_dir(
+    dir: &Path,
+    modified: Option<SystemTime>,
+    kind: ProviderFileKind,
+    directories: &mut Vec<DirectoryStamp>,
+    files: &mut Vec<FileListStamp>,
+) -> bool {
+    if !directories.iter().any(|d| d.path == dir) {
+        return false;
+    }
+    let mut held_files = HashSet::new();
+    let mut held_dirs = HashSet::new();
+    if modified.is_some() {
+        // Unread, it keeps its stamp and is tried again at the next sweep.
+        let Ok(entries) = fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                held_dirs.insert(path);
+            } else if !file_type.is_symlink() && kind.is_session_file(&path) {
+                held_files.insert(path);
+            }
+        }
+    }
+    let gone: Vec<PathBuf> = match modified {
+        None => vec![dir.to_path_buf()],
+        Some(_) => directories
+            .iter()
+            .filter(|d| d.path.parent() == Some(dir) && !held_dirs.contains(&d.path))
+            .map(|d| d.path.clone())
+            .collect(),
+    };
+    let left = |path: &Path| gone.iter().any(|gone| path.starts_with(gone));
+    directories.retain(|d| !left(&d.path));
+    let before = files.len();
+    files.retain(|f| {
+        !left(&f.path) && (f.path.parent() != Some(dir) || held_files.contains(&f.path))
+    });
+    let removed = files.len() != before;
+    let Some(modified) = modified else {
+        return removed;
+    };
+
+    for listed in directories.iter_mut().filter(|d| d.path == dir) {
+        listed.modified = modified;
+    }
+    let known: HashSet<&Path> = directories
+        .iter()
+        .map(|d| d.path.as_path())
+        .chain(files.iter().map(|f| f.path.as_path()))
+        .filter(|path| path.parent() == Some(dir))
+        .collect();
+    let mut came: Vec<PathBuf> = held_files
+        .into_iter()
+        .filter(|path| !known.contains(path.as_path()))
+        .collect();
+    let new_dirs: Vec<PathBuf> = held_dirs
+        .into_iter()
+        .filter(|path| !known.contains(path.as_path()))
+        .collect();
+    for sub in &new_dirs {
+        scan_jsonl_tree_into(sub, kind, &mut came, directories);
+    }
+    let before = files.len();
+    files.extend(
+        came.into_iter()
+            .filter_map(|path| file_stamp(&path).map(|stamp| FileListStamp { path, stamp })),
+    );
+    removed || files.len() != before
 }
 
 fn earliest_entry_date(entries: &[ParsedEntry]) -> Option<NaiveDate> {
@@ -442,20 +667,26 @@ struct SegmentAgg {
 
 /// Aggregate (display_name, cost, tokens, pricing_available) keyed by model_key
 /// for a slice of entries.
+/// (display_name, model_key, USD cost) of one entry.
+fn price_entry(e: &ParsedEntry) -> (String, String, f64) {
+    let (name, key) = normalize_model(&e.model);
+    let cost = crate::usage::pricing::calculate_cost_for_key(
+        &key,
+        e.input_tokens,
+        e.output_tokens,
+        e.cache_creation_5m_tokens,
+        e.cache_creation_1h_tokens,
+        e.cache_read_tokens,
+        e.web_search_requests,
+    ) * crate::usage::pricing::provider_multiplier(&e.model);
+    (name, key, cost)
+}
+
 fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, SegmentAgg> {
     let mut map: HashMap<String, SegmentAgg> = HashMap::new();
     for e in entries {
-        let (name, key) = normalize_model(&e.model);
+        let (name, key, cost) = price_entry(e);
         let pricing_available = crate::usage::pricing::pricing_available_for_key(&key);
-        let cost = crate::usage::pricing::calculate_cost_for_key(
-            &key,
-            e.input_tokens,
-            e.output_tokens,
-            e.cache_creation_5m_tokens,
-            e.cache_creation_1h_tokens,
-            e.cache_read_tokens,
-            e.web_search_requests,
-        ) * crate::usage::pricing::provider_multiplier(&e.model);
         let entry = map.entry(key).or_insert(SegmentAgg {
             display_name: name,
             cost: 0.0,
@@ -571,6 +802,19 @@ const CACHE_TTL_SECS: u64 = 120;
 /// at the cache TTL so a persistently failing endpoint is retried at most once
 /// per refresh interval, exactly like an expired cache.
 const CURSOR_REMOTE_FAILURE_COOLDOWN_SECS: u64 = CACHE_TTL_SECS;
+/// Longest a Cursor fetch that keeps finding nothing new is spaced out to.
+/// Usage from other machines can show up this late while the IDE here idles.
+const CURSOR_IDLE_MAX_SECS: u64 = 1800;
+
+/// The next wait between Cursor fetches: back to `base` when the last fetch
+/// changed something, else doubled, up to [`CURSOR_IDLE_MAX_SECS`].
+pub(crate) fn cursor_idle_backoff(current: u64, base: u64, changed: bool) -> u64 {
+    if changed {
+        base
+    } else {
+        current.saturating_mul(2).clamp(base, CURSOR_IDLE_MAX_SECS)
+    }
+}
 const MAX_PAYLOAD_CACHE_ENTRIES: usize = 256;
 const MAX_FILE_CACHE_ENTRIES: usize = 4096;
 
@@ -587,10 +831,50 @@ pub struct UsageParser {
     /// `needs_cursor_remote_fetch` for `CURSOR_REMOTE_FAILURE_COOLDOWN_SECS`
     /// so a failing fetch cannot be respawned on every refresh.
     cursor_remote_failure_at: Mutex<Option<Instant>>,
+    /// How long the Cursor remote data stays fresh for the periodic refresh:
+    /// [`CACHE_TTL_SECS`], doubled by each refresh that found nothing new (see
+    /// [`cursor_idle_backoff`]), and back to the base on Cursor activity.
+    cursor_remote_ttl_secs: AtomicU64,
+    /// Bumped whenever the Cursor remote data changes. A compute that saw it
+    /// move built from a superseded snapshot and must not be cached; see
+    /// [`UsageParser::store_cache_at_cursor_generation`].
+    cursor_remote_generation: AtomicU64,
     /// Earliest entry date per provider string, cached so `has_entries_before`
     /// answers in O(1) instead of re-scanning every session file per query.
-    /// Invalidated on source change (`invalidate_if_changed`) and `clear_cache`.
+    /// Invalidated on a listing change ([`UsageParser::sweep`]) and `clear_cache`.
     earliest_date_cache: Mutex<HashMap<String, Option<NaiveDate>>>,
+    /// Each listed file's earliest entry date by root, so recomputing a
+    /// provider's earliest date parses only the files new since, or shrunk.
+    file_earliest_dates: Mutex<HashMap<String, FileEarliestDates>>,
+    /// How long a payload cache entry lives; see [`payload_ttl_for`].
+    payload_ttl_secs: AtomicU64,
+    /// When set, only the sweep ([`UsageParser::sweep`]) revalidates the
+    /// session-file listings; queries reuse them as built.
+    listings_frozen: AtomicBool,
+    /// Bumped per integration at each sweep that finds its logs changed; the
+    /// first listing or a cache clear bumps them all.
+    log_changes: Mutex<HashMap<UsageIntegrationId, u64>>,
+}
+
+/// Payload cache TTL for a refresh interval: it outlives the interval, so a
+/// view computed from one sample is reused until the next. "Off" (0) keeps
+/// it for a day; the sample that finds a change clears it anyway.
+pub(crate) fn payload_ttl_for(interval_secs: u64) -> u64 {
+    if interval_secs == 0 {
+        86_400
+    } else {
+        CACHE_TTL_SECS.max(interval_secs.saturating_mul(2))
+    }
+}
+
+/// The `entries_cache` key of a load; the loads from the logs alone apart.
+fn entries_cache_key(provider: &str, since: Option<NaiveDate>, with_archive: bool) -> String {
+    format!(
+        "{}{}:{}",
+        if with_archive { "" } else { "live:" },
+        provider,
+        since.map(|d| d.to_string()).unwrap_or_default()
+    )
 }
 
 /// Cached result of a background Cursor remote API fetch.
@@ -616,19 +900,55 @@ fn cursor_range_covers(covered_since: Option<NaiveDate>, req_since: Option<Naive
     }
 }
 
-/// True when `candidate` covers at least as much history as `current` — used to
-/// keep the widest fresh cache when concurrent fetches (e.g. warmup) race.
-fn cursor_range_at_least_as_wide(candidate: Option<NaiveDate>, current: Option<NaiveDate>) -> bool {
-    match (candidate, current) {
-        (None, _) => true,
-        (Some(_), None) => false,
-        (Some(candidate), Some(current)) => candidate <= current,
-    }
+/// True when `entry` is dated before `since` (`None` = all time, so never).
+fn cursor_entry_before(entry: &ParsedEntry, since: Option<NaiveDate>) -> bool {
+    since.is_some_and(|since| entry.timestamp.date_naive() < since)
 }
 
-fn prune_payload_cache(cache: &mut HashMap<String, PayloadCacheEntry>) {
+/// Cheap change check for a slice of Cursor remote entries:
+/// (count, token sums per type, latest timestamp). Per type because moving
+/// tokens between types changes the cost without changing the total.
+fn cursor_entries_fingerprint(
+    entries: &[ParsedEntry],
+) -> (usize, [u64; 5], Option<DateTime<Local>>) {
+    // Wrapping: the sums are only compared for equality, and a panic here
+    // would poison the Cursor cache mutex held by `store_cursor_remote`.
+    let mut tokens = [0u64; 5];
+    for e in entries {
+        tokens[0] = tokens[0].wrapping_add(e.input_tokens);
+        tokens[1] = tokens[1].wrapping_add(e.output_tokens);
+        tokens[2] = tokens[2].wrapping_add(e.cache_creation_5m_tokens);
+        tokens[3] = tokens[3].wrapping_add(e.cache_creation_1h_tokens);
+        tokens[4] = tokens[4].wrapping_add(e.cache_read_tokens);
+    }
+    (
+        entries.len(),
+        tokens,
+        entries.iter().map(|e| e.timestamp).max(),
+    )
+}
+
+fn insert_payload_cache_entry(
+    cache: &mut HashMap<String, PayloadCacheEntry>,
+    key: &str,
+    payload: UsagePayload,
+    ttl_secs: u64,
+) {
     let now = Instant::now();
-    cache.retain(|_, entry| now.duration_since(entry.stored_at).as_secs() < CACHE_TTL_SECS);
+    cache.insert(
+        key.to_string(),
+        PayloadCacheEntry {
+            payload,
+            stored_at: now,
+            last_accessed_at: now,
+        },
+    );
+    prune_payload_cache(cache, ttl_secs);
+}
+
+fn prune_payload_cache(cache: &mut HashMap<String, PayloadCacheEntry>, ttl_secs: u64) {
+    let now = Instant::now();
+    cache.retain(|_, entry| now.duration_since(entry.stored_at).as_secs() < ttl_secs);
 
     if cache.len() <= MAX_PAYLOAD_CACHE_ENTRIES {
         return;
@@ -648,7 +968,24 @@ fn prune_payload_cache(cache: &mut HashMap<String, PayloadCacheEntry>) {
     }
 }
 
-fn prune_file_cache(cache: &mut HashMap<String, CachedFileEntries>) {
+/// A file last written this long ago serves only views far back (Year,
+/// earlier months). Once no load has read it for `FILE_CACHE_IDLE` it leaves
+/// the cache and is re-parsed on demand, which keeps the cache well under
+/// its cap and its memory to the recent logs.
+const OLD_FILE_AGE: std::time::Duration = std::time::Duration::from_secs(32 * 86_400);
+const FILE_CACHE_IDLE: std::time::Duration = std::time::Duration::from_secs(3_600);
+
+fn prune_file_cache(
+    cache: &mut HashMap<String, CachedFileEntries>,
+    now: Instant,
+    wall_now: SystemTime,
+) {
+    cache.retain(|_, entry| {
+        now.duration_since(entry.last_accessed_at) < FILE_CACHE_IDLE
+            || !wall_now
+                .duration_since(entry.stamp.modified)
+                .is_ok_and(|age| age >= OLD_FILE_AGE)
+    });
     if cache.len() <= MAX_FILE_CACHE_ENTRIES {
         return;
     }
@@ -746,8 +1083,22 @@ impl UsageParser {
             entries_cache: Mutex::new(HashMap::new()),
             cursor_remote_cache: Mutex::new(None),
             cursor_remote_failure_at: Mutex::new(None),
+            cursor_remote_ttl_secs: AtomicU64::new(CACHE_TTL_SECS),
+            cursor_remote_generation: AtomicU64::new(0),
             earliest_date_cache: Mutex::new(HashMap::new()),
+            file_earliest_dates: Mutex::new(HashMap::new()),
+            payload_ttl_secs: AtomicU64::new(CACHE_TTL_SECS),
+            listings_frozen: AtomicBool::new(false),
+            log_changes: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn set_payload_ttl_secs(&self, secs: u64) {
+        self.payload_ttl_secs.store(secs, Ordering::SeqCst);
+    }
+
+    pub fn set_listings_frozen(&self, frozen: bool) {
+        self.listings_frozen.store(frozen, Ordering::SeqCst);
     }
 
     /// Set the archive manager for persistent hourly data storage.
@@ -761,34 +1112,136 @@ impl UsageParser {
         self.archive.lock().unwrap().clone()
     }
 
-    /// Store cursor remote entries fetched by the background task, tagged with
-    /// the `covered_since` range the fetch used. Keeps the widest fresh dataset
-    /// so a late narrow fetch (e.g. a warmup day-range) can't clobber a wider
-    /// one stored by a concurrent fetch.
+    /// [`Self::store_cursor_remote_if_current`] with no generation check.
+    #[cfg(test)]
     pub(crate) fn store_cursor_remote(
         &self,
         entries: Vec<ParsedEntry>,
         covered_since: Option<NaiveDate>,
-    ) {
+    ) -> bool {
+        self.store_cursor_remote_checked(entries, covered_since, None)
+            .unwrap_or(false)
+    }
+
+    /// Store Cursor remote entries fetched in the background, tagged with the
+    /// `covered_since` range the fetch used. The cache merges and never
+    /// narrows:
+    /// - a refresh the cache already covers replaces only the entries from
+    ///   `covered_since` on, keeps the older ones and restarts the TTL;
+    /// - a wider fetch adds only the days before the old coverage and keeps
+    ///   `stored_at`, so the recent part (today) never moves between refreshes.
+    ///
+    /// Nothing is stored when the Cursor data changed or was cleared since the
+    /// fetch began at `generation`: a clear means the account may have
+    /// changed, so a fetch begun before it used the old credentials. The check
+    /// runs under the cache lock, where every change bumps the generation.
+    ///
+    /// Returns `None` for such a superseded fetch, otherwise whether the
+    /// cached data changed.
+    pub(crate) fn store_cursor_remote_if_current(
+        &self,
+        entries: Vec<ParsedEntry>,
+        covered_since: Option<NaiveDate>,
+        generation: u64,
+    ) -> Option<bool> {
+        self.store_cursor_remote_checked(entries, covered_since, Some(generation))
+    }
+
+    fn store_cursor_remote_checked(
+        &self,
+        entries: Vec<ParsedEntry>,
+        covered_since: Option<NaiveDate>,
+        generation: Option<u64>,
+    ) -> Option<bool> {
         let mut guard = self.cursor_remote_cache.lock().unwrap();
-        let replace = match guard.as_ref() {
-            None => true,
-            Some(existing) => {
-                existing.stored_at.elapsed().as_secs() >= CACHE_TTL_SECS
-                    || cursor_range_at_least_as_wide(covered_since, existing.covered_since)
+        if generation.is_some_and(|generation| generation != self.cursor_remote_generation()) {
+            return None;
+        }
+        let (cache, changed) = match guard.take() {
+            None => (
+                CachedCursorRemote {
+                    entries,
+                    stored_at: Instant::now(),
+                    covered_since,
+                },
+                true,
+            ),
+            Some(old) if cursor_range_covers(old.covered_since, covered_since) => {
+                let (mut merged, replaced): (Vec<_>, Vec<_>) = old
+                    .entries
+                    .into_iter()
+                    .partition(|e| cursor_entry_before(e, covered_since));
+                let changed =
+                    cursor_entries_fingerprint(&replaced) != cursor_entries_fingerprint(&entries);
+                // A refresh that found nothing new waits longer for the next.
+                let ttl = self.cursor_remote_ttl_secs.load(Ordering::SeqCst);
+                self.cursor_remote_ttl_secs.store(
+                    cursor_idle_backoff(ttl, CACHE_TTL_SECS, changed),
+                    Ordering::SeqCst,
+                );
+                merged.extend(entries);
+                (
+                    CachedCursorRemote {
+                        entries: merged,
+                        stored_at: Instant::now(),
+                        covered_since: old.covered_since,
+                    },
+                    changed,
+                )
+            }
+            Some(old) => {
+                let mut merged: Vec<_> = entries
+                    .into_iter()
+                    .filter(|e| cursor_entry_before(e, old.covered_since))
+                    .collect();
+                merged.extend(old.entries);
+                // Always a change: views computed while this range was
+                // uncovered carry no Cursor data at all, even when the fetch
+                // found no older days.
+                (
+                    CachedCursorRemote {
+                        entries: merged,
+                        stored_at: old.stored_at,
+                        covered_since,
+                    },
+                    true,
+                )
             }
         };
-        if replace {
-            *guard = Some(CachedCursorRemote {
-                entries,
-                stored_at: Instant::now(),
-                covered_since,
-            });
+        *guard = Some(cache);
+        if changed {
+            self.cursor_remote_generation.fetch_add(1, Ordering::SeqCst);
         }
         drop(guard);
-        // The endpoint answered, so any earlier failure cooldown is obsolete —
-        // even when a wider concurrent fetch won the `replace` race.
+        // The endpoint answered, so any earlier failure cooldown is obsolete.
         self.clear_cursor_remote_failure();
+        Some(changed)
+    }
+
+    /// Drop the Cursor remote cache and any failure cooldown (the Cursor
+    /// account may have changed), so the next query fetches afresh.
+    pub(crate) fn clear_cursor_remote(&self) {
+        let mut guard = self.cursor_remote_cache.lock().unwrap();
+        *guard = None;
+        self.cursor_remote_generation.fetch_add(1, Ordering::SeqCst);
+        drop(guard);
+        self.clear_cursor_remote_failure();
+        self.reset_cursor_remote_ttl();
+    }
+
+    /// Cursor may be in use (the IDE wrote its state, the popover was shown,
+    /// or the user asked for a refresh): refresh its remote data on the base
+    /// TTL again.
+    pub(crate) fn reset_cursor_remote_ttl(&self) {
+        self.cursor_remote_ttl_secs
+            .store(CACHE_TTL_SECS, Ordering::SeqCst);
+    }
+
+    /// Current Cursor remote data generation. Read it before building
+    /// anything from the Cursor cache, then pass it to
+    /// [`Self::store_cache_at_cursor_generation`].
+    pub(crate) fn cursor_remote_generation(&self) -> u64 {
+        self.cursor_remote_generation.load(Ordering::SeqCst)
     }
 
     /// Record that a background Cursor remote fetch failed (API error, bad
@@ -802,6 +1255,21 @@ impl UsageParser {
         if let Ok(mut guard) = self.cursor_remote_failure_at.lock() {
             *guard = Some(Instant::now());
         }
+    }
+
+    /// [`Self::note_cursor_remote_failure`] for a fetch that began at Cursor
+    /// `generation`, unless the data was cleared since: the failure was the
+    /// old account's, and must not hold back a fetch with the new one.
+    /// Returns whether it was noted.
+    pub(crate) fn note_cursor_remote_failure_if_current(&self, generation: u64) -> bool {
+        // Under the cache lock, where a clear bumps the generation; the clear
+        // drops the cooldown after it, so either order leaves none behind.
+        let _cache = self.cursor_remote_cache.lock().unwrap();
+        if generation != self.cursor_remote_generation() {
+            return false;
+        }
+        self.note_cursor_remote_failure();
+        true
     }
 
     fn clear_cursor_remote_failure(&self) {
@@ -869,10 +1337,11 @@ impl UsageParser {
 
     #[cfg(test)]
     pub(crate) fn cursor_remote_ttl_expired_for_test(&self) -> bool {
+        let ttl = self.cursor_remote_ttl_secs.load(Ordering::SeqCst);
         let guard = self.cursor_remote_cache.lock().unwrap();
         guard
             .as_ref()
-            .is_some_and(|cache| cache.stored_at.elapsed().as_secs() >= CACHE_TTL_SECS)
+            .is_some_and(|cache| cache.stored_at.elapsed().as_secs() >= ttl)
     }
 
     /// Create with default home-directory paths.
@@ -944,6 +1413,9 @@ impl UsageParser {
         if let Ok(mut c) = self.earliest_date_cache.lock() {
             c.clear();
         }
+        if let Ok(mut c) = self.file_earliest_dates.lock() {
+            c.clear();
+        }
         if let Ok(mut c) = self.root_file_lists.lock() {
             c.clear();
         }
@@ -958,6 +1430,7 @@ impl UsageParser {
         if let Ok(mut c) = self.entries_cache.lock() {
             c.clear();
         }
+        self.note_log_change(None);
     }
 
     pub fn clear_payload_cache(&self) {
@@ -967,35 +1440,97 @@ impl UsageParser {
         self.clear_entries_cache();
     }
 
+    /// [`Self::clear_payload_cache`] of only the payloads `stale` picks by key.
+    pub(crate) fn clear_payload_cache_where(&self, stale: impl Fn(&str) -> bool) {
+        if let Ok(mut c) = self.cache.lock() {
+            c.retain(|key, _| !stale(key));
+        }
+        self.clear_entries_cache();
+    }
+
     pub(crate) fn load_entries_cached(
         &self,
         provider: &str,
         since: Option<NaiveDate>,
     ) -> Arc<LoadedEntries> {
-        let key = format!(
-            "{}:{}",
-            provider,
-            since.map(|d| d.to_string()).unwrap_or_default()
-        );
+        self.entries_cached(provider, since, true)
+    }
 
+    /// [`Self::load_entries_cached`] from the logs alone, without the
+    /// archive: its hourly aggregates are stamped at the top of their hour,
+    /// which loses when in the hour each request was made. For callers that
+    /// need that and look back no further than the logs are kept.
+    pub(crate) fn load_live_entries_cached(
+        &self,
+        provider: &str,
+        since: Option<NaiveDate>,
+    ) -> Arc<LoadedEntries> {
+        self.entries_cached(provider, since, false)
+    }
+
+    fn entries_cached(
+        &self,
+        provider: &str,
+        since: Option<NaiveDate>,
+        with_archive: bool,
+    ) -> Arc<LoadedEntries> {
         // Note: do NOT call have_sources_changed() here — it stats all files
-        // and defeats the warm-path optimization. The background loop calls
-        // invalidate_if_changed() which clears entries_cache when sources change.
-
-        {
-            let cache = self.entries_cache.lock().unwrap();
-            if let Some((_stored_at, cached)) = cache.get(&key) {
-                return cached.clone();
+        // and defeats the warm-path optimization. The refresh's sweep clears
+        // entries_cache when sources change.
+        let Some(selection) = UsageIntegrationSelection::parse(provider) else {
+            return Arc::default();
+        };
+        self.cached_load(entries_cache_key(provider, since, with_archive), || {
+            // Each integration's load is cached apart, before the tab's model
+            // filter, so an `all` view reuses its per-provider charts' loads.
+            let parts: Vec<Arc<LoadedEntries>> = selection
+                .integration_ids()
+                .into_iter()
+                .map(|id| {
+                    let key =
+                        entries_cache_key(&format!("raw:{}", id.as_str()), since, with_archive);
+                    self.cached_load(key, || {
+                        Arc::new(self.load_integration(id, since, with_archive))
+                    })
+                })
+                .collect();
+            let keep = |entry: &ParsedEntry| provider_matches_model(provider, &entry.model);
+            match parts.as_slice() {
+                [part] if part.entries.iter().all(keep) => part.clone(),
+                _ => Arc::new(LoadedEntries {
+                    entries: parts
+                        .iter()
+                        .flat_map(|part| part.entries.iter().filter(|e| keep(e)).cloned())
+                        .collect(),
+                    change_events: parts
+                        .iter()
+                        .flat_map(|part| part.change_events.iter().cloned())
+                        .collect(),
+                    reports: parts
+                        .iter()
+                        .flat_map(|part| part.reports.iter().cloned())
+                        .collect(),
+                }),
             }
+        })
+    }
+
+    /// The `entries_cache` entry at `key`, from `load` on a miss. Not stored
+    /// when the Cursor remote data changed mid-load: the snapshot is
+    /// superseded, and a later compute that trusts the new generation must
+    /// not pick it up.
+    fn cached_load(
+        &self,
+        key: String,
+        load: impl FnOnce() -> Arc<LoadedEntries>,
+    ) -> Arc<LoadedEntries> {
+        if let Some((_stored_at, cached)) = self.entries_cache.lock().unwrap().get(&key) {
+            return cached.clone();
         }
-        let (entries, change_events, reports) = self.load_entries(provider, since);
-        let loaded = Arc::new(LoadedEntries {
-            entries,
-            change_events,
-            reports,
-        });
-        {
-            let mut cache = self.entries_cache.lock().unwrap();
+        let cursor_generation = self.cursor_remote_generation();
+        let loaded = load();
+        let mut cache = self.entries_cache.lock().unwrap();
+        if self.cursor_remote_generation() == cursor_generation {
             cache.insert(key, (Instant::now(), loaded.clone()));
         }
         loaded
@@ -1012,177 +1547,226 @@ impl UsageParser {
         }
     }
 
-    /// Single stat sweep over the cached listings that classifies what changed.
-    ///
-    /// For every cached root it compares directory mtimes (cheap, detects
-    /// add/remove/rename) and, when the listing is unchanged, re-stats each file
-    /// to detect in-place appends. The fresh stamps are kept so a content-only
-    /// change can refresh the listing without a second stat pass — the same
-    /// sweep that detects the change also supplies the data to apply it.
-    fn scan_source_changes(&self) -> SourceChangeScan {
-        let cache = match self.root_file_lists.lock() {
-            Ok(c) => c,
+    /// One sweep over the cached listings, root by root (see [`sweep_root`]).
+    /// Roots are swept off the lock; only the sample sweeps, under the
+    /// compute gate, so no query lists a root meanwhile.
+    fn scan_source_changes(&self, full: bool) -> SourceChangeScan {
+        let listed: Vec<(String, CachedRootFileList)> = match self.root_file_lists.lock() {
+            Ok(cache) => cache.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             // Poisoned lock: be conservative and force a full rescan.
-            Err(_) => {
-                return SourceChangeScan {
-                    listing_changed: true,
-                    content_changes: Vec::new(),
-                }
-            }
+            Err(_) => Vec::new(),
         };
-
-        if cache.is_empty() {
+        if listed.is_empty() {
             return SourceChangeScan {
                 listing_changed: true,
-                content_changes: Vec::new(),
+                ..SourceChangeScan::default()
             };
         }
 
         let mut scan = SourceChangeScan::default();
-        for (cache_key, entry) in cache.iter() {
-            if !Self::root_listing_is_fresh(entry) {
-                // Directory mtime moved → files were added/removed/renamed. The
-                // next query rebuilds this root from scratch, so don't bother
-                // collecting per-file stamps for it.
-                scan.listing_changed = true;
-                continue;
-            }
-
-            // Listing membership unchanged → look for in-place content edits
-            // (directory mtime is blind to appends into an existing file). The
-            // idle path (nothing changed) must stay allocation-free, so only
-            // the changed files are collected here; the full refreshed stamp
-            // list is materialized lazily (one slice clone) and only when
-            // something actually changed.
-            let mut changed: Vec<(usize, FileStamp)> = Vec::new();
-            let mut listing_changed = false;
-            for (i, file) in entry.file_stamps.iter().enumerate() {
-                match file_stamp(&file.path) {
-                    Some(stamp) => {
-                        if stamp != file.stamp {
-                            changed.push((i, stamp));
-                        }
-                    }
-                    None => {
-                        // A listed file vanished without the directory mtime
-                        // moving (rare fs race). Force a full rescan to stay
-                        // correct rather than trusting a phantom entry.
-                        listing_changed = true;
-                        break;
-                    }
-                }
-            }
-            if listing_changed {
-                scan.listing_changed = true;
-                continue;
-            }
-            if !changed.is_empty() {
-                let mut fresh_stamps = entry.file_stamps.to_vec();
-                let mut changed_keys = Vec::with_capacity(changed.len());
-                for (i, stamp) in changed {
-                    changed_keys.push(path_to_string(&fresh_stamps[i].path));
-                    fresh_stamps[i].stamp = stamp;
-                }
-                scan.content_changes.push(RootContentChange {
-                    cache_key: cache_key.clone(),
-                    fresh_stamps,
-                    changed_keys,
-                });
+        for (cache_key, entry) in listed {
+            let swept = self
+                .listed_root(&cache_key)
+                .and_then(|(config, root)| sweep_root(root, &entry, config.file_kind(), full));
+            match swept {
+                None => scan.dropped.push(cache_key),
+                Some(None) => {}
+                Some(Some(root)) => scan.roots.push(RootSweep { cache_key, ..root }),
             }
         }
         scan
     }
 
-    /// Invalidate the payload cache only if source files have changed.
-    /// Returns true if the cache was cleared.
-    ///
-    /// Splits the response by change kind: a file-SET change (add/remove/rename)
-    /// drops the listing and the earliest-entry-date cache for a full rescan,
-    /// while in-place CONTENT changes (appends — the common active-use case)
-    /// keep both. An append can never lower a provider's global earliest entry
-    /// date, so re-deriving it (a multi-hundred-ms re-parse of every session
-    /// file) is pure waste; and the file listing's membership is unchanged, so
-    /// the tree walk is skipped too. Only the appended files re-parse.
+    /// A full [`Self::sweep`] that drops every payload when anything changed.
+    /// Returns whether anything did.
     pub fn invalidate_if_changed(&self) -> bool {
-        let scan = self.scan_source_changes();
-        if !scan.any() {
+        if self.sweep(true) == LogChanges::None {
             return false;
         }
-
-        // Any change invalidates the derived payload + entries aggregates.
         self.clear_payload_cache();
-
-        if scan.listing_changed {
-            // Clear the listing so the next query does a fresh scan
-            // (listing_cache_hit will be false, forcing a fresh stat).
-            if let Ok(mut c) = self.root_file_lists.lock() {
-                c.clear();
-            }
-            // The file set changed → the cached earliest date may be stale.
-            if let Ok(mut c) = self.earliest_date_cache.lock() {
-                c.clear();
-            }
-        } else {
-            // Content-only change: keep the listing and earliest_date_cache; just
-            // refresh the changed files' stamps and drop their parsed entries.
-            self.apply_content_changes(scan.content_changes);
-        }
         true
     }
 
-    /// Apply in-place content changes surgically: drop the changed files'
-    /// `file_cache` entries (so the next query re-parses exactly them) and
-    /// refresh their stamps in the cached listing (reusing the stamps the scan
-    /// already collected, so the mtime filter sees the new mtimes without a
-    /// second stat sweep). Directory stamps are untouched — set membership held.
-    fn apply_content_changes(&self, changes: Vec<RootContentChange>) {
-        if changes.is_empty() {
-            return;
+    /// Sweep the logs (every file when `full`, see [`sweep_root`]) and take
+    /// in what moved: the listings as found, and the changed files dropped
+    /// from the file cache, so only they re-parse. The payloads are the
+    /// caller's to drop, by what this returns. A file that came clears the
+    /// earliest dates too (it may hold older entries); their recompute parses
+    /// only the files the per-file memo lacks. An append cannot lower them.
+    pub(crate) fn sweep(&self, full: bool) -> LogChanges {
+        let scan = self.scan_source_changes(full);
+        if scan.listing_changed {
+            // The next query lists every root.
+            if let Ok(mut c) = self.root_file_lists.lock() {
+                c.clear();
+            }
+            if let Ok(mut c) = self.earliest_date_cache.lock() {
+                c.clear();
+            }
+            self.note_log_change(None);
+            self.clear_entries_cache();
+            return LogChanges::Any;
         }
-        if let Ok(mut fc) = self.file_cache.lock() {
-            for change in &changes {
-                for key in &change.changed_keys {
-                    fc.remove(key);
+
+        let mut set_changed = !scan.dropped.is_empty();
+        let mut any = set_changed;
+        let mut appended = Vec::new();
+        let mut since: Option<SystemTime> = None;
+        let mut stale_files = Vec::new();
+        let mut listings = Vec::new();
+        for key in &scan.dropped {
+            self.note_log_change(Some(key));
+        }
+        for root in scan.roots {
+            if root.set_changed || !root.changed_keys.is_empty() {
+                self.note_log_change(Some(&root.cache_key));
+            }
+            if !root.changed_keys.is_empty() {
+                match self.listed_root(&root.cache_key) {
+                    Some((config, _))
+                        if config.id != UsageIntegrationId::Cursor && !root.shrunk =>
+                    {
+                        if !appended.contains(&config.id) {
+                            appended.push(config.id);
+                        }
+                        since = since.into_iter().chain(root.changed_since).min();
+                    }
+                    _ => any = true,
+                }
+            }
+            set_changed |= root.set_changed;
+            any |= root.set_changed;
+            stale_files.extend(root.changed_keys);
+            listings.push((root.cache_key, root.directories, root.file_stamps));
+        }
+
+        if let Ok(mut lists) = self.root_file_lists.lock() {
+            for key in &scan.dropped {
+                lists.remove(key);
+            }
+            for (key, directories, file_stamps) in listings {
+                if let Some(entry) = lists.get_mut(&key) {
+                    entry.files = file_stamps.iter().map(|f| f.path.clone()).collect();
+                    entry.directories = directories.into();
+                    entry.file_stamps = file_stamps.into();
                 }
             }
         }
-        if let Ok(mut lists) = self.root_file_lists.lock() {
-            for change in changes {
-                if let Some(entry) = lists.get_mut(&change.cache_key) {
-                    entry.file_stamps = change.fresh_stamps.into();
-                    entry.last_accessed_at = Instant::now();
-                }
+        if let Ok(mut fc) = self.file_cache.lock() {
+            for key in &stale_files {
+                fc.remove(key);
+            }
+        }
+        if set_changed {
+            if let Ok(mut c) = self.earliest_date_cache.lock() {
+                c.clear();
+            }
+        }
+        let changes = match since {
+            _ if any => LogChanges::Any,
+            // No later than now: a clock that went back left a later stamp.
+            Some(since) => LogChanges::Appended(LogAppends {
+                integrations: appended,
+                since: (DateTime::<Local>::from(since.min(SystemTime::now())) - APPEND_DATE_SLACK)
+                    .date_naive(),
+            }),
+            None => return LogChanges::None,
+        };
+        self.clear_entries_cache();
+        changes
+    }
+
+    /// A count that moves whenever `provider`'s entries may have: at each
+    /// sweep that found its logs changed, and for Cursor at each change of
+    /// its remote data. The same count means the same entries.
+    pub(crate) fn data_version(&self, provider: &str) -> u64 {
+        let Some(selection) = UsageIntegrationSelection::parse(provider) else {
+            return 0;
+        };
+        let changes = self.log_changes.lock().unwrap_or_else(|p| p.into_inner());
+        selection
+            .integration_ids()
+            .into_iter()
+            .map(|id| {
+                let remote = if id == UsageIntegrationId::Cursor {
+                    self.cursor_remote_generation()
+                } else {
+                    0
+                };
+                changes.get(&id).copied().unwrap_or(0) + remote
+            })
+            .sum()
+    }
+
+    /// Count a change to the logs under the root listed as `root_key`, or
+    /// under every root for `None`.
+    fn note_log_change(&self, root_key: Option<&str>) {
+        let owner = root_key
+            .and_then(|key| self.listed_root(key))
+            .map(|(config, _)| config.id);
+        let mut changes = self.log_changes.lock().unwrap_or_else(|p| p.into_inner());
+        for config in &self.integrations {
+            if owner.is_none_or(|id| id == config.id) {
+                *changes.entry(config.id).or_default() += 1;
             }
         }
     }
 
+    /// The integration whose root is listed as `root_key`, and that root.
+    fn listed_root(&self, root_key: &str) -> Option<(&UsageIntegrationConfig, &Path)> {
+        self.integrations.iter().find_map(|config| {
+            config
+                .roots
+                .iter()
+                .find(|root| path_to_string(root) == root_key)
+                .map(|root| (config, root.as_path()))
+        })
+    }
+
     pub fn check_cache(&self, key: &str) -> Option<UsagePayload> {
+        let mut payload = self.check_cache_as_stored(key)?;
+        payload.from_cache = true;
+        Some(payload)
+    }
+
+    /// [`Self::check_cache`] that returns the stored `from_cache` unchanged,
+    /// so only a copy restored from disk reads as cached.
+    pub fn check_cache_as_stored(&self, key: &str) -> Option<UsagePayload> {
         let mut c = self.cache.lock().ok()?;
-        prune_payload_cache(&mut c);
+        prune_payload_cache(&mut c, self.payload_ttl_secs.load(Ordering::SeqCst));
 
-        if let Some(entry) = c.get_mut(key) {
-            entry.last_accessed_at = Instant::now();
-            let mut payload = entry.payload.clone();
-            payload.from_cache = true;
-            return Some(payload);
-        }
-
-        None
+        let entry = c.get_mut(key)?;
+        entry.last_accessed_at = Instant::now();
+        Some(entry.payload.clone())
     }
 
     pub fn store_cache(&self, key: &str, payload: UsagePayload) {
         if let Ok(mut c) = self.cache.lock() {
-            let now = Instant::now();
-            c.insert(
-                key.to_string(),
-                PayloadCacheEntry {
-                    payload,
-                    stored_at: now,
-                    last_accessed_at: now,
-                },
-            );
-            prune_payload_cache(&mut c);
+            let ttl_secs = self.payload_ttl_secs.load(Ordering::SeqCst);
+            insert_payload_cache_entry(&mut c, key, payload, ttl_secs);
         }
+    }
+
+    /// [`Self::store_cache`] unless the Cursor remote data changed since
+    /// `cursor_generation` was read, in which case the payload was built from
+    /// a superseded snapshot and is dropped (returns `false`). The check runs
+    /// under the cache lock, and a change bumps the generation before its
+    /// completion clears this cache, so no stale payload can outlive it.
+    pub(crate) fn store_cache_at_cursor_generation(
+        &self,
+        key: &str,
+        payload: UsagePayload,
+        cursor_generation: u64,
+    ) -> bool {
+        let Ok(mut c) = self.cache.lock() else {
+            return false;
+        };
+        if self.cursor_remote_generation() != cursor_generation {
+            return false;
+        }
+        let ttl_secs = self.payload_ttl_secs.load(Ordering::SeqCst);
+        insert_payload_cache_entry(&mut c, key, payload, ttl_secs);
+        true
     }
 
     fn set_last_query_debug(&self, report: UsageQueryDebugReport) {
@@ -1220,6 +1804,7 @@ impl UsageParser {
     fn cached_jsonl_files(
         &self,
         dir: &Path,
+        kind: ProviderFileKind,
     ) -> (Arc<[PathBuf]>, Option<Arc<[FileListStamp]>>, bool) {
         if !dir.exists() {
             return (Arc::from(Vec::<PathBuf>::new()), None, false);
@@ -1228,7 +1813,11 @@ impl UsageParser {
         let cache_key = path_to_string(dir);
         if let Ok(mut cache) = self.root_file_lists.lock() {
             if let Some(entry) = cache.get_mut(&cache_key) {
-                if Self::root_listing_is_fresh(entry) {
+                // Frozen, a listing is revalidated only by the sweep: a re-walk
+                // here would absorb a new file, and the sweep would then find
+                // no change to report.
+                if self.listings_frozen.load(Ordering::SeqCst) || Self::root_listing_is_fresh(entry)
+                {
                     entry.last_accessed_at = Instant::now();
                     return (entry.files.clone(), Some(entry.file_stamps.clone()), true);
                 }
@@ -1236,7 +1825,7 @@ impl UsageParser {
             }
         }
 
-        let (files, directories) = scan_jsonl_tree(dir);
+        let (files, directories) = scan_jsonl_tree(dir, kind);
         let file_stamps: Vec<FileListStamp> = files
             .iter()
             .filter_map(|path| {
@@ -1289,7 +1878,7 @@ impl UsageParser {
 
         for root_dir in &config.roots {
             let _t_scan = std::time::Instant::now();
-            let (files, cached_stamps, listing_cache_hit) = self.cached_jsonl_files(root_dir);
+            let (files, cached_stamps, listing_cache_hit) = self.cached_jsonl_files(root_dir, kind);
             reports.push(ProviderReadDebug {
                 provider: String::from(config.id.as_str()),
                 root_dir: path_to_string(root_dir),
@@ -1329,7 +1918,7 @@ impl UsageParser {
                 }
                 candidate_indices.push(i);
             }
-            tracing::info!(
+            tracing::debug!(
                 "[PROFILE] {}: Phase1+2a scan+mtime_filter={:?} files={} candidates={} listing_cache={}",
                 config.id.as_str(),
                 _t_scan.elapsed(),
@@ -1339,14 +1928,16 @@ impl UsageParser {
             );
 
             // Phase 2b: Classify into cache-hit vs needs-parse (single lock).
-            // When listing_cache_hit is true AND file_cache has the entry, trust it
-            // without fresh stat — the background loop (have_sources_changed) handles
-            // in-place edit detection and clears caches when files change.
+            // When listing_cache_hit is true AND file_cache has the entry at the
+            // listed stamp, trust it without a fresh stat: the sweep stats files
+            // and drops the entries of those that changed. One at another stamp
+            // (its path left the listing and came back) is stat'ed below.
             let mut cache_hits: Vec<CachedFileLoad> = Vec::new();
             let mut to_parse: Vec<(usize, PathBuf, Option<FileStamp>)> = Vec::new();
             let mut needs_stat_indices: Vec<usize> = Vec::new();
+            let now = Instant::now();
             {
-                let cache = self.file_cache.lock().unwrap();
+                let mut cache = self.file_cache.lock().unwrap();
                 for &i in &candidate_indices {
                     let path = &files[i];
                     reports[report_idx].attempted_paths += 1;
@@ -1354,7 +1945,12 @@ impl UsageParser {
 
                     let cache_key = path_to_string(path);
                     if listing_cache_hit {
-                        if let Some(cached) = cache.get(&cache_key) {
+                        let listed = cached_stamp_map
+                            .as_ref()
+                            .and_then(|m| m.get(path.as_path()).copied());
+                        let cached = cache.get_mut(&cache_key);
+                        if let Some(cached) = cached.filter(|c| Some(&c.stamp) == listed) {
+                            cached.last_accessed_at = now;
                             reports[report_idx].cache_hits += 1;
                             cache_hits.push(CachedFileLoad {
                                 entries: cached.entries.clone(),
@@ -1370,7 +1966,7 @@ impl UsageParser {
                     needs_stat_indices.push(i);
                 }
             }
-            tracing::info!(
+            tracing::debug!(
                 "[PROFILE] {}: Phase2b classify elapsed={:?} cache_hits={} needs_stat={}",
                 config.id.as_str(),
                 _t_scan.elapsed(),
@@ -1384,13 +1980,14 @@ impl UsageParser {
                 .map(|&i| (i, file_stamp(&files[i])))
                 .collect();
             {
-                let cache = self.file_cache.lock().unwrap();
+                let mut cache = self.file_cache.lock().unwrap();
                 for (i, stamp) in &fresh_stamps {
                     let path = &files[*i];
                     let cache_key = path_to_string(path);
                     let hit = stamp.as_ref().and_then(|s| {
-                        cache.get(&cache_key).and_then(|cached| {
+                        cache.get_mut(&cache_key).and_then(|cached| {
                             if &cached.stamp == s {
+                                cached.last_accessed_at = now;
                                 Some(CachedFileLoad {
                                     entries: cached.entries.clone(),
                                     change_events: cached.change_events.clone(),
@@ -1416,7 +2013,7 @@ impl UsageParser {
                     }
                 }
             }
-            tracing::info!(
+            tracing::debug!(
                 "[PROFILE] {}: Phase2c parallel_stat elapsed={:?} to_parse={}",
                 config.id.as_str(),
                 _t_scan.elapsed(),
@@ -1427,12 +2024,7 @@ impl UsageParser {
             let parsed: Vec<(PathBuf, Option<FileStamp>, CachedFileLoad)> = to_parse
                 .par_iter()
                 .map(|(_i, path, stamp)| {
-                    let (raw_entries, raw_change_events, lines_read, opened) = match kind {
-                        ProviderFileKind::Claude => parse_claude_session_file(path),
-                        ProviderFileKind::Codex => parse_codex_session_file(path),
-                        ProviderFileKind::Cursor => parse_cursor_session_file(path),
-                        ProviderFileKind::Kimi => parse_kimi_session_file(path),
-                    };
+                    let (raw_entries, raw_change_events, lines_read, opened) = kind.parse(path);
                     let earliest_date = earliest_entry_date(&raw_entries);
                     let loaded = CachedFileLoad {
                         entries: raw_entries.into(),
@@ -1445,7 +2037,7 @@ impl UsageParser {
                     (path.clone(), stamp.clone(), loaded)
                 })
                 .collect();
-            tracing::info!(
+            tracing::debug!(
                 "[PROFILE] {}: Phase3 parallel_parse elapsed={:?} parsed_files={}",
                 config.id.as_str(),
                 _t_scan.elapsed(),
@@ -1459,7 +2051,6 @@ impl UsageParser {
                     let cache_key = path_to_string(path);
                     if loaded.opened {
                         if let Some(stamp) = stamp {
-                            let now = Instant::now();
                             cache.insert(
                                 cache_key,
                                 CachedFileEntries {
@@ -1477,7 +2068,7 @@ impl UsageParser {
                         cache.remove(&cache_key);
                     }
                 }
-                prune_file_cache(&mut cache);
+                prune_file_cache(&mut cache, now, SystemTime::now());
             }
 
             // If files were re-parsed, entries_cache is stale.
@@ -1562,7 +2153,7 @@ impl UsageParser {
                 }
             }
         }
-        tracing::info!(
+        tracing::debug!(
             "[PROFILE] {}: TOTAL={:?} entries={} change_events={}",
             config.id.as_str(),
             _prof_t0.elapsed(),
@@ -1620,8 +2211,13 @@ impl UsageParser {
         let config = self
             .integration_config(UsageIntegrationId::Cursor)
             .expect("cursor integration should be configured");
-        let root_dir = config.roots.first().cloned().unwrap_or_default();
-        load_cursor_local_entries(&root_dir, since)
+        // The chat listing and each file's parse (even one with no usage)
+        // are cached like the other providers' logs, and revalidated only by
+        // the sweep.
+        let (mut entries, _change_events, reports) =
+            self.load_integration_entries_with_debug(config, since);
+        entries.sort_by_key(|entry| entry.timestamp);
+        (entries, reports.into_iter().next().unwrap_or_default())
     }
 
     fn load_cursor_entries_with_debug(
@@ -1649,9 +2245,10 @@ impl UsageParser {
         (Vec::new(), Vec::new(), report)
     }
 
-    /// Returns `true` when Cursor remote auth is configured and the cache does
-    /// not already cover the requested `since` range — indicating a background
-    /// fetch should be spawned (adaptive widening: only fetch the part we lack).
+    /// Returns `true` when Cursor remote auth is configured and the cache is
+    /// missing, past its TTL, or does not cover the requested `since` range —
+    /// the periodic (tray) refresh check. Usage views use
+    /// [`Self::cursor_remote_uncovered`], which ignores the TTL.
     ///
     /// Returns `false` during the cooldown that follows a failed fetch: a
     /// failure caches nothing, so without the cooldown every refresh triggered
@@ -1664,14 +2261,45 @@ impl UsageParser {
         if self.cursor_remote_failure_cooldown_active() {
             return false;
         }
+        let ttl = self.cursor_remote_ttl_secs.load(Ordering::SeqCst);
         let guard = self.cursor_remote_cache.lock().unwrap();
         match guard.as_ref() {
             None => true,
             Some(cache) => {
-                cache.stored_at.elapsed().as_secs() >= CACHE_TTL_SECS
+                cache.stored_at.elapsed().as_secs() >= ttl
                     || !cursor_range_covers(cache.covered_since, req_since)
             }
         }
+    }
+
+    /// Returns `true` when Cursor remote auth is configured, no failure
+    /// cooldown is active, and the cache does not cover `req_since` — a view
+    /// needs a widening fetch (only the part we lack). There is no TTL check:
+    /// an expired cache that still covers the range is served as-is, since
+    /// keeping it fresh is the periodic refresh's job.
+    pub(crate) fn cursor_remote_uncovered(&self, req_since: Option<NaiveDate>) -> bool {
+        use super::cursor_parser::resolve_cursor_auth;
+        resolve_cursor_auth().is_some()
+            && !self.cursor_remote_failure_cooldown_active()
+            && self.cursor_remote_cache_uncovered(req_since)
+    }
+
+    /// The first day the Cursor remote cache covers, when a fetch since
+    /// `req_since` would widen it: add only the days before that one. `None`
+    /// when it holds nothing, or covers `req_since` already.
+    pub(crate) fn cursor_widening_from(&self, req_since: Option<NaiveDate>) -> Option<NaiveDate> {
+        let guard = self.cursor_remote_cache.lock().unwrap();
+        let covered = guard.as_ref()?.covered_since?;
+        (!cursor_range_covers(Some(covered), req_since)).then_some(covered)
+    }
+
+    /// True when there is no cache or it does not cover `req_since`, however
+    /// old it is.
+    fn cursor_remote_cache_uncovered(&self, req_since: Option<NaiveDate>) -> bool {
+        let guard = self.cursor_remote_cache.lock().unwrap();
+        guard
+            .as_ref()
+            .is_none_or(|cache| !cursor_range_covers(cache.covered_since, req_since))
     }
 
     // ── Internal: load entries for a provider/since combination ──
@@ -1685,6 +2313,21 @@ impl UsageParser {
         Vec<ParsedChangeEvent>,
         Vec<ProviderReadDebug>,
     ) {
+        self.load_entries_from(provider, since, true)
+    }
+
+    /// [`Self::load_entries`], with the archive's completed hours in place
+    /// of the logs' when `with_archive`, else from the logs alone.
+    fn load_entries_from(
+        &self,
+        provider: &str,
+        since: Option<NaiveDate>,
+        with_archive: bool,
+    ) -> (
+        Vec<ParsedEntry>,
+        Vec<ParsedChangeEvent>,
+        Vec<ProviderReadDebug>,
+    ) {
         let Some(selection) = UsageIntegrationSelection::parse(provider) else {
             return (Vec::new(), Vec::new(), Vec::new());
         };
@@ -1692,56 +2335,11 @@ impl UsageParser {
         let mut entries = Vec::new();
         let mut change_events = Vec::new();
         let mut reports = Vec::new();
-
-        let archive_guard = self.archive.lock().unwrap();
-        let archive = archive_guard.as_ref();
-
         for integration_id in selection.integration_ids() {
-            let source_key = format!("local:{}", integration_id.as_str());
-            let frontier = archive.and_then(|a| a.frontier(&source_key));
-
-            // Load archived entries for completed hours (up to frontier).
-            let archived = if let (Some(a), Some(_frontier)) = (archive, frontier) {
-                a.load_archived(&source_key, since)
-            } else {
-                Vec::new()
-            };
-
-            // Load live entries from source JSONL files.
-            match integration_id {
-                UsageIntegrationId::Claude => {
-                    let (next_entries, next_change_events, next_reports) =
-                        self.load_claude_entries_with_debug(since);
-
-                    merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
-                    change_events.extend(next_change_events);
-                    reports.extend(next_reports);
-                }
-                UsageIntegrationId::Codex => {
-                    let (next_entries, next_change_events, next_report) =
-                        self.load_codex_entries_with_debug(since);
-
-                    merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
-                    change_events.extend(next_change_events);
-                    reports.push(next_report);
-                }
-                UsageIntegrationId::Cursor => {
-                    let (next_entries, next_change_events, next_report) =
-                        self.load_cursor_entries_with_debug(since);
-
-                    merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
-                    change_events.extend(next_change_events);
-                    reports.push(next_report);
-                }
-                UsageIntegrationId::Kimi => {
-                    let (next_entries, next_change_events, next_report) =
-                        self.load_kimi_entries_with_debug(since);
-
-                    merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
-                    change_events.extend(next_change_events);
-                    reports.push(next_report);
-                }
-            }
+            let part = self.load_integration(integration_id, since, with_archive);
+            entries.extend(part.entries);
+            change_events.extend(part.change_events);
+            reports.extend(part.reports);
         }
 
         // Drop rows whose model doesn't belong to the selected provider tab.
@@ -1751,28 +2349,52 @@ impl UsageParser {
         // applies the same predicate to remote SSH rows.
         entries.retain(|e| provider_matches_model(provider, &e.model));
 
-        // Write-through: populate entries_cache so subsequent load_entries_cached
-        // calls within the same request hit the cache instead of re-scanning.
-        let cache_key = format!(
-            "{}:{}",
-            provider,
-            since.map(|d| d.to_string()).unwrap_or_default()
-        );
-        {
-            let mut cache = self.entries_cache.lock().unwrap();
-            cache.entry(cache_key).or_insert_with(|| {
-                (
-                    Instant::now(),
-                    Arc::new(LoadedEntries {
-                        entries: entries.clone(),
-                        change_events: change_events.clone(),
-                        reports: reports.clone(),
-                    }),
-                )
-            });
-        }
-
         (entries, change_events, reports)
+    }
+
+    /// One integration's entries, before any provider tab's model filter.
+    fn load_integration(
+        &self,
+        integration_id: UsageIntegrationId,
+        since: Option<NaiveDate>,
+        with_archive: bool,
+    ) -> LoadedEntries {
+        let archive_guard = self.archive.lock().unwrap();
+        let archive = archive_guard.as_ref().filter(|_| with_archive);
+        let source_key = format!("local:{}", integration_id.as_str());
+        let frontier = archive.and_then(|a| a.frontier(&source_key));
+
+        // Load archived entries for completed hours (up to frontier).
+        let archived = if let (Some(a), Some(_frontier)) = (archive, frontier) {
+            a.load_archived(&source_key, since)
+        } else {
+            Vec::new()
+        };
+
+        // Load live entries from source JSONL files.
+        let (live, change_events, reports) = match integration_id {
+            UsageIntegrationId::Claude => self.load_claude_entries_with_debug(since),
+            UsageIntegrationId::Codex => {
+                let (entries, change_events, report) = self.load_codex_entries_with_debug(since);
+                (entries, change_events, vec![report])
+            }
+            UsageIntegrationId::Cursor => {
+                let (entries, change_events, report) = self.load_cursor_entries_with_debug(since);
+                (entries, change_events, vec![report])
+            }
+            UsageIntegrationId::Kimi => {
+                let (entries, change_events, report) = self.load_kimi_entries_with_debug(since);
+                (entries, change_events, vec![report])
+            }
+        };
+
+        let mut entries = Vec::new();
+        merge_archived_and_live_entries(&mut entries, archived, live, frontier);
+        LoadedEntries {
+            entries,
+            change_events,
+            reports,
+        }
     }
 
     // ── has_entries_before: check if data exists before a given date ──
@@ -1787,7 +2409,8 @@ impl UsageParser {
     /// The first call scans the provider's session files once (parsing
     /// uncached ones in parallel); every later call — including each period
     /// switch and the background warmup's per-offset probing — is O(1). The
-    /// cache is cleared by `clear_cache` and `invalidate_if_changed`.
+    /// cache is cleared by `clear_cache` and a sweep that finds files came or
+    /// went.
     fn provider_earliest_date(&self, provider: &str) -> Option<NaiveDate> {
         if let Ok(cache) = self.earliest_date_cache.lock() {
             if let Some(cached) = cache.get(provider) {
@@ -1807,11 +2430,9 @@ impl UsageParser {
             .integration_ids()
             .iter()
             .copied()
-            .filter_map(|integration_id| match integration_id {
-                UsageIntegrationId::Cursor => self.cursor_earliest_date(),
-                _ => self
-                    .integration_config(integration_id)
-                    .and_then(|config| self.integration_earliest_date(config)),
+            .filter_map(|integration_id| {
+                self.integration_config(integration_id)
+                    .and_then(|config| self.integration_earliest_date(config))
             })
             .min()
     }
@@ -1824,44 +2445,46 @@ impl UsageParser {
     /// (4096) capped `file_cache` would call `prune_file_cache` on every insert
     /// past the cap (clone-all-keys + O(n log n) sort, under one Mutex shared by
     /// the rayon workers) — that eviction churn, not parsing, was the multi-second
-    /// cost here. Raw parsing of the whole tree is sub-second.
+    /// cost here.
+    ///
+    /// Each file's date is memoized with the stamp it was read at, and only a
+    /// file that is new, shrank, or held no entry is parsed again: an append
+    /// cannot lower a file's earliest date. A file that left the listing
+    /// leaves the memo, and with it the minimum.
     fn integration_earliest_date(&self, config: &UsageIntegrationConfig) -> Option<NaiveDate> {
         let kind = config.file_kind();
         config
             .roots
             .iter()
             .filter_map(|root_dir| {
-                let (files, _, _) = self.cached_jsonl_files(root_dir);
-                let files: Vec<PathBuf> = files.iter().cloned().collect();
-                files
+                let (_, stamps, _) = self.cached_jsonl_files(root_dir, kind);
+                let root_key = path_to_string(root_dir);
+                let known = self
+                    .file_earliest_dates
+                    .lock()
+                    .ok()
+                    .and_then(|mut memo| memo.remove(&root_key))
+                    .unwrap_or_default();
+                let dates: FileEarliestDates = stamps?
                     .par_iter()
-                    .filter_map(|path| {
-                        let entries = match kind {
-                            ProviderFileKind::Claude => parse_claude_session_file(path).0,
-                            ProviderFileKind::Codex => parse_codex_session_file(path).0,
-                            ProviderFileKind::Cursor => parse_cursor_session_file(path).0,
-                            ProviderFileKind::Kimi => parse_kimi_session_file(path).0,
+                    .map(|file| {
+                        let date = match known.get(&file.path) {
+                            Some((read_at, Some(date))) if read_at.len <= file.stamp.len => {
+                                Some(*date)
+                            }
+                            Some((read_at, None)) if *read_at == file.stamp => None,
+                            _ => earliest_entry_date(&kind.parse(&file.path).0),
                         };
-                        earliest_entry_date(&entries)
+                        (file.path.clone(), (file.stamp.clone(), date))
                     })
-                    .min()
+                    .collect();
+                let earliest = dates.values().filter_map(|(_, date)| *date).min();
+                if let Ok(mut memo) = self.file_earliest_dates.lock() {
+                    memo.insert(root_key, dates);
+                }
+                earliest
             })
             .min()
-    }
-
-    fn cursor_earliest_date(&self) -> Option<NaiveDate> {
-        let config = self.integration_config(UsageIntegrationId::Cursor)?;
-        let mut earliest: Option<NaiveDate> = None;
-        for root_dir in &config.roots {
-            for path in glob_cursor_chat_session_files(root_dir) {
-                let (entries, _changes, _lines_read, _opened) = parse_cursor_session_file(&path);
-                for entry in &entries {
-                    let date = entry.timestamp.date_naive();
-                    earliest = Some(earliest.map_or(date, |cur| cur.min(date)));
-                }
-            }
-        }
-        earliest
     }
 
     // ── Internal: build model_breakdown across all entries ──
@@ -2194,6 +2817,28 @@ impl UsageParser {
             provider_detected: None,
             cursor_loading: false,
         }
+    }
+
+    /// Every request from `start` on as (time, display_name, model_key, USD),
+    /// sorted by time. From the logs alone, so each keeps its own time: an
+    /// archived hour would come back as one row at the top of the hour.
+    pub fn priced_entries_since(
+        &self,
+        provider: &str,
+        start: DateTime<Local>,
+    ) -> Vec<(DateTime<Local>, String, String, f64)> {
+        let loaded = self.load_live_entries_cached(provider, Some(start.date_naive()));
+        let mut out: Vec<_> = loaded
+            .entries
+            .iter()
+            .filter(|e| e.timestamp >= start)
+            .map(|e| {
+                let (name, key, cost) = price_entry(e);
+                (e.timestamp, name, key, cost)
+            })
+            .collect();
+        out.sort_by_key(|row| row.0);
+        out
     }
 
     // ── Aggregation: official 5h window (or any [start, end) instant range) ──
@@ -2594,7 +3239,7 @@ mod tests {
 
         let mut files = Vec::new();
         let mut dirs = Vec::new();
-        scan_jsonl_tree_into(root.path(), &mut files, &mut dirs);
+        scan_jsonl_tree_into(root.path(), ProviderFileKind::Claude, &mut files, &mut dirs);
         assert_eq!(files.len(), 1, "symlinked subdir must not be traversed");
         assert!(files[0].ends_with("session.jsonl"));
         // The symlinked dir also must not appear in the directory-stamp list.
@@ -2931,6 +3576,41 @@ mod tests {
         assert_eq!(report.emitted_entries, 0);
     }
 
+    #[test]
+    fn cursor_chat_listing_and_parses_are_reused_until_the_sweep() {
+        let root = TempDir::new().unwrap();
+        let chat = |workspace: &str| root.path().join(workspace).join("chatSessions");
+        fs::create_dir_all(chat("workspace-a")).unwrap();
+        write_file(
+            &chat("workspace-a").join("session.json"),
+            r#"{"messages":[{"id":"event-1","text":"hello"}]}"#,
+        );
+        let parser = UsageParser::from_integrations(usage_integration_configs_with_overrides(
+            None,
+            None,
+            Some(vec![root.path().to_path_buf()]),
+        ));
+        parser.set_listings_frozen(true);
+
+        let (_, first) = parser.load_cursor_local_entries_with_debug(None);
+        assert_eq!((first.listing_cache_hit, first.opened_paths), (false, 1));
+        // No walk and no parse, although the file held no usage.
+        let (_, again) = parser.load_cursor_local_entries_with_debug(None);
+        assert_eq!((again.listing_cache_hit, again.opened_paths), (true, 0));
+        assert_eq!(again.cache_hits, 1);
+
+        fs::create_dir_all(chat("workspace-b")).unwrap();
+        write_file(
+            &chat("workspace-b").join("other.json"),
+            r#"{"messages":[{"id":"event-2","timestamp":"2026-03-15T12:00:00+00:00","model":"cursor-model","tokenUsage":{"inputTokens":100,"outputTokens":50}}]}"#,
+        );
+        let (entries, _) = parser.load_cursor_local_entries_with_debug(None);
+        assert!(entries.is_empty(), "listings move only at the sweep");
+        assert!(parser.invalidate_if_changed());
+        let (entries, _) = parser.load_cursor_local_entries_with_debug(None);
+        assert_eq!(entries.len(), 1);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Claude parsing
     // ─────────────────────────────────────────────────────────────────────────
@@ -3032,6 +3712,12 @@ mod tests {
             all_entries.iter().any(|e| e.model == "glm-5"),
             "the 'all' tab should still include the GLM-5 row"
         );
+
+        // The cached loads share one Claude load and filter it the same way.
+        let since = parse_since_date("20260301");
+        assert_eq!(parser.load_entries_cached("claude", since).entries.len(), 1);
+        let all = parser.load_entries_cached("all", since);
+        assert!(all.entries.iter().any(|e| e.model == "glm-5"));
     }
 
     #[test]
@@ -3557,6 +4243,34 @@ mod tests {
     }
 
     #[test]
+    fn an_append_moves_only_its_own_providers_data_version() {
+        let dir = TempDir::new().unwrap();
+        let (claude_dir, codex_dir) = (dir.path().join("claude"), dir.path().join("codex"));
+        fs::create_dir_all(&claude_dir).unwrap();
+        fs::create_dir_all(&codex_dir).unwrap();
+        let line = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let session = claude_dir.join("session.jsonl");
+        write_file(&session, line);
+        write_file(&codex_dir.join("rollout.jsonl"), "{}");
+        let parser = UsageParser::with_dirs(claude_dir, codex_dir);
+        parser.get_daily("claude", "20260101");
+        parser.get_daily("codex", "20260101");
+        let versions =
+            || ["claude", "codex", "cursor"].map(|provider| parser.data_version(provider));
+        let before = versions();
+
+        use std::io::Write;
+        let mut log = fs::OpenOptions::new().append(true).open(&session).unwrap();
+        write!(log, "\n{line}").unwrap();
+        drop(log);
+        assert!(parser.invalidate_if_changed(), "guard: the sweep sees it");
+        let after = versions();
+        assert!(after[0] > before[0], "Claude's logs changed");
+        assert_eq!(after[1], before[1], "Codex's did not");
+        assert_eq!(after[2], before[2], "nor Cursor's: the sweep lists them");
+    }
+
+    #[test]
     fn content_append_keeps_earliest_date_cache_warm() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("session.jsonl");
@@ -3608,45 +4322,185 @@ mod tests {
         assert!(!parser.has_entries_before("claude", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
     }
 
-    #[test]
-    fn adding_new_file_clears_earliest_date_cache() {
-        let dir = TempDir::new().unwrap();
-        write_file(
-            &dir.path().join("session-a.jsonl"),
-            r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#,
-        );
-        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
-        parser.get_daily("claude", "20260101");
-        let _ = parser.has_entries_before("claude", NaiveDate::from_ymd_opt(2026, 4, 1).unwrap());
-        assert!(parser
-            .earliest_date_cache
-            .lock()
-            .unwrap()
-            .contains_key("claude"));
+    /// One Claude request logged at noon UTC on `day` of March 2026.
+    fn march_line(day: u32) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"2026-03-{day:02}T12:00:00+00:00","message":{{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#
+        )
+    }
 
-        // A brand-new file could contain backdated data → the earliest date may
-        // change, so adding one must clear the cache for a fresh recompute.
-        write_file(
-            &dir.path().join("session-b.jsonl"),
-            r#"{"type":"assistant","timestamp":"2026-03-16T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":75}}}"#,
-        );
+    fn march(day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 3, day).unwrap()
+    }
+
+    /// Move `dir`'s mtime past what the last sweep saw, as a file added to
+    /// it does on a filesystem with a coarse mtime.
+    fn touch_dir(dir: &Path) {
         filetime::set_file_mtime(
-            dir.path(),
+            dir,
             filetime::FileTime::from_system_time(
                 std::time::SystemTime::now() + std::time::Duration::from_secs(2),
             ),
         )
         .unwrap();
+    }
 
+    #[test]
+    fn a_new_file_reparses_only_itself_for_the_earliest_date() {
+        let dir = TempDir::new().unwrap();
+        let a = dir.path().join("session-a.jsonl");
+        write_file(&a, &march_line(15));
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        assert!(parser.has_entries_before("claude", march(16)));
+
+        // A file that did not shrink keeps the date it was read at (an append
+        // cannot lower it), so rewriting `a` in place at the same size goes
+        // unseen: the new file is all the listing change parses.
+        write_file(&a, &march_line(20));
+        write_file(&dir.path().join("session-b.jsonl"), &march_line(18));
+        touch_dir(dir.path());
         assert!(parser.invalidate_if_changed());
         assert!(
-            !parser
-                .earliest_date_cache
-                .lock()
-                .unwrap()
-                .contains_key("claude"),
-            "adding a file must clear the earliest-date cache (potential backdated data)"
+            parser.has_entries_before("claude", march(16)),
+            "a's date comes from the memo"
         );
+    }
+
+    #[test]
+    fn a_new_file_with_older_entries_lowers_the_earliest_date() {
+        let dir = TempDir::new().unwrap();
+        write_file(&dir.path().join("session-a.jsonl"), &march_line(15));
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        assert!(!parser.has_entries_before("claude", march(10)));
+
+        // A resumed session can open a new file with old timestamps.
+        write_file(&dir.path().join("session-b.jsonl"), &march_line(1));
+        touch_dir(dir.path());
+        assert!(parser.invalidate_if_changed());
+        assert!(parser.has_entries_before("claude", march(10)));
+    }
+
+    #[test]
+    fn a_new_file_is_listed_by_reading_only_its_directory() {
+        let dir = TempDir::new().unwrap();
+        let (claude_dir, codex_dir) = (dir.path().join("claude"), dir.path().join("codex"));
+        let (project, other) = (claude_dir.join("project"), claude_dir.join("other"));
+        for dir in [&project, &other, &codex_dir] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        write_file(&project.join("a.jsonl"), &march_line(15));
+        write_file(&codex_dir.join("rollout.jsonl"), "{}");
+        let parser = UsageParser::with_dirs(claude_dir.clone(), codex_dir.clone());
+        parser.set_listings_frozen(true);
+        parser.get_daily("claude", "20260101");
+        parser.get_daily("codex", "20260101");
+        let codex_version = parser.data_version("codex");
+
+        // Not a log: its directory is read again, and nothing changed.
+        write_file(&project.join("notes.txt"), "x");
+        touch_dir(&project);
+        assert_eq!(parser.sweep(false), LogChanges::None);
+        assert_eq!(parser.sweep(false), LogChanges::None, "at its new stamp");
+
+        write_file(&project.join("b.jsonl"), &march_line(16));
+        touch_dir(&project);
+        fs::remove_dir(&other).unwrap();
+        fs::create_dir(claude_dir.join("new")).unwrap();
+        write_file(&claude_dir.join("new").join("c.jsonl"), &march_line(17));
+        touch_dir(&claude_dir);
+        assert_eq!(parser.sweep(false), LogChanges::Any);
+        let (entries, _, reports) = parser.load_entries("claude", None);
+        assert!(reports[0].listing_cache_hit, "no walk of the tree");
+        assert_eq!(entries.len(), 3);
+        let listed = parser.root_file_lists.lock().unwrap()[&path_to_string(&claude_dir)].clone();
+        let dirs: HashSet<PathBuf> = listed.directories.iter().map(|d| d.path.clone()).collect();
+        assert_eq!(
+            dirs,
+            HashSet::from([claude_dir.clone(), project, claude_dir.join("new")])
+        );
+        assert_eq!(parser.data_version("codex"), codex_version, "Codex's stays");
+    }
+
+    #[test]
+    fn a_log_back_in_the_listing_is_not_served_its_old_parse() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let log = project.join("a.jsonl");
+        write_file(&log, &march_line(15));
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        parser.set_listings_frozen(true);
+        parser.get_daily("claude", "20260101");
+
+        fs::remove_file(&log).unwrap();
+        touch_dir(&project);
+        assert_eq!(parser.sweep(false), LogChanges::Any);
+        write_file(&log, &format!("{}\n{}", march_line(15), march_line(16)));
+        touch_dir(&project);
+        assert_eq!(parser.sweep(false), LogChanges::Any);
+        let (entries, _, reports) = parser.load_entries("claude", None);
+        assert!(reports[0].listing_cache_hit, "guard: listed by the sweep");
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn a_file_not_written_for_a_week_is_stat_ed_only_by_a_full_sweep() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("session.jsonl");
+        write_file(&log, &march_line(15));
+        let eight_days_ago = SystemTime::now() - std::time::Duration::from_secs(8 * 86_400);
+        filetime::set_file_mtime(&log, filetime::FileTime::from_system_time(eight_days_ago))
+            .unwrap();
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        parser.set_listings_frozen(true);
+        parser.get_daily("claude", "20260101");
+
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&log).unwrap();
+        write!(file, "\n{}", march_line(16)).unwrap();
+        drop(file);
+        assert_eq!(parser.sweep(false), LogChanges::None);
+        let since = (DateTime::<Local>::from(eight_days_ago) - APPEND_DATE_SLACK).date_naive();
+        assert_eq!(
+            parser.sweep(true),
+            LogChanges::Appended(LogAppends {
+                integrations: vec![UsageIntegrationId::Claude],
+                since,
+            }),
+            "dated no earlier than an hour before the file's previous write"
+        );
+        assert_eq!(parser.sweep(false), LogChanges::None, "hot from now on");
+
+        write_file(&log, &march_line(15));
+        assert_eq!(
+            parser.sweep(false),
+            LogChanges::Any,
+            "a shrink is a rewrite"
+        );
+    }
+
+    #[test]
+    fn file_cache_drops_old_files_no_load_read_for_an_hour() {
+        let (now, wall) = (Instant::now(), SystemTime::now());
+        let entry = |modified: SystemTime, read_at: Instant| CachedFileEntries {
+            stamp: FileStamp { modified, len: 0 },
+            entries: Vec::new().into(),
+            change_events: Vec::new().into(),
+            earliest_date: None,
+            last_accessed_at: read_at,
+        };
+        let old = wall - std::time::Duration::from_secs(40 * 86_400);
+        let later = now + std::time::Duration::from_secs(2 * 3_600);
+        let mut cache = HashMap::from([
+            ("old".to_string(), entry(old, now)),
+            ("old, read since".to_string(), entry(old, later)),
+            ("recent".to_string(), entry(wall, now)),
+        ]);
+
+        prune_file_cache(&mut cache, later, wall);
+        let mut kept: Vec<&str> = cache.keys().map(String::as_str).collect();
+        kept.sort();
+        assert_eq!(kept, ["old, read since", "recent"]);
     }
 
     #[test]
@@ -3688,6 +4542,85 @@ mod tests {
         assert_eq!(debug.sources[0].opened_paths, 1);
         assert_eq!(debug.sources[0].cache_misses, 1);
         assert_eq!(debug.sources[0].cache_hits, 1);
+    }
+
+    #[test]
+    fn frozen_listing_defers_new_file_to_next_sweep() {
+        let entry_a = r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":50}}}"#;
+        let entry_b = r#"{"type":"assistant","timestamp":"2026-03-16T12:00:00+00:00","message":{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{"input_tokens":200,"output_tokens":75}}}"#;
+        let add_second_file = |dir: &Path| {
+            write_file(&dir.join("session-b.jsonl"), entry_b);
+            // Fast writes may land within the directory mtime granularity.
+            filetime::set_file_mtime(
+                dir,
+                filetime::FileTime::from_system_time(
+                    SystemTime::now() + std::time::Duration::from_secs(2),
+                ),
+            )
+            .unwrap();
+        };
+
+        // Frozen: a query between sweeps keeps the listing, so the next sweep
+        // still sees the new file and reports the change.
+        let dir = TempDir::new().unwrap();
+        write_file(&dir.path().join("session-a.jsonl"), entry_a);
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        parser.set_listings_frozen(true);
+        assert_eq!(parser.load_entries("claude", None).0.len(), 1);
+        add_second_file(dir.path());
+        assert_eq!(
+            parser.load_entries("claude", None).0.len(),
+            1,
+            "a frozen listing must not pick up the new file before the sweep"
+        );
+        assert!(
+            parser.invalidate_if_changed(),
+            "the sweep must report the new file"
+        );
+        assert_eq!(parser.load_entries("claude", None).0.len(), 2);
+
+        // Not frozen: the query re-walks and absorbs the new file, so the next
+        // sweep finds nothing to report.
+        let dir = TempDir::new().unwrap();
+        write_file(&dir.path().join("session-a.jsonl"), entry_a);
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        assert_eq!(parser.load_entries("claude", None).0.len(), 1);
+        add_second_file(dir.path());
+        assert_eq!(parser.load_entries("claude", None).0.len(), 2);
+        assert!(!parser.invalidate_if_changed());
+    }
+
+    #[test]
+    fn payload_ttl_follows_refresh_interval() {
+        assert_eq!(payload_ttl_for(0), 86_400);
+        assert_eq!(payload_ttl_for(30), 120);
+        assert_eq!(payload_ttl_for(300), 600);
+    }
+
+    #[test]
+    fn prune_keeps_entry_within_interval_ttl() {
+        let dir = TempDir::new().unwrap();
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let aged = Instant::now() - std::time::Duration::from_secs(200);
+        parser.cache.lock().unwrap().insert(
+            String::from("view"),
+            PayloadCacheEntry {
+                payload: UsagePayload::default(),
+                stored_at: aged,
+                last_accessed_at: aged,
+            },
+        );
+
+        parser.set_payload_ttl_secs(600);
+        assert!(
+            parser.check_cache("view").is_some(),
+            "a 200 s old entry is live under a 600 s TTL"
+        );
+        parser.set_payload_ttl_secs(120);
+        assert!(
+            parser.check_cache("view").is_none(),
+            "and expired under a 120 s TTL"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -4995,6 +5928,32 @@ mod cursor_remote_cache_tests {
         }
     }
 
+    fn make_cursor_entry_with_input(day: NaiveDate, input_tokens: u64) -> ParsedEntry {
+        ParsedEntry {
+            input_tokens,
+            ..make_cursor_entry(day)
+        }
+    }
+
+    fn input_tokens_by_day(entries: &[ParsedEntry]) -> Vec<(NaiveDate, u64)> {
+        let mut days: Vec<_> = entries
+            .iter()
+            .map(|e| (e.timestamp.date_naive(), e.input_tokens))
+            .collect();
+        days.sort();
+        days
+    }
+
+    fn covered_since(parser: &UsageParser) -> Option<NaiveDate> {
+        parser
+            .cursor_remote_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("cache is set")
+            .covered_since
+    }
+
     #[test]
     fn range_covers_only_when_request_is_a_subset() {
         let jan1 = date(2026, 1, 1);
@@ -5007,16 +5966,6 @@ mod cursor_remote_cache_tests {
         // All-time cache covers anything; a bounded cache can't cover all-time.
         assert!(cursor_range_covers(None, Some(jan1)));
         assert!(!cursor_range_covers(Some(jan1), None));
-    }
-
-    #[test]
-    fn range_at_least_as_wide_prefers_earlier_start() {
-        let jan1 = date(2026, 1, 1);
-        let jun1 = date(2026, 6, 1);
-        assert!(cursor_range_at_least_as_wide(Some(jan1), Some(jun1)));
-        assert!(!cursor_range_at_least_as_wide(Some(jun1), Some(jan1)));
-        assert!(cursor_range_at_least_as_wide(None, Some(jan1)));
-        assert!(!cursor_range_at_least_as_wide(Some(jan1), None));
     }
 
     #[test]
@@ -5078,6 +6027,257 @@ mod cursor_remote_cache_tests {
         parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
         // Year view still served fully from the retained wide cache.
         assert_eq!(parser.cursor_remote_for(Some(jan1)).unwrap().len(), 2);
+    }
+
+    /// An expired year cache must not shrink to the range of the next
+    /// today-only refresh: the refresh replaces only the part it covers.
+    #[test]
+    fn expired_wide_cache_merges_narrow_refresh() {
+        let parser = UsageParser::new();
+        let jan1 = date(2026, 1, 1);
+        let jun1 = date(2026, 6, 1);
+        let jun2 = date(2026, 6, 2);
+        parser.store_cursor_remote(
+            vec![make_cursor_entry(jan1), make_cursor_entry(jun1)],
+            Some(jan1),
+        );
+        parser.age_cursor_remote_cache_for_test(std::time::Duration::from_secs(CACHE_TTL_SECS + 1));
+
+        parser.store_cursor_remote(
+            vec![
+                make_cursor_entry_with_input(jun1, 5),
+                make_cursor_entry(jun2),
+            ],
+            Some(jun1),
+        );
+
+        let year = parser
+            .cursor_remote_for(Some(jan1))
+            .expect("the year range stays covered");
+        assert_eq!(
+            input_tokens_by_day(&year),
+            vec![(jan1, 1), (jun1, 5), (jun2, 1)]
+        );
+        assert_eq!(covered_since(&parser), Some(jan1));
+        // The refresh restarts the TTL.
+        assert!(!parser.cursor_remote_ttl_expired_for_test());
+    }
+
+    /// A widening fetch fills in only the days before the old coverage, so the
+    /// recent part the tray and open views already show does not move.
+    #[test]
+    fn wide_fetch_adds_only_older_days() {
+        let parser = UsageParser::new();
+        let jan1 = date(2026, 1, 1);
+        let jun1 = date(2026, 6, 1);
+        let jun2 = date(2026, 6, 2);
+        parser.store_cursor_remote(
+            vec![make_cursor_entry(jun1), make_cursor_entry(jun2)],
+            Some(jun1),
+        );
+        parser.age_cursor_remote_cache_for_test(std::time::Duration::from_secs(CACHE_TTL_SECS + 1));
+
+        parser.store_cursor_remote(
+            vec![
+                make_cursor_entry(jan1),
+                make_cursor_entry_with_input(jun1, 7),
+                make_cursor_entry_with_input(jun2, 7),
+            ],
+            Some(jan1),
+        );
+
+        let year = parser
+            .cursor_remote_for(Some(jan1))
+            .expect("coverage widened to jan1");
+        assert_eq!(
+            input_tokens_by_day(&year),
+            vec![(jan1, 1), (jun1, 1), (jun2, 1)]
+        );
+        assert_eq!(covered_since(&parser), Some(jan1));
+        // Widening keeps stored_at: the recent part is still due its refresh.
+        assert!(parser.cursor_remote_ttl_expired_for_test());
+    }
+
+    #[test]
+    fn identical_refresh_reports_unchanged() {
+        let parser = UsageParser::new();
+        let jun1 = date(2026, 6, 1);
+        let jun2 = date(2026, 6, 2);
+        let recent = || vec![make_cursor_entry(jun1), make_cursor_entry(jun2)];
+        assert!(
+            parser.store_cursor_remote(recent(), Some(jun1)),
+            "first store"
+        );
+        assert!(!parser.store_cursor_remote(recent(), Some(jun1)));
+        // A narrower refresh compares only the part it replaces.
+        assert!(!parser.store_cursor_remote(vec![make_cursor_entry(jun2)], Some(jun2)));
+        assert!(parser.store_cursor_remote(vec![make_cursor_entry_with_input(jun2, 3)], Some(jun2)));
+        // Same token total, different mix: the cost changes, so it is a change.
+        let shifted = ParsedEntry {
+            cache_read_tokens: 1,
+            ..make_cursor_entry_with_input(jun2, 2)
+        };
+        assert!(parser.store_cursor_remote(vec![shifted], Some(jun2)));
+    }
+
+    /// The post-fetch tray repaint relies on an unchanged refresh still
+    /// renewing the cache: only a fresh cache releases the tray's cost holdover.
+    #[test]
+    fn unchanged_refresh_still_renews_ttl() {
+        let parser = UsageParser::new();
+        let jun1 = date(2026, 6, 1);
+        parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
+        parser.age_cursor_remote_cache_for_test(std::time::Duration::from_secs(CACHE_TTL_SECS + 1));
+        assert!(!parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1)));
+        assert!(!parser.cursor_remote_ttl_expired_for_test());
+    }
+
+    #[test]
+    fn unchanged_refreshes_back_off_the_ttl_until_cursor_wakes() {
+        let parser = UsageParser::new();
+        let jun1 = date(2026, 6, 1);
+        let same = || vec![make_cursor_entry(jun1)];
+        let ttl = || parser.cursor_remote_ttl_secs.load(Ordering::SeqCst);
+        parser.store_cursor_remote(same(), Some(jun1));
+        parser.store_cursor_remote(same(), Some(jun1));
+        assert_eq!(ttl(), 2 * CACHE_TTL_SECS);
+        for _ in 0..10 {
+            parser.store_cursor_remote(same(), Some(jun1));
+        }
+        assert_eq!(ttl(), CURSOR_IDLE_MAX_SECS);
+        parser.age_cursor_remote_cache_for_test(std::time::Duration::from_secs(CACHE_TTL_SECS + 1));
+        assert!(!parser.cursor_remote_ttl_expired_for_test(), "backed off");
+
+        parser.reset_cursor_remote_ttl();
+        assert!(parser.cursor_remote_ttl_expired_for_test(), "woken");
+        parser.store_cursor_remote(same(), Some(jun1));
+        parser.store_cursor_remote(vec![make_cursor_entry_with_input(jun1, 9)], Some(jun1));
+        assert_eq!(ttl(), CACHE_TTL_SECS, "a change drops it back");
+    }
+
+    /// Views computed while the range was uncovered carry no Cursor data at
+    /// all, so widening coverage is a change even when no older day is added.
+    #[test]
+    fn widening_without_older_entries_reports_changed() {
+        let parser = UsageParser::new();
+        let jan1 = date(2026, 1, 1);
+        let jun1 = date(2026, 6, 1);
+        parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
+        assert!(parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jan1)));
+        assert_eq!(covered_since(&parser), Some(jan1));
+    }
+
+    #[test]
+    fn uncovered_ignores_ttl_expiry() {
+        let parser = UsageParser::new();
+        let jan1 = date(2026, 1, 1);
+        let jun1 = date(2026, 6, 1);
+        assert!(
+            parser.cursor_remote_cache_uncovered(Some(jun1)),
+            "no cache yet"
+        );
+
+        parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
+        parser.age_cursor_remote_cache_for_test(std::time::Duration::from_secs(CACHE_TTL_SECS + 1));
+        // Expired but still covering: served as-is, no refetch from the view.
+        assert!(!parser.cursor_remote_cache_uncovered(Some(jun1)));
+        assert!(parser.cursor_remote_cache_uncovered(Some(jan1)));
+    }
+
+    #[test]
+    fn clear_cursor_remote_drops_cache_and_cooldown() {
+        let parser = UsageParser::new();
+        let jun1 = date(2026, 6, 1);
+        parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
+        parser.note_cursor_remote_failure();
+
+        parser.clear_cursor_remote();
+
+        assert!(parser.cursor_remote_for(Some(jun1)).is_none());
+        assert!(!parser.cursor_remote_failure_cooldown_active());
+    }
+
+    /// A view computed while a Cursor fetch lands was built from the old
+    /// snapshot. The fetch's completion clears the payload caches first, so a
+    /// store after that clear would outlive it; only an unchanged refresh
+    /// leaves the snapshot current.
+    #[test]
+    fn payload_built_across_a_cursor_change_is_not_cached() {
+        let parser = UsageParser::new();
+        let jan1 = date(2026, 1, 1);
+        let jun1 = date(2026, 6, 1);
+        parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
+
+        let generation = parser.cursor_remote_generation();
+        assert!(!parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1)));
+        assert!(parser.store_cache_at_cursor_generation(
+            "view",
+            UsagePayload::default(),
+            generation
+        ));
+        assert!(parser.check_cache("view").is_some());
+
+        // New data lands mid-compute; the completion clears, then the
+        // compute finishes and tries to store.
+        let generation = parser.cursor_remote_generation();
+        assert!(parser.store_cursor_remote(vec![make_cursor_entry_with_input(jun1, 9)], Some(jun1)));
+        parser.clear_payload_cache();
+        assert!(!parser.store_cache_at_cursor_generation(
+            "view",
+            UsagePayload::default(),
+            generation
+        ));
+        assert!(parser.check_cache("view").is_none());
+
+        // Widening and clearing replace the snapshot too.
+        let generation = parser.cursor_remote_generation();
+        parser.store_cursor_remote(Vec::new(), Some(jan1));
+        assert_ne!(parser.cursor_remote_generation(), generation);
+        let generation = parser.cursor_remote_generation();
+        parser.clear_cursor_remote();
+        assert_ne!(parser.cursor_remote_generation(), generation);
+    }
+
+    /// A fetch that began before a clear (the Cursor account may have
+    /// changed) used the old credentials: neither its entries nor its
+    /// failure may land after the clear.
+    #[test]
+    fn a_fetch_begun_before_a_clear_does_not_land() {
+        let parser = UsageParser::new();
+        let jun1 = date(2026, 6, 1);
+        parser.store_cursor_remote(vec![make_cursor_entry(jun1)], Some(jun1));
+
+        let begun = parser.cursor_remote_generation();
+        parser.clear_cursor_remote();
+        assert_eq!(
+            parser.store_cursor_remote_if_current(
+                vec![make_cursor_entry_with_input(jun1, 9)],
+                Some(jun1),
+                begun
+            ),
+            None,
+            "superseded"
+        );
+        assert!(
+            parser.cursor_remote_for(Some(jun1)).is_none(),
+            "the clear stands"
+        );
+        assert!(!parser.note_cursor_remote_failure_if_current(begun));
+        assert!(
+            !parser.cursor_remote_failure_cooldown_active(),
+            "the new account is not held back by the old one's failure"
+        );
+
+        // A fetch begun after the clear lands.
+        let begun = parser.cursor_remote_generation();
+        assert_eq!(
+            parser.store_cursor_remote_if_current(vec![make_cursor_entry(jun1)], Some(jun1), begun),
+            Some(true)
+        );
+        assert_eq!(parser.cursor_remote_for(Some(jun1)).unwrap().len(), 1);
+        let begun = parser.cursor_remote_generation();
+        assert!(parser.note_cursor_remote_failure_if_current(begun));
+        assert!(parser.cursor_remote_failure_cooldown_active());
     }
 
     /// A failed fetch caches nothing, so before the cooldown existed every

@@ -171,6 +171,18 @@ export interface RateLimitWindow {
   label: string;
   utilization: number;
   resetsAt: string | null;
+  /** Window length when the vendor reports it (Codex, Kimi). */
+  windowMinutes?: number;
+  /** Dollar size of the pool when the vendor states it (Cursor API pool). */
+  budgetUsd?: number;
+}
+
+/** Mirrors `plan_budget::PlanBudget`. */
+export interface PlanBudget {
+  /** Local spend since the window started. */
+  spend: number;
+  /** Per-model budget for a full window, learned from single-model stretches. */
+  models: { model: string; usd: number; lowUsd: number; highUsd: number }[];
 }
 
 export interface ExtraUsageInfo {

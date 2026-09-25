@@ -649,7 +649,7 @@
 <style>
   .po {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro",
-      "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      system-ui, "Helvetica Neue", Helvetica, Arial, sans-serif;
     display: flex;
     flex-direction: column;
     gap: 18px;
@@ -816,7 +816,7 @@
   /* Optional badge — for "Major rewrite", "Beta", etc. Uses an accent tint
      so the version still leads visually but the badge catches the eye. */
   .po-changelog-tag {
-    font: 600 9px/1 'Inter', sans-serif;
+    font: 600 9px/1 system-ui, sans-serif;
     color: #1f8cff;
     background: rgba(31, 140, 255, 0.12);
     border: 1px solid rgba(31, 140, 255, 0.22);
@@ -833,12 +833,12 @@
     border-color: rgba(10, 114, 232, 0.30);
   }
   .po-changelog-date {
-    font: 500 9.5px/1 'Inter', sans-serif;
+    font: 500 9.5px/1 system-ui, sans-serif;
     color: var(--t4);
     margin-left: auto;
   }
   .po-changelog-title {
-    font: 600 12px/1.3 'Inter', sans-serif;
+    font: 600 12px/1.3 system-ui, sans-serif;
     color: var(--t1);
     margin-bottom: 8px;
     letter-spacing: -0.1px;
@@ -880,12 +880,12 @@
     background: var(--t4);
   }
   .po-highlight-title {
-    font: 600 11px/1.3 'Inter', sans-serif;
+    font: 600 11px/1.3 system-ui, sans-serif;
     color: var(--t1);
     letter-spacing: -0.06px;
   }
   .po-highlight-body {
-    font: 400 10.5px/1.45 'Inter', sans-serif;
+    font: 400 10.5px/1.45 system-ui, sans-serif;
     color: var(--t3);
     letter-spacing: -0.02px;
   }
@@ -1039,7 +1039,7 @@
   .po-progress-num,
   .po-progress-of {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro",
-      "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      system-ui, "Helvetica Neue", Helvetica, Arial, sans-serif;
     font-size: 11px;
     line-height: 1;
     letter-spacing: -0.05px;
@@ -1252,7 +1252,7 @@
     background: rgba(52, 199, 89, 0.10);
     border: 1px solid rgba(52, 199, 89, 0.20);
     color: #34c759;
-    font: 600 11px/1 'Inter', sans-serif;
+    font: 600 11px/1 system-ui, sans-serif;
     letter-spacing: -0.05px;
     margin-top: 2px;
     /* Slight opacity-and-rise on appearance: the ledge between "loading"
@@ -1278,7 +1278,7 @@
     background: rgba(255, 255, 255, 0.04);
     border: 1px solid rgba(255, 255, 255, 0.08);
     color: var(--t3);
-    font: 500 10.5px/1 'Inter', sans-serif;
+    font: 500 10.5px/1 system-ui, sans-serif;
     letter-spacing: -0.05px;
     margin-top: 2px;
   }
@@ -1344,7 +1344,7 @@
     justify-content: space-between;
     gap: 12px;
     padding: 9px 14px;
-    font: 500 11.5px/1.3 'Inter', sans-serif;
+    font: 500 11.5px/1.3 system-ui, sans-serif;
     color: var(--t1);
     border-bottom: 1px solid rgba(255,255,255,0.04);
   }
@@ -1358,7 +1358,7 @@
     letter-spacing: -0.05px;
   }
   .po-recap-status {
-    font: 500 11px/1 'Inter', sans-serif;
+    font: 500 11px/1 system-ui, sans-serif;
     color: var(--t3);
     letter-spacing: -0.04px;
   }

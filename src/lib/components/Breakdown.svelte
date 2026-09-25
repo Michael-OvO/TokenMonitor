@@ -243,12 +243,12 @@
     display: flex; justify-content: space-between; margin-bottom: 6px; padding: 0 2px;
   }
   .bd-title {
-    font: 500 8px/1 'Inter', sans-serif;
+    font: 500 8px/1 system-ui, sans-serif;
     color: var(--t3);
   }
   .bd-sep {
     padding: 6px 9px 2px;
-    font: 500 7px/1 'Inter', sans-serif;
+    font: 500 7px/1 system-ui, sans-serif;
     color: var(--t4);
     opacity: 0.7;
   }
@@ -264,12 +264,12 @@
   .agent-row:hover { background: var(--surface-2); }
   .agent-bar { width: 2.5px; height: 14px; border-radius: 1.5px; flex-shrink: 0; }
   .agent-name {
-    font: 400 10px/1.2 'Inter', sans-serif;
+    font: 400 10px/1.2 system-ui, sans-serif;
     color: var(--t2); flex: 1; min-width: 0;
   }
-  .agent-meta { font: 400 8px/1 'Inter', sans-serif; color: var(--t4); opacity: 0.7; }
-  .agent-cost { font: 500 10px/1.2 'Inter', sans-serif; color: var(--t1); }
-  .agent-pct { font: 400 9px/1.2 'Inter', sans-serif; color: var(--t3); min-width: 28px; text-align: right; }
+  .agent-meta { font: 400 8px/1 system-ui, sans-serif; color: var(--t4); opacity: 0.7; }
+  .agent-cost { font: 500 10px/1.2 system-ui, sans-serif; color: var(--t1); }
+  .agent-pct { font: 400 9px/1.2 system-ui, sans-serif; color: var(--t3); min-width: 28px; text-align: right; }
 
   /* ── Dot → line indicator ── */
   .ind {
@@ -328,10 +328,10 @@
   .sub-bar { width: 2px; height: 10px; border-radius: 1px; flex-shrink: 0; margin-top: 2px; }
   .sub-info { flex: 1; min-width: 0; }
   .sub-name-row { display: flex; align-items: center; gap: 4px; }
-  .sub-name { font: 400 9px/1.2 'Inter', sans-serif; color: var(--t3); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sub-cost { font: 400 9px/1.2 'Inter', sans-serif; color: var(--t2); }
+  .sub-name { font: 400 9px/1.2 system-ui, sans-serif; color: var(--t3); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sub-cost { font: 400 9px/1.2 system-ui, sans-serif; color: var(--t2); }
   .sub-tokens {
-    font: 400 7.5px/1 'Inter', sans-serif; color: var(--t4);
+    font: 400 7.5px/1 system-ui, sans-serif; color: var(--t4);
     margin-top: 2px; font-variant-numeric: tabular-nums;
     opacity: 0.8;
   }
@@ -339,7 +339,7 @@
   /* ── Change attribution ── */
   .ch-row {
     display: flex; gap: 16px; padding: 2px 9px 4px;
-    font: 400 8px/1 'Inter', sans-serif; color: var(--t4);
+    font: 400 8px/1 system-ui, sans-serif; color: var(--t4);
   }
   .ch-scope { color: var(--t4); }
   .ch-plus { color: var(--ch-plus); }
@@ -363,18 +363,18 @@
     -webkit-app-region: no-drag;
   }
   .device-name-row { display: flex; align-items: center; gap: 4px; }
-  .device-name { font: 400 9px/1.2 'Inter', sans-serif; color: var(--t2); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .device-name { font: 400 9px/1.2 system-ui, sans-serif; color: var(--t2); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .device-badge {
-    font: 500 6.5px/1 'Inter', sans-serif; color: var(--t4);
+    font: 500 6.5px/1 system-ui, sans-serif; color: var(--t4);
     background: var(--surface-hover, rgba(128,128,128,0.1));
     padding: 1px 4px; border-radius: 3px; flex-shrink: 0;
 
   }
-  .device-cost { font: 500 9px/1.2 'Inter', sans-serif; color: var(--t1); flex-shrink: 0; }
+  .device-cost { font: 500 9px/1.2 system-ui, sans-serif; color: var(--t1); flex-shrink: 0; }
   .device-more {
     display: block; width: 100%; padding: 4px 7px 4px 24px;
     border: none; background: none; cursor: pointer;
-    font: 400 8px/1.2 'Inter', sans-serif; color: var(--t3);
+    font: 400 8px/1.2 system-ui, sans-serif; color: var(--t3);
     text-align: left;
     transition: color var(--t-fast) ease;
     -webkit-app-region: no-drag;
@@ -391,13 +391,13 @@
   .model-row:hover { background: var(--surface-2); }
   .model-bar { width: 2.5px; height: 14px; border-radius: 1.5px; flex-shrink: 0; }
   .model-name {
-    font: 400 10px/1.2 'Inter', sans-serif;
+    font: 400 10px/1.2 system-ui, sans-serif;
     color: var(--t2); flex: 1; min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .model-cost { font: 500 10px/1.2 'Inter', sans-serif; color: var(--t1); }
+  .model-cost { font: 500 10px/1.2 system-ui, sans-serif; color: var(--t1); }
   .model-tokens {
-    font: 400 9px/1.2 'Inter', sans-serif;
+    font: 400 9px/1.2 system-ui, sans-serif;
     color: var(--t3); min-width: 32px; text-align: right;
     font-variant-numeric: tabular-nums;
   }

@@ -325,7 +325,17 @@ async fn try_fetch_claude_rate_limits() -> FetchAttempt {
         }
     };
 
-    let client = reqwest::Client::new();
+    let client = match reqwest::Client::builder()
+        .timeout(super::HTTP_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return FetchAttempt::Other(RateLimitFetchError::message(format!(
+                "HTTP client build failed: {e}"
+            )));
+        }
+    };
 
     // Fetch usage + account in parallel
     let usage_fut = client

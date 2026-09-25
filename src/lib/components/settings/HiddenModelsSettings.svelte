@@ -98,7 +98,7 @@
     align-items: center;
   }
   .label {
-    font: 400 10px/1 'Inter', sans-serif;
+    font: 400 10px/1 system-ui, sans-serif;
     color: var(--t1);
   }
   .collapsible-toggle {
@@ -124,7 +124,7 @@
     transform: rotate(0deg);
   }
   .count {
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
   }
   .model-grid {
@@ -134,7 +134,7 @@
   }
   .model-empty {
     padding: 10px;
-    font: 400 9px/1.4 'Inter', sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     color: var(--t3);
   }
   .model-cell {
@@ -147,7 +147,7 @@
   .model-name {
     flex: 1;
     min-width: 0;
-    font: 400 10px/1.25 'Inter', sans-serif;
+    font: 400 10px/1.25 system-ui, sans-serif;
     color: var(--t1);
     overflow: hidden;
     text-overflow: ellipsis;

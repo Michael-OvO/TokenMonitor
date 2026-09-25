@@ -495,13 +495,13 @@
     padding: 6px 10px 3px;
   }
   .section-title {
-    font: 600 8px/1 'Inter', sans-serif;
+    font: 600 8px/1 system-ui, sans-serif;
     color: var(--t3);
     text-transform: uppercase;
     letter-spacing: 0;
   }
   .section-count {
-    font: 400 8px/1 'Inter', sans-serif;
+    font: 400 8px/1 system-ui, sans-serif;
     color: var(--t4);
   }
   .ssh-host-row,
@@ -525,14 +525,14 @@
     flex: 1;
   }
   .ssh-alias {
-    font: 500 9px/1.1 'Inter', sans-serif;
+    font: 500 9px/1.1 system-ui, sans-serif;
     color: var(--t1);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .ssh-detail {
-    font: 400 7.5px/1.1 'Inter', sans-serif;
+    font: 400 7.5px/1.1 system-ui, sans-serif;
     color: var(--t4);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -548,7 +548,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    font: 400 7.5px/1 'Inter', sans-serif;
+    font: 400 7.5px/1 system-ui, sans-serif;
     color: var(--t4);
     white-space: nowrap;
   }
@@ -557,7 +557,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     padding: 2px 8px;
-    font: 400 8px/1.2 'Inter', sans-serif;
+    font: 400 8px/1.2 system-ui, sans-serif;
     color: var(--t2);
     cursor: pointer;
     white-space: nowrap;
@@ -575,17 +575,17 @@
     cursor: default;
   }
   .ssh-testing {
-    font: 400 8px/1 'Inter', sans-serif;
+    font: 400 8px/1 system-ui, sans-serif;
     color: var(--t4);
   }
   .ssh-result {
-    font: 500 8px/1 'Inter', sans-serif;
+    font: 500 8px/1 system-ui, sans-serif;
   }
   .ssh-ok { color: #22c55e; }
   .ssh-fail { color: #ef4444; }
   .ssh-empty {
     padding: 10px;
-    font: 400 9px/1.4 'Inter', sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     color: var(--t3);
   }
   .error-text {
@@ -602,7 +602,7 @@
     display: flex;
   }
   .ssh-sync-label {
-    font: 400 8px/1 'Inter', sans-serif;
+    font: 400 8px/1 system-ui, sans-serif;
     color: var(--t3);
   }
   .ssh-sync-status {
@@ -626,7 +626,7 @@
     background: var(--surface-hover);
   }
   .label {
-    font: 400 10px/1 'Inter', sans-serif;
+    font: 400 10px/1 system-ui, sans-serif;
     color: var(--t1);
   }
   .collapsible-right {
@@ -642,7 +642,7 @@
     transform: rotate(0deg);
   }
   .count {
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
     white-space: nowrap;
   }

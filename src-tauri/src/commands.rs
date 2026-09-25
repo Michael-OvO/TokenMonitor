@@ -10,8 +10,6 @@ pub mod updater;
 pub mod usage_io;
 pub mod usage_query;
 
-pub use tray::sync_tray_title;
-
 use crate::models::*;
 use crate::statusline::windows::ClaudePlanTier;
 use crate::usage::integrations::{
@@ -73,6 +71,13 @@ pub struct AppState {
     /// change through `set_enabled_integrations`. A std lock because the
     /// reader (`current_daily_total_cost`) is synchronous.
     pub enabled_integrations: Arc<std::sync::RwLock<Vec<UsageIntegrationId>>>,
+    pub(crate) refresh: Arc<crate::refresh::RefreshState>,
+    /// Fair FIFO gate: at most one heavy CPU job (a usage compute, device or
+    /// calendar aggregation, export/import) runs at a time. Never held across
+    /// network or child-process waits, and never taken by a holder again.
+    pub(crate) compute: Arc<tokio::sync::Mutex<()>>,
+    /// Serialises every read-probe-write of `cached_rate_limits`.
+    pub(crate) rate_limits_io: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -101,6 +106,9 @@ impl AppState {
             enabled_integrations: Arc::new(std::sync::RwLock::new(
                 all_usage_integrations().to_vec(),
             )),
+            refresh: Arc::new(crate::refresh::RefreshState::default()),
+            compute: Arc::new(tokio::sync::Mutex::new(())),
+            rate_limits_io: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -120,9 +128,21 @@ impl AppState {
     /// `cursor_loading`) keeps refreshing. Mirrors the SSH-sync path: clearing
     /// the `usage-view:` prefix forces the next fetch to recompute from fresh
     /// logs. The cold-start fallback is unaffected — the recompute re-persists.
+    ///
+    /// Clears under the write lock: a disk hit holds the read lock while it
+    /// copies its entry into memory, so every hit in flight has finished that
+    /// copy by the time this returns, and a memory clear after it drops them.
     pub(crate) async fn clear_payload_disk_cache(&self) {
-        if let Some(ref disk_cache) = *self.payload_disk_cache.read().await {
+        if let Some(ref disk_cache) = *self.payload_disk_cache.write().await {
             disk_cache.clear_prefix("usage-view:");
+        }
+    }
+
+    /// [`Self::clear_payload_disk_cache`] of only the payloads `stale` picks
+    /// by file name (see `PayloadDiskCache::remove_where`).
+    pub(crate) async fn clear_payload_disk_cache_where(&self, stale: impl Fn(&str) -> bool) {
+        if let Some(ref disk_cache) = *self.payload_disk_cache.write().await {
+            disk_cache.remove_where(stale);
         }
     }
 }

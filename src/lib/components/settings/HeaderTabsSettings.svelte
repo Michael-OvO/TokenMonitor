@@ -178,11 +178,11 @@
     transform: rotate(0deg);
   }
   .label {
-    font: 400 10px/1 'Inter', sans-serif;
+    font: 400 10px/1 system-ui, sans-serif;
     color: var(--t1);
   }
   .count {
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
   }
 
@@ -222,7 +222,7 @@
   .header-preview-empty {
     padding: 12px 12px;
     text-align: center;
-    font: 400 9.5px/1.4 'Inter', sans-serif;
+    font: 400 9.5px/1.4 system-ui, sans-serif;
     color: var(--t4);
   }
 
@@ -244,7 +244,7 @@
     border: 1px solid var(--border-subtle);
     background: transparent;
     color: var(--t2);
-    font: 500 10px/1.3 'Inter', sans-serif;
+    font: 500 10px/1.3 system-ui, sans-serif;
     text-align: left;
     letter-spacing: -0.02px;
     cursor: pointer;

@@ -13,6 +13,8 @@
     isLoading,
     isPlaceholderLoading,
     fetchData,
+    holdWarmupsUntilPublish,
+    notePublish,
     warmCache,
     warmAllPeriods,
     usageRefreshError,
@@ -35,7 +37,9 @@
     rateLimitsRequestState,
     hydrateRateLimits,
     fetchRateLimits,
+    setRateLimitRetriesPaused,
   } from "./lib/stores/rateLimits.js";
+  import { popoverVisible, refreshWhenVisible, trackPopoverVisibility } from "./lib/visibility.js";
   import { providerPayload } from "./lib/views/rateLimitMonitor.js";
   import { hasRateLimitWindows } from "./lib/views/rateLimits.js";
   import {
@@ -239,6 +243,13 @@
   // Apply/remove data-provider attribute reactively
   $effect(() => {
     applyProvider(provider, brandTheming);
+  });
+
+  // Off screen: freeze every CSS animation and hold the rate-limit retries.
+  $effect(() => {
+    const hidden = !$popoverVisible;
+    document.documentElement.classList.toggle("popover-hidden", hidden);
+    setRateLimitRetriesPaused(hidden);
   });
 
   $effect(() => {
@@ -505,6 +516,9 @@
     let cancelled = false;
     let observer: ResizeObserver | undefined;
     let unlisten: (() => void) | undefined;
+    let unlistenPublish: (() => void) | undefined;
+    let stopVisibility: (() => void) | undefined;
+    let viewRefresh: ReturnType<typeof refreshWhenVisible> | undefined;
     let unlistenWindowResize: (() => void) | undefined;
     let onViewportPointerEnter: (() => void) | undefined;
     let onViewportPointerLeave: (() => void) | undefined;
@@ -513,6 +527,16 @@
     let lastViewportWidth = typeof window === "undefined" ? WINDOW_WIDTH : Math.round(window.innerWidth);
     let lastDevicePixelRatio = typeof window === "undefined" ? 1 : window.devicePixelRatio;
     let lastTauriWindowWidth: number | null = null;
+
+    void trackPopoverVisibility(
+      (handler) => tauriWindow.listen<boolean>("popover-visibility", ({ payload }) => handler(payload)),
+      () => tauriWindow.isVisible(),
+    )
+      .then((stop) => {
+        if (cancelled) stop();
+        else stopVisibility = stop;
+      })
+      .catch((e) => logger.debug("visibility", `popover visibility tracking failed: ${e}`));
 
     // Create the resize orchestrator (all resize state lives in its closure)
     let persistedWindowHeight = 0;
@@ -598,12 +622,14 @@
       },
       onFocus: () => {
         logResizeDebug("window:focus", {});
+        // A focused window is on screen; the show's own event usually said so
+        // first. Showing runs the one refetch publishes queued while hidden.
+        popoverVisible.set(true);
         void syncNativeWindowSurface().catch((e) => logger.debug("appearance", `syncNativeWindowSurface failed: ${e}`));
         scheduleWindowGeometryRecalibration("window-focus", 0);
         syncSizeAndVerify("window-focus");
-        // Refresh silently — never drop the live view back to the spinner.
-        fetchData(provider, period, offset, { silent: true });
-        if (period === "5h") fetchRateLimits(backendScope(provider));
+        // With the refresh interval Off, a look at older data refreshes it.
+        invoke("refresh_on_focus").catch(() => {});
       },
       onBlur: () => {
         logResizeDebug("window:blur", {});
@@ -651,6 +677,20 @@
     const init = async () => {
       await resizeOrch!.refreshWindowMetrics();
       applyMonitorMetricsToView();
+
+      // Warm-ups wait for the first publish: the backend's first refresh
+      // drops what it computed before, so one sent earlier would run twice.
+      // Listening before bootstrap lets the loop start, so none is missed.
+      holdWarmupsUntilPublish();
+      try {
+        unlistenPublish = await listen("data-updated", () => notePublish());
+      } catch {
+        notePublish();
+      }
+      if (cancelled) {
+        unlistenPublish?.();
+        return;
+      }
 
       // Load persisted settings and apply theme + defaults (non-blocking)
       try {
@@ -748,18 +788,26 @@
         resizeOrch?.markInitialContentReady();
       }
 
+      // Silent background refresh — the backend just recomputed. Clearing
+      // the cache + cold-fetching here re-showed the loading spinner over
+      // live data every ~120s; keep the view and swap in fresh numbers.
+      // While the popover is hidden, a publish refetches every 5 min at most
+      // (the view is a memory hit by then), so a show paints recent numbers at
+      // the right height; the rest wait for the next show.
+      viewRefresh = refreshWhenVisible(() => {
+        fetchData(provider, period, offset, { silent: true });
+        if (period === "5h") fetchRateLimits(backendScope(provider));
+      }, 5 * 60_000);
       unlisten = await listen("data-updated", () => {
         logResizeDebug("app:data-updated-event", {
           provider,
           period,
           offset,
         });
-        // Silent background refresh — the backend just recomputed. Clearing
-        // the cache + cold-fetching here re-showed the loading spinner over
-        // live data every ~120s; keep the view and swap in fresh numbers.
-        fetchData(provider, period, offset, { silent: true });
-        if (period === "5h") fetchRateLimits(backendScope(provider));
+        viewRefresh?.request();
       });
+      // A publish may have come before this listener: catch it up too.
+      viewRefresh.request();
 
       unlistenWindowResize = await tauriWindow.onResized(({ payload }) => {
         const resizedWidth = Math.round(payload.width);
@@ -796,6 +844,9 @@
     return () => {
       cancelled = true;
       unlisten?.();
+      unlistenPublish?.();
+      stopVisibility?.();
+      viewRefresh?.stop();
       unlistenWindowResize?.();
       const docEl = document.documentElement;
       if (onViewportPointerEnter) docEl.removeEventListener("mouseenter", onViewportPointerEnter);
@@ -900,7 +951,7 @@
 
           {#if period === "5h"}
             {#if $settings.rateLimitsEnabled && visibleUsableRateLimitProviders.length > 0}
-              {#each visibleUsableRateLimitProviders as rateLimitProvider, index}
+              {#each visibleUsableRateLimitProviders as rateLimitProvider, index (rateLimitProvider)}
                 <UsageBars
                   providerLabel={provider === ALL_USAGE_PROVIDER_ID ? getUsageProviderLabel(rateLimitProvider) : undefined}
                   rateLimits={providerPayload(rateLimits, rateLimitProvider)!}
@@ -1114,7 +1165,7 @@
     margin-bottom: 10px;
   }
   .loading-text {
-    font: 400 10px/1 'Inter', sans-serif;
+    font: 400 10px/1 system-ui, sans-serif;
     color: var(--t3);
   }
   .loading-bars {
@@ -1148,20 +1199,20 @@
     background: #d88d31;
   }
   .rl-stale-headline {
-    font: 500 10px/1 'Inter', sans-serif;
+    font: 500 10px/1 system-ui, sans-serif;
     color: var(--t2);
   }
   .rl-stale-body {
-    font: 400 9px/1.4 'Inter', sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     color: var(--t3);
     padding-left: 12px;
   }
   .rate-limit-empty-title {
-    font: 500 11px/1 'Inter', sans-serif;
+    font: 500 11px/1 system-ui, sans-serif;
     color: var(--t1);
   }
   .rate-limit-empty-text {
-    font: 400 9px/1.4 'Inter', sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     color: var(--t3);
   }
   .usage-warning {
@@ -1181,7 +1232,7 @@
     margin-bottom: 0;
   }
   .usage-warning-title {
-    font: 600 9px/1.2 'Inter', sans-serif;
+    font: 600 9px/1.2 system-ui, sans-serif;
     color: var(--t1);
   }
   .usage-warning-dismiss {
@@ -1205,7 +1256,7 @@
     background: var(--surface-hover);
   }
   .usage-warning-text {
-    font: 400 8.5px/1.35 'Inter', sans-serif;
+    font: 400 8.5px/1.35 system-ui, sans-serif;
     color: var(--t2);
   }
   .usage-warning-retry {
@@ -1215,7 +1266,7 @@
     border-radius: 5px;
     background: transparent;
     color: var(--t1);
-    font: 500 9px/1 'Inter', sans-serif;
+    font: 500 9px/1 system-ui, sans-serif;
     cursor: pointer;
   }
   .usage-warning-retry:hover {
@@ -1229,7 +1280,7 @@
     border-radius: 6px;
     background: var(--accent, #6366f1);
     color: white;
-    font: 500 10px/1 'Inter', sans-serif;
+    font: 500 10px/1 system-ui, sans-serif;
     cursor: pointer;
     transition: filter var(--t-fast) ease;
   }
@@ -1252,7 +1303,7 @@
     border-radius: 999px;
     background: var(--accent-soft, rgba(255,255,255,0.06));
     color: var(--accent, var(--t1));
-    font: 500 10px/1 'Inter', sans-serif;
+    font: 500 10px/1 system-ui, sans-serif;
     letter-spacing: .15px;
     cursor: pointer;
     transition: background var(--t-fast) ease, transform var(--t-fast) ease,
@@ -1305,7 +1356,7 @@
     gap: 6px;
     text-align: center;
     color: var(--t3);
-    font: 400 10px/1 'Inter', sans-serif;
+    font: 400 10px/1 system-ui, sans-serif;
     padding: 32px 0;
   }
 
@@ -1337,11 +1388,11 @@
     margin-bottom: 6px;
   }
   .empty-title {
-    font: 600 11px/1 'Inter', sans-serif;
+    font: 600 11px/1 system-ui, sans-serif;
     color: var(--t2);
   }
   .empty-subtitle {
-    font: 400 10px/1.4 'Inter', sans-serif;
+    font: 400 10px/1.4 system-ui, sans-serif;
     color: var(--t3);
     max-width: 220px;
   }

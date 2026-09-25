@@ -1,4 +1,4 @@
-use super::usage_query::{get_provider_data, spawn_cursor_remote_fetch_if_needed};
+use super::usage_query::get_provider_data;
 use super::AppState;
 use crate::models::*;
 use crate::usage::integrations::UsageIntegrationId;
@@ -269,13 +269,17 @@ fn merge_tray_utilization(current: TrayUtilization, patch: TrayUtilization) -> T
     }
 }
 
-fn current_daily_total_cost(state: &AppState) -> f64 {
-    let enabled = state
+/// The integrations the menu-bar cost sums (Settings → Header Tabs).
+pub(crate) fn enabled_integrations(state: &AppState) -> Vec<UsageIntegrationId> {
+    state
         .enabled_integrations
         .read()
         .map(|ids| ids.clone())
-        .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
-    enabled
+        .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+}
+
+fn current_daily_total_cost(state: &AppState) -> f64 {
+    enabled_integrations(state)
         .iter()
         .map(|integration_id| {
             get_provider_data(&state.parser, integration_id.as_str(), "day", 0)
@@ -313,7 +317,18 @@ fn resolve_tray_daily_cost_display(
     (computed, Some(computed))
 }
 
-fn current_daily_total_cost_if_allowed(state: &AppState) -> f64 {
+/// Whether the day cost may still lack Cursor's remote data. Only a cost
+/// Cursor counts toward can: with the Cursor tab off nothing refreshes that
+/// data, and a holdover would pin the cost at its high-water mark (after
+/// midnight, yesterday's total).
+fn cursor_remote_pending(
+    enabled: &[UsageIntegrationId],
+    needs_fetch: impl FnOnce() -> bool,
+) -> bool {
+    enabled.contains(&UsageIntegrationId::Cursor) && needs_fetch()
+}
+
+pub(crate) fn current_daily_total_cost_if_allowed(state: &AppState) -> f64 {
     let last = state
         .last_tray_daily_cost
         .lock()
@@ -327,21 +342,15 @@ fn current_daily_total_cost_if_allowed(state: &AppState) -> f64 {
         } else {
             0.0
         },
-        state.parser.needs_cursor_remote_fetch(Some(today)),
+        cursor_remote_pending(&enabled_integrations(state), || {
+            state.parser.needs_cursor_remote_fetch(Some(today))
+        }),
         last,
     );
     if let Ok(mut guard) = state.last_tray_daily_cost.lock() {
         *guard = next_last;
     }
     display
-}
-
-fn ensure_tray_cursor_remote_fresh(app: &tauri::AppHandle, state: &AppState) {
-    if !state.usage_access_enabled() {
-        return;
-    }
-    let today = Local::now().date_naive();
-    spawn_cursor_remote_fetch_if_needed(app, state, Some(today));
 }
 
 fn should_update_tray_icon(config: &TrayConfig, utilization: TrayUtilization) -> bool {
@@ -456,10 +465,15 @@ fn apply_tray_presentation_on_main_thread(
     let title = format_tray_title(config, total_cost, utilization);
 
     if let Some(tray) = app.tray_by_id("main-tray") {
+        let mut shown = TRAY_SHOWN.lock().unwrap_or_else(|e| e.into_inner());
         // macOS: set_title() shows text beside the icon in the menu bar.
         // Windows/Linux: set_title() is a noop, but set_tooltip() works cross-platform.
-        let _ = tray.set_title(Some(&title));
-        let _ = tray.set_tooltip(Some(&format!("TokenMonitor: {title}")));
+        apply_if_changed(&mut shown.title, title, |title| {
+            tray.set_title(Some(title)).is_ok()
+                && tray
+                    .set_tooltip(Some(&format!("TokenMonitor: {title}")))
+                    .is_ok()
+        });
 
         if should_update_tray_icon(config, utilization) {
             let base_icon = include_bytes!("../../icons/tray-icon@2x.rgba");
@@ -479,13 +493,37 @@ fn apply_tray_presentation_on_main_thread(
             );
             let expected_size = (w * h * 4) as usize;
             if icon_buf.len() == expected_size {
-                let icon = tauri::image::Image::new_owned(icon_buf, w, h);
-                let _ = tray.set_icon(Some(icon));
-                let _ = tray.set_icon_as_template(use_template);
+                apply_if_changed(&mut shown.icon, (icon_buf, w, use_template), |icon| {
+                    let image = tauri::image::Image::new_owned(icon.0.clone(), w, h);
+                    tray.set_icon(Some(image)).is_ok()
+                        && tray.set_icon_as_template(use_template).is_ok()
+                });
             }
         }
     }
 }
+
+/// Run `apply` unless `shown` already holds `next`; keep `next` only when
+/// `apply` worked, so a failed call is retried by the next paint.
+fn apply_if_changed<T: PartialEq>(shown: &mut Option<T>, next: T, apply: impl FnOnce(&T) -> bool) {
+    if shown.as_ref() != Some(&next) {
+        *shown = apply(&next).then_some(next);
+    }
+}
+
+/// What the tray last showed. A publish that changes neither skips the
+/// platform calls: on Windows each one is a `Shell_NotifyIcon` round trip into
+/// explorer.exe, and `set_icon` also builds a new HICON. The icon is keyed by
+/// its rendered pixels, so every input (bars, dark bar, update badge) counts.
+struct TrayShown {
+    title: Option<String>,
+    icon: Option<(Vec<u8>, u32, bool)>,
+}
+
+static TRAY_SHOWN: std::sync::Mutex<TrayShown> = std::sync::Mutex::new(TrayShown {
+    title: None,
+    icon: None,
+});
 
 fn emit_status_widget_updated(app: &tauri::AppHandle) {
     let _ = app.emit("status-widget-updated", ());
@@ -510,26 +548,33 @@ async fn current_tray_utilization(state: &AppState) -> TrayUtilization {
     tray_utilization_from_rate_limits(cached.as_ref())
 }
 
+/// Repaint the tray from the published cost and tell the float ball.
 pub(crate) async fn apply_tray_title_now(app: &tauri::AppHandle, state: &AppState) {
+    let total_cost = crate::refresh::tray_cost(state).await;
+    paint_tray(app, state, total_cost).await;
+}
+
+async fn paint_tray(app: &tauri::AppHandle, state: &AppState, total_cost: f64) {
+    paint_tray_quietly(app, state, total_cost).await;
+    emit_status_widget_updated(app);
+}
+
+/// Paint `total_cost` with the current bars and update badge, without telling
+/// the float ball: the refresh cycle's `data-updated` does that.
+pub(crate) async fn paint_tray_quietly(app: &tauri::AppHandle, state: &AppState, total_cost: f64) {
     let config = state.tray_config.read().await.clone();
-    let total_cost = current_daily_total_cost_if_allowed(state);
     let utilization = current_tray_utilization(state).await;
     let update_available = {
         let guard = state.updater.read().await;
         guard.should_show_banner()
     };
     apply_tray_presentation(app, &config, total_cost, utilization, update_available);
-    emit_status_widget_updated(app);
 }
 
+/// Recompute the day cost, publish it and repaint.
 pub async fn sync_tray_title(app: &tauri::AppHandle, state: &AppState) {
-    ensure_tray_cursor_remote_fresh(app, state);
-    apply_tray_title_now(app, state).await;
-}
-
-/// Refresh the tray title after a Cursor remote fetch without spawning another fetch.
-pub async fn refresh_tray_title_after_cursor_fetch(app: &tauri::AppHandle, state: &AppState) {
-    apply_tray_title_now(app, state).await;
+    let total_cost = crate::refresh::recompute_tray_cost(state).await;
+    paint_tray(app, state, total_cost).await;
 }
 
 #[tauri::command]
@@ -564,11 +609,10 @@ pub async fn set_tray_config(
         let guard = state.updater.read().await;
         guard.should_show_banner()
     };
-    ensure_tray_cursor_remote_fresh(&app, &state);
     apply_tray_presentation(
         &app,
         &config,
-        current_daily_total_cost_if_allowed(&state),
+        crate::refresh::tray_cost(&state).await,
         utilization,
         update_available,
     );
@@ -600,34 +644,58 @@ pub(crate) fn parse_enabled_integrations(
 }
 
 /// Mirror of Settings → Header Tabs: only these integrations count toward
-/// the menu-bar cost. Resyncs the tray title immediately.
+/// the menu-bar cost, so a change recomputes the published cost straight
+/// away. The same set (every launch) leaves it alone. In the background:
+/// bootstrap waits for this before the first refresh, and a compute at
+/// launch is cold.
 #[tauri::command]
 pub async fn set_enabled_integrations(
     ids: Vec<String>,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    use tauri::Manager;
     let parsed = parse_enabled_integrations(&ids)?;
-    {
+    if apply_enabled_integrations(&state, parsed) {
+        tauri::async_runtime::spawn(async move {
+            sync_tray_title(&app, &app.state::<AppState>()).await;
+        });
+    }
+    Ok(())
+}
+
+/// Store the enabled integrations; returns whether they changed. A change
+/// requests a refresh: one just switched on has not been probed, nor its
+/// Cursor data refreshed, and the refresh publishes every surface from the
+/// new set together.
+fn apply_enabled_integrations(state: &AppState, enabled: Vec<UsageIntegrationId>) -> bool {
+    let changed = {
         let mut current = state
             .enabled_integrations
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *current = parsed;
+        let previous = std::mem::replace(&mut *current, enabled);
+        previous != *current
+    };
+    if changed {
+        crate::refresh::request_refresh(state);
     }
-    sync_tray_title(&app, &state).await;
-    Ok(())
+    changed
 }
 
 #[tauri::command]
 pub async fn get_status_widget_summary(
     state: tauri::State<'_, AppState>,
 ) -> Result<StatusWidgetSummary, String> {
-    let config = state.tray_config.read().await.clone();
-    let utilization = current_tray_utilization(&state).await;
-    let total_cost = current_daily_total_cost_if_allowed(&state);
+    Ok(status_widget_summary(&state).await)
+}
 
-    Ok(StatusWidgetSummary {
+async fn status_widget_summary(state: &AppState) -> StatusWidgetSummary {
+    let config = state.tray_config.read().await.clone();
+    let utilization = current_tray_utilization(state).await;
+    let total_cost = crate::refresh::tray_cost(state).await;
+
+    StatusWidgetSummary {
         title: format_tray_title(&config, total_cost, utilization),
         cost_text: crate::usage::money::format_compact(total_cost),
         config,
@@ -636,7 +704,7 @@ pub async fn get_status_widget_summary(
         codex_util: utilization.codex,
         cursor_util: utilization.cursor,
         kimi_util: utilization.kimi,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -647,6 +715,30 @@ pub(crate) fn current_daily_total_cost_for_test(state: &AppState) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_to_the_enabled_integrations_requests_a_refresh() {
+        use std::sync::atomic::Ordering;
+        let state = AppState::new();
+        let requested = || state.refresh.requested.swap(false, Ordering::SeqCst);
+        let all = crate::usage::integrations::all_usage_integrations().to_vec();
+        assert!(!apply_enabled_integrations(&state, all));
+        assert!(
+            !requested(),
+            "the same set: nothing to refresh or recompute"
+        );
+
+        assert!(apply_enabled_integrations(
+            &state,
+            vec![UsageIntegrationId::Claude]
+        ));
+        assert!(requested(), "one switched off");
+        apply_enabled_integrations(
+            &state,
+            vec![UsageIntegrationId::Claude, UsageIntegrationId::Kimi],
+        );
+        assert!(requested(), "one switched on: probe it now");
+    }
 
     #[test]
     fn tray_cost_holdover_keeps_last_while_cursor_remote_pending() {
@@ -682,6 +774,21 @@ mod tests {
         let (display, next) = resolve_tray_daily_cost_display(false, 0.0, true, Some(12.34));
         assert_eq!(display, 0.0);
         assert_eq!(next, None);
+    }
+
+    #[test]
+    fn tray_cost_is_not_held_over_when_cursor_does_not_count() {
+        // Cursor's remote cache is stale, but with the Cursor tab off nothing
+        // refreshes it: after midnight the lower cost must show at once.
+        use UsageIntegrationId::{Claude, Cursor};
+        let pending = cursor_remote_pending(&[Claude], || true);
+        let (display, next) = resolve_tray_daily_cost_display(true, 3.0, pending, Some(47.0));
+        assert_eq!(display, 3.0);
+        assert_eq!(next, Some(3.0));
+        assert!(
+            cursor_remote_pending(&[Claude, Cursor], || true),
+            "guard: with Cursor counted, the holdover still applies"
+        );
     }
 
     fn utils(claude: Option<f64>, codex: Option<f64>, cursor: Option<f64>) -> TrayUtilization {
@@ -875,12 +982,12 @@ mod tests {
             claude: Some(ProviderRateLimits {
                 provider: "claude".to_string(),
                 plan_tier: Some("Max 5x".to_string()),
-                windows: vec![RateLimitWindow {
-                    window_id: "five_hour".to_string(),
-                    label: "Session (5hr)".to_string(),
-                    utilization: 72.0,
-                    resets_at: None,
-                }],
+                windows: vec![RateLimitWindow::new(
+                    "five_hour".to_string(),
+                    "Session (5hr)".to_string(),
+                    72.0,
+                    None,
+                )],
                 extra_usage: None,
                 credits: None,
                 stale: false,
@@ -892,12 +999,12 @@ mod tests {
             codex: Some(ProviderRateLimits {
                 provider: "codex".to_string(),
                 plan_tier: Some("Pro".to_string()),
-                windows: vec![RateLimitWindow {
-                    window_id: "primary".to_string(),
-                    label: "Session (5hr)".to_string(),
-                    utilization: 35.0,
-                    resets_at: None,
-                }],
+                windows: vec![RateLimitWindow::new(
+                    "primary".to_string(),
+                    "Session (5hr)".to_string(),
+                    35.0,
+                    None,
+                )],
                 extra_usage: None,
                 credits: None,
                 stale: false,
@@ -919,6 +1026,23 @@ mod tests {
                 kimi: None,
             }
         );
+    }
+
+    #[test]
+    fn an_unchanged_tray_value_is_not_reapplied_and_a_failed_one_is_retried() {
+        let mut shown = None;
+        let mut calls = 0;
+        let mut paint = |next: &'static str, works: bool| {
+            apply_if_changed(&mut shown, next, |_| {
+                calls += 1;
+                works
+            })
+        };
+        paint("$1.00", true);
+        paint("$1.00", true);
+        paint("$2.00", false);
+        paint("$2.00", true);
+        assert_eq!(calls, 3);
     }
 
     #[test]
@@ -963,12 +1087,12 @@ mod tests {
     }
 
     fn make_window(window_id: &str, utilization: f64, resets_at: Option<&str>) -> RateLimitWindow {
-        RateLimitWindow {
-            window_id: window_id.to_string(),
-            label: window_id.to_string(),
+        RateLimitWindow::new(
+            window_id.to_string(),
+            window_id.to_string(),
             utilization,
-            resets_at: resets_at.map(|s| s.to_string()),
-        }
+            resets_at.map(|s| s.to_string()),
+        )
     }
 
     #[test]
@@ -1126,5 +1250,56 @@ mod tests {
 
         *state.enabled_integrations.write().unwrap() = vec![UsageIntegrationId::Claude];
         assert!((current_daily_total_cost(&state) - claude_only).abs() < 1e-9);
+    }
+
+    /// A state whose Claude logs price today's usage above zero.
+    fn claude_day_fixture() -> (AppState, tempfile::TempDir, tempfile::TempDir) {
+        use crate::usage::parser::UsageParser;
+        use std::sync::Arc;
+
+        let claude_dir = tempfile::TempDir::new().unwrap();
+        let codex_dir = tempfile::TempDir::new().unwrap();
+        let ts = chrono::Local::now().to_rfc3339();
+        std::fs::write(
+            claude_dir.path().join("session.jsonl"),
+            format!(
+                r#"{{"type":"assistant","timestamp":"{ts}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":1000,"output_tokens":500}},"stop_reason":"end_turn"}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let mut state = AppState::new();
+        state.parser = Arc::new(UsageParser::with_dirs(
+            claude_dir.path().to_path_buf(),
+            codex_dir.path().to_path_buf(),
+        ));
+        state
+            .usage_access_enabled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        *state.enabled_integrations.write().unwrap() = vec![UsageIntegrationId::Claude];
+        (state, claude_dir, codex_dir)
+    }
+
+    /// The float ball shows the published cost, not a fresh compute, so it
+    /// agrees with the tray until the next refresh publishes a new one.
+    #[tokio::test]
+    async fn summary_reads_published_tray_cost() {
+        let (state, _claude_dir, _codex_dir) = claude_day_fixture();
+        let computed = current_daily_total_cost(&state);
+        assert!(computed > 0.0, "fixture must produce Claude cost today");
+        assert_ne!(computed, 12.34, "fixture must price differently");
+
+        *state.refresh.tray_cost.lock().unwrap() = Some(12.34);
+        assert_eq!(status_widget_summary(&state).await.total_cost, 12.34);
+    }
+
+    /// Before the first publish, the first reader computes the cost and
+    /// publishes it, so the menu bar never starts at `$0`.
+    #[tokio::test]
+    async fn unpublished_tray_cost_is_computed_and_stored() {
+        let (state, _claude_dir, _codex_dir) = claude_day_fixture();
+        let cost = crate::refresh::tray_cost(&state).await;
+        assert!(cost > 0.0, "fixture must produce Claude cost today");
+        assert_eq!(*state.refresh.tray_cost.lock().unwrap(), Some(cost));
     }
 }

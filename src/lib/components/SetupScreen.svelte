@@ -22,12 +22,12 @@
     opacity: 0.5;
   }
   .setup-title {
-    font: 600 13px/1 'Inter', sans-serif;
+    font: 600 13px/1 system-ui, sans-serif;
     color: var(--t1);
     margin-bottom: 8px;
   }
   .setup-text {
-    font: 400 11px/1.4 'Inter', sans-serif;
+    font: 400 11px/1.4 system-ui, sans-serif;
     color: var(--t3);
     max-width: 240px;
   }

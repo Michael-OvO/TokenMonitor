@@ -69,7 +69,7 @@
   .label {
     background: none;
     border: none;
-    font: 500 10px/1 'Inter', sans-serif;
+    font: 500 10px/1 system-ui, sans-serif;
     color: var(--t1);
     letter-spacing: 0.2px;
     cursor: default;

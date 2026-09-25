@@ -39,7 +39,7 @@
   }
   .seg-btn {
     padding: 3px 7px;
-    font: 500 8px/1 'Inter', sans-serif;
+    font: 500 8px/1 system-ui, sans-serif;
     color: var(--t3);
     background: transparent;
     border: none;

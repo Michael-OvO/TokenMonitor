@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Archived hourly aggregate record
@@ -140,7 +141,7 @@ pub struct ImportSourceStats {
 
 const STATE_VERSION: u32 = 1;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct ArchiveState {
     version: u32,
     /// Maps source key → last archived hour as "YYYY-MM-DDTHH"
@@ -208,39 +209,110 @@ impl ArchiveState {
 // ArchiveManager
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Last scanned (date, hour, source stamp) per source key.
+type ScanAttempts = HashMap<String, (NaiveDate, u8, u64)>;
+
+/// A peer export file's mtime at its merge, by file name.
+pub type MergedPeerFiles = HashMap<String, Option<std::time::SystemTime>>;
+
+/// `.merged-peers.json`: the sync folder the peer files were merged from.
+#[derive(Serialize, Deserialize)]
+struct MergedPeers {
+    folder: String,
+    files: MergedPeerFiles,
+}
+
 #[derive(Clone)]
 pub struct ArchiveManager {
     base_dir: PathBuf,
+    /// Shared by clones, since `UsageParser::archive()` hands out copies.
+    attempts: Arc<Mutex<ScanAttempts>>,
+    /// `.archive-state.json` as last read or saved, shared by clones: every
+    /// view compute reads a frontier per device, several times over.
+    state: Arc<Mutex<Option<ArchiveState>>>,
 }
 
 impl ArchiveManager {
     pub fn new(app_data_dir: &Path) -> Self {
         Self {
             base_dir: app_data_dir.join("usage-archive"),
+            attempts: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::default(),
         }
+    }
+
+    /// Returns true at most once per (date, hour, stamp) for a source. A frontier
+    /// with no entries in the previous hour never becomes "up to date", so without
+    /// this every tick would reload the source's full history for nothing.
+    /// `stamp` identifies the source's content (0 when the caller has none).
+    pub fn should_scan(&self, source: &str, date: NaiveDate, hour: u8, stamp: u64) -> bool {
+        let mut attempts = self.attempts.lock().unwrap();
+        if attempts.get(source) == Some(&(date, hour, stamp)) {
+            return false;
+        }
+        attempts.insert(source.to_string(), (date, hour, stamp));
+        true
     }
 
     fn state_path(&self) -> PathBuf {
         self.base_dir.join(".archive-state.json")
     }
 
+    /// Read the state, from the file only the first time: `save_state` keeps
+    /// the copy in memory in step with it.
+    fn read_state<T>(&self, read: impl FnOnce(&ArchiveState) -> T) -> T {
+        let mut cached = self.state.lock().unwrap();
+        read(
+            cached.get_or_insert_with(|| match fs::read_to_string(self.state_path()) {
+                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                Err(_) => ArchiveState::default(),
+            }),
+        )
+    }
+
     fn load_state(&self) -> ArchiveState {
-        match fs::read_to_string(self.state_path()) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => ArchiveState::default(),
-        }
+        self.read_state(ArchiveState::clone)
     }
 
     fn save_state(&self, state: &ArchiveState) {
-        if let Err(e) = atomic_write_json(&self.state_path(), state) {
+        let saved = atomic_write_json(&self.state_path(), state);
+        if let Err(e) = &saved {
             tracing::warn!("Failed to save archive state: {e}");
         }
+        // A failed write left the file as it was: read that again.
+        *self.state.lock().unwrap() = saved.is_ok().then(|| state.clone());
     }
 
     /// Get the archive frontier (inclusive) for a source.
     /// Returns None if no data has been archived for this source.
     pub fn frontier(&self, source_key: &str) -> Option<ArchiveFrontier> {
-        self.load_state().get_frontier(source_key)
+        self.read_state(|state| state.get_frontier(source_key))
+    }
+
+    fn merged_peers_path(&self) -> PathBuf {
+        self.base_dir.join(".merged-peers.json")
+    }
+
+    /// The mtime each peer export file in the sync `folder` had when it was
+    /// merged into this archive, by file name. Kept with the archive, so a
+    /// reset forgets it too; empty after a change of folder.
+    pub fn merged_peers(&self, folder: &str) -> MergedPeerFiles {
+        fs::read_to_string(self.merged_peers_path())
+            .ok()
+            .and_then(|content| serde_json::from_str::<MergedPeers>(&content).ok())
+            .filter(|merged| merged.folder == folder)
+            .map(|merged| merged.files)
+            .unwrap_or_default()
+    }
+
+    pub fn save_merged_peers(&self, folder: &str, files: &MergedPeerFiles) {
+        let merged = MergedPeers {
+            folder: folder.to_string(),
+            files: files.clone(),
+        };
+        if let Err(e) = atomic_write_json(&self.merged_peers_path(), &merged) {
+            tracing::warn!("Failed to save the merged peer files: {e}");
+        }
     }
 
     /// Archive completed hours from parsed entries.
@@ -559,11 +631,13 @@ impl ArchiveManager {
     /// - `"local:codex"` → `usage-archive/local/codex/`
     /// - `"device:{alias}"` → `usage-archive/devices/{alias}/`
     pub fn reset(&self) {
+        self.attempts.lock().unwrap().clear();
         if self.base_dir.exists() {
             if let Err(e) = fs::remove_dir_all(&self.base_dir) {
                 tracing::warn!("Failed to remove archive dir {:?}: {e}", self.base_dir);
             }
         }
+        *self.state.lock().unwrap() = None;
     }
 
     // ── Export / import ──
@@ -1177,6 +1251,19 @@ mod tests {
     }
 
     #[test]
+    fn reset_forgets_the_frontier_it_kept_in_memory() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let entries = vec![make_entry("2026-04-11", 10, "claude-sonnet-4-6", 1, 1)];
+        let today = NaiveDate::from_ymd_opt(2026, 4, 11).unwrap();
+        mgr.archive_completed_hours(&entries, "local:claude", "claude", today, 14);
+        assert!(mgr.clone().frontier("local:claude").is_some());
+
+        mgr.reset();
+        assert_eq!(mgr.frontier("local:claude"), None);
+    }
+
+    #[test]
     fn does_not_advance_frontier_when_append_fails() {
         let tmp = TempDir::new().unwrap();
         let mgr = ArchiveManager::new(tmp.path());
@@ -1277,6 +1364,28 @@ mod tests {
         };
         // Frontier is a day ahead → up to date.
         assert!(f.is_up_to_date(NaiveDate::from_ymd_opt(2026, 4, 11).unwrap(), 14));
+    }
+
+    #[test]
+    fn should_scan_once_per_hour_and_stamp() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let date = NaiveDate::from_ymd_opt(2026, 4, 11).unwrap();
+
+        assert!(mgr.should_scan("local:claude", date, 14, 0));
+        assert!(!mgr.should_scan("local:claude", date, 14, 0));
+        // Clones (parser.archive() hands out copies) share the memo.
+        assert!(!mgr.clone().should_scan("local:claude", date, 14, 0));
+        // Sources are tracked independently.
+        assert!(mgr.should_scan("local:codex", date, 14, 0));
+
+        // Next hour, or a changed source file, scans again.
+        assert!(mgr.should_scan("local:claude", date, 15, 0));
+        assert!(mgr.should_scan("local:claude", date, 15, 42));
+        assert!(!mgr.should_scan("local:claude", date, 15, 42));
+
+        mgr.reset();
+        assert!(mgr.should_scan("local:claude", date, 15, 42));
     }
 
     #[test]

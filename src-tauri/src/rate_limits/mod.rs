@@ -10,8 +10,10 @@ use crate::models::RateLimitWindow;
 use crate::models::{ProviderRateLimits, RateLimitsPayload};
 use crate::statusline;
 use crate::usage::integrations::UsageIntegrationId;
+use crate::usage::parser::cursor_idle_backoff;
 use chrono::{DateTime, Duration, Utc};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) fn command_in_path(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -77,11 +79,15 @@ const STATUSLINE_FRESHNESS: Duration = Duration::minutes(10);
 /// Returns `None` if the statusline is not installed, has no events, or the
 /// most recent event is older than `STATUSLINE_FRESHNESS`.
 fn fetch_claude_from_statusline() -> Option<ProviderRateLimits> {
-    let session = statusline::source::latest_active_session(&statusline::events_file())
-        .ok()
-        .flatten()?;
+    let now = Utc::now();
+    let session = statusline::source::latest_active_session(
+        &statusline::events_file(),
+        now - STATUSLINE_FRESHNESS,
+    )
+    .ok()
+    .flatten()?;
 
-    if !session.is_fresh(STATUSLINE_FRESHNESS, Utc::now()) {
+    if !session.is_fresh(STATUSLINE_FRESHNESS, now) {
         return None;
     }
 
@@ -118,7 +124,7 @@ fn fetch_claude_from_statusline() -> Option<ProviderRateLimits> {
 }
 
 use claude::fetch_claude_rate_limits;
-use codex::extract_codex_rate_limits;
+use codex::{codex_log_reading, extract_codex_rate_limits};
 use codex_cli::fetch_codex_rate_limits_via_cli;
 use cursor::fetch_cursor_rate_limits;
 use http::{
@@ -133,10 +139,29 @@ use kimi::fetch_kimi_rate_limits;
 const CLAUDE_MIN_REFETCH_SECS: i64 = 300;
 const CODEX_MIN_REFETCH_SECS: i64 = 300;
 const KIMI_MIN_REFETCH_SECS: i64 = 300;
-/// Cursor's probe is the dearest of the four (a `sqlite3` spawn to read the
-/// IDE's token, then an HTTPS round trip), and until it had this gate it ran
-/// on every statusline event, several times a minute while Claude Code works.
+/// Cursor's probe is an HTTPS round trip (plus a `sqlite3` spawn to re-read
+/// the IDE's token when its state DB changed), and until it had this gate it
+/// ran on every statusline event, several times a minute while Claude Code works.
 const CURSOR_MIN_REFETCH_SECS: i64 = 300;
+/// Cursor's floor in use: [`CURSOR_MIN_REFETCH_SECS`], doubled by each probe
+/// whose meters had not moved (see `cursor_idle_backoff`), and back to the
+/// base on Cursor activity ([`reset_cursor_refetch_floor`]).
+static CURSOR_REFETCH_SECS: AtomicU64 = AtomicU64::new(CURSOR_MIN_REFETCH_SECS as u64);
+/// Bound on every rate-limit HTTP call, so a stalled connection cannot hold
+/// a refresh open indefinitely.
+const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Cursor may be in use: probe its meters on the base floor again.
+pub(crate) fn reset_cursor_refetch_floor() {
+    CURSOR_REFETCH_SECS.store(CURSOR_MIN_REFETCH_SECS as u64, Ordering::Relaxed);
+}
+
+/// Whether a reading shows the same meters as `cached`.
+fn same_meters(fresh: &ProviderRateLimits, cached: Option<&ProviderRateLimits>) -> bool {
+    let meters =
+        |rl: &ProviderRateLimits| serde_json::to_value((&rl.windows, &rl.extra_usage)).ok();
+    cached.is_some_and(|cached| meters(fresh) == meters(cached))
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct RateLimitFetchError {
@@ -198,16 +223,60 @@ impl RateLimitSelection {
     }
 }
 
+/// Seconds taken off a provider's refetch floor, so a reading from one
+/// refresh tick has expired by the next tick of the same length instead of
+/// being a few seconds short of it and skipping that tick.
+const PROBE_SLACK_SECS: i64 = 15;
+/// How long an error-only payload holds off the next probe, so a broken
+/// provider is retried soon but cannot spawn a process on every refresh.
+const ERROR_RETRY_SECS: i64 = 120;
+
 /// Returns `true` when the cached provider data was fetched recently enough
-/// that we should skip a new probe.  Only considers data with at least one
-/// usable window — error-only payloads are never treated as fresh so we
-/// retry immediately instead of showing "No rate limit data".
-fn is_fresh(cached: Option<&ProviderRateLimits>, min_age_secs: i64, now: DateTime<Utc>) -> bool {
+/// that we should skip a new probe. A reading with windows stays fresh for
+/// its floor less [`PROBE_SLACK_SECS`]; an error-only payload for
+/// [`ERROR_RETRY_SECS`]. An explicit user retry (`retry_errors`) probes a
+/// provider whose last probe failed at once, even when the failure kept the
+/// previous reading's windows.
+fn is_fresh(
+    cached: Option<&ProviderRateLimits>,
+    min_age_secs: i64,
+    now: DateTime<Utc>,
+    retry_errors: bool,
+) -> bool {
     cached
-        .filter(|rl| !rl.windows.is_empty())
-        .and_then(|rl| DateTime::parse_from_rfc3339(&rl.fetched_at).ok())
-        .map(|fetched| (now - fetched.with_timezone(&Utc)).num_seconds() < min_age_secs)
+        .and_then(|rl| {
+            if retry_errors && (rl.error.is_some() || rl.windows.is_empty()) {
+                return None;
+            }
+            let max_age_secs = if rl.windows.is_empty() {
+                ERROR_RETRY_SECS
+            } else {
+                min_age_secs - PROBE_SLACK_SECS
+            };
+            let fetched = DateTime::parse_from_rfc3339(&rl.fetched_at).ok()?;
+            Some((now - fetched.with_timezone(&Utc)).num_seconds() < max_age_secs)
+        })
         .unwrap_or(false)
+}
+
+/// Whether a reading Codex logged can stand in for a probe: it has meters, was
+/// logged after the `cached` reading was taken, is no older than a probed
+/// reading still kept, and no window has reset since (a probe would show that
+/// window at zero).
+fn stands_in_for_probe(
+    logged: &ProviderRateLimits,
+    cached: Option<&ProviderRateLimits>,
+    now: DateTime<Utc>,
+) -> bool {
+    let taken = |rl: &ProviderRateLimits| DateTime::parse_from_rfc3339(&rl.fetched_at).ok();
+    let newer = match (taken(logged), cached.and_then(taken)) {
+        (Some(logged_at), Some(cached_at)) => logged_at > cached_at,
+        (logged_at, _) => logged_at.is_some(),
+    };
+    newer
+        && !logged.windows.is_empty()
+        && is_fresh(Some(logged), CODEX_MIN_REFETCH_SECS, now, false)
+        && !codex::has_reset(&logged.windows, now)
 }
 
 /// Backoff gate for the Claude *OAuth* fallback only.
@@ -253,10 +322,17 @@ pub fn merge_rate_limits(
     }
 }
 
-pub async fn fetch_selected_rate_limits(
+/// Probe the selected providers one at a time, so their CLI children never
+/// run side by side. Once `deadline` has passed, the providers not reached
+/// yet keep their cached value; a probe already under way is never cut short.
+/// `retry_errors` is for an explicit user retry: a provider whose last probe
+/// failed is probed again at once, while a good reading keeps its floor.
+pub async fn fetch_selected_rate_limits_until(
     codex_dir: &Path,
     selection: RateLimitSelection,
     cached: Option<&RateLimitsPayload>,
+    deadline: Option<std::time::Instant>,
+    retry_errors: bool,
 ) -> RateLimitsPayload {
     let codex_dir = codex_dir.to_path_buf();
 
@@ -288,7 +364,12 @@ pub async fn fetch_selected_rate_limits(
             // Shared throttle for both remaining paths. The windows we track are
             // 5h and 7d, so a 5-minute floor loses nothing visible and keeps us
             // from spawning a CLI (or spending API budget) every 2.5 min.
-            if is_fresh(cached_claude.as_ref(), CLAUDE_MIN_REFETCH_SECS, now) {
+            if is_fresh(
+                cached_claude.as_ref(),
+                CLAUDE_MIN_REFETCH_SECS,
+                now,
+                retry_errors,
+            ) {
                 return cached_claude;
             }
 
@@ -338,8 +419,22 @@ pub async fn fetch_selected_rate_limits(
         }
 
         let now = Utc::now();
-        if is_fresh(cached_codex.as_ref(), CODEX_MIN_REFETCH_SECS, now) {
+        if is_fresh(cached_codex.as_ref(), CODEX_MIN_REFETCH_SECS, now, retry_errors) {
             return cached_codex;
+        }
+
+        // Codex logs the meters the server reports after every turn: while it
+        // is used here, those stand in for a probe.
+        let since = now - Duration::seconds(CODEX_MIN_REFETCH_SECS - PROBE_SLACK_SECS);
+        let log_dir = codex_dir.clone();
+        let logged = tokio::task::spawn_blocking(move || codex_log_reading(&log_dir, since))
+            .await
+            .ok()
+            .flatten()
+            .filter(|logged| stands_in_for_probe(logged, cached_codex.as_ref(), now));
+        if logged.is_some() {
+            tracing::debug!("Codex rate limits served from its session logs");
+            return logged;
         }
 
         match fetch_codex_rate_limits_via_cli().await {
@@ -374,7 +469,8 @@ pub async fn fetch_selected_rate_limits(
             }
 
             let now = Utc::now();
-            if is_fresh(cached_cursor.as_ref(), CURSOR_MIN_REFETCH_SECS, now) {
+            let floor = CURSOR_REFETCH_SECS.load(Ordering::Relaxed);
+            if is_fresh(cached_cursor.as_ref(), floor as i64, now, retry_errors) {
                 return cached_cursor;
             }
 
@@ -385,7 +481,13 @@ pub async fn fetch_selected_rate_limits(
             }
 
             match fetch_cursor_rate_limits().await {
-                Ok(rate_limits) => Some(rate_limits),
+                Ok(rate_limits) => {
+                    let changed = !same_meters(&rate_limits, cached_cursor.as_ref());
+                    let base = CURSOR_MIN_REFETCH_SECS as u64;
+                    CURSOR_REFETCH_SECS
+                        .store(cursor_idle_backoff(floor, base, changed), Ordering::Relaxed);
+                    Some(rate_limits)
+                }
                 Err(error) => {
                     tracing::warn!(error = %error.message, "Cursor rate-limit fetch failed");
                     Some(provider_rate_limit_error("cursor", error))
@@ -404,12 +506,17 @@ pub async fn fetch_selected_rate_limits(
             }
 
             let now = Utc::now();
-            if is_fresh(cached_kimi.as_ref(), KIMI_MIN_REFETCH_SECS, now) {
+            if is_fresh(
+                cached_kimi.as_ref(),
+                KIMI_MIN_REFETCH_SECS,
+                now,
+                retry_errors,
+            ) {
                 return cached_kimi;
             }
 
-            // Honor a 429 cooldown: error payloads have no windows, so `is_fresh`
-            // never trips and we'd otherwise re-hit the API every refresh cycle.
+            // Honor a 429 cooldown: `is_fresh` holds an error payload back for
+            // only ERROR_RETRY_SECS, so a longer server cooldown needs this too.
             if let Some(rate_limits) = cached_kimi.clone() {
                 if provider_cooldown_is_active(&rate_limits, now) {
                     return Some(mark_rate_limits_stale(rate_limits));
@@ -418,6 +525,10 @@ pub async fn fetch_selected_rate_limits(
 
             match fetch_kimi_rate_limits().await {
                 Ok(rate_limits) => Some(rate_limits),
+                Err(error) if error.message == kimi::NOT_SIGNED_IN => {
+                    tracing::debug!("Kimi Code CLI is not signed in; no Kimi rate limits");
+                    Some(provider_rate_limit_error("kimi", error))
+                }
                 Err(error) => {
                     tracing::warn!(error = %error.message, "Kimi rate-limit fetch failed");
                     Some(provider_rate_limit_error("kimi", error))
@@ -428,9 +539,29 @@ pub async fn fetch_selected_rate_limits(
         (result, provider_t0.elapsed())
     };
 
-    let ((claude, claude_took), (codex, codex_took), (cursor, cursor_took), (kimi, kimi_took)) =
-        tokio::join!(claude_future, codex_future, cursor_future, kimi_future);
-    tracing::info!(
+    let past_deadline = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
+    let kept = |cached: Option<ProviderRateLimits>| (cached, std::time::Duration::ZERO);
+    let (claude, claude_took) = if past_deadline() {
+        kept(cached.and_then(|payload| payload.claude.clone()))
+    } else {
+        claude_future.await
+    };
+    let (codex, codex_took) = if past_deadline() {
+        kept(cached.and_then(|payload| payload.codex.clone()))
+    } else {
+        codex_future.await
+    };
+    let (cursor, cursor_took) = if past_deadline() {
+        kept(cached.and_then(|payload| payload.cursor.clone()))
+    } else {
+        cursor_future.await
+    };
+    let (kimi, kimi_took) = if past_deadline() {
+        kept(cached.and_then(|payload| payload.kimi.clone()))
+    } else {
+        kimi_future.await
+    };
+    tracing::debug!(
         "[PROFILE] rate-limits: selection={selection:?} claude={claude_took:?} codex={codex_took:?} cursor={cursor_took:?} kimi={kimi_took:?}"
     );
     RateLimitsPayload {
@@ -521,7 +652,7 @@ mod tests {
             &(now - Duration::seconds(60)).to_rfc3339(),
             vec![sample_window()],
         );
-        assert!(is_fresh(Some(&recent), 300, now));
+        assert!(is_fresh(Some(&recent), 300, now, false));
     }
 
     #[test]
@@ -531,12 +662,12 @@ mod tests {
             &(now - Duration::seconds(600)).to_rfc3339(),
             vec![sample_window()],
         );
-        assert!(!is_fresh(Some(&old), 300, now));
+        assert!(!is_fresh(Some(&old), 300, now, false));
     }
 
     #[test]
     fn is_fresh_returns_false_when_no_cache() {
-        assert!(!is_fresh(None, 300, Utc::now()));
+        assert!(!is_fresh(None, 300, Utc::now(), false));
     }
 
     #[test]
@@ -569,10 +700,137 @@ mod tests {
     }
 
     #[test]
-    fn is_fresh_returns_false_when_cached_has_no_windows() {
+    fn is_fresh_expires_a_reading_the_slack_before_its_floor() {
+        // A 300 s floor must re-probe on every 300 s tick, whose reading is a
+        // few seconds younger than 300 s when the next tick comes round.
         let now = Utc::now();
-        let error_only =
-            make_provider_with_windows(&(now - Duration::seconds(10)).to_rfc3339(), vec![]);
-        assert!(!is_fresh(Some(&error_only), 300, now));
+        let at = |age: i64| {
+            make_provider_with_windows(
+                &(now - Duration::seconds(age)).to_rfc3339(),
+                vec![sample_window()],
+            )
+        };
+        assert!(!is_fresh(Some(&at(290)), 300, now, false));
+        assert!(is_fresh(Some(&at(280)), 300, now, false));
+    }
+
+    #[test]
+    fn is_fresh_backs_off_an_error_only_payload() {
+        let now = Utc::now();
+        let at = |age: i64| {
+            let mut error_only =
+                make_provider_with_windows(&(now - Duration::seconds(age)).to_rfc3339(), vec![]);
+            error_only.error = Some("Claude CLI /usage probe failed".to_string());
+            error_only
+        };
+        assert!(is_fresh(Some(&at(60)), 300, now, false));
+        assert!(!is_fresh(Some(&at(130)), 300, now, false));
+    }
+
+    #[test]
+    fn a_user_retry_probes_a_failed_provider_that_kept_its_old_windows() {
+        let now = Utc::now();
+        let fetched_at = (now - Duration::seconds(60)).to_rfc3339();
+        // A probe failed and the merge kept the previous reading's windows.
+        let mut failed = make_provider_with_windows(&fetched_at, vec![sample_window()]);
+        failed.stale = true;
+        failed.error = Some("Codex app-server probe failed".to_string());
+
+        assert!(
+            !is_fresh(Some(&failed), 300, now, true),
+            "a user retry probes it at once"
+        );
+        assert!(
+            is_fresh(Some(&failed), 300, now, false),
+            "the refresh keeps its floor"
+        );
+        let good = make_provider_with_windows(&fetched_at, vec![sample_window()]);
+        assert!(
+            is_fresh(Some(&good), 300, now, true),
+            "a good reading keeps its floor on a retry too"
+        );
+    }
+
+    #[tokio::test]
+    async fn providers_reached_after_the_deadline_keep_their_cached_value() {
+        // Every reading is long past its floor: without the deadline each
+        // provider would be probed.
+        let old = (Utc::now() - Duration::hours(2)).to_rfc3339();
+        let reading = |provider: &str| {
+            let mut reading = make_provider_with_windows(&old, vec![sample_window()]);
+            reading.provider = provider.to_string();
+            Some(reading)
+        };
+        let cached = RateLimitsPayload {
+            claude: reading("claude"),
+            codex: reading("codex"),
+            cursor: reading("cursor"),
+            kimi: reading("kimi"),
+        };
+        let every = RateLimitSelection::enabled(&[
+            UsageIntegrationId::Claude,
+            UsageIntegrationId::Codex,
+            UsageIntegrationId::Cursor,
+            UsageIntegrationId::Kimi,
+        ]);
+        let codex_dir = tempfile::TempDir::new().unwrap();
+
+        let passed = std::time::Instant::now();
+        let fresh = fetch_selected_rate_limits_until(
+            codex_dir.path(),
+            every,
+            Some(&cached),
+            Some(passed),
+            false,
+        )
+        .await;
+
+        let json = |payload: &RateLimitsPayload| serde_json::to_value(payload).unwrap();
+        assert_eq!(json(&fresh), json(&cached));
+    }
+
+    #[test]
+    fn a_logged_codex_reading_stands_in_only_when_newer_recent_and_unreset() {
+        let now = Utc::now();
+        let reading = |age: i64, resets_in: i64| {
+            make_provider_with_windows(
+                &(now - Duration::seconds(age)).to_rfc3339(),
+                vec![RateLimitWindow::new(
+                    "primary".into(),
+                    "Session (5hr)".into(),
+                    5.0,
+                    Some((now + Duration::seconds(resets_in)).to_rfc3339()),
+                )],
+            )
+        };
+        let probed = reading(400, 3600);
+        let stands_in = |logged, cached| stands_in_for_probe(&logged, cached, now);
+        assert!(
+            stands_in(reading(60, 3600), Some(&probed)),
+            "logged since the probe"
+        );
+        assert!(stands_in(reading(60, 3600), None), "nothing probed yet");
+        assert!(
+            !stands_in(reading(500, 3600), None),
+            "older than a kept probe"
+        );
+        let later = reading(100, 3600);
+        assert!(!stands_in(reading(200, 3600), Some(&later)), "not newer");
+        assert!(
+            !stands_in(reading(60, -10), Some(&probed)),
+            "a window reset since"
+        );
+    }
+
+    #[test]
+    fn an_explicit_retry_skips_only_the_error_back_off() {
+        let now = Utc::now();
+        let fetched_at = (now - Duration::seconds(60)).to_rfc3339();
+        let mut error_only = make_provider_with_windows(&fetched_at, vec![]);
+        error_only.error = Some("Claude CLI /usage probe failed".to_string());
+        assert!(!is_fresh(Some(&error_only), 300, now, true));
+
+        let reading = make_provider_with_windows(&fetched_at, vec![sample_window()]);
+        assert!(is_fresh(Some(&reading), 300, now, true));
     }
 }
