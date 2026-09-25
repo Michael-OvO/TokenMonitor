@@ -4,8 +4,8 @@ Local-first, cross-platform (macOS/Windows/Linux) system-tray app that monitors 
 Cursor IDE, and Kimi Code token usage. Stack: Tauri v2 + Svelte 5 frontend (`src/`), Rust backend (`src-tauri/`). It parses JSONL
 session logs from disk, prices them in Rust, and shows spend + rate limits in a tray popover and an optional
 FloatBall overlay. Entry points: `src/main.ts` (main window), `src/float-ball.ts` (FloatBall, separate Vite
-entry), `src-tauri/src/main.rs` → `lib.rs` (backend). Root `README.md` covers product overview and architecture; `docs/DEVELOPMENT.md` is the
-maintained dev guide; `CHANGELOG.md` at the repository root is the release history. Current version: 0.15.x.
+entry), `src-tauri/src/main.rs` → `lib.rs` (backend). Root `README.md` covers the product overview, the three-step build, and the unsigned-macOS note; `docs/DEVELOPMENT.md` is the
+maintained dev guide; `CHANGELOG.md` at the repository root is the release history. Current version: 0.16.x.
 
 ## Commands
 
@@ -60,9 +60,13 @@ Data flow: local JSONL logs → Rust parsers + pricing → in-memory/disk caches
 Claude rate limits prefer a fresh statusline event, then the CLI probe
 `claude -p /usage --no-session-persistence --safe-mode` (CLIs that reject those flags get the old fixed-session
 form), then the OAuth usage API (cooldown-gated); the OAuth token comes from `~/.claude/.credentials.json` or
-Claude Code's own Keychain item read through `/usr/bin/security`, never from an app-owned Keychain entry. Codex
+Claude Code's own Keychain item read through `/usr/bin/security`, never from an app-owned Keychain entry. The
+statusline carries only the 5h and 7d windows, so while it is live the model-specific weekly windows come from the
+probe every 15 min and are carried forward in between (`overlay_live_windows`). Codex
 limits use the newest meters Codex logged (`token_count`) when newer than the last reading and under 285 s old,
-else the `codex app-server` probe, which on Windows starts the vendored `codex.exe` behind the npm shim. Kimi
+else the `codex app-server` probe, which on Windows starts the vendored `codex.exe` behind the npm shim; only
+the probe reports usage-limit resets, so it still runs at launch and every 15 min, and a logged reading keeps
+the last probe's resets. Kimi
 limits use the Kimi usage API and refresh their token like the Kimi CLI does. The Usage tab covers the
 official 5h reset window from cached rate limits, or a rolling five hours when none is cached. Completed hours
 are persisted to the usage archive so history survives log deletion. Models missing from the static pricing

@@ -204,6 +204,30 @@ pub struct CreditsInfo {
     pub balance: Option<f64>,
     pub has_credits: bool,
     pub unlimited: bool,
+    /// Usage-limit resets the account can still redeem (Codex "rate limit
+    /// reset credits"; each wipes the current windows). None when the source
+    /// does not report them.
+    pub usage_limit_resets: Option<UsageLimitResets>,
+}
+
+/// The usage-limit resets an account can still redeem.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageLimitResets {
+    /// Count the provider reports; the detail list may be shorter.
+    pub available: u32,
+    /// Still-available resets, soonest expiry first.
+    pub resets: Vec<UsageLimitReset>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageLimitReset {
+    pub title: Option<String>,
+    /// RFC 3339.
+    pub granted_at: Option<String>,
+    /// RFC 3339.
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]

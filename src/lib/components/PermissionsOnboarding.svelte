@@ -1030,7 +1030,7 @@
     border-color: rgba(36, 160, 86, 0.30);
     color: #248058;
   }
-  /* Pill content is a single Inter typeface throughout; only the weight
+  /* Pill content is a single typeface throughout; only the weight
      and color shift between the numbers and the connector word. That
      gets us identical glyph metrics so the spans line up perfectly,
      and avoids the visual jolt of a monospace digit sitting next to a
