@@ -4,8 +4,10 @@ mod logging;
 mod models;
 mod ops;
 mod paths;
+mod plan_budget;
 mod platform;
 mod rate_limits;
+mod refresh;
 mod secrets;
 mod single_instance;
 mod stats;
@@ -16,11 +18,7 @@ mod updater;
 mod usage;
 
 use chrono::Timelike;
-use commands::{
-    sync_tray_title,
-    tray::{patch_tray_utilization, tray_utilization_from_rate_limits},
-    AppState,
-};
+use commands::AppState;
 use std::time::Duration;
 #[cfg(target_os = "macos")]
 use tauri::tray::TrayIconEvent;
@@ -110,9 +108,23 @@ fn move_window_near_tray(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Tell the popover page whether it is on screen. WebView2 is not told when
+/// its window hides and keeps painting, so the page pauses its own animations,
+/// timers and refetches. Sent before a show, so the page wakes up with it, and
+/// after a hide.
+pub(crate) fn emit_popover_visibility(window: &tauri::WebviewWindow, visible: bool) {
+    if visible {
+        if let Some(state) = window.try_state::<AppState>() {
+            crate::refresh::popover_shown(&state);
+        }
+    }
+    let _ = window.emit_to(window.label(), "popover-visibility", visible);
+}
+
 /// Show + position + focus the main window using the same per-OS logic as the
 /// tray "Show" menu item. Must run on the main thread (GTK/AppKit constraint).
 fn show_main_window_inner(window: &tauri::WebviewWindow) {
+    emit_popover_visibility(window, true);
     #[cfg(target_os = "windows")]
     {
         platform::windows::window::position_near_tray(window);
@@ -171,6 +183,16 @@ pub fn run() {
     if single_instance::acquire_or_exit() == single_instance::Acquire::Exit {
         return;
     }
+
+    // Parse on at most half the cores, so even a cold parse never saturates
+    // the machine.
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(
+            std::thread::available_parallelism()
+                .map(|n| (n.get() / 2).max(1))
+                .unwrap_or(1),
+        )
+        .build_global();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
@@ -252,8 +274,10 @@ pub fn run() {
                                 if window.is_visible().unwrap_or(false) {
                                     tracing::info!("tray click: hiding the popover");
                                     let _ = window.hide();
+                                    emit_popover_visibility(&window, false);
                                 } else {
                                     tracing::info!("tray click: showing the popover");
+                                    emit_popover_visibility(&window, true);
                                     #[cfg(target_os = "windows")]
                                     {
                                         platform::windows::window::position_near_tray(&window);
@@ -330,6 +354,7 @@ pub fn run() {
                             if focused.is_empty() {
                                 tracing::info!("popover blur: no app window focused, hiding");
                                 let _ = win.hide();
+                                emit_popover_visibility(&win, false);
                             } else {
                                 tracing::info!(
                                     "popover blur: focus stayed in the app ({}), keeping it",
@@ -363,69 +388,46 @@ pub fn run() {
                     app_data.join("usage-archive")
                 );
 
+                plan_budget::init(&app_data);
+
                 // Initialize payload disk cache for instant cold-start.
                 let disk_cache = usage::payload_disk_cache::PayloadDiskCache::new(&app_data);
                 *state.payload_disk_cache.blocking_write() = Some(disk_cache);
 
-                // Load cached dynamic pricing immediately (non-blocking).
+                // Load cached dynamic pricing and exchange rates immediately.
                 if let Some(rates) = usage::litellm::load_cached(&app_data) {
                     usage::pricing::set_dynamic_pricing(rates);
                 }
-
-                // Spawn async refresh if cache is stale (>7 days) or version-mismatched.
-                if usage::litellm::should_refresh(&app_data) {
-                    let data_dir = app_data.clone();
-                    tauri::async_runtime::spawn(async move {
-                        match usage::litellm::fetch_and_cache(&data_dir).await {
-                            Ok(rates) => {
-                                usage::pricing::set_dynamic_pricing(rates);
-                                tracing::info!("Dynamic pricing refreshed (LiteLLM + OpenRouter)");
-                            }
-                            Err(e) => {
-                                tracing::warn!("Pricing fetch failed (using fallback): {e}");
-                            }
-                        }
-                    });
-                }
-
-                // Load cached exchange rates immediately.
                 if let Some(rates) = usage::exchange_rates::load_cached(&app_data) {
                     usage::exchange_rates::set_exchange_rates(rates);
                 }
 
-                // Spawn async refresh if exchange rate cache is stale (>24h).
-                if usage::exchange_rates::should_refresh(&app_data) {
-                    let data_dir = app_data.clone();
-                    let rates_app = app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        match usage::exchange_rates::fetch_and_cache(&data_dir).await {
-                            Ok(rates) => {
-                                usage::exchange_rates::set_exchange_rates(rates);
-                                tracing::info!("Exchange rates refreshed (frankfurter.dev)");
-                                // The frontend asks for rates once during
-                                // bootstrap. On a first launch there is no
-                                // cache yet, so that call returns an empty map
-                                // and the webview would spend the whole session
-                                // on the hardcoded fallback table. Tell it the
-                                // real rates arrived.
-                                let _ = rates_app.emit("exchange-rates-updated", ());
-                            }
-                            Err(e) => {
-                                tracing::warn!("Exchange rate fetch failed (using fallback): {e}");
-                            }
-                        }
-                    });
+                // Tables past their TTL (or version) are fetched now and
+                // applied by the first sample after they arrive, which also
+                // tells the webview (`exchange-rates-updated`). This counts as
+                // the refresh's hourly check.
+                if let Ok(mut last) = state.refresh.last_pricing_check.lock() {
+                    *last = Some(std::time::Instant::now());
                 }
+                let pricing_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = pricing_app.state::<AppState>();
+                    refresh::fetch_price_tables_once(&state, &app_data).await;
+                });
             }
             tracing::info!("[PROFILE] setup:data-init = {:?}", setup_t0.elapsed());
 
             // Hydrate the in-memory Cursor secret cache from keyring (or
             // file fallback) so the first usage refresh after launch can
-            // hit the remote API without waiting for the frontend to
-            // round-trip a `set_cursor_auth_config` call. Best-effort: a
-            // missing/locked keychain just leaves the cache empty.
-            commands::config::prime_cursor_auth_from_disk(app.handle());
-            tracing::info!("[PROFILE] setup:cursor-prime = {:?}", setup_t0.elapsed());
+            // hit the remote API even without the frontend's
+            // `set_cursor_auth_config`. Best-effort: a missing/locked
+            // keychain just leaves the cache empty. In the background: the
+            // keychain and IDE-token reads take tens of ms, and the setup
+            // hook holds up the app's start.
+            let prime_handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                commands::config::prime_cursor_auth_from_disk(&prime_handle);
+            });
 
             // Load persisted updater state
             {
@@ -439,20 +441,9 @@ pub fn run() {
             updater::scheduler::spawn(app.handle().clone());
             tracing::info!("[PROFILE] setup:updater-done = {:?}", setup_t0.elapsed());
 
-            // Spawn background setup + polling
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                background_loop(app_handle).await;
-            });
-
-            // Reactive statusline poll — fires within ~2s of any Claude Code
-            // prompt by watching the events-file mtime. Independent of the
-            // slow background loop so the dashboard keeps pace with the
-            // user without cranking up the global refresh interval.
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                fast_statusline_poll(app_handle).await;
-            });
+            // The refresh loop owns every periodic job: one sample per tick,
+            // published together.
+            tauri::async_runtime::spawn(refresh::run(app.handle().clone()));
 
             tracing::info!("[PROFILE] setup:TOTAL = {:?}", setup_t0.elapsed());
             Ok(())
@@ -461,6 +452,7 @@ pub fn run() {
             commands::usage_query::get_usage_data,
             commands::calendar::get_monthly_usage,
             commands::usage_query::get_known_models,
+            plan_budget::get_plan_budget,
             commands::config::get_last_usage_debug,
             commands::config::set_dock_icon_visible,
             commands::config::suppress_next_auto_hide,
@@ -526,141 +518,11 @@ pub fn run() {
             commands::usage_io::export_usage_data,
             commands::usage_io::import_usage_data,
             commands::usage_io::sync_remote_devices,
+            refresh::refresh_ready,
+            refresh::refresh_on_focus,
         ])
         .run(tauri::generate_context!())
         .expect("error running TokenMonitor");
-}
-
-/// Fetch fresh rate limits and update cached state + tray utilization.
-async fn refresh_rate_limits(app: &tauri::AppHandle, state: &AppState) {
-    statusline::source::maybe_trim(&statusline::events_file());
-
-    let codex_dir = state.parser.codex_dir().to_path_buf();
-    let cached = state.cached_rate_limits.read().await.clone();
-    // Only the integrations the user has switched on: the others would cost
-    // a probe (Cursor spawns sqlite3 and calls its API) for numbers nobody
-    // sees, on every statusline event.
-    let enabled = state
-        .enabled_integrations
-        .read()
-        .map(|ids| ids.clone())
-        .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
-    let fresh = rate_limits::fetch_selected_rate_limits(
-        &codex_dir,
-        rate_limits::RateLimitSelection::enabled(&enabled),
-        cached.as_ref(),
-    )
-    .await;
-
-    let merged = rate_limits::merge_rate_limits(fresh, cached.as_ref());
-
-    *state.cached_rate_limits.write().await = Some(merged.clone());
-    patch_tray_utilization(state, tray_utilization_from_rate_limits(Some(&merged))).await;
-
-    tracing::debug!("Background rate-limit refresh complete");
-
-    let _ = app.emit("status-widget-updated", ());
-}
-
-/// SSH sync interval: every 10 local refresh cycles (~5 min at 30s interval).
-const SSH_SYNC_EVERY_N_CYCLES: u64 = 10;
-/// Rate limit refresh: every 5 cycles (~2.5 min at 30s interval).
-const RATE_LIMIT_REFRESH_EVERY_N_CYCLES: u64 = 5;
-/// Pricing/exchange-rate TTL check: every 120 cycles (~1h at 30s interval).
-const PRICING_CHECK_EVERY_N_CYCLES: u64 = 120;
-
-/// When auto-refresh is "off" (refresh_interval == 0), the 2s statusline poll
-/// is the only thing detecting usage-log changes, so its (expensive) full-file
-/// scan falls back to this cadence instead of running every 2s. Matches the
-/// default refresh interval.
-const OFF_MODE_SWEEP_SECS: u64 = 30;
-
-async fn fast_statusline_poll(app: tauri::AppHandle) {
-    use std::fs;
-    use std::time::SystemTime;
-
-    const POLL_INTERVAL_SECS: u64 = 2;
-
-    let path = crate::statusline::events_file();
-    let mut last_mtime: Option<SystemTime> =
-        fs::metadata(&path).ok().and_then(|m| m.modified().ok());
-
-    let state = app.state::<AppState>();
-
-    // Accumulates elapsed time so the heavy usage-log scan runs at the
-    // configured refresh interval rather than on every 2s tick.
-    let mut secs_since_sweep: u64 = 0;
-
-    loop {
-        tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
-
-        if !state
-            .usage_access_enabled
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            continue;
-        }
-
-        let now_mtime = fs::metadata(&path).ok().and_then(|m| m.modified().ok());
-        let events_moved = now_mtime != last_mtime;
-        if events_moved {
-            last_mtime = now_mtime;
-        }
-
-        // Detecting in-place log appends means stat-ing every session file —
-        // far too heavy to run every 2s on a large log set. Throttle it to the
-        // user's configured refresh interval (Settings); the cheap events-file
-        // check above still runs every 2s for rate limits. "Off" (0) falls back
-        // to a sane cadence so usage numbers never freeze entirely.
-        secs_since_sweep += POLL_INTERVAL_SECS;
-        let sweep_interval_secs = {
-            let configured = *state.refresh_interval.read().await;
-            if configured == 0 {
-                OFF_MODE_SWEEP_SECS
-            } else {
-                configured
-            }
-        };
-        let parser_changed = if secs_since_sweep >= sweep_interval_secs {
-            secs_since_sweep = 0;
-            state.parser.invalidate_if_changed()
-        } else {
-            false
-        };
-
-        if !events_moved && !parser_changed {
-            continue;
-        }
-
-        let tick_t0 = std::time::Instant::now();
-        state.parser.clear_payload_cache();
-        if parser_changed {
-            // Source logs changed: drop the no-TTL disk cache too, otherwise the
-            // next fetch re-serves a stale per-provider payload despite the
-            // memory clear above (see AppState::clear_payload_disk_cache).
-            state.clear_payload_disk_cache().await;
-        }
-        let clear_elapsed = tick_t0.elapsed();
-
-        let rate_limits_t0 = std::time::Instant::now();
-        if events_moved
-            && state
-                .rate_limits_enabled
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            refresh_rate_limits(&app, &state).await;
-        }
-        let rate_limits_elapsed = rate_limits_t0.elapsed();
-
-        let tray_t0 = std::time::Instant::now();
-        sync_tray_title(&app, &state).await;
-        let tray_elapsed = tray_t0.elapsed();
-        let _ = app.emit("data-updated", 0u64);
-        tracing::info!(
-            "[PROFILE] statusline-poll: events_moved={events_moved} parser_changed={parser_changed} clear={clear_elapsed:?} rate_limits={rate_limits_elapsed:?} tray={tray_elapsed:?} total={:?}",
-            tick_t0.elapsed()
-        );
-    }
 }
 
 /// Seconds past local midnight that every scheduled refresh is aligned to.
@@ -668,7 +530,7 @@ async fn fast_statusline_poll(app: tauri::AppHandle) {
 /// unambiguously *on* the new day, never a hair before it.
 const REFRESH_ALIGN_OFFSET_SECS: i64 = 1;
 
-const SECS_PER_DAY: i64 = 86_400;
+pub(crate) const SECS_PER_DAY: i64 = 86_400;
 
 /// How long to sleep so the next wake lands on the next aligned refresh tick:
 /// `local midnight + 1s + k * interval`.
@@ -679,7 +541,10 @@ const SECS_PER_DAY: i64 = 86_400;
 /// midnight a window left open across the boundary keeps showing the previous
 /// day. Ticks that would overshoot the next midnight are clamped back to it,
 /// which also covers intervals that don't divide the day evenly.
-fn secs_until_next_refresh(now: chrono::DateTime<chrono::Local>, interval_secs: u64) -> f64 {
+pub(crate) fn secs_until_next_refresh(
+    now: chrono::DateTime<chrono::Local>,
+    interval_secs: u64,
+) -> f64 {
     let interval = (interval_secs.max(1) as i64).min(SECS_PER_DAY);
     let secs_of_day = now.num_seconds_from_midnight() as i64;
     let elapsed = secs_of_day - REFRESH_ALIGN_OFFSET_SECS;
@@ -697,243 +562,17 @@ fn secs_until_next_refresh(now: chrono::DateTime<chrono::Local>, interval_secs: 
     ((next_secs_of_day - secs_of_day) as f64 - subsec).max(0.001)
 }
 
-async fn background_loop(app: tauri::AppHandle) {
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    tracing::info!("Background refresh loop started");
-
-    let state = app.state::<AppState>();
-
-    sync_tray_title(&app, &state).await;
-
-    // One-shot silent warmup: precompute all payload caches in background.
-    if state
-        .usage_access_enabled
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        let app_clone = app.clone();
-        tokio::spawn(async move {
-            usage::cache_warmup::warmup_payloads(&app_clone, "all", "day", false).await;
-        });
-    }
-
-    // One-shot on launch: probe rate limits immediately instead of waiting for
-    // the first periodic refresh (~2.5 min in). cached_rate_limits starts empty,
-    // so this re-probes fresh for every provider — notably Codex, whose periodic
-    // refresh is throttled to 5 min and would otherwise sit on stale hydrated
-    // data showing "(stale)" right after the app opens. Spawned (not awaited):
-    // the Codex app-server probe can take up to 15s and must not delay the loop.
-    // Emits `data-updated` afterward so the 5h view re-pulls the fresh windows.
-    if state
-        .usage_access_enabled
-        .load(std::sync::atomic::Ordering::SeqCst)
-        && state
-            .rate_limits_enabled
-            .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        let app_clone = app.clone();
-        tokio::spawn(async move {
-            let state = app_clone.state::<AppState>();
-            refresh_rate_limits(&app_clone, &state).await;
-            let _ = app_clone.emit("data-updated", 0u64);
-        });
-    }
-
-    // One-shot on launch: purge duplicate device sources left by older builds
-    // (the same machine counted under several drifted slugs, or a peer under both
-    // its hash-less and canonical alias). The local archive persists across
-    // sessions, so this works even before the first archive flush of this session.
-    cleanup_duplicate_devices(&state).await;
-
-    let mut update_counter: u64 = 0;
-    let mut ssh_sync_counter: u64 = 0;
-    let mut rate_limit_counter: u64 = 0;
-    let mut pricing_counter: u64 = 0;
-    // Tracks which refresh-interval-sized time bucket the rolling 5h window is
-    // in. The 5h payload cache key is bucketed by the same size, so when this
-    // advances the cached 5h numbers are stale-by-time even if no source log
-    // changed — we emit `data-updated` to nudge the UI to re-fetch. Starts at 0
-    // so the first cycle always emits once shortly after launch.
-    let mut last_five_hour_bucket: u64 = 0;
-    // Local date this loop last woke up on. Ticks are aligned to 00:00:01, so
-    // the first tick of a new day sees this change and forces a refresh even
-    // when no source log moved.
-    let mut last_tick_date = chrono::Local::now().date_naive();
-
-    loop {
-        let interval_secs = {
-            let interval = state.refresh_interval.read().await;
-            *interval
-        };
-
-        if interval_secs == 0 {
-            // Auto-export has its own toggle independent of the refresh interval,
-            // so honor it even when periodic refresh is Off. It's a cheap no-op
-            // when nothing changed, but still lands the once-per-session full
-            // sync and any import-triggered reconciliation.
-            commands::usage_io::run_auto_export(&app, &state).await;
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
-        }
-
-        tokio::time::sleep(Duration::from_secs_f64(secs_until_next_refresh(
-            chrono::Local::now(),
-            interval_secs,
-        )))
-        .await;
-
-        let today = chrono::Local::now().date_naive();
-        let day_rolled = today != last_tick_date;
-        if day_rolled {
-            tracing::info!("Local date rolled over to {today}, forcing a refresh");
-            last_tick_date = today;
-        }
-
-        update_counter += 1;
-        ssh_sync_counter += 1;
-        rate_limit_counter += 1;
-        pricing_counter += 1;
-
-        let usage_access_enabled = state
-            .usage_access_enabled
-            .load(std::sync::atomic::Ordering::SeqCst);
-
-        let mut changed = false;
-        if usage_access_enabled {
-            changed = state.parser.invalidate_if_changed();
-            if changed {
-                tracing::debug!(
-                    cycle = update_counter,
-                    "Parser cache invalidated, data changed"
-                );
-            }
-        }
-
-        // Periodically refresh rate limits so the tray icon and float ball
-        // stay up to date even when the main window is hidden. Skipped when
-        // the user hasn't opted in — keeps Keychain access dormant until
-        // they turn rate-limit tracking on.
-        if rate_limit_counter >= RATE_LIMIT_REFRESH_EVERY_N_CYCLES {
-            rate_limit_counter = 0;
-            if usage_access_enabled
-                && state
-                    .rate_limits_enabled
-                    .load(std::sync::atomic::Ordering::SeqCst)
-            {
-                refresh_rate_limits(&app, &state).await;
-            }
-        }
-
-        // Periodically check if pricing cache needs refresh (7-day TTL).
-        if pricing_counter >= PRICING_CHECK_EVERY_N_CYCLES {
-            pricing_counter = 0;
-            if let Ok(app_data) = app.path().app_data_dir() {
-                if usage::litellm::should_refresh(&app_data) {
-                    tracing::info!("Pricing cache stale, refreshing...");
-                    match usage::litellm::fetch_and_cache(&app_data).await {
-                        Ok(rates) => {
-                            usage::pricing::set_dynamic_pricing(rates);
-                            tracing::info!("Dynamic pricing refreshed (background)");
-                        }
-                        Err(e) => {
-                            tracing::warn!("Background pricing refresh failed: {e}");
-                        }
-                    }
-                }
-
-                // Also check exchange rate cache (24h TTL).
-                if usage::exchange_rates::should_refresh(&app_data) {
-                    match usage::exchange_rates::fetch_and_cache(&app_data).await {
-                        Ok(rates) => {
-                            usage::exchange_rates::set_exchange_rates(rates);
-                            tracing::info!("Exchange rates refreshed (background)");
-                            // A session left open for days would otherwise keep
-                            // formatting with the rates it read at startup.
-                            let _ = app.emit("exchange-rates-updated", ());
-                        }
-                        Err(e) => {
-                            tracing::warn!("Background exchange rate refresh failed: {e}");
-                        }
-                    }
-                }
-            }
-        }
-
-        sync_tray_title(&app, &state).await;
-
-        // Archive completed hours for data loss prevention.
-        // Runs every cycle (~30s) but is fast: only writes when new hours are complete.
-        if usage_access_enabled {
-            archive_local_usage(&state);
-        }
-
-        // Periodically sync SSH hosts in background.
-        if ssh_sync_counter >= SSH_SYNC_EVERY_N_CYCLES {
-            ssh_sync_counter = 0;
-            let ssh_changed = sync_ssh_hosts(&state).await;
-            if usage_access_enabled && ssh_changed {
-                // Invalidate parser cache so device data reflects new remote files.
-                state.parser.invalidate_if_changed();
-                if let Some(ref disk_cache) = *state.payload_disk_cache.read().await {
-                    disk_cache.clear_prefix("usage-view:");
-                }
-                let _ = app.emit("data-updated", update_counter);
-            }
-            // Archive SSH device data for data loss prevention.
-            archive_ssh_device_usage(&state).await;
-        }
-
-        // Mirror the latest archive to the user's auto-export folder if enabled.
-        // Runs on the refresh cadence like everything else in this loop; a fast
-        // no-op when disabled or no folder is configured.
-        commands::usage_io::run_auto_export(&app, &state).await;
-
-        // The rolling 5h window advances with wall-clock time, not just log
-        // changes. Its cache key is bucketed by the refresh interval (see
-        // final_usage_cache_key), so once we cross into a new bucket the cached
-        // 5h payload is stale-by-time. Detect the roll and nudge the UI to
-        // re-fetch — the existing `data-updated` listener recomputes the fresh
-        // window (and re-pulls rate limits when the 5h view is open).
-        let current_five_hour_bucket = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-            / interval_secs;
-        let five_hour_bucket_rolled = current_five_hour_bucket != last_five_hour_bucket;
-        last_five_hour_bucket = current_five_hour_bucket;
-
-        if changed {
-            // Local source logs changed. `invalidate_if_changed()` above already
-            // dropped the in-memory payload cache, but the no-TTL disk cache
-            // would keep re-serving the pre-change per-provider payloads (the
-            // Claude/Codex tabs froze for the day while `all` stayed fresh). Drop
-            // the disk entries too so the next fetch recomputes from fresh logs.
-            state.clear_payload_disk_cache().await;
-            let _ = app.emit("data-updated", update_counter);
-        } else if day_rolled || (five_hour_bucket_rolled && usage_access_enabled) {
-            // `day_rolled` is unconditional: every date-relative label and
-            // period the UI renders is now wrong, whether or not any log moved,
-            // and a short clamped sleep into midnight may leave the 5h bucket
-            // unchanged so that check alone can't be relied on here.
-            let _ = app.emit("data-updated", update_counter);
-        }
-    }
-}
-
-/// Archive completed hours for all local providers.
+/// Archive completed hours for all local providers: those before the hour of
+/// `horizon`, the time of the sweep the file cache was revalidated by. What
+/// was logged after it is not in the cache yet, so its hour stays open.
 /// Fast no-op when no new hours have completed since the last archive.
-pub(crate) fn archive_local_usage(state: &AppState) {
+pub(crate) fn archive_local_usage(state: &AppState, horizon: chrono::DateTime<chrono::Local>) {
     let Some(archive) = state.parser.archive() else {
         return;
     };
 
-    // Re-read the Kimi CLI's config.toml so a model switch ("K2.7 Coding" →
-    // "K3") shows up without an app restart. Cheap: one small file per data
-    // home, and archive runs are already periodic.
-    models::set_model_display_overrides(usage::kimi_parser::kimi_model_display_names());
-
-    let now = chrono::Local::now();
-    let current_date = now.date_naive();
-    let current_hour = now.hour() as u8;
+    let current_date = horizon.date_naive();
+    let current_hour = horizon.hour() as u8;
 
     // Archive each local provider independently.
     for (provider, integration_id) in [
@@ -945,14 +584,24 @@ pub(crate) fn archive_local_usage(state: &AppState) {
         let source_key = format!("local:{provider}");
 
         // Quick check: skip if frontier is already up to date.
-        if let Some(frontier) = archive.frontier(&source_key) {
-            if frontier.is_up_to_date(current_date, current_hour) {
-                continue;
-            }
+        let frontier = archive.frontier(&source_key);
+        if frontier.is_some_and(|f| f.is_up_to_date(current_date, current_hour)) {
+            continue;
+        }
+        // A frontier stuck behind an idle hour stays "not up to date"; scan it
+        // once per hour instead of reloading full history on every call.
+        if !archive.should_scan(&source_key, current_date, current_hour, 0) {
+            continue;
         }
 
-        // Load entries for this provider. The parser's file cache makes this fast.
-        let (entries, _, _) = state.parser.load_entries(integration_id.as_str(), None);
+        // Hours up to the frontier are skipped, so load from its day on: the
+        // mtime filter then leaves the older logs unread. Not Cursor's: an
+        // all-time load gets its remote rows only from an all-time fetch,
+        // which keeps them out of the archive as before.
+        let since = frontier
+            .filter(|_| integration_id != usage::integrations::UsageIntegrationId::Cursor)
+            .map(|f| f.date);
+        let (entries, _, _) = state.parser.load_entries(integration_id.as_str(), since);
 
         let count = archive.archive_completed_hours(
             &entries,
@@ -1008,30 +657,38 @@ pub(crate) async fn archive_ssh_device_usage(state: &AppState) {
                 continue;
             }
         }
-
-        let records = match mgr.load_cached_records(alias) {
+        // The shared records may predate the latest sync, so take their version
+        // and write time from the same memo entry.
+        let cached = match mgr.load_cached_records_stamped(alias) {
             Ok(r) => r,
             Err(_) => continue,
         };
-
+        // The file holds the remote rows only up to the sync that wrote it:
+        // archive just the hours before that one, or the rest of its hour would
+        // be hidden behind the frontier and never archived.
+        let Some(written_at) = cached.written_at else {
+            continue;
+        };
+        let written = chrono::DateTime::<chrono::Local>::from(written_at).min(now);
+        let (horizon_date, horizon_hour) = (written.date_naive(), written.hour() as u8);
+        if !archive.should_scan(&source_key, horizon_date, horizon_hour, cached.stamp) {
+            continue;
+        }
         // Convert CompactUsageRecord → ParsedEntry for archiving.
-        let entries: Vec<usage::parser::ParsedEntry> = records
-            .iter()
-            .filter_map(|r| {
-                let dt = match usage::device_aggregation::parse_remote_ts(&r.ts) {
-                    Some(d) => d,
-                    None => {
-                        tracing::warn!(
-                            device = alias.as_str(),
-                            ts = %r.ts,
-                            "Skipping record with unparseable timestamp"
-                        );
-                        return None;
-                    }
+        let entries: Vec<usage::parser::ParsedEntry> = cached
+            .index
+            .all()
+            .filter_map(|(local, r)| {
+                let Some(local) = local else {
+                    tracing::warn!(
+                        device = alias.as_str(),
+                        ts = %r.ts,
+                        "Skipping record with unparseable timestamp"
+                    );
+                    return None;
                 };
-                let local_dt = dt.with_timezone(&chrono::Local);
                 Some(usage::parser::ParsedEntry {
-                    timestamp: local_dt,
+                    timestamp: *local,
                     model: if r.speed.as_deref() == Some("fast") {
                         format!("{}-fast", r.model)
                     } else {
@@ -1056,8 +713,8 @@ pub(crate) async fn archive_ssh_device_usage(state: &AppState) {
             &entries,
             &source_key,
             "all",
-            current_date,
-            current_hour,
+            horizon_date,
+            horizon_hour,
         );
 
         if count > 0 {
@@ -1079,11 +736,12 @@ pub(crate) async fn archive_ssh_device_usage(state: &AppState) {
 ///     (label)>` (old manual-import path) when auto-sync keys off the filename
 ///     slug `device:<slugify(label)>-<hash>`, so one machine became two devices.
 ///
-/// Both are merged/removed safely and idempotently (a no-op once cleaned);
-/// invalidates the usage-view caches when it actually changes something.
-pub(crate) async fn cleanup_duplicate_devices(state: &AppState) {
+/// Both are merged/removed safely and idempotently (a no-op once cleaned).
+/// Returns whether it changed the archive; the caller decides when views pick
+/// that up.
+pub(crate) async fn cleanup_duplicate_devices(state: &AppState) -> bool {
     let Some(archive) = state.parser.archive() else {
-        return;
+        return false;
     };
     let configured: std::collections::HashSet<String> = {
         let hosts = state.ssh_hosts.read().await;
@@ -1103,64 +761,22 @@ pub(crate) async fn cleanup_duplicate_devices(state: &AppState) {
             "Folded account-scoped Cursor rows from device archives into local:cursor"
         );
     }
-    if !removed.is_empty() || folded_cursor > 0 {
+    let folded_all = archive.fold_device_providers_into_all();
+    if folded_all > 0 {
+        tracing::info!(
+            folded = folded_all,
+            "Folded provider-tagged device rows into p=all (removes SSH double count)"
+        );
+    }
+    let changed = !removed.is_empty() || folded_cursor > 0 || folded_all > 0;
+    if changed {
         tracing::info!(
             count = removed.len(),
             "Cleaned up {} duplicate device source(s) from the archive",
             removed.len()
         );
-        state.parser.clear_payload_cache();
-        if let Some(ref disk_cache) = *state.payload_disk_cache.read().await {
-            disk_cache.clear_prefix("usage-view:");
-        }
     }
-}
-
-/// Sync all active SSH hosts sequentially. Returns true if any data changed.
-async fn sync_ssh_hosts(state: &AppState) -> bool {
-    let configs = state.ssh_hosts.read().await;
-    let enabled: Vec<String> = configs
-        .iter()
-        .filter(|c| c.enabled && c.include_in_stats)
-        .map(|c| c.alias.clone())
-        .collect();
-    drop(configs); // Release read lock before async work.
-
-    if enabled.is_empty() {
-        return false;
-    }
-
-    let cache_mgr = state.ssh_cache.read().await;
-    let mgr = match cache_mgr.as_ref() {
-        Some(m) => m,
-        None => return false,
-    };
-
-    let mut any_synced = false;
-    for alias in &enabled {
-        // Pre-test: skip sync if connection fails.
-        let test = usage::ssh_remote::test_connection(alias).await;
-        if !test.success {
-            tracing::warn!(
-                alias = %alias,
-                error = %test.message,
-                "SSH connection test failed, skipping sync"
-            );
-            continue;
-        }
-
-        match mgr.sync_host(alias).await {
-            Ok(count) if count > 0 => {
-                any_synced = true;
-            }
-            Err(e) => {
-                tracing::error!(alias = %alias, error = %e, "SSH sync failed");
-            }
-            _ => {}
-        }
-    }
-
-    any_synced
+    changed
 }
 
 #[cfg(test)]
@@ -1252,5 +868,89 @@ mod refresh_schedule_tests {
     fn interval_longer_than_a_day_still_ticks_daily() {
         let wake = wake_secs_of_day(at(12, 0, 0, 0), SECS_PER_DAY as u64 * 3);
         assert!((wake - (SECS_PER_DAY + REFRESH_ALIGN_OFFSET_SECS) as f64).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod ssh_archive_tests {
+    use super::*;
+    use chrono::{DateTime, Local, TimeDelta};
+    use std::sync::Arc;
+    use usage::ssh_remote::{CompactUsageRecord, SshCacheManager, SshHostConfig};
+
+    fn row(at: DateTime<Local>) -> String {
+        let record = CompactUsageRecord {
+            ts: at.to_rfc3339(),
+            model: "claude-sonnet-4-6".into(),
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_5m: 0,
+            cache_1h: 0,
+            cache_read: 0,
+            speed: None,
+            dedupe_key: None,
+        };
+        serde_json::to_string(&record).unwrap() + "\n"
+    }
+
+    /// A sync at `written` that left `rows` in the host's cache file.
+    fn write_cache(path: &std::path::Path, rows: &[DateTime<Local>], written: DateTime<Local>) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, rows.iter().map(|&at| row(at)).collect::<String>()).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(written.into())
+            .unwrap();
+    }
+
+    fn frontier_hour(state: &AppState) -> Option<(chrono::NaiveDate, u8)> {
+        let archive = state.parser.archive().unwrap();
+        archive.frontier("device:host").map(|f| (f.date, f.hour))
+    }
+
+    fn hour_of(at: DateTime<Local>) -> Option<(chrono::NaiveDate, u8)> {
+        Some((at.date_naive(), at.hour() as u8))
+    }
+
+    #[tokio::test]
+    async fn ssh_archive_stops_before_the_hour_of_the_sync_that_wrote_the_records() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parser = usage::parser::UsageParser::with_dirs(
+            tmp.path().join("claude"),
+            tmp.path().join("codex"),
+        );
+        parser.set_archive(usage::archive::ArchiveManager::new(tmp.path()));
+        let mut state = AppState::new();
+        state.parser = Arc::new(parser);
+        *state.ssh_hosts.write().await = vec![SshHostConfig {
+            alias: "host".into(),
+            enabled: true,
+            include_in_stats: true,
+        }];
+        let mgr = SshCacheManager::new(tmp.path());
+        *state.ssh_cache.write().await = Some(mgr.clone());
+        let path = tmp.path().join("remote-cache/host/usage.jsonl");
+
+        // The sync that wrote the file ran partway into its hour: that hour's
+        // later remote rows are not in the file yet, so it must stay open.
+        let now = Local::now();
+        let first = now - TimeDelta::hours(4);
+        let before = first - TimeDelta::hours(1);
+        write_cache(&path, &[before, first], first);
+        archive_ssh_device_usage(&state).await;
+        assert_eq!(frontier_hour(&state), hour_of(before));
+
+        // A later sync rewrites the file, but the frozen records (and their
+        // write time) stay the ones read above until the next revalidation.
+        let second = now - TimeDelta::hours(1);
+        write_cache(&path, &[before, first, second], second);
+        archive_ssh_device_usage(&state).await;
+        assert_eq!(frontier_hour(&state), hour_of(before));
+
+        assert!(mgr.revalidate_records_memo());
+        archive_ssh_device_usage(&state).await;
+        assert_eq!(frontier_hour(&state), hour_of(first));
     }
 }

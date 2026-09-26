@@ -5,7 +5,7 @@ Cursor IDE, and Kimi Code token usage. Stack: Tauri v2 + Svelte 5 frontend (`src
 session logs from disk, prices them in Rust, and shows spend + rate limits in a tray popover and an optional
 FloatBall overlay. Entry points: `src/main.ts` (main window), `src/float-ball.ts` (FloatBall, separate Vite
 entry), `src-tauri/src/main.rs` → `lib.rs` (backend). Root `README.md` covers the product overview, the three-step build, and the unsigned-macOS note; `docs/DEVELOPMENT.md` is the
-maintained dev guide; `CHANGELOG.md` at the repository root is the release history. Current version: 0.15.x.
+maintained dev guide; `CHANGELOG.md` at the repository root is the release history. Current version: 0.16.x.
 
 ## Commands
 
@@ -41,12 +41,14 @@ src/                     Svelte 5 frontend
 src-tauri/src/           Rust backend
   commands/                Tauri IPC dispatch, split by domain (usage_query, calendar, tray, ssh, statusline…)
   usage/                   parsers (claude/codex/cursor/kimi), pricing, money (display currency), caches, archive, SSH remote sync
-  rate_limits/             claude + claude_cli (`claude -p "/usage"` probe), codex + codex_cli, cursor, kimi
+  rate_limits/             claude + claude_cli (`claude -p /usage` probe), codex + codex_cli, cursor, kimi
   statusline/              installs a shell/PowerShell statusline script into Claude Code; reads its JSONL events
   stats/  secrets/         change/subagent aggregation; keyring-backed credential access
   single_instance/         process ownership + focus protocol
   tray/  platform/         RGBA tray icon rendering in pure Rust; OS-specific window behavior
   updater/  paths.rs       update scheduling/state/channels; central registry of every filesystem path the app reads
+  refresh.rs               the refresh loop: owns all periodic work (sample → publish, then spaced slot jobs)
+  plan_budget.rs           $ per rate-limit window, learned from meter readings vs local spend per model
   ops.rs / ops.json        vendor-facing constants (API hosts, plan budgets, LiteLLM cache TTL)
 build/                   installer build code (index.mjs) + per-platform tauri config overlays
 scripts/                 release.sh, sync-tauri-versions.mjs
@@ -55,13 +57,40 @@ docs/                    DEVELOPMENT.md, tutorial.md, testing/ procedures
 ```
 
 Data flow: local JSONL logs → Rust parsers + pricing → in-memory/disk caches → Tauri IPC → Svelte stores → UI.
-Claude rate limits prefer a fresh statusline event, then the `claude -p "/usage"` CLI probe, then the OAuth
-usage API (cooldown-gated); the OAuth token comes from `~/.claude/.credentials.json` or Claude Code's own
-Keychain item read through `/usr/bin/security`, never from an app-owned Keychain entry. Kimi limits use the
-Kimi usage API and refresh their token like the Kimi CLI does. The Usage tab covers the official 5h reset
-window from cached rate limits, or a rolling five hours when none is cached. Completed hours
+Claude rate limits prefer a fresh statusline event, then Claude Code's own last usage response
+(`cachedUsageUtilization` in `~/.claude.json`, newer than our reading and under 285 s old), then the CLI probe
+`claude -p /usage --no-session-persistence --safe-mode` (CLIs that reject those flags get the old fixed-session
+form), then the OAuth usage API (cooldown-gated); the OAuth token comes from `~/.claude/.credentials.json` or
+Claude Code's own Keychain item read through `/usr/bin/security`, never from an app-owned Keychain entry. The
+statusline carries only the 5h and 7d windows, so while it is live the model-specific weekly windows come from
+Claude Code's cache while under 15 min old, else from the probe every 15 min, and are carried forward in between
+(`overlay_live_windows`). The usage API lists those windows in `limits` (`weekly_scoped`); they keep the
+`seven_day_<model>` ids. The usage-credit balance
+comes hourly from `prepaid/credits`, with the organization id read from `~/.claude.json`, as Claude Code does. Codex
+limits use the newest meters Codex logged (`token_count`) when newer than the last reading and under 285 s old,
+else the `codex app-server` probe, which on Windows starts the vendored `codex.exe` behind the npm shim; only
+the probe reports usage-limit resets, so it still runs at launch and every 15 min, and a logged reading keeps
+the last probe's resets. Kimi
+limits use the Kimi usage API and refresh their token like the Kimi CLI does. The Usage tab covers the
+official 5h reset window from cached rate limits, or a rolling five hours when none is cached. Completed hours
 are persisted to the usage archive so history survives log deletion. Models missing from the static pricing
 table (`usage/pricing.rs`, bump `PRICING_VERSION` when editing) resolve via LiteLLM/OpenRouter with 24h TTL.
+
+Refresh: `refresh.rs` owns all periodic work. Each refresh (launch, then every aligned interval tick) runs its
+I/O first (Cursor today, rate-limit probes one provider at a time), then one sample (the only log sweep and
+cache invalidation; it stats the files written within a week, and every file hourly, after user actions and
+after a popover show; an append drops only the views it can reach), computes the tray cost and open view
+behind the `AppState.compute` FIFO gate (one heavy CPU job at a time), and publishes once; only it and the
+Cursor widening fetch (`usage_query.rs`) emit `data-updated`. Archive/export, plan budgets (one job per
+provider, skipped while its logs, meter readings and prices are unchanged, for up to an hour) and the hourly
+price check then run in evenly spaced slots; SSH syncs detached every 10th cycle (a host whose host key
+fails is held back 1 h, doubling to a day). Background results appear at the next refresh; user actions call
+`refresh::request_refresh`. Interval Off refreshes only at launch, 00:00:01, user actions, and popover focus
+once the last sample is ≥ 30 s old. There is no statusline poll (it is read at each refresh) and no automatic
+startup warmup. WebView2 keeps painting a hidden window, so every popover show/hide calls
+`emit_popover_visibility` (`lib.rs`); while hidden the page (`lib/visibility.ts`) pauses CSS animations, the
+footer/bar timers and rate-limit retries, and refetches on `data-updated` at most every 5 min (the rest wait
+for the next show).
 
 Platform notes (verified in code): tray cost text uses `set_title()` beside the icon on macOS; on
 Windows/Linux `set_title` is a noop and the cost goes in the tooltip (`commands/tray.rs`). On macOS the tray

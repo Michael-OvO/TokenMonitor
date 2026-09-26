@@ -281,7 +281,7 @@
     border: none;
     cursor: pointer;
     color: var(--t1);
-    font: 600 12px/1 'Inter', sans-serif;
+    font: 600 12px/1 system-ui, sans-serif;
     padding: 0;
   }
   .back:hover { color: var(--t2); }
@@ -317,7 +317,7 @@
     margin-bottom: 0;
   }
   .usage-warning-title {
-    font: 600 10px/1.2 'Inter', sans-serif;
+    font: 600 10px/1.2 system-ui, sans-serif;
     color: var(--t1);
   }
   .usage-warning-dismiss {
@@ -341,7 +341,7 @@
     background: var(--surface-hover);
   }
   .usage-warning-text {
-    font: 400 9px/1.35 'Inter', sans-serif;
+    font: 400 9px/1.35 system-ui, sans-serif;
     color: var(--t2);
     white-space: pre-wrap;
   }
@@ -362,7 +362,7 @@
   }
 
   .month-label {
-    font: 600 13px/1 'Inter', sans-serif;
+    font: 600 13px/1 system-ui, sans-serif;
     color: var(--t1);
   }
 
@@ -375,7 +375,7 @@
   }
 
   .day-header {
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t4);
   }
 
@@ -404,7 +404,7 @@
   }
 
   .day-num {
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t2);
     font-variant-numeric: tabular-nums;
   }
@@ -424,7 +424,7 @@
     align-items: center;
     justify-content: center;
     gap: 6px;
-    font: 500 10px/1 'Inter', sans-serif;
+    font: 500 10px/1 system-ui, sans-serif;
 
     letter-spacing: 0.8px;
     color: var(--t4);
@@ -432,7 +432,7 @@
   }
 
   .plan-badge {
-    font: 500 9px/1 'Inter', sans-serif;
+    font: 500 9px/1 system-ui, sans-serif;
     letter-spacing: 0.4px;
     text-transform: none;
     color: var(--accent);
@@ -450,18 +450,18 @@
   }
 
   .summary-total {
-    font: 600 18px/1 'Inter', sans-serif;
+    font: 600 18px/1 system-ui, sans-serif;
     color: var(--t1);
     font-variant-numeric: tabular-nums;
   }
 
   .summary-dot {
-    font: 400 11px/1 'Inter', sans-serif;
+    font: 400 11px/1 system-ui, sans-serif;
     color: var(--t3);
   }
 
   .summary-earned {
-    font: 600 14px/1 'Inter', sans-serif;
+    font: 600 14px/1 system-ui, sans-serif;
     font-variant-numeric: tabular-nums;
   }
   .summary-earned.positive { color: #4daf4a; }

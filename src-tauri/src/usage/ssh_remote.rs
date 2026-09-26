@@ -1,7 +1,12 @@
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use tokio::process::Command;
+
+use crate::usage::device_aggregation::{local_zone_stamp, RecordIndex};
 
 /// Windows: CREATE_NO_WINDOW flag prevents a console window from flashing.
 #[cfg(target_os = "windows")]
@@ -79,9 +84,15 @@ pub struct CompactUsageRecord {
     pub cache_read: u64,
     #[serde(rename = "sp", default, skip_serializing_if = "Option::is_none")]
     pub speed: Option<String>,
+    /// Claude `message.id:requestId`. Streamed chunks share it; the one with most output wins.
+    #[serde(rename = "k", default, skip_serializing_if = "Option::is_none")]
+    pub dedupe_key: Option<String>,
 }
 
 fn compact_record_key(r: &CompactUsageRecord) -> String {
+    if let Some(k) = &r.dedupe_key {
+        return k.clone();
+    }
     format!(
         "{}:{}:{}:{}",
         r.ts, r.model, r.input_tokens, r.output_tokens
@@ -104,6 +115,33 @@ fn max_remote_epoch(
         .filter(|r| crate::models::detect_model_family(&r.model) == family)
         .filter_map(|r| compact_ts_epoch(&r.ts))
         .max()
+}
+
+/// Merge freshly fetched records into the cache. A record sharing a key with a
+/// cached one replaces it when it carries more output (a later streamed chunk).
+/// Returns how many records were inserted or replaced.
+fn merge_records(cached: &mut Vec<CompactUsageRecord>, fresh: &[CompactUsageRecord]) -> u32 {
+    let mut index: std::collections::HashMap<String, usize> = cached
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (compact_record_key(r), i))
+        .collect();
+    let mut changed = 0;
+    for r in fresh {
+        match index.get(&compact_record_key(r)) {
+            Some(&i) if r.output_tokens > cached[i].output_tokens => {
+                cached[i] = r.clone();
+                changed += 1;
+            }
+            Some(_) => {}
+            None => {
+                index.insert(compact_record_key(r), cached.len());
+                cached.push(r.clone());
+                changed += 1;
+            }
+        }
+    }
+    changed
 }
 
 /// ponytail: 2s back-margin so exclusive `ts>S` / `-newer` doesn't skip
@@ -130,7 +168,8 @@ pub async fn test_connection(alias: &str) -> SshTestResult {
         alias,
         "echo",
         "ok",
-    ]);
+    ])
+    .kill_on_drop(true);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let result = cmd.output().await;
@@ -237,7 +276,7 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
     // Rust's trailing-backslash line continuation eating the leading spaces.
     let claude_py = concat!(
         "import json,sys\n",
-        "seen=set()\n",
+        "best={}\n",
         "for f in sys.argv[1:]:\n",
         " try:\n",
         "  for line in open(f):\n",
@@ -248,8 +287,6 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
         "     mid=msg.get('id','')\n",
         "     rid=d.get('requestId','')\n",
         "     dk=mid+':'+rid if rid else mid\n",
-        "     if dk and dk in seen:continue\n",
-        "     if dk:seen.add(dk)\n",
         "     u=msg.get('usage')\n",
         "     if u:\n",
         "      cc=u.get('cache_creation')\n",
@@ -261,9 +298,12 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
         "'c1':((cc.get('ephemeral_1h_input_tokens') or 0) if isinstance(cc,dict) else u.get('cache_creation_input_tokens',0)),",
         "'cr':u.get('cache_read_input_tokens',0)}\n",
         "      if u.get('speed')=='fast':r['sp']='fast'\n",
-        "      print(json.dumps(r))\n",
+        "      if not dk:print(json.dumps(r));continue\n",
+        "      r['k']=dk\n",
+        "      if dk not in best or r['out']>=best[dk]['out']:best[dk]=r\n",
         "   except Exception:pass\n",
         " except Exception as e:import sys;print('PARSE_ERR:'+str(e),file=sys.stderr)\n",
+        "for r in best.values():print(json.dumps(r))\n",
     );
 
     // Codex python extraction — stateful: tracks model from turn_context,
@@ -471,6 +511,12 @@ fn parse_full_entry_to_compact(line: &str) -> Option<CompactUsageRecord> {
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
         speed,
+        dedupe_key: message.get("id").and_then(|v| v.as_str()).map(|mid| {
+            match value.get("requestId").and_then(|v| v.as_str()) {
+                Some(rid) => format!("{mid}:{rid}"),
+                None => mid.to_string(),
+            }
+        }),
     })
 }
 
@@ -488,6 +534,11 @@ async fn ssh_command(alias: &str, script: &str) -> Result<String, String> {
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=10",
+        // A connection that dies silently mid-sync ends in ~30 s, not never.
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=2",
         "-o",
         "LogLevel=ERROR",
         alias,
@@ -495,7 +546,8 @@ async fn ssh_command(alias: &str, script: &str) -> Result<String, String> {
     ])
     .stdin(std::process::Stdio::piped())
     .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped());
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
     let mut child = cmd
@@ -544,6 +596,23 @@ async fn ssh_command(alias: &str, script: &str) -> Result<String, String> {
     Err(format!("SSH command failed: {msg}"))
 }
 
+/// Whether an ssh failure needs the user before a retry can work: a changed or
+/// unknown host key. An unresolved hostname (offline, VPN down) or rejected
+/// keys (a locked agent) often clear by themselves, so they are retried.
+pub fn is_permanent_ssh_failure(error: &str) -> bool {
+    error
+        .to_ascii_lowercase()
+        .contains("host key verification failed")
+}
+
+/// Bound one host's sync, background or manual. Dropping the
+/// timed-out future kills its ssh child (`kill_on_drop`).
+pub async fn with_host_timeout<F: std::future::Future>(
+    fut: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    tokio::time::timeout(Duration::from_secs(60), fut).await
+}
+
 // ── Cache manager ───────────────────────────────────────────────────────────
 //
 // Stores compact usage records per host, not raw JSONL files.
@@ -553,15 +622,35 @@ async fn ssh_command(alias: &str, script: &str) -> Result<String, String> {
 //     .last-sync-codex     — epoch timestamp for Codex provider
 //     usage.jsonl           — compact records (appended on each sync)
 
+/// One host's parsed `usage.jsonl` and the file version it was read at.
+#[derive(Clone)]
+pub struct CachedRecords {
+    /// `cached_records_stamp` of the version read.
+    pub stamp: u64,
+    /// Its mtime: the sync that wrote it, so the remote rows of that hour and
+    /// later ones may be missing. `None` when there was no file.
+    pub written_at: Option<SystemTime>,
+    pub records: Arc<Vec<CompactUsageRecord>>,
+    /// The same records by time, each timestamp converted once.
+    pub index: Arc<RecordIndex>,
+}
+
+type RecordsMemo = HashMap<String, CachedRecords>;
+
 #[derive(Clone)]
 pub struct SshCacheManager {
     base_dir: PathBuf,
+    /// Shared by clones. Frozen between refresh samples: only
+    /// `revalidate_records_memo`, `invalidate_records` and `reset_all_caches`
+    /// drop entries, so a sync's rewrite shows up at the next sample.
+    records_memo: Arc<Mutex<RecordsMemo>>,
 }
 
 impl SshCacheManager {
     pub fn new(app_data_dir: &Path) -> Self {
         Self {
             base_dir: app_data_dir.join("remote-cache"),
+            records_memo: Arc::default(),
         }
     }
 
@@ -571,6 +660,8 @@ impl SshCacheManager {
                 tracing::warn!("Failed to remove remote cache dir {:?}: {e}", self.base_dir);
             }
         }
+        // After the removal, so a load racing it can't re-memoise deleted records.
+        self.records_memo.lock().unwrap().clear();
     }
 
     /// Get the cache directory for a specific host.
@@ -748,54 +839,29 @@ impl SshCacheManager {
         let dir = self.host_cache_dir(alias)?;
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
 
-        // Build a set of existing record keys for dedup.
-        let mut existing_keys = std::collections::HashSet::new();
-        if let Ok(file) = std::fs::File::open(&cache_path) {
-            for line in std::io::BufReader::new(file).lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => continue,
-                };
-                if let Ok(r) = serde_json::from_str::<CompactUsageRecord>(&line) {
-                    existing_keys.insert(compact_record_key(&r));
+        let mut cached = self.load_cached_records(alias)?;
+        let new_count = merge_records(&mut cached, &records);
+
+        use crate::models::{detect_model_family, ModelFamily};
+        let has_claude = records
+            .iter()
+            .any(|r| detect_model_family(&r.model) == ModelFamily::Anthropic);
+        let has_codex = records
+            .iter()
+            .any(|r| detect_model_family(&r.model) == ModelFamily::OpenAI);
+
+        if new_count > 0 {
+            let mut lines = String::new();
+            for record in &cached {
+                if let Ok(json) = serde_json::to_string(record) {
+                    lines.push_str(&json);
+                    lines.push('\n');
                 }
             }
+            let tmp = cache_path.with_extension("jsonl.tmp");
+            std::fs::write(&tmp, lines).map_err(|e| format!("write cache: {e}"))?;
+            std::fs::rename(&tmp, &cache_path).map_err(|e| format!("write cache: {e}"))?;
         }
-
-        let mut lines = String::new();
-        let mut has_claude = false;
-        let mut has_codex = false;
-        let mut new_count = 0u32;
-        for record in &records {
-            let key = compact_record_key(record);
-            if existing_keys.contains(&key) {
-                continue;
-            }
-            existing_keys.insert(key);
-            if let Ok(json) = serde_json::to_string(record) {
-                lines.push_str(&json);
-                lines.push('\n');
-                new_count += 1;
-            }
-            // Detect provider by model family.
-            use crate::models::{detect_model_family, ModelFamily};
-            match detect_model_family(&record.model) {
-                ModelFamily::Anthropic => has_claude = true,
-                ModelFamily::OpenAI => has_codex = true,
-                _ => {} // Other models don't affect provider timestamps.
-            }
-        }
-
-        use std::io::Write;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&cache_path)
-            .map_err(|e| format!("open cache: {e}"))?;
-        let mut writer = std::io::BufWriter::new(file);
-        writer
-            .write_all(lines.as_bytes())
-            .map_err(|e| format!("write cache: {e}"))?;
 
         // Only advance a provider's timestamp when that provider had data.
         // Use max remote record time, not local now — clock skew would skip forever.
@@ -845,6 +911,84 @@ impl SshCacheManager {
             .filter_map(|line| serde_json::from_str::<CompactUsageRecord>(&line).ok())
             .collect())
     }
+
+    /// Content stamp of a host's usage cache (mtime nanos ^ length), 0 when missing.
+    pub fn cached_records_stamp(&self, alias: &str) -> u64 {
+        self.cached_records_version(alias).0
+    }
+
+    /// `cached_records_stamp` and the file's mtime, from one stat.
+    fn cached_records_version(&self, alias: &str) -> (u64, Option<SystemTime>) {
+        let Some(meta) = self
+            .usage_cache_path(alias)
+            .ok()
+            .and_then(|path| std::fs::metadata(path).ok())
+        else {
+            return (0, None);
+        };
+        let modified = meta.modified().ok();
+        let mtime = modified
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as u64);
+        (mtime ^ meta.len(), modified)
+    }
+
+    /// A host's cached records, parsed once and shared until the memo drops them.
+    pub fn load_cached_records_shared(
+        &self,
+        alias: &str,
+    ) -> Result<Arc<Vec<CompactUsageRecord>>, String> {
+        self.load_cached_records_stamped(alias)
+            .map(|cached| cached.records)
+    }
+
+    /// `load_cached_records_shared` plus the version those records were read
+    /// at, so a caller keying work by content sees the same version it reads.
+    pub fn load_cached_records_stamped(&self, alias: &str) -> Result<CachedRecords, String> {
+        if let Some(hit) = self.records_memo.lock().unwrap().get(alias) {
+            return Ok(hit.clone());
+        }
+        // Stat before reading: a rewrite in between leaves an older version
+        // that the next revalidation drops, never a current one on older records.
+        let (stamp, written_at) = self.cached_records_version(alias);
+        let records = Arc::new(self.load_cached_records(alias)?);
+        let cached = CachedRecords {
+            stamp,
+            written_at,
+            index: Arc::new(RecordIndex::new(records.clone())),
+            records,
+        };
+        self.records_memo
+            .lock()
+            .unwrap()
+            .insert(alias.to_string(), cached.clone());
+        Ok(cached)
+    }
+
+    /// `load_cached_records_shared`, indexed by time.
+    pub fn load_record_index(&self, alias: &str) -> Result<Arc<RecordIndex>, String> {
+        self.load_cached_records_stamped(alias)
+            .map(|cached| cached.index)
+    }
+
+    /// Drop memoised records whose cache file was rewritten, created or removed
+    /// since they were read, and all of them once the time zone changed: their
+    /// local times were converted in the old one. Returns whether any were
+    /// dropped.
+    pub fn revalidate_records_memo(&self) -> bool {
+        let zone = local_zone_stamp();
+        let mut memo = self.records_memo.lock().unwrap();
+        let before = memo.len();
+        memo.retain(|alias, cached| {
+            cached.index.zone == zone && self.cached_records_stamp(alias) == cached.stamp
+        });
+        memo.len() != before
+    }
+
+    /// Forget a host's memoised records (a manual sync just rewrote them).
+    pub fn invalidate_records(&self, alias: &str) {
+        self.records_memo.lock().unwrap().remove(alias);
+    }
 }
 
 #[cfg(test)]
@@ -861,7 +1005,23 @@ mod tests {
             cache_1h: 0,
             cache_read: 0,
             speed: None,
+            dedupe_key: None,
         }
+    }
+
+    #[test]
+    fn merge_keeps_final_streamed_chunk() {
+        let mut partial = rec("2026-01-01T00:00:00Z", "claude-sonnet-4");
+        partial.dedupe_key = Some("msg_1:req_1".into());
+        let mut fin = partial.clone();
+        fin.output_tokens = 500;
+        let mut cached = vec![partial.clone()];
+        assert_eq!(merge_records(&mut cached, &[fin.clone()]), 1);
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].output_tokens, 500);
+        // Re-seeing the partial chunk (another sync) must not downgrade or duplicate.
+        assert_eq!(merge_records(&mut cached, &[partial]), 0);
+        assert_eq!(cached[0].output_tokens, 500);
     }
 
     #[test]
@@ -895,5 +1055,119 @@ mod tests {
             next_last_sync_epoch(Some(expected + 100), claude),
             expected + 100
         );
+    }
+
+    #[test]
+    fn cached_records_stamp_tracks_the_cache_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mgr = SshCacheManager::new(tmp.path());
+        assert_eq!(mgr.cached_records_stamp("host"), 0);
+
+        let path = mgr.usage_cache_path("host").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "a\n").unwrap();
+        let first = mgr.cached_records_stamp("host");
+        assert_ne!(first, 0);
+        assert_eq!(mgr.cached_records_stamp("host"), first);
+
+        std::fs::write(&path, "a\nb\n").unwrap();
+        assert_ne!(mgr.cached_records_stamp("host"), first);
+    }
+
+    fn jsonl(records: &[CompactUsageRecord]) -> String {
+        records
+            .iter()
+            .map(|r| serde_json::to_string(r).unwrap() + "\n")
+            .collect()
+    }
+
+    #[test]
+    fn shared_records_are_reused_until_revalidated() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mgr = SshCacheManager::new(tmp.path());
+        let path = mgr.usage_cache_path("host").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let a = rec("2026-03-15T12:00:00+00:00", "claude-sonnet-4-6");
+        let b = rec("2026-03-15T13:00:00+00:00", "claude-opus-4-6");
+        std::fs::write(&path, jsonl(std::slice::from_ref(&a))).unwrap();
+
+        let first = mgr.load_cached_records_shared("host").unwrap();
+        assert_eq!(first.len(), 1);
+        // Clones share the memo.
+        let again = mgr.clone().load_cached_records_shared("host").unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+
+        // A sync's tmp+rename rewrite stays invisible until the next revalidation.
+        let tmp_path = path.with_extension("jsonl.tmp");
+        std::fs::write(&tmp_path, jsonl(&[a, b])).unwrap();
+        std::fs::rename(&tmp_path, &path).unwrap();
+        let still = mgr.load_cached_records_shared("host").unwrap();
+        assert!(Arc::ptr_eq(&first, &still));
+
+        assert!(mgr.revalidate_records_memo());
+        let second = mgr.load_cached_records_shared("host").unwrap();
+        assert_eq!(second.len(), 2);
+        assert!(!mgr.revalidate_records_memo());
+    }
+
+    #[test]
+    fn shared_records_of_a_missing_file_are_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mgr = SshCacheManager::new(tmp.path());
+        assert!(mgr.load_cached_records_shared("host").unwrap().is_empty());
+        // Still missing is not a change, or every sample would clear the caches.
+        assert!(!mgr.revalidate_records_memo());
+
+        // The first sync creating the file is.
+        let path = mgr.usage_cache_path("host").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, jsonl(&[rec("2026-03-15T12:00:00+00:00", "gpt-5.4")])).unwrap();
+        assert!(mgr.load_cached_records_shared("host").unwrap().is_empty());
+        assert!(mgr.revalidate_records_memo());
+        assert_eq!(mgr.load_cached_records_shared("host").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invalidate_and_reset_drop_shared_records() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mgr = SshCacheManager::new(tmp.path());
+        let path = mgr.usage_cache_path("host").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, jsonl(&[rec("2026-03-15T12:00:00+00:00", "gpt-5.4")])).unwrap();
+
+        let first = mgr.load_cached_records_shared("host").unwrap();
+        mgr.invalidate_records("host");
+        let reloaded = mgr.load_cached_records_shared("host").unwrap();
+        assert!(!Arc::ptr_eq(&first, &reloaded));
+        assert_eq!(reloaded.len(), 1);
+
+        mgr.reset_all_caches();
+        assert!(mgr.load_cached_records_shared("host").unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_failures_the_user_must_fix_are_permanent() {
+        assert!(is_permanent_ssh_failure(
+            "SSH command failed: Host key verification failed."
+        ));
+        for transient in [
+            "SSH command failed: ssh: connect to host 10.0.0.1 port 22: Connection timed out",
+            "SSH command failed: Connection closed by 10.0.0.1 port 22",
+            // Offline or off the VPN, and a locked agent: they clear by themselves.
+            "SSH command failed: ssh: Could not resolve hostname dukeserver: No such host is known.",
+            "SSH command failed: user@host: Permission denied (publickey).",
+        ] {
+            assert!(!is_permanent_ssh_failure(transient), "{transient}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn per_host_timeout_bounds_a_hung_sync() {
+        let start = tokio::time::Instant::now();
+        let result = with_host_timeout(std::future::pending::<()>()).await;
+        assert!(result.is_err());
+        let waited = start.elapsed();
+        assert!(waited >= std::time::Duration::from_secs(60));
+        assert!(waited < std::time::Duration::from_secs(61));
     }
 }

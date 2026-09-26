@@ -49,9 +49,14 @@ export const rateLimitsRequestState = derived(
 let providerStores: Partial<Record<RateLimitProvider, Awaited<ReturnType<typeof load>>>> = {};
 let legacyStore: Awaited<ReturnType<typeof load>> | null = null;
 let hydratePromise: Promise<void> | null = null;
-let inflightFetches: Partial<Record<RateLimitProvider, Promise<void>>> = {};
+let inflightFetches: Partial<
+  Record<RateLimitProvider, { promise: Promise<void>; force: boolean }>
+> = {};
 let retryTimers: Partial<Record<RateLimitProvider, ReturnType<typeof setTimeout>>> = {};
+let retriesPaused = false;
 let lastRequestedScope: RateLimitScope = "all";
+/** The record last written per provider, so an unchanged one is not rewritten. */
+let persistedRecords: Partial<Record<RateLimitProvider, string>> = {};
 
 async function ensureProviderStore(provider: RateLimitProvider) {
   if (providerStores[provider]) return providerStores[provider];
@@ -93,11 +98,14 @@ async function persistProviderRecord(
   payload: ProviderRateLimits | null,
   lastSuccessfulAt: string | null,
 ): Promise<void> {
+  const record = JSON.stringify([payload, lastSuccessfulAt]);
+  if (persistedRecords[provider] === record) return;
   try {
     const store = await ensureProviderStore(provider);
     await store.set(CACHE_KEY, payload);
     await store.set(LAST_SUCCESSFUL_AT_KEY, lastSuccessfulAt);
     await store.save();
+    persistedRecords[provider] = record;
   } catch (error) {
     logger.warn("rateLimits", `Failed to persist ${provider} rate limits: ${error}`);
   }
@@ -138,7 +146,7 @@ function scheduleProviderRetry(
     deferredUntil,
   }));
 
-  if (!deferredUntil) return;
+  if (!deferredUntil || retriesPaused) return;
 
   const delay = new Date(deferredUntil).getTime() - Date.now();
   if (delay <= 0) return;
@@ -164,6 +172,18 @@ function scheduleScopeRetries(
   }
 }
 
+/** Hold the deferred retries while the popover is hidden, where nothing shows
+ * the limits; re-arm the ones still ahead when it shows again. */
+export function setRateLimitRetriesPaused(paused: boolean) {
+  if (paused === retriesPaused) return;
+  retriesPaused = paused;
+  if (paused) {
+    for (const provider of RATE_LIMIT_PROVIDER_ORDER) clearRetryTimer(provider);
+  } else {
+    scheduleScopeRetries(get(rateLimitsData), lastRequestedScope);
+  }
+}
+
 function mergedPayloadOrNull(payload: RateLimitsPayload): RateLimitsPayload | null {
   if (RATE_LIMIT_PROVIDER_ORDER.every((provider) => !payload[provider])) return null;
   return payload;
@@ -185,8 +205,19 @@ function hydrateProviderMonitorState(
   }));
 }
 
-async function fetchProviderRateLimits(provider: RateLimitProvider): Promise<void> {
-  if (inflightFetches[provider]) return inflightFetches[provider];
+// Unforced reads return what the backend's last refresh probed; `force` asks
+// it to probe now.
+async function fetchProviderRateLimits(
+  provider: RateLimitProvider,
+  force = false,
+): Promise<void> {
+  const inflight = inflightFetches[provider];
+  if (inflight) {
+    if (inflight.force || !force) return inflight.promise;
+    // A plain read in flight only returns the cache: probe once it is done.
+    await inflight.promise;
+    return fetchProviderRateLimits(provider, force);
+  }
 
   const currentPayload = get(rateLimitsData);
   const cachedProvider = providerPayload(currentPayload, provider);
@@ -202,10 +233,11 @@ async function fetchProviderRateLimits(provider: RateLimitProvider): Promise<voi
 
   const startedAt = new Date().toISOString();
 
-  inflightFetches[provider] = (async () => {
+  const promise = (async () => {
     try {
       const freshPayload = await invoke<RateLimitsPayload>("get_rate_limits", {
         provider,
+        ...(force ? { force: true } : {}),
       });
 
       const freshProvider = providerPayload(freshPayload, provider);
@@ -268,8 +300,9 @@ async function fetchProviderRateLimits(provider: RateLimitProvider): Promise<voi
       delete inflightFetches[provider];
     }
   })();
+  inflightFetches[provider] = { promise, force };
 
-  return inflightFetches[provider];
+  return promise;
 }
 
 export async function hydrateRateLimits(): Promise<void> {
@@ -355,5 +388,7 @@ export async function fetchRateLimits(
     : eligibleProviders(cached, scope);
   if (providers.length === 0) return;
 
-  await Promise.all(providers.map((provider) => fetchProviderRateLimits(provider)));
+  await Promise.all(
+    providers.map((provider) => fetchProviderRateLimits(provider, options.force)),
+  );
 }

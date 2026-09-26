@@ -77,14 +77,14 @@
   }
 
   .permission-title {
-    font: 500 10.5px/1.25 "Inter", sans-serif;
+    font: 500 10.5px/1.25 system-ui, sans-serif;
     color: var(--t1);
     min-width: 0;
   }
 
   .permission-status {
     flex-shrink: 0;
-    font: 500 9px/1 "Inter", sans-serif;
+    font: 500 9px/1 system-ui, sans-serif;
   }
 
   .status-ok { color: var(--ch-plus); }
@@ -94,7 +94,7 @@
   .permission-copy,
   .permission-policy {
     margin: 0;
-    font: 400 9.5px/1.35 "Inter", sans-serif;
+    font: 400 9.5px/1.35 system-ui, sans-serif;
     color: var(--t3);
   }
 
@@ -113,7 +113,7 @@
     border: none;
     cursor: pointer;
     color: var(--accent, #6366f1);
-    font: 500 9.5px/1 "Inter", sans-serif;
+    font: 500 9.5px/1 system-ui, sans-serif;
   }
   .permission-manage:hover {
     text-decoration: underline;

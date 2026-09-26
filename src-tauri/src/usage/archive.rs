@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Archived hourly aggregate record
@@ -140,7 +141,7 @@ pub struct ImportSourceStats {
 
 const STATE_VERSION: u32 = 1;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct ArchiveState {
     version: u32,
     /// Maps source key → last archived hour as "YYYY-MM-DDTHH"
@@ -208,39 +209,110 @@ impl ArchiveState {
 // ArchiveManager
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Last scanned (date, hour, source stamp) per source key.
+type ScanAttempts = HashMap<String, (NaiveDate, u8, u64)>;
+
+/// A peer export file's mtime at its merge, by file name.
+pub type MergedPeerFiles = HashMap<String, Option<std::time::SystemTime>>;
+
+/// `.merged-peers.json`: the sync folder the peer files were merged from.
+#[derive(Serialize, Deserialize)]
+struct MergedPeers {
+    folder: String,
+    files: MergedPeerFiles,
+}
+
 #[derive(Clone)]
 pub struct ArchiveManager {
     base_dir: PathBuf,
+    /// Shared by clones, since `UsageParser::archive()` hands out copies.
+    attempts: Arc<Mutex<ScanAttempts>>,
+    /// `.archive-state.json` as last read or saved, shared by clones: every
+    /// view compute reads a frontier per device, several times over.
+    state: Arc<Mutex<Option<ArchiveState>>>,
 }
 
 impl ArchiveManager {
     pub fn new(app_data_dir: &Path) -> Self {
         Self {
             base_dir: app_data_dir.join("usage-archive"),
+            attempts: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::default(),
         }
+    }
+
+    /// Returns true at most once per (date, hour, stamp) for a source. A frontier
+    /// with no entries in the previous hour never becomes "up to date", so without
+    /// this every tick would reload the source's full history for nothing.
+    /// `stamp` identifies the source's content (0 when the caller has none).
+    pub fn should_scan(&self, source: &str, date: NaiveDate, hour: u8, stamp: u64) -> bool {
+        let mut attempts = self.attempts.lock().unwrap();
+        if attempts.get(source) == Some(&(date, hour, stamp)) {
+            return false;
+        }
+        attempts.insert(source.to_string(), (date, hour, stamp));
+        true
     }
 
     fn state_path(&self) -> PathBuf {
         self.base_dir.join(".archive-state.json")
     }
 
+    /// Read the state, from the file only the first time: `save_state` keeps
+    /// the copy in memory in step with it.
+    fn read_state<T>(&self, read: impl FnOnce(&ArchiveState) -> T) -> T {
+        let mut cached = self.state.lock().unwrap();
+        read(
+            cached.get_or_insert_with(|| match fs::read_to_string(self.state_path()) {
+                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                Err(_) => ArchiveState::default(),
+            }),
+        )
+    }
+
     fn load_state(&self) -> ArchiveState {
-        match fs::read_to_string(self.state_path()) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => ArchiveState::default(),
-        }
+        self.read_state(ArchiveState::clone)
     }
 
     fn save_state(&self, state: &ArchiveState) {
-        if let Err(e) = atomic_write_json(&self.state_path(), state) {
+        let saved = atomic_write_json(&self.state_path(), state);
+        if let Err(e) = &saved {
             tracing::warn!("Failed to save archive state: {e}");
         }
+        // A failed write left the file as it was: read that again.
+        *self.state.lock().unwrap() = saved.is_ok().then(|| state.clone());
     }
 
     /// Get the archive frontier (inclusive) for a source.
     /// Returns None if no data has been archived for this source.
     pub fn frontier(&self, source_key: &str) -> Option<ArchiveFrontier> {
-        self.load_state().get_frontier(source_key)
+        self.read_state(|state| state.get_frontier(source_key))
+    }
+
+    fn merged_peers_path(&self) -> PathBuf {
+        self.base_dir.join(".merged-peers.json")
+    }
+
+    /// The mtime each peer export file in the sync `folder` had when it was
+    /// merged into this archive, by file name. Kept with the archive, so a
+    /// reset forgets it too; empty after a change of folder.
+    pub fn merged_peers(&self, folder: &str) -> MergedPeerFiles {
+        fs::read_to_string(self.merged_peers_path())
+            .ok()
+            .and_then(|content| serde_json::from_str::<MergedPeers>(&content).ok())
+            .filter(|merged| merged.folder == folder)
+            .map(|merged| merged.files)
+            .unwrap_or_default()
+    }
+
+    pub fn save_merged_peers(&self, folder: &str, files: &MergedPeerFiles) {
+        let merged = MergedPeers {
+            folder: folder.to_string(),
+            files: files.clone(),
+        };
+        if let Err(e) = atomic_write_json(&self.merged_peers_path(), &merged) {
+            tracing::warn!("Failed to save the merged peer files: {e}");
+        }
     }
 
     /// Archive completed hours from parsed entries.
@@ -559,11 +631,13 @@ impl ArchiveManager {
     /// - `"local:codex"` → `usage-archive/local/codex/`
     /// - `"device:{alias}"` → `usage-archive/devices/{alias}/`
     pub fn reset(&self) {
+        self.attempts.lock().unwrap().clear();
         if self.base_dir.exists() {
             if let Err(e) = fs::remove_dir_all(&self.base_dir) {
                 tracing::warn!("Failed to remove archive dir {:?}: {e}", self.base_dir);
             }
         }
+        *self.state.lock().unwrap() = None;
     }
 
     // ── Export / import ──
@@ -678,12 +752,18 @@ impl ArchiveManager {
         // second copy that would sum with this machine's Cursor archive.
         let redirected: Vec<ArchivedHourly>;
         let records = if device_source {
-            let (cursor, rest): (Vec<_>, Vec<_>) = records
+            let (cursor, mut rest): (Vec<_>, Vec<_>) = records
                 .iter()
                 .cloned()
                 .partition(ArchivedHourly::is_shared_cursor);
             if !cursor.is_empty() {
                 self.import_source("local:cursor", &cursor, current_date, current_hour);
+            }
+            // Device rows always live under p="all" (the SSH archiver's tag), so
+            // a peer's copy of the same server shares our bucket instead of
+            // summing beside it. Provider is recovered from the model on export.
+            for r in &mut rest {
+                r.p = String::from("all");
             }
             redirected = rest;
             redirected.as_slice()
@@ -846,6 +926,47 @@ impl ArchiveManager {
         folded
     }
 
+    /// Collapse every non-cursor row of a `device:*` source onto `p = "all"`.
+    /// Older builds imported a peer's copy of an SSH server under `p = claude/
+    /// codex`, which sat beside this machine's own `p = "all"` rows for the same
+    /// hour and summed. Same (d, h, mk) buckets merge field-wise max, so this is
+    /// lossless and idempotent. Only sources with stray rows are rewritten.
+    /// Returns the number of rows folded.
+    pub fn fold_device_providers_into_all(&self) -> usize {
+        let mut folded = 0;
+        for source_key in self.list_sources() {
+            if !source_key.starts_with("device:") {
+                continue;
+            }
+            let records = self.read_raw(&source_key);
+            if !records
+                .iter()
+                .any(|r| r.p != "all" && !r.is_shared_cursor())
+            {
+                continue;
+            }
+            let mut buckets: HashMap<(String, u8, String, String), ArchivedHourly> = HashMap::new();
+            for mut r in records {
+                if !r.is_shared_cursor() && r.p != "all" {
+                    folded += 1;
+                    r.p = String::from("all");
+                }
+                match buckets.get_mut(&r.bucket_key()) {
+                    Some(existing) => {
+                        existing.merge_max_from(&r);
+                    }
+                    None => {
+                        buckets.insert(r.bucket_key(), r);
+                    }
+                }
+            }
+            let mut rows: Vec<ArchivedHourly> = buckets.into_values().collect();
+            rows.sort_by(|a, b| (&a.d, a.h, &a.mk, &a.p).cmp(&(&b.d, b.h, &b.mk, &b.p)));
+            self.rewrite_source(&source_key, rows.iter());
+        }
+        folded
+    }
+
     /// Permanently remove a source: delete its archive directory and drop its
     /// frontier state. Used to clean up a PHANTOM `device:<slug>` source — this
     /// machine's own data that an older build duplicated under a stale device
@@ -883,10 +1004,13 @@ impl ArchiveManager {
     /// outright as a second guard. Returns the removed source keys.
     pub fn remove_self_duplicate_devices(&self, configured: &HashSet<String>) -> Vec<String> {
         // Index this machine's own local buckets (claude + codex + cursor).
-        let mut local: HashMap<(String, u8, String, String), ArchivedHourly> = HashMap::new();
+        // Keyed WITHOUT the provider tag: device rows are stored as p="all"
+        // while local rows carry claude/codex, so `p` can never match; the
+        // exact token equality on every bucket is the actual safety.
+        let mut local: HashMap<(String, u8, String), ArchivedHourly> = HashMap::new();
         for provider in ["claude", "codex", "cursor"] {
             for r in self.read_raw(&format!("local:{provider}")) {
-                local.entry(r.bucket_key()).or_insert(r);
+                local.entry((r.d.clone(), r.h, r.mk.clone())).or_insert(r);
             }
         }
         if local.is_empty() {
@@ -906,17 +1030,20 @@ impl ArchiveManager {
             if records.is_empty() {
                 continue;
             }
-            let subsumed = records.iter().all(|r| match local.get(&r.bucket_key()) {
-                Some(l) => {
-                    l.input_tokens == r.input_tokens
-                        && l.out == r.out
-                        && l.c5 == r.c5
-                        && l.c1 == r.c1
-                        && l.cr == r.cr
-                        && l.ws == r.ws
-                }
-                None => false,
-            });
+            let subsumed =
+                records
+                    .iter()
+                    .all(|r| match local.get(&(r.d.clone(), r.h, r.mk.clone())) {
+                        Some(l) => {
+                            l.input_tokens == r.input_tokens
+                                && l.out == r.out
+                                && l.c5 == r.c5
+                                && l.c1 == r.c1
+                                && l.cr == r.cr
+                                && l.ws == r.ws
+                        }
+                        None => false,
+                    });
             if subsumed {
                 tracing::info!(
                     source = source_key.as_str(),
@@ -1124,6 +1251,19 @@ mod tests {
     }
 
     #[test]
+    fn reset_forgets_the_frontier_it_kept_in_memory() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let entries = vec![make_entry("2026-04-11", 10, "claude-sonnet-4-6", 1, 1)];
+        let today = NaiveDate::from_ymd_opt(2026, 4, 11).unwrap();
+        mgr.archive_completed_hours(&entries, "local:claude", "claude", today, 14);
+        assert!(mgr.clone().frontier("local:claude").is_some());
+
+        mgr.reset();
+        assert_eq!(mgr.frontier("local:claude"), None);
+    }
+
+    #[test]
     fn does_not_advance_frontier_when_append_fails() {
         let tmp = TempDir::new().unwrap();
         let mgr = ArchiveManager::new(tmp.path());
@@ -1224,6 +1364,28 @@ mod tests {
         };
         // Frontier is a day ahead → up to date.
         assert!(f.is_up_to_date(NaiveDate::from_ymd_opt(2026, 4, 11).unwrap(), 14));
+    }
+
+    #[test]
+    fn should_scan_once_per_hour_and_stamp() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let date = NaiveDate::from_ymd_opt(2026, 4, 11).unwrap();
+
+        assert!(mgr.should_scan("local:claude", date, 14, 0));
+        assert!(!mgr.should_scan("local:claude", date, 14, 0));
+        // Clones (parser.archive() hands out copies) share the memo.
+        assert!(!mgr.clone().should_scan("local:claude", date, 14, 0));
+        // Sources are tracked independently.
+        assert!(mgr.should_scan("local:codex", date, 14, 0));
+
+        // Next hour, or a changed source file, scans again.
+        assert!(mgr.should_scan("local:claude", date, 15, 0));
+        assert!(mgr.should_scan("local:claude", date, 15, 42));
+        assert!(!mgr.should_scan("local:claude", date, 15, 42));
+
+        mgr.reset();
+        assert!(mgr.should_scan("local:claude", date, 15, 42));
     }
 
     #[test]
@@ -1532,8 +1694,8 @@ mod tests {
             fd,
             0,
         );
-        // A configured SSH device whose data happens to equal local → kept (guard
-        // + it's archived as p="all" so it wouldn't match anyway).
+        // A configured SSH device whose data happens to equal local → kept (the
+        // `configured` guard is what protects it).
         let mut ssh = arch("2026-04-10", 9, "sonnet-4-6", 1000, 500);
         ssh.p = "all".to_string();
         mgr.import_source("device:myserver", &[ssh], fd, 0);
@@ -1679,6 +1841,52 @@ mod tests {
 
         let device_raw = mgr.read_raw("device:peer-mac");
         assert!(device_raw.iter().all(|r| r.p != "cursor"));
+    }
+
+    #[test]
+    fn import_retags_device_rows_to_all_so_peer_copy_shares_bucket() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let fd = future_date();
+        let mut own = arch("2026-04-10", 9, "sonnet-4-6", 1000, 500);
+        own.p = "all".to_string();
+        mgr.import_source("device:srv", &[own], fd, 0);
+        // Peer's export of the same hour arrives tagged claude.
+        let peer = arch("2026-04-10", 9, "sonnet-4-6", 1200, 400);
+        mgr.import_source("device:srv", &[peer], fd, 0);
+        let rows = mgr.read_raw("device:srv");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].p, "all");
+        assert_eq!((rows[0].input_tokens, rows[0].out), (1200, 500));
+        // Nothing left for the cleanup fold to do.
+        assert_eq!(mgr.fold_device_providers_into_all(), 0);
+    }
+
+    #[test]
+    fn fold_device_providers_collapses_ssh_double_count() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let fd = future_date();
+
+        // Our own SSH archive of the server (p=all) + a peer's copy of the same
+        // hour imported by an older build (p=claude) + a cursor row to leave alone.
+        let mut own = arch("2026-04-10", 9, "sonnet-4-6", 1000, 500);
+        own.p = "all".to_string();
+        let peer = arch("2026-04-10", 9, "sonnet-4-6", 1200, 500);
+        let mut cursor = arch("2026-04-10", 9, "grok-4.6", 7, 7);
+        cursor.p = "cursor".to_string();
+        mgr.rewrite_source("device:srv", [&own, &peer, &cursor]);
+
+        assert_eq!(mgr.fold_device_providers_into_all(), 1);
+        let rows = mgr.read_raw("device:srv");
+        let all: Vec<_> = rows.iter().filter(|r| r.p == "all").collect();
+        assert_eq!(all.len(), 1, "one bucket, not two");
+        assert_eq!(all[0].input_tokens, 1200, "field-wise max, not sum");
+        assert_eq!(rows.iter().filter(|r| r.p == "cursor").count(), 1);
+
+        // Idempotent: nothing left to fold, source untouched.
+        assert_eq!(mgr.fold_device_providers_into_all(), 0);
+        let _ = fd;
     }
 
     #[test]

@@ -202,6 +202,20 @@ pub fn claude_credentials_file() -> Option<PathBuf> {
         .map(|p| p.join(".credentials.json"))
 }
 
+/// Claude Code's global config (`~/.claude.json`, or `.claude.json` inside
+/// `$CLAUDE_CONFIG_DIR`): read for the account's organization UUID and Claude
+/// Code's cached usage response (`cachedUsageUtilization`).
+pub fn claude_global_config_file() -> Option<PathBuf> {
+    match env::var("CLAUDE_CONFIG_DIR") {
+        Ok(raw) => raw
+            .split(',')
+            .map(str::trim)
+            .find(|entry| !entry.is_empty())
+            .map(|dir| PathBuf::from(dir).join(".claude.json")),
+        Err(_) => home().map(|h| h.join(".claude.json")),
+    }
+}
+
 /// Enumerate every path the app *may* read, for audit and UI display.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn accessed_paths() -> Vec<AccessedPath> {
@@ -209,6 +223,13 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
     for p in claude_project_roots_default() {
         out.push(AccessedPath {
             purpose: "Claude Code session logs",
+            path: p,
+            env_override: Some("CLAUDE_CONFIG_DIR"),
+        });
+    }
+    if let Some(p) = claude_global_config_file() {
+        out.push(AccessedPath {
+            purpose: "Claude Code's cached usage and organization id for rate limits",
             path: p,
             env_override: Some("CLAUDE_CONFIG_DIR"),
         });

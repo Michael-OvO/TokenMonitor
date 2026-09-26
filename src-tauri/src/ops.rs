@@ -22,6 +22,7 @@ pub struct PlanBudget {
 struct Urls {
     anthropic_usage: String,
     anthropic_account: String,
+    anthropic_prepaid_credits: String,
     cursor_official_api: String,
     cursor_dashboard: String,
     cursor_ide: String,
@@ -78,6 +79,13 @@ pub fn anthropic_usage_url() -> &'static str {
 
 pub fn anthropic_account_url() -> &'static str {
     ops().urls.anthropic_account.as_str()
+}
+
+pub fn anthropic_prepaid_credits_url(org_uuid: &str) -> String {
+    ops()
+        .urls
+        .anthropic_prepaid_credits
+        .replace("{org}", org_uuid)
 }
 
 pub fn cursor_official_api_base() -> &'static str {

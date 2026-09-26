@@ -138,13 +138,13 @@
     border: none;
     cursor: pointer;
     color: var(--t1);
-    font: 600 12px/1 'Inter', sans-serif;
+    font: 600 12px/1 system-ui, sans-serif;
     padding: 0;
   }
   .back:hover { color: var(--t2); }
 
   .total {
-    font: 600 12px/1 'Inter', sans-serif;
+    font: 600 12px/1 system-ui, sans-serif;
     color: var(--t1);
     font-variant-numeric: tabular-nums;
   }
@@ -174,11 +174,11 @@
   }
   .empty-icon { display: block; margin-bottom: 4px; opacity: 0.6; }
   .error-title {
-    font: 500 11px/1 'Inter', sans-serif;
+    font: 500 11px/1 system-ui, sans-serif;
     color: var(--t1);
   }
   .error-text {
-    font: 400 9px/1.4 'Inter', sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     color: #ef4444;
     max-width: 220px;
   }
@@ -189,7 +189,7 @@
     border-radius: 5px;
     background: transparent;
     color: var(--t2);
-    font: 500 9px/1 'Inter', sans-serif;
+    font: 500 9px/1 system-ui, sans-serif;
     cursor: pointer;
     transition: background var(--t-fast) ease, color var(--t-fast) ease;
   }
@@ -205,7 +205,7 @@
 
   .models-title {
     display: block;
-    font: 500 8px/1 'Inter', sans-serif;
+    font: 500 8px/1 system-ui, sans-serif;
     color: var(--t3);
 
         margin-bottom: 8px;
@@ -232,7 +232,7 @@
 
   .model-name {
     flex: 1;
-    font: 400 10px/1.25 'Inter', sans-serif;
+    font: 400 10px/1.25 system-ui, sans-serif;
     color: var(--t2);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -240,14 +240,14 @@
   }
 
   .model-cost {
-    font: 500 10px/1 'Inter', sans-serif;
+    font: 500 10px/1 system-ui, sans-serif;
     color: var(--t1);
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }
 
   .model-tokens {
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;

@@ -1,11 +1,13 @@
 #[cfg_attr(not(test), allow(dead_code))]
-pub const PRICING_VERSION: &str = "2026-09-16";
+pub const PRICING_VERSION: &str = "2026-09-21";
 
 use crate::models::{detect_model_family, ModelFamily};
 use crate::usage::litellm::DynamicModelRates;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 
+#[derive(Clone, Copy)]
 struct ModelRates {
     input: f64,
     output: f64,
@@ -17,6 +19,7 @@ struct ModelRates {
 // ── Dynamic pricing from LiteLLM ────────────────────────────────────────────
 
 static DYNAMIC_PRICING: OnceLock<RwLock<HashMap<String, DynamicModelRates>>> = OnceLock::new();
+static PRICING_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// Replace the dynamic pricing table. Called from startup and async refresh.
 pub fn set_dynamic_pricing(rates: HashMap<String, DynamicModelRates>) {
@@ -24,6 +27,12 @@ pub fn set_dynamic_pricing(rates: HashMap<String, DynamicModelRates>) {
     if let Ok(mut guard) = lock.write() {
         *guard = rates;
     }
+    PRICING_EPOCH.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Bumped at each change of the price table: the same epoch, the same prices.
+pub fn pricing_epoch() -> u64 {
+    PRICING_EPOCH.load(Ordering::SeqCst)
 }
 
 /// Look up dynamic pricing for a normalized model key.
@@ -185,11 +194,39 @@ fn get_rates(model: &str) -> Option<ModelRates> {
     get_rates_for_key(&normalized)
 }
 
+/// Rates per model key under the price table of the tagged epoch.
+type RatesMemo = RwLock<(u64, HashMap<String, Option<ModelRates>>)>;
+
+/// [`lookup_rates_for_key`], memoized per key until the next price table:
+/// every view prices each entry, and the keys number in the tens.
+fn get_rates_for_key(model: &str) -> Option<ModelRates> {
+    static MEMO: OnceLock<RatesMemo> = OnceLock::new();
+    let memo = MEMO.get_or_init(Default::default);
+    // Read before the lookup: a table applied meanwhile bumps it past this
+    // epoch, which keeps the rates looked up here out of the new one's memo.
+    let epoch = pricing_epoch();
+    if let Ok(m) = memo.read() {
+        if let Some(rates) = m.1.get(model).filter(|_| m.0 == epoch) {
+            return *rates;
+        }
+    }
+    let rates = lookup_rates_for_key(model);
+    if let Ok(mut m) = memo.write() {
+        if m.0 < epoch {
+            *m = (epoch, HashMap::new());
+        }
+        if m.0 == epoch && m.1.len() < 4096 {
+            m.1.insert(model.to_string(), rates);
+        }
+    }
+    rates
+}
+
 /// Look up pricing for an already-lowercase model key.
 ///
 /// Checks dynamic LiteLLM/OpenRouter pricing first, then `pricing_fallback.json`,
 /// then inline hardcoded rates.
-fn get_rates_for_key(model: &str) -> Option<ModelRates> {
+fn lookup_rates_for_key(model: &str) -> Option<ModelRates> {
     // Dynamic pricing from LiteLLM + OpenRouter (refreshed on startup, cached 7d).
     if let Some(rates) = lookup_dynamic(model) {
         return Some(rates);
@@ -678,7 +715,7 @@ mod tests {
 
     #[test]
     fn pricing_version_is_set() {
-        assert_eq!(PRICING_VERSION, "2026-09-16");
+        assert_eq!(PRICING_VERSION, "2026-09-21");
     }
 
     #[test]

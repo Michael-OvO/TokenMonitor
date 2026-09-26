@@ -204,7 +204,7 @@
 
   /* ── App name ── */
   .name {
-    font: 500 13px/1 'Inter', -apple-system, system-ui, sans-serif;
+    font: 500 13px/1 system-ui, -apple-system, sans-serif;
     color: var(--t2);
     letter-spacing: 0.5px;
     opacity: 0;

@@ -1,4 +1,4 @@
-use super::tray::{patch_tray_utilization, sync_tray_title, tray_utilization_from_rate_limits};
+use super::tray::{patch_tray_utilization, tray_utilization_from_rate_limits};
 use super::{AppState, UsageDebugReport};
 use crate::models::*;
 use crate::secrets;
@@ -7,9 +7,18 @@ use tauri::{AppHandle, State};
 
 #[tauri::command]
 pub async fn set_refresh_interval(interval: u64, state: State<'_, AppState>) -> Result<(), String> {
-    let mut current = state.refresh_interval.write().await;
-    *current = interval;
+    apply_refresh_interval(&state, interval).await;
     Ok(())
+}
+
+/// Store the interval and wake the refresh loop, which re-plans against the
+/// new grid at once without running a cycle for it.
+pub(crate) async fn apply_refresh_interval(state: &AppState, interval: u64) {
+    *state.refresh_interval.write().await = interval;
+    state
+        .parser
+        .set_payload_ttl_secs(crate::usage::parser::payload_ttl_for(interval));
+    state.refresh.wake.notify_one();
 }
 
 /// Push the week-start day and rolling-window toggle from Settings down to
@@ -42,7 +51,7 @@ pub async fn set_currency(
 
 /// Enable or disable live rate-limit fetching.
 ///
-/// When disabled, the background loop skips `refresh_rate_limits`, so the app
+/// When disabled, the refresh cycle skips its rate-limit probes, so the app
 /// spawns no CLI probe and reads no Claude credentials until the user
 /// explicitly opts in (via the welcome card or the rate-limits CTA).
 #[tauri::command]
@@ -50,10 +59,18 @@ pub async fn set_rate_limits_enabled(
     enabled: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state
-        .rate_limits_enabled
-        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    apply_rate_limits_enabled(&state, enabled);
     Ok(())
+}
+
+fn apply_rate_limits_enabled(state: &AppState, enabled: bool) {
+    let was_enabled = state
+        .rate_limits_enabled
+        .swap(enabled, std::sync::atomic::Ordering::SeqCst);
+    if enabled && !was_enabled {
+        // Nothing has been probed yet: probe now, not at the next tick.
+        crate::refresh::request_refresh(state);
+    }
 }
 
 /// Enable or disable local Claude/Codex session-log reads.
@@ -66,10 +83,18 @@ pub async fn set_usage_access_enabled(
     enabled: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state
-        .usage_access_enabled
-        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    apply_usage_access(&state, enabled);
     Ok(())
+}
+
+fn apply_usage_access(state: &AppState, enabled: bool) {
+    let was_enabled = state
+        .usage_access_enabled
+        .swap(enabled, std::sync::atomic::Ordering::SeqCst);
+    if enabled && !was_enabled {
+        // Everything published so far was computed without access.
+        crate::refresh::request_refresh(state);
+    }
 }
 
 /// Set or refresh the user's Cursor secret.
@@ -246,11 +271,15 @@ fn launch_cursor() -> Result<(), String> {
 ///    can surface "Connected via Cursor IDE" instead of "Not connected".
 ///
 /// Failures are silent — a missing/locked keychain or absent Cursor IDE
-/// just leaves the corresponding layer empty.
+/// just leaves the corresponding layer empty. Runs in the background at
+/// launch, beside the frontend's own `set_cursor_auth_config`: whichever
+/// lands later is newer, so this sets nothing once that one has.
 pub fn prime_cursor_auth_from_disk(app: &AppHandle) {
+    use crate::usage::cursor_parser::set_cursor_auth_config_if_unchanged;
+    let version = crate::usage::cursor_parser::cursor_auth_version();
     let user_secret_loaded = match secrets::cursor::load(app) {
         Some((value, backend)) => {
-            let _ = crate::usage::cursor_parser::set_cursor_auth_config(Some(value), backend);
+            set_cursor_auth_config_if_unchanged(version, Some(value), backend);
             true
         }
         None => false,
@@ -266,10 +295,7 @@ pub fn prime_cursor_auth_from_disk(app: &AppHandle) {
         // No user-pasted secret, but the IDE has a token — surface the
         // "auto-detected" backend so the Settings UI can render a
         // "Connected via Cursor IDE" badge without persisting anything.
-        let _ = crate::usage::cursor_parser::set_cursor_auth_config(
-            None,
-            secrets::StorageBackend::IdeAuto,
-        );
+        set_cursor_auth_config_if_unchanged(version, None, secrets::StorageBackend::IdeAuto);
     }
 }
 
@@ -434,6 +460,7 @@ pub async fn set_dock_icon_visible(app: tauri::AppHandle, visible: bool) -> Resu
         // to the center of the screen on startup.
         if let Some(win) = main {
             if showing {
+                crate::emit_popover_visibility(&win, true);
                 let _ = win.show();
                 let _ = win.set_focus();
             }
@@ -508,7 +535,9 @@ pub async fn set_auto_export_config(
         let app2 = app.clone();
         tauri::async_runtime::spawn(async move {
             let state = app2.state::<AppState>();
-            crate::commands::usage_io::run_auto_export(&app2, &state).await;
+            if crate::commands::usage_io::run_auto_export(&app2, &state).await {
+                crate::refresh::request_refresh(&state);
+            }
         });
     }
     Ok(())
@@ -517,24 +546,40 @@ pub async fn set_auto_export_config(
 #[tauri::command]
 pub async fn clear_cache(state: State<'_, AppState>) -> Result<(), String> {
     state.parser.clear_cache();
-    if let Some(ref disk_cache) = *state.payload_disk_cache.read().await {
-        disk_cache.clear_all();
-    }
     if let Some(ssh_cache) = state.ssh_cache.read().await.as_ref() {
         ssh_cache.reset_all_caches();
     }
-    *state.cached_rate_limits.write().await = None;
+    {
+        // After the probe in flight, which would write its readings back.
+        let _io = state.rate_limits_io.lock().await;
+        *state.cached_rate_limits.write().await = None;
+    }
     *state.last_usage_debug.write().await = None;
+    clear_payload_caches(&state).await;
     Ok(())
 }
 
+/// Settings calls this after a Cursor auth change, among others.
 #[tauri::command]
 pub async fn clear_payload_cache(state: State<'_, AppState>) -> Result<(), String> {
-    state.parser.clear_payload_cache();
-    if let Some(ref disk_cache) = *state.payload_disk_cache.read().await {
+    clear_payload_caches(&state).await;
+    Ok(())
+}
+
+/// Drop every computed view and the Cursor remote data (the Cursor account
+/// may have changed), then ask for a refresh: it refetches, recomputes and
+/// publishes them together.
+async fn clear_payload_caches(state: &AppState) {
+    // The Cursor generation bump comes before the clears, so a view still
+    // computing from the old data is not cached after them.
+    state.parser.clear_cursor_remote();
+    // Disk first: the write lock waits out the disk hits in flight, and the
+    // memory clear after it drops the copies they made.
+    if let Some(ref disk_cache) = *state.payload_disk_cache.write().await {
         disk_cache.clear_all();
     }
-    Ok(())
+    state.parser.clear_payload_cache();
+    crate::refresh::request_refresh(state);
 }
 
 #[tauri::command]
@@ -611,9 +656,12 @@ pub async fn get_window_anchor_edge() -> String {
     }
 }
 
+/// The rate limits the last refresh probed. `force` probes the selection now
+/// instead, for explicit user actions (Enable rate limits, Re-grant access).
 #[tauri::command]
 pub async fn get_rate_limits(
     provider: Option<String>,
+    force: Option<bool>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RateLimitsPayload, String> {
@@ -637,11 +685,57 @@ pub async fn get_rate_limits(
         },
     };
 
-    if !state
-        .usage_access_enabled
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        return Ok(state
+    let force = force == Some(true);
+    let payload = rate_limits_for(&state, selection, force).await;
+    if force {
+        super::tray::apply_tray_title_now(&app, &state).await;
+    }
+    Ok(payload)
+}
+
+/// How long after a forced request a probe may still start for it.
+const FORCED_PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The providers in `selection` whose reading is the same in `now` as in
+/// `before`. A probe that ended while a forced request waited for its turn
+/// answered it for the providers it read; probing those again would only
+/// queue another probe, or retry an error just got.
+fn not_probed_since(
+    selection: crate::rate_limits::RateLimitSelection,
+    before: Option<&RateLimitsPayload>,
+    now: Option<&RateLimitsPayload>,
+) -> crate::rate_limits::RateLimitSelection {
+    use crate::usage::integrations::UsageIntegrationId as Id;
+    let fetched_at = |payload: Option<&RateLimitsPayload>, id: Id| {
+        payload
+            .and_then(|p| match id {
+                Id::Claude => p.claude.as_ref(),
+                Id::Codex => p.codex.as_ref(),
+                Id::Cursor => p.cursor.as_ref(),
+                Id::Kimi => p.kimi.as_ref(),
+            })
+            .map(|limits| limits.fetched_at.clone())
+    };
+    let ids: Vec<Id> = [
+        (Id::Claude, selection.includes_claude()),
+        (Id::Codex, selection.includes_codex()),
+        (Id::Cursor, selection.includes_cursor()),
+        (Id::Kimi, selection.includes_kimi()),
+    ]
+    .into_iter()
+    .filter(|(id, selected)| *selected && fetched_at(before, *id) == fetched_at(now, *id))
+    .map(|(id, _)| id)
+    .collect();
+    crate::rate_limits::RateLimitSelection::enabled(&ids)
+}
+
+pub(crate) async fn rate_limits_for(
+    state: &AppState,
+    selection: crate::rate_limits::RateLimitSelection,
+    force: bool,
+) -> RateLimitsPayload {
+    if !force || !state.usage_access_enabled() {
+        return state
             .cached_rate_limits
             .read()
             .await
@@ -651,23 +745,33 @@ pub async fn get_rate_limits(
                 codex: None,
                 cursor: None,
                 kimi: None,
-            }));
+            });
     }
 
+    let asked = std::time::Instant::now();
+    let before = state.cached_rate_limits.read().await.clone();
+    let _io = state.rate_limits_io.lock().await;
     let codex_dir = state.parser.codex_dir().to_path_buf();
     let cached = state.cached_rate_limits.read().await.clone();
-    let fresh =
-        crate::rate_limits::fetch_selected_rate_limits(&codex_dir, selection, cached.as_ref())
-            .await;
+    let selection = not_probed_since(selection, before.as_ref(), cached.as_ref());
+    // A user retry probes a provider whose last probe failed straight away.
+    // The budget counts from the ask, so requests queued behind one another
+    // cannot add up to minutes: the providers left keep their cached value.
+    let fresh = crate::rate_limits::fetch_selected_rate_limits_until(
+        &codex_dir,
+        selection,
+        cached.as_ref(),
+        Some(asked + FORCED_PROBE_BUDGET),
+        true,
+    )
+    .await;
 
     let merged = crate::rate_limits::merge_rate_limits(fresh, cached.as_ref());
+    crate::plan_budget::record(&merged);
 
     *state.cached_rate_limits.write().await = Some(merged.clone());
-    patch_tray_utilization(&state, tray_utilization_from_rate_limits(Some(&merged))).await;
-
-    sync_tray_title(&app, &state).await;
-
-    Ok(merged)
+    patch_tray_utilization(state, tray_utilization_from_rate_limits(Some(&merged))).await;
+    merged
 }
 
 #[tauri::command]
@@ -701,7 +805,7 @@ pub async fn start_cache_warmup(
     let period = priority_period.unwrap_or_else(|| "day".to_string());
 
     tokio::spawn(async move {
-        crate::usage::cache_warmup::warmup_payloads(&app, &provider, &period, true).await;
+        crate::usage::cache_warmup::warmup_payloads(&app, &provider, &period).await;
     });
 
     Ok(0)
@@ -711,4 +815,164 @@ pub async fn start_cache_warmup(
 pub fn cancel_cache_warmup() -> Result<(), String> {
     crate::usage::cache_warmup::cancel_warmup();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usage::integrations::UsageIntegrationId;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn a_new_refresh_interval_wakes_the_loop_without_requesting_a_cycle() {
+        let state = AppState::new();
+        apply_refresh_interval(&state, 300).await;
+
+        assert_eq!(*state.refresh_interval.read().await, 300);
+        let woken =
+            tokio::time::timeout(std::time::Duration::ZERO, state.refresh.wake.notified()).await;
+        assert!(woken.is_ok(), "a wake permit is stored for the loop");
+        assert!(
+            !state.refresh.requested.load(Ordering::SeqCst),
+            "the loop only re-plans against the new grid"
+        );
+    }
+
+    #[test]
+    fn turning_usage_access_on_requests_a_refresh() {
+        let state = AppState::new();
+        apply_usage_access(&state, true);
+        assert!(
+            state.refresh.requested.swap(false, Ordering::SeqCst),
+            "the tray and views were computed without access"
+        );
+
+        apply_usage_access(&state, true);
+        apply_usage_access(&state, false);
+        assert!(
+            !state.refresh.requested.load(Ordering::SeqCst),
+            "only a switch from off to on asks for one"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_payload_cache_requests_refresh_and_drops_cursor_cache() {
+        let state = AppState::new();
+        state.parser.store_cursor_remote(Vec::new(), None);
+        assert!(
+            state.parser.cursor_remote_for(None).is_some(),
+            "guard: Cursor data is cached"
+        );
+
+        clear_payload_caches(&state).await;
+
+        assert!(
+            state.parser.cursor_remote_for(None).is_none(),
+            "the Cursor account may have changed"
+        );
+        assert!(
+            state.refresh.requested.load(Ordering::SeqCst),
+            "a refresh rebuilds the views from one sample"
+        );
+    }
+
+    /// A plain read serves the refresh's reading: no probe, even when the
+    /// cached one is long past every provider's refetch floor.
+    #[tokio::test]
+    async fn unforced_rate_limits_return_cache_without_probe() {
+        let cached = RateLimitsPayload {
+            claude: None,
+            codex: None,
+            cursor: None,
+            kimi: Some(ProviderRateLimits {
+                provider: "kimi".to_string(),
+                plan_tier: None,
+                windows: vec![RateLimitWindow::new(
+                    "five_hour".to_string(),
+                    "Session (5hr)".to_string(),
+                    42.0,
+                    None,
+                )],
+                extra_usage: None,
+                credits: None,
+                stale: false,
+                error: None,
+                retry_after_seconds: None,
+                cooldown_until: None,
+                fetched_at: "2020-01-01T00:00:00+00:00".to_string(),
+            }),
+        };
+        let state = AppState::new();
+        state.usage_access_enabled.store(true, Ordering::SeqCst);
+        state.rate_limits_enabled.store(true, Ordering::SeqCst);
+        *state.cached_rate_limits.write().await = Some(cached.clone());
+
+        let selection =
+            crate::rate_limits::RateLimitSelection::enabled(&[UsageIntegrationId::Kimi]);
+        let served = rate_limits_for(&state, selection, false).await;
+
+        let json = |payload: &RateLimitsPayload| serde_json::to_value(payload).unwrap();
+        assert_eq!(json(&served), json(&cached));
+        let stored = state.cached_rate_limits.read().await.clone().unwrap();
+        assert_eq!(json(&stored), json(&cached), "fetched_at must not move");
+    }
+
+    fn read_at(provider: &str, fetched_at: &str) -> Option<ProviderRateLimits> {
+        Some(ProviderRateLimits {
+            provider: provider.to_string(),
+            plan_tier: None,
+            windows: Vec::new(),
+            extra_usage: None,
+            credits: None,
+            stale: false,
+            error: None,
+            retry_after_seconds: None,
+            cooldown_until: None,
+            fetched_at: fetched_at.to_string(),
+        })
+    }
+
+    #[test]
+    fn a_probe_that_ended_while_a_forced_request_waited_answers_it() {
+        use crate::rate_limits::RateLimitSelection;
+        let at = |claude: &str, kimi: &str| RateLimitsPayload {
+            claude: read_at("claude", claude),
+            codex: None,
+            cursor: None,
+            kimi: read_at("kimi", kimi),
+        };
+        let asked = at("2026-09-25T10:00:00Z", "2026-09-25T10:00:00Z");
+        // While it waited, the refresh probed Claude (and maybe errored).
+        let now = at("2026-09-25T10:00:20Z", "2026-09-25T10:00:00Z");
+        let both =
+            RateLimitSelection::enabled(&[UsageIntegrationId::Claude, UsageIntegrationId::Kimi]);
+
+        assert_eq!(
+            not_probed_since(both, Some(&asked), Some(&now)),
+            RateLimitSelection::enabled(&[UsageIntegrationId::Kimi])
+        );
+        assert_eq!(
+            not_probed_since(both, Some(&now), Some(&now)),
+            both,
+            "no probe meanwhile: probe them all"
+        );
+        assert_eq!(not_probed_since(both, None, None), both);
+    }
+
+    #[test]
+    fn turning_rate_limits_on_requests_a_refresh() {
+        let state = AppState::new();
+        apply_rate_limits_enabled(&state, true);
+        assert!(
+            state.refresh.requested.swap(false, Ordering::SeqCst),
+            "nothing was probed while they were off"
+        );
+
+        apply_rate_limits_enabled(&state, true);
+        apply_rate_limits_enabled(&state, false);
+        assert!(
+            !state.refresh.requested.load(Ordering::SeqCst),
+            "only a switch from off to on asks for one"
+        );
+    }
 }

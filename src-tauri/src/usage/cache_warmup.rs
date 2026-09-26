@@ -103,11 +103,12 @@ fn build_warmup_keys(
     keys
 }
 
+/// Each key goes through `get_usage_data_inner`, which computes a miss under
+/// the compute gate and drops its entries cache itself.
 pub async fn warmup_payloads(
     app: &AppHandle,
     priority_provider: &str,
     priority_period: &str,
-    emit_progress: bool,
 ) -> u32 {
     if WARMUP_RUNNING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -156,7 +157,6 @@ pub async fn warmup_payloads(
                 for (prov, period, offset) in &provider_keys {
                     let _ =
                         get_usage_data_inner(Some(&app_clone), &state, prov, period, *offset).await;
-                    state.parser.clear_entries_cache();
                     count += 1;
                 }
                 count
@@ -167,18 +167,16 @@ pub async fn warmup_payloads(
     for handle in handles {
         if let Ok(count) = handle.await {
             completed += count;
-            if emit_progress {
-                let _ = app.emit(
-                    "cache://progress",
-                    WarmupProgress {
-                        current: completed,
-                        total,
-                        provider: String::new(),
-                        period: String::new(),
-                        offset: 0,
-                    },
-                );
-            }
+            let _ = app.emit(
+                "cache://progress",
+                WarmupProgress {
+                    current: completed,
+                    total,
+                    provider: String::new(),
+                    period: String::new(),
+                    offset: 0,
+                },
+            );
         }
     }
 
@@ -189,21 +187,18 @@ pub async fn warmup_payloads(
             break;
         }
         let _ = get_usage_data_inner(Some(app), &state, provider, period, *offset).await;
-        state.parser.clear_entries_cache();
         completed += 1;
 
-        if emit_progress {
-            let _ = app.emit(
-                "cache://progress",
-                WarmupProgress {
-                    current: completed,
-                    total,
-                    provider: provider.clone(),
-                    period: period.clone(),
-                    offset: *offset,
-                },
-            );
-        }
+        let _ = app.emit(
+            "cache://progress",
+            WarmupProgress {
+                current: completed,
+                total,
+                provider: provider.clone(),
+                period: period.clone(),
+                offset: *offset,
+            },
+        );
     }
 
     let _ = app.emit("cache://done", completed);

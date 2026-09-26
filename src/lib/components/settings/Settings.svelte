@@ -24,6 +24,7 @@
   import { isMacOS } from "../../utils/platform.js";
   import type { PermissionSurfaceId } from "../../permissions/surfaces.js";
   import { currencySymbol } from "../../utils/format.js";
+  import { debounce } from "../../utils/debounce.js";
   import { logger } from "../../utils/logger.js";
   import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
   import SegmentedControl from "../SegmentedControl.svelte";
@@ -209,28 +210,39 @@
     cursorAuthStatus = await invoke<CursorAuthStatus>("set_cursor_auth_config", {
       apiKey,
     });
-    clearUsageCache();
-    await invoke("clear_payload_cache").catch((e) => logger.debug("settings", `clear_payload_cache failed: ${e}`));
   }
 
   async function clearCursorAuth() {
     cursorAuthStatus = await invoke<CursorAuthStatus>("clear_cursor_auth_config");
+  }
+
+  /** Drop the computed views after a Cursor auth change. The backend also
+   *  drops its Cursor data and requests a refresh, which publishes anew. */
+  async function dropViewsForCursorAuth() {
     clearUsageCache();
     await invoke("clear_payload_cache").catch((e) => logger.debug("settings", `clear_payload_cache failed: ${e}`));
   }
+
+  // Each keystroke saves and pushes the key, but the views are dropped (and a
+  // refresh requested) once typing settles, not once per character.
+  const CURSOR_KEY_SETTLE_MS = 800;
+  const dropViewsOnceKeySettles = debounce(() => void dropViewsForCursorAuth(), CURSOR_KEY_SETTLE_MS);
 
   async function handleCursorApiKeyInput(value: string) {
     await updateSetting("cursorApiKey", value);
     if (!value.trim()) {
       await clearCursorAuth();
-      return;
+    } else {
+      await syncCursorAuth(value);
     }
-    await syncCursorAuth(value);
+    dropViewsOnceKeySettles.schedule();
   }
 
   async function disconnectCursorAuth() {
+    dropViewsOnceKeySettles.cancel();
     await updateSetting("cursorApiKey", "");
     await clearCursorAuth();
+    await dropViewsForCursorAuth();
   }
 
   async function openCursorDashboard() {
@@ -558,6 +570,8 @@
 
   onDestroy(() => {
     stopCursorRetry();
+    // A key typed just before leaving Settings still drops the old views.
+    dropViewsOnceKeySettles.flush();
   });
 </script>
 
@@ -1016,13 +1030,13 @@
     border: none;
     cursor: pointer;
     color: var(--t1);
-    font: 600 12px/1 'Inter', sans-serif;
+    font: 600 12px/1 system-ui, sans-serif;
     padding: 0;
   }
   .back:hover { color: var(--t2); }
 
   .ver {
-    font: 400 8.5px/1 'Inter', sans-serif;
+    font: 400 8.5px/1 system-ui, sans-serif;
     color: var(--t4);
   }
 
@@ -1082,7 +1096,7 @@
     padding-top: 0;
   }
   .autostart-error {
-    font: 400 9px/1.35 'Inter', sans-serif;
+    font: 400 9px/1.35 system-ui, sans-serif;
     color: var(--ch-minus);
   }
 
@@ -1120,7 +1134,7 @@
     border: 1px solid var(--border);
     border-radius: 5px;
     padding: 6px 7px;
-    font: 400 10px/1 'Inter', sans-serif;
+    font: 400 10px/1 system-ui, sans-serif;
     color: var(--t1);
     outline: none;
   }
@@ -1129,7 +1143,7 @@
   }
   .hint {
     margin-top: 5px;
-    font: 400 8.5px/1.35 'Inter', sans-serif;
+    font: 400 8.5px/1.35 system-ui, sans-serif;
     color: var(--t4);
   }
   .cursor-actions {
@@ -1139,7 +1153,7 @@
   }
   .cursor-message {
     margin-top: 6px;
-    font: 400 8.5px/1.35 'Inter', sans-serif;
+    font: 400 8.5px/1.35 system-ui, sans-serif;
     color: #E8A060;
   }
 
@@ -1152,7 +1166,7 @@
   .label {
     flex: 1 1 110px;
     min-width: 0;
-    font: 400 10px/1 'Inter', sans-serif;
+    font: 400 10px/1 system-ui, sans-serif;
     color: var(--t1);
   }
 
@@ -1163,7 +1177,7 @@
   }
 
   .value {
-    font: 400 12px/1 'Inter', sans-serif;
+    font: 400 12px/1 system-ui, sans-serif;
     color: var(--t3);
   }
   .value-group {
@@ -1181,7 +1195,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font: 500 11px/1 'Inter', sans-serif;
+    font: 500 11px/1 system-ui, sans-serif;
     padding-left: 2px;
     transition: color 180ms ease;
     min-width: 0;
@@ -1240,7 +1254,7 @@
     border: 1px solid var(--border);
     border-radius: 5px;
     padding: 2px 5px;
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t1);
     cursor: pointer;
     outline: none;
@@ -1263,7 +1277,7 @@
     gap: 3px;
   }
   .dollar {
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
   }
   .cost-field {
@@ -1273,7 +1287,7 @@
     padding: 3px 6px;
     width: 54px;
     text-align: right;
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t1);
     outline: none;
   }
@@ -1317,7 +1331,7 @@
     border-radius: 4px;
     background: var(--surface-2);
     color: var(--t1);
-    font: 400 9px/1.4 'Inter', sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     outline: none;
     cursor: pointer;
   }
@@ -1325,7 +1339,7 @@
     border-color: var(--t3);
   }
   .channel-loading {
-    font: 400 8px/1 'Inter', sans-serif;
+    font: 400 8px/1 system-ui, sans-serif;
     color: var(--t4);
   }
   .cache-btn {
@@ -1333,7 +1347,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     padding: 2px 8px;
-    font: 400 8px/1.2 'Inter', sans-serif;
+    font: 400 8px/1.2 system-ui, sans-serif;
     color: var(--t2);
     cursor: pointer;
     white-space: nowrap;
@@ -1352,7 +1366,7 @@
     padding-top: 0;
   }
   .data-io-msg {
-    font: 400 8px/1.4 'Inter', sans-serif;
+    font: 400 8px/1.4 system-ui, sans-serif;
     color: var(--t3);
     word-break: break-word;
   }
@@ -1370,7 +1384,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     padding: 2px 8px;
-    font: 400 8px/1.2 'Inter', sans-serif;
+    font: 400 8px/1.2 system-ui, sans-serif;
     color: var(--t2);
     cursor: pointer;
     white-space: nowrap;
@@ -1391,7 +1405,7 @@
     background: none;
     border: 1px solid var(--border-subtle);
     border-radius: 5px;
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
     cursor: pointer;
     padding: 5px 7px;
@@ -1418,7 +1432,7 @@
     background: none;
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
-    font: 500 11px/1 'Inter', sans-serif;
+    font: 500 11px/1 system-ui, sans-serif;
     color: var(--t2);
     cursor: pointer;
     padding: 7px 14px;

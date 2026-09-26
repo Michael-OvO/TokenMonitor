@@ -42,6 +42,10 @@ impl PayloadDiskCache {
         serde_json::from_str(&data).ok()
     }
 
+    pub fn remove(&self, key: &str) {
+        fs::remove_file(self.path_for(key)).ok();
+    }
+
     pub fn clear_all(&self) {
         if let Ok(entries) = fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
@@ -71,6 +75,26 @@ impl PayloadDiskCache {
                 }
                 let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 if name.starts_with(&safe_prefix) {
+                    fs::remove_file(&path).ok();
+                }
+            }
+        }
+    }
+
+    /// Remove the payloads `stale` picks by file name: the key with every
+    /// character but letters, digits, `-` and `_` written as `_`.
+    pub fn remove_where(&self, stale: impl Fn(&str) -> bool) {
+        if let Ok(entries) = fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(&stale)
+                {
                     fs::remove_file(&path).ok();
                 }
             }
@@ -123,5 +147,19 @@ mod tests {
         cache.save("usage-view:claude:day:0", &payload);
         let loaded = cache.load("usage-view:claude:day:0");
         assert!(loaded.is_some());
+    }
+
+    #[test]
+    fn remove_drops_only_that_key() {
+        let tmp = TempDir::new().unwrap();
+        let cache = PayloadDiskCache::new(tmp.path());
+        let payload = UsagePayload::default();
+        cache.save("usage-view:all:day:0", &payload);
+        cache.save("usage-view:all:day:-1", &payload);
+        cache.remove("usage-view:all:day:0");
+        assert!(cache.load("usage-view:all:day:0").is_none());
+        assert!(cache.load("usage-view:all:day:-1").is_some());
+        // Removing a missing key is a no-op.
+        cache.remove("usage-view:all:day:0");
     }
 }

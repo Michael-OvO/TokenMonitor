@@ -135,18 +135,18 @@
   }
   .m:hover { background: var(--surface-hover); }
   .m-v {
-    font: 400 13px/1 'Inter', sans-serif;
+    font: 400 13px/1 system-ui, sans-serif;
     color: var(--t1); font-variant-numeric: tabular-nums;
     letter-spacing: -.2px;
   }
   .m-l {
     display: flex; align-items: center; gap: 4px;
-    font: 500 8px/1 'Inter', sans-serif;
+    font: 500 8px/1 system-ui, sans-serif;
     color: var(--t3);
     margin-top: 4px;
   }
   .m-s {
-    font: 400 8px/1 'Inter', sans-serif;
+    font: 400 8px/1 system-ui, sans-serif;
     color: var(--t4); margin-top: 2px; letter-spacing: .1px;
   }
 
@@ -179,7 +179,7 @@
   /* Composition */
   .comp-head {
     display: flex; justify-content: space-between; align-items: center;
-    font: 500 8px/1 'Inter', sans-serif;
+    font: 500 8px/1 system-ui, sans-serif;
     color: var(--t3);
       }
   .comp-eff {
@@ -195,7 +195,7 @@
   .comp-seg { height: 100%; min-width: 2px; }
   .comp-legend {
     display: flex; gap: 6px; flex-wrap: wrap;
-    font: 400 7.5px/1 'Inter', sans-serif;
+    font: 400 7.5px/1 system-ui, sans-serif;
     color: var(--t4); letter-spacing: .1px;
     margin-top: 4px;
   }

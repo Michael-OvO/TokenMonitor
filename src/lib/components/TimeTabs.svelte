@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { UsagePeriod } from "../types/index.js";
+  import { settings } from "../stores/settings.js";
 
   interface Props {
     active: UsagePeriod;
@@ -7,13 +8,17 @@
   }
   let { active, onChange }: Props = $props();
 
-  const tabs: Array<{ value: UsagePeriod; label: string }> = [
-    { value: "5h", label: "Usage" },
-    { value: "day", label: "Day" },
-    { value: "week", label: "Week" },
-    { value: "month", label: "Month" },
-    { value: "year", label: "Year" },
-  ];
+  // "To date" (rolling) mode relabels the calendar tabs as week/month/year-to-date.
+  let tabs = $derived.by((): Array<{ value: UsagePeriod; label: string }> => {
+    const td = $settings.rollingPeriods;
+    return [
+      { value: "5h", label: "Usage" },
+      { value: "day", label: "Day" },
+      { value: "week", label: td ? "WTD" : "Week" },
+      { value: "month", label: td ? "MTD" : "Month" },
+      { value: "year", label: td ? "YTD" : "Year" },
+    ];
+  });
 
   let activeIdx = $derived(Math.max(tabs.findIndex((t) => t.value === active), 0));
 </script>
@@ -50,7 +55,7 @@
   }
   button {
     flex: 1; min-width: 0; padding: 6px 8px; border: none; background: none;
-    font: 500 8.5px/1 'Inter', sans-serif;
+    font: 500 8.5px/1 system-ui, sans-serif;
     color: var(--t3); cursor: pointer; position: relative; z-index: 1;
     letter-spacing: .2px; transition: color var(--t-normal) ease;
     overflow: hidden;

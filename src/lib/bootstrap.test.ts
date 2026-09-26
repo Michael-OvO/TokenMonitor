@@ -250,6 +250,58 @@ describe("initializeRuntimeFromSettings", () => {
     expect(authIdx).toBeLessThan(trayIdx);
   });
 
+  it("starts the refresh loop without waiting for the tray paint or the float ball", async () => {
+    // At launch these compute the day cost cold, which can take seconds.
+    const slow = new Set(["set_currency", "set_tray_config", "create_float_ball"]);
+    const invokeFn = vi.fn().mockImplementation((cmd: string) =>
+      slow.has(cmd) ? new Promise<void>(() => {}) : Promise.resolve(undefined),
+    );
+
+    await initializeRuntimeFromSettings(makeSettings({ floatBall: true }), {
+      invokeFn,
+      applyThemeFn: vi.fn(),
+      applyGlassFn: vi.fn(),
+      syncNativeWindowThemeFn: vi.fn().mockResolvedValue(undefined),
+      syncNativeWindowSurfaceFn: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(invokeFn).toHaveBeenCalledWith("refresh_ready");
+    const sent = invokeFn.mock.calls.map(([cmd]) => cmd);
+    expect(sent).toEqual(expect.arrayContaining([...slow]));
+  });
+
+  it("tells the refresh loop it may start once the settings its first cycle reads have settled", async () => {
+    let settleIntegrations!: () => void;
+    const invokeFn = vi.fn().mockImplementation((cmd: string) =>
+      cmd === "set_enabled_integrations"
+        ? new Promise<void>((resolve) => {
+            settleIntegrations = resolve;
+          })
+        : Promise.resolve(undefined),
+    );
+
+    const init = initializeRuntimeFromSettings(makeSettings(), {
+      invokeFn,
+      applyThemeFn: vi.fn(),
+      applyGlassFn: vi.fn(),
+      syncNativeWindowThemeFn: vi.fn().mockResolvedValue(undefined),
+      syncNativeWindowSurfaceFn: vi.fn().mockResolvedValue(undefined),
+    });
+    await vi.waitFor(() =>
+      expect(invokeFn).toHaveBeenCalledWith("set_enabled_integrations", expect.anything()),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(invokeFn).not.toHaveBeenCalledWith("refresh_ready");
+
+    settleIntegrations();
+    await init;
+
+    const callOrder = (cmd: string) =>
+      invokeFn.mock.invocationCallOrder[invokeFn.mock.calls.findIndex(([name]) => name === cmd)];
+    expect(invokeFn).toHaveBeenCalledWith("refresh_ready");
+    expect(callOrder("refresh_ready")).toBeGreaterThan(callOrder("set_enabled_integrations"));
+  });
+
   it("forwards stored Cursor auth config on startup", async () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const applyGlassFn = vi.fn();

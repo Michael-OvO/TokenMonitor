@@ -89,7 +89,7 @@
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    font: 500 11px/1 'Inter', sans-serif;
+    font: 500 11px/1 system-ui, sans-serif;
     background: var(--surface-2);
     border-bottom: 1px solid var(--border-subtle);
     color: var(--t1);
@@ -138,7 +138,7 @@
     background: none;
     border: none;
     padding: 2px 6px;
-    font: 500 11px/1 'Inter', sans-serif;
+    font: 500 11px/1 system-ui, sans-serif;
     color: var(--t2);
     cursor: pointer;
     border-radius: 3px;

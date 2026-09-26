@@ -1,19 +1,88 @@
-use chrono::Timelike;
+use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
 
 use crate::commands::period::{resolve_period_bounds_for_provider, PeriodBounds};
 use crate::commands::AppState;
 use crate::models::{ChartBucket, ChartSegment, DeviceModelSummary, DeviceSummary};
-use crate::usage::archive::ArchiveManager;
+use crate::usage::archive::{ArchiveFrontier, ArchiveManager};
 use crate::usage::integrations::{
     remote_record_matches_provider, UsageIntegrationId, UsageIntegrationSelection,
 };
-use crate::usage::ssh_remote::{CompactUsageRecord, SshHostConfig};
+use crate::usage::ssh_remote::{CompactUsageRecord, SshCacheManager, SshHostConfig};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 pub(crate) fn parse_remote_ts(ts: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     chrono::DateTime::parse_from_rfc3339(ts)
         .or_else(|_| chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f%z"))
         .ok()
+}
+
+/// A host's SSH records by time, each timestamp parsed and converted to local
+/// time once, when the records memo loads them: a conversion is a time-zone
+/// lookup (a system call on Windows), and every view compute filters every
+/// record by its local time several times over.
+#[derive(Default)]
+pub struct RecordIndex {
+    records: Arc<Vec<CompactUsageRecord>>,
+    /// (local time, position in `records`) by time. `None`, a timestamp that
+    /// does not parse, sorts first.
+    rows: Vec<(Option<DateTime<Local>>, usize)>,
+    /// [`local_zone_stamp`] at the conversion.
+    pub(crate) zone: (i32, i32),
+}
+
+impl RecordIndex {
+    pub(crate) fn new(records: Arc<Vec<CompactUsageRecord>>) -> Self {
+        let mut rows: Vec<_> = records
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (parse_remote_ts(&r.ts).map(|t| t.with_timezone(&Local)), i))
+            .collect();
+        rows.sort_by_key(|(local, _)| *local);
+        Self {
+            records,
+            rows,
+            zone: local_zone_stamp(),
+        }
+    }
+
+    /// Every record with its local time, `None` when that does not parse.
+    pub(crate) fn all(
+        &self,
+    ) -> impl Iterator<Item = (Option<&DateTime<Local>>, &CompactUsageRecord)> {
+        self.rows
+            .iter()
+            .map(|(local, i)| (local.as_ref(), &self.records[*i]))
+    }
+
+    /// The records inside `bounds`, oldest first.
+    pub(crate) fn in_bounds(
+        &self,
+        bounds: &PeriodBounds,
+    ) -> impl Iterator<Item = (&DateTime<Local>, &CompactUsageRecord)> {
+        let before = |at: DateTime<Local>| {
+            self.rows
+                .partition_point(|(local, _)| local.is_none_or(|t| t < at))
+        };
+        let (start, end) = (before(bounds.range_start), before(bounds.range_end));
+        self.rows[start..end.max(start)]
+            .iter()
+            .filter_map(|(local, i)| Some((local.as_ref()?, &self.records[*i])))
+    }
+}
+
+/// Local's UTC offsets in January and July of this year: they move with the
+/// time zone, which invalidates every local time converted in the old one.
+pub(crate) fn local_zone_stamp() -> (i32, i32) {
+    let year = chrono::Utc::now().year();
+    let offset = |month| {
+        chrono::NaiveDate::from_ymd_opt(year, month, 1)
+            .and_then(|day| day.and_hms_opt(0, 0, 0))
+            .map_or(0, |at| {
+                Local.offset_from_utc_datetime(&at).local_minus_utc()
+            })
+    };
+    (offset(1), offset(7))
 }
 
 pub(crate) fn archived_hour_keys(
@@ -26,21 +95,44 @@ pub(crate) fn archived_hour_keys(
 }
 
 /// Keep live SSH rows for hours the frontier covers but archive has no rows.
+/// `local` is the row's local time, `None` when its timestamp does not parse.
 pub(crate) fn ssh_live_hour_open(
-    frontier: Option<&crate::usage::archive::ArchiveFrontier>,
+    frontier: Option<&ArchiveFrontier>,
     archived_hours: &HashSet<(chrono::NaiveDate, u8)>,
-    ts: &str,
+    local: Option<&DateTime<Local>>,
 ) -> bool {
-    let Some(f) = frontier else {
+    let (Some(f), Some(local)) = (frontier, local) else {
         return true;
     };
-    match parse_remote_ts(ts).map(|d| d.with_timezone(&chrono::Local)) {
-        Some(local) => {
-            let hour = (local.date_naive(), local.hour() as u8);
-            !(f.covers(hour.0, hour.1) && archived_hours.contains(&hour))
-        }
-        None => true,
-    }
+    let hour = (local.date_naive(), local.hour() as u8);
+    !(f.covers(hour.0, hour.1) && archived_hours.contains(&hour))
+}
+
+/// The live records a view counts: inside `bounds`, of `provider`'s model
+/// family, and in an hour the archive holds no rows for.
+pub(crate) fn live_records_in<'a>(
+    index: &'a RecordIndex,
+    provider: &'a str,
+    bounds: &PeriodBounds,
+    frontier: Option<&'a ArchiveFrontier>,
+    archived_hours: &'a HashSet<(chrono::NaiveDate, u8)>,
+) -> impl Iterator<Item = (&'a DateTime<Local>, &'a CompactUsageRecord)> {
+    index.in_bounds(bounds).filter(move |(local, record)| {
+        compact_record_matches_provider(record, provider)
+            && ssh_live_hour_open(frontier, archived_hours, Some(local))
+    })
+}
+
+/// A configured host's indexed live records; none for a file-imported peer,
+/// which has no SSH cache, or when they cannot be read.
+pub(crate) fn live_index(mgr: Option<&SshCacheManager>, dev: &AggDevice) -> Arc<RecordIndex> {
+    let Some(mgr) = mgr.filter(|_| dev.configured) else {
+        return Arc::default();
+    };
+    mgr.load_record_index(&dev.alias).unwrap_or_else(|e| {
+        tracing::warn!("Failed to load cached records for {}: {e}", dev.alias);
+        Arc::default()
+    })
 }
 
 #[cfg(test)]
@@ -66,6 +158,7 @@ pub(crate) fn compact_record_matches_provider(record: &CompactUsageRecord, provi
     remote_record_matches_provider(provider, &record.model)
 }
 
+#[cfg(test)]
 fn remote_ts_in_bounds(bounds: &PeriodBounds, ts: &str) -> bool {
     parse_remote_ts(ts)
         .map(|dt| bounds.contains_timestamp(dt.with_timezone(&chrono::Local)))
@@ -161,7 +254,11 @@ pub(crate) fn build_device_summary_from_parsed(
             entry.cache_read_tokens,
             0,
         ) * provider_multiplier(&entry.model);
-        let tokens = entry.input_tokens + entry.output_tokens;
+        let tokens = entry.input_tokens
+            + entry.output_tokens
+            + entry.cache_creation_5m_tokens
+            + entry.cache_creation_1h_tokens
+            + entry.cache_read_tokens;
 
         let agg = model_map
             .entry(model_key)
@@ -208,7 +305,11 @@ pub(crate) fn build_device_summary_from_compact(
             record.cache_read,
             0,
         ) * provider_multiplier(&record.model);
-        let tokens = record.input_tokens + record.output_tokens;
+        let tokens = record.input_tokens
+            + record.output_tokens
+            + record.cache_5m
+            + record.cache_1h
+            + record.cache_read;
 
         let agg = model_map
             .entry(model_key)
@@ -221,6 +322,7 @@ pub(crate) fn build_device_summary_from_compact(
     finish_device_summary(device_name, model_map)
 }
 
+/// `live_records` are the ones inside `bounds` (see [`live_records_in`]).
 pub(crate) fn build_device_summary_merged(
     device_name: &str,
     archived_entries: &[crate::usage::parser::ParsedEntry],
@@ -250,7 +352,11 @@ pub(crate) fn build_device_summary_merged(
             entry.cache_read_tokens,
             0,
         ) * provider_multiplier(&entry.model);
-        let tokens = entry.input_tokens + entry.output_tokens;
+        let tokens = entry.input_tokens
+            + entry.output_tokens
+            + entry.cache_creation_5m_tokens
+            + entry.cache_creation_1h_tokens
+            + entry.cache_read_tokens;
         let agg = model_map
             .entry(model_key)
             .or_insert_with(|| (display_name, 0.0, 0, true));
@@ -261,9 +367,6 @@ pub(crate) fn build_device_summary_merged(
 
     for record in live_records {
         if record.model.starts_with('<') {
-            continue;
-        }
-        if !remote_ts_in_bounds(bounds, &record.ts) {
             continue;
         }
         let (display_name, model_key) = normalize_model(&record.model);
@@ -277,7 +380,11 @@ pub(crate) fn build_device_summary_merged(
             record.cache_read,
             0,
         ) * provider_multiplier(&record.model);
-        let tokens = record.input_tokens + record.output_tokens;
+        let tokens = record.input_tokens
+            + record.output_tokens
+            + record.cache_5m
+            + record.cache_1h
+            + record.cache_read;
         let agg = model_map
             .entry(model_key)
             .or_insert_with(|| (display_name, 0.0, 0, true));
@@ -401,31 +508,30 @@ pub(crate) async fn build_device_breakdown_for_payload(
 
         // Live SSH-cache rows only for configured hosts; file-imported peers have
         // no SSH cache and contribute from archived data alone.
-        let all_records: Vec<CompactUsageRecord> = if dev.configured {
-            match mgr {
-                Some(m) => m.load_cached_records(&dev.alias).unwrap_or_else(|e| {
-                    tracing::warn!("Failed to load cached records for {}: {e}", dev.alias);
-                    Vec::new()
-                }),
-                None => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        };
-        let filtered: Vec<&CompactUsageRecord> = all_records
-            .iter()
-            .filter(|r| compact_record_matches_provider(r, provider))
-            .filter(|r| ssh_live_hour_open(frontier.as_ref(), &archived_hours, &r.ts))
-            .collect();
+        let index = live_index(mgr, dev);
 
         // Skip devices with no data matching the selected provider (provider
         // scoping — a Claude-only device doesn't show as an empty Codex row).
-        if archived_entries.is_empty() && filtered.is_empty() {
+        if archived_entries.is_empty()
+            && !index.all().any(|(local, r)| {
+                compact_record_matches_provider(r, provider)
+                    && ssh_live_hour_open(frontier.as_ref(), &archived_hours, local)
+            })
+        {
             continue;
         }
 
+        let live: Vec<&CompactUsageRecord> = live_records_in(
+            &index,
+            provider,
+            &bounds,
+            frontier.as_ref(),
+            &archived_hours,
+        )
+        .map(|(_, record)| record)
+        .collect();
         let mut summary =
-            build_device_summary_merged(&dev.alias, &archived_entries, &filtered, &bounds);
+            build_device_summary_merged(&dev.alias, &archived_entries, &live, &bounds);
 
         if dev.configured {
             if let Some(host_status) = statuses.iter().find(|s| s.alias == dev.alias) {
@@ -487,15 +593,12 @@ pub(crate) async fn build_included_devices_payload(
     let mgr = cache_mgr.as_ref();
 
     let mut model_map: HashMap<String, (String, f64, u64, bool)> = HashMap::new();
-    let mut chart_entries: Vec<(
-        chrono::DateTime<chrono::FixedOffset>,
-        String,
-        f64,
-        u64,
-        bool,
-    )> = Vec::new();
+    let mut chart_entries: Vec<(DateTime<Local>, String, f64, u64, bool)> = Vec::new();
     let mut input_tokens = 0_u64;
     let mut output_tokens = 0_u64;
+    let mut cache_read_tokens = 0_u64;
+    let mut cache_write_5m_tokens = 0_u64;
+    let mut cache_write_1h_tokens = 0_u64;
 
     for dev in &agg_devices {
         // Only devices flagged "include in stats" contribute to the MAIN total.
@@ -530,9 +633,19 @@ pub(crate) async fn build_included_devices_payload(
                     entry.cache_read_tokens,
                     0,
                 ) * provider_multiplier(&entry.model);
-                let tokens = entry.input_tokens + entry.output_tokens;
+                // Same definition as the local payload (parser::entry_total_tokens):
+                // cache counts, otherwise a peer's cache-heavy usage vanishes
+                // from the Tokens card while still being priced into Cost.
+                let tokens = entry.input_tokens
+                    + entry.output_tokens
+                    + entry.cache_creation_5m_tokens
+                    + entry.cache_creation_1h_tokens
+                    + entry.cache_read_tokens;
                 input_tokens += entry.input_tokens;
                 output_tokens += entry.output_tokens;
+                cache_write_5m_tokens += entry.cache_creation_5m_tokens;
+                cache_write_1h_tokens += entry.cache_creation_1h_tokens;
+                cache_read_tokens += entry.cache_read_tokens;
 
                 let agg = model_map
                     .entry(model_key.clone())
@@ -541,45 +654,20 @@ pub(crate) async fn build_included_devices_payload(
                 agg.2 += tokens;
                 agg.3 &= pricing_available;
 
-                chart_entries.push((
-                    entry.timestamp.fixed_offset(),
-                    model_key,
-                    cost,
-                    tokens,
-                    pricing_available,
-                ));
+                chart_entries.push((entry.timestamp, model_key, cost, tokens, pricing_available));
             }
         }
 
         // ── Live compact rows for configured hosts (peers have no SSH cache) ──
-        if !dev.configured {
-            continue;
-        }
-        let Some(m) = mgr else { continue };
-        let records = match m.load_cached_records(&dev.alias) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Failed to load cached records for {}: {e}", dev.alias);
-                continue;
-            }
-        };
-        for record in records
-            .iter()
-            .filter(|r| compact_record_matches_provider(r, provider))
-        {
+        let index = live_index(mgr, dev);
+        for (local, record) in live_records_in(
+            &index,
+            provider,
+            &bounds,
+            frontier.as_ref(),
+            &archived_hours,
+        ) {
             if record.model.starts_with('<') {
-                continue;
-            }
-
-            let parsed_ts = match parse_remote_ts(&record.ts) {
-                Some(ts) => ts,
-                None => continue,
-            };
-            let local = parsed_ts.with_timezone(&chrono::Local);
-            if !ssh_live_hour_open(frontier.as_ref(), &archived_hours, &record.ts) {
-                continue;
-            }
-            if !bounds.contains_timestamp(local) {
                 continue;
             }
 
@@ -594,9 +682,16 @@ pub(crate) async fn build_included_devices_payload(
                 record.cache_read,
                 0,
             ) * provider_multiplier(&record.model);
-            let tokens = record.input_tokens + record.output_tokens;
+            let tokens = record.input_tokens
+                + record.output_tokens
+                + record.cache_5m
+                + record.cache_1h
+                + record.cache_read;
             input_tokens += record.input_tokens;
             output_tokens += record.output_tokens;
+            cache_write_5m_tokens += record.cache_5m;
+            cache_write_1h_tokens += record.cache_1h;
+            cache_read_tokens += record.cache_read;
 
             let agg = model_map
                 .entry(model_key.clone())
@@ -605,7 +700,7 @@ pub(crate) async fn build_included_devices_payload(
             agg.2 += tokens;
             agg.3 &= pricing_available;
 
-            chart_entries.push((parsed_ts, model_key, cost, tokens, pricing_available));
+            chart_entries.push((*local, model_key, cost, tokens, pricing_available));
         }
     }
 
@@ -637,7 +732,7 @@ pub(crate) async fn build_included_devices_payload(
     type ModelBucket = BTreeMap<String, (String, f64, u64, bool)>;
     let mut bucket_map: BTreeMap<String, ModelBucket> = BTreeMap::new();
     for (ts, model_key, cost, tokens, pricing_available) in &chart_entries {
-        let bkey = bucket_key_for_timestamp(ts, period);
+        let bkey = bucket_key_for_local(ts, period);
         let model_entry = bucket_map.entry(bkey).or_default();
         let (_, model_cost, model_tokens, model_pricing_available) =
             model_entry.entry(model_key.clone()).or_insert_with(|| {
@@ -688,6 +783,9 @@ pub(crate) async fn build_included_devices_payload(
         total_tokens,
         input_tokens,
         output_tokens,
+        cache_read_tokens,
+        cache_write_5m_tokens,
+        cache_write_1h_tokens,
         chart_buckets,
         model_breakdown,
         usage_source: UsageSource::Parser,
@@ -728,7 +826,7 @@ pub(crate) async fn build_device_time_chart_buckets(
         if !bounds.contains_timestamp(entry.timestamp) {
             continue;
         }
-        let bucket_key = bucket_key_for_timestamp(&entry.timestamp.fixed_offset(), period);
+        let bucket_key = bucket_key_for_local(&entry.timestamp, period);
         let (_, model_key) = normalize_model(&entry.model);
         let cost = calculate_cost_for_key(
             &model_key,
@@ -772,8 +870,7 @@ pub(crate) async fn build_device_time_chart_buckets(
                     if !bounds.contains_timestamp(entry.timestamp) {
                         continue;
                     }
-                    let bucket_key =
-                        bucket_key_for_timestamp(&entry.timestamp.fixed_offset(), period);
+                    let bucket_key = bucket_key_for_local(&entry.timestamp, period);
                     let (_, model_key) = normalize_model(&entry.model);
                     let cost = calculate_cost_for_key(
                         &model_key,
@@ -793,34 +890,15 @@ pub(crate) async fn build_device_time_chart_buckets(
             }
 
             // Live compact records for configured hosts (peers have none).
-            if !dev.configured {
-                continue;
-            }
-            let Some(mgr) = mgr else { continue };
-            let records = match mgr.load_cached_records(&dev.alias) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!("Failed to load cached records for {}: {e}", dev.alias);
-                    continue;
-                }
-            };
-            for record in records
-                .iter()
-                .filter(|r| compact_record_matches_provider(r, provider))
-            {
-                let parsed_ts = match parse_remote_ts(&record.ts) {
-                    Some(ts) => ts,
-                    None => continue,
-                };
-                let local = parsed_ts.with_timezone(&chrono::Local);
-                if !ssh_live_hour_open(frontier.as_ref(), &archived_hours, &record.ts) {
-                    continue;
-                }
-                if !bounds.contains_timestamp(local) {
-                    continue;
-                }
-
-                let bucket_key = bucket_key_for_timestamp(&parsed_ts, period);
+            let index = live_index(mgr, dev);
+            for (local, record) in live_records_in(
+                &index,
+                provider,
+                &bounds,
+                frontier.as_ref(),
+                &archived_hours,
+            ) {
+                let bucket_key = bucket_key_for_local(local, period);
                 let (_, model_key) = normalize_model(&record.model);
                 let cost = calculate_cost_for_key(
                     &model_key,
@@ -875,11 +953,7 @@ pub(crate) async fn build_device_time_chart_buckets(
 
 // ── Bucket helpers ──────────────────────────────────────────────────────────
 
-pub(crate) fn bucket_key_for_timestamp(
-    ts: &chrono::DateTime<chrono::FixedOffset>,
-    period: &str,
-) -> String {
-    let local = ts.with_timezone(&chrono::Local);
+pub(crate) fn bucket_key_for_local(local: &DateTime<Local>, period: &str) -> String {
     match period {
         "5h" => local.format("%Y-%m-%dT%H:00:00%z").to_string(),
         "day" => format!("{:02}", local.hour()),
@@ -1597,6 +1671,7 @@ mod tests {
             cache_1h: 0,
             cache_read: 0,
             speed: None,
+            dedupe_key: None,
         }];
 
         let local_date = parse_remote_ts_to_local_date(&records[0].ts);
@@ -1622,6 +1697,94 @@ mod tests {
             summary_miss.total_cost == 0.0,
             "record should be excluded when local date is outside the range"
         );
+    }
+
+    /// The index keeps exactly the live records the per-record parse did:
+    /// the frontier/archived-hour dedupe, provider matching and bounds, and
+    /// the breakdown's has-data check over every record.
+    #[test]
+    fn indexed_live_records_match_the_per_record_parse() {
+        use crate::usage::archive::ArchiveFrontier;
+        let now = Local::now();
+        let today = now.date_naive();
+        let yesterday = today.pred_opt().unwrap();
+        let at = |day: chrono::NaiveDate, hour: u32| {
+            Local
+                .from_local_datetime(&day.and_hms_opt(hour, 30, 0).unwrap())
+                .earliest()
+                .unwrap()
+        };
+        let tokyo = chrono::FixedOffset::east_opt(9 * 3600).unwrap();
+        let rec = |ts: String, model: &str| CompactUsageRecord {
+            ts,
+            model: model.to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_5m: 0,
+            cache_1h: 0,
+            cache_read: 0,
+            speed: None,
+            dedupe_key: None,
+        };
+        // Out of order and in several offsets: one in an archived hour, one
+        // in a frontier gap, one before the day, one that does not parse.
+        let records = Arc::new(vec![
+            rec(at(today, 11).to_rfc3339(), "claude-sonnet-4-6"),
+            rec(
+                at(today, 9).with_timezone(&tokyo).to_rfc3339(),
+                "claude-sonnet-4-6",
+            ),
+            rec(
+                at(today, 8).with_timezone(&chrono::Utc).to_rfc3339(),
+                "gpt-5.4",
+            ),
+            rec(at(yesterday, 23).to_rfc3339(), "claude-opus-4-6"),
+            rec(String::from("not-a-timestamp"), "claude-sonnet-4-6"),
+            rec(at(today, 10).to_rfc3339(), "<synthetic>"),
+            rec(at(today, 1).to_rfc3339(), "gpt-5.4"),
+        ]);
+        let frontier = ArchiveFrontier {
+            date: today,
+            hour: 9,
+        };
+        let archived_hours: HashSet<_> = [(today, 9u8)].into();
+        let old_open = |ts: &str| match parse_remote_ts(ts).map(|t| t.with_timezone(&Local)) {
+            Some(local) => {
+                let hour = (local.date_naive(), local.hour() as u8);
+                !(frontier.covers(hour.0, hour.1) && archived_hours.contains(&hour))
+            }
+            None => true,
+        };
+        let index = RecordIndex::new(records.clone());
+
+        for provider in ["all", "claude", "codex", "claude+cursor"] {
+            for (period, offset) in [("day", 0), ("day", -1), ("week", 0), ("5h", 0)] {
+                let bounds =
+                    crate::commands::period::resolve_period_bounds_at(period, offset, now, None)
+                        .unwrap();
+                let mut old: Vec<&str> = records
+                    .iter()
+                    .filter(|r| compact_record_matches_provider(r, provider))
+                    .filter(|r| old_open(&r.ts) && remote_ts_in_bounds(&bounds, &r.ts))
+                    .map(|r| r.ts.as_str())
+                    .collect();
+                let mut new: Vec<&str> =
+                    live_records_in(&index, provider, &bounds, Some(&frontier), &archived_hours)
+                        .map(|(_, r)| r.ts.as_str())
+                        .collect();
+                old.sort_unstable();
+                new.sort_unstable();
+                assert_eq!(new, old, "{provider} {period} {offset}");
+            }
+            let old_any = records
+                .iter()
+                .any(|r| compact_record_matches_provider(r, provider) && old_open(&r.ts));
+            let new_any = index.all().any(|(local, r)| {
+                compact_record_matches_provider(r, provider)
+                    && ssh_live_hour_open(Some(&frontier), &archived_hours, local)
+            });
+            assert_eq!(new_any, old_any, "{provider}");
+        }
     }
 
     #[test]
