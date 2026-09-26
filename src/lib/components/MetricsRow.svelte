@@ -53,11 +53,25 @@
       : "—"
   );
 
+  // Composition and $/100L only see sessions that edited files. When some of
+  // the period's sessions didn't (research, chat), say how much of the usage
+  // the card covers, or a day of mostly research reads as all code.
+  let scopeLabel = $derived.by(() => {
+    if (!cs || cs.edit_cost_share == null || cs.edit_sessions >= cs.total_sessions) return null;
+    const pct = cs.edit_cost_share * 100;
+    const share = pct > 0 && pct < 1 ? "<1%" : `${Math.round(pct)}%`;
+    return `from ${cs.edit_sessions} of ${cs.total_sessions} sessions · ${share} of cost`;
+  });
+
   let compAriaLabel = $derived(
     compTotal > 0
-      ? `Composition: code ${compPcts.code.toFixed(0)}%, docs ${compPcts.docs.toFixed(0)}%, config ${compPcts.config.toFixed(0)}%, other ${compPcts.other.toFixed(0)}%`
-      : "No composition data"
+      ? `File edits, share of lines added and removed: code ${formatShare(compPcts.code)}, docs ${formatShare(compPcts.docs)}, config ${formatShare(compPcts.config)}, other ${formatShare(compPcts.other)}${scopeLabel ? `, ${scopeLabel}` : ""}`
+      : "No observed file edits"
   );
+
+  function formatShare(pct: number): string {
+    return pct > 0 && pct < 1 ? "<1%" : `${pct.toFixed(0)}%`;
+  }
 </script>
 
 <div class="met">
@@ -90,10 +104,11 @@
   {#if compTotal > 0}
     <div class="m met-comp">
       <div class="comp-head">
-        <span>Composition</span>
+        <span>File edits</span>
         <span class="comp-eff">{effLabel}</span>
       </div>
-      <div class="comp-bar" role="img" aria-label={compAriaLabel}>
+      <div class="comp-note">Share of lines added + removed</div>
+      <div class="comp-bar" role="img" aria-label={compAriaLabel} title="Observed file edits grouped by file type. Other includes data and unrecognized files. Session purpose and token use are not inferred from edits.">
         {#if compPcts.code > 0}
           <div class="comp-seg" style="width:{compPcts.code}%;background:var(--comp-code)"></div>
         {/if}
@@ -108,10 +123,11 @@
         {/if}
       </div>
       <div class="comp-legend">
-        {#if compPcts.code > 0}<span class="comp-item"><span class="comp-dot" style="background:var(--comp-code)"></span>code {compPcts.code.toFixed(0)}%</span>{/if}
-        {#if compPcts.docs > 0}<span class="comp-item"><span class="comp-dot" style="background:var(--comp-docs)"></span>docs {compPcts.docs.toFixed(0)}%</span>{/if}
-        {#if compPcts.config > 0}<span class="comp-item"><span class="comp-dot" style="background:var(--comp-config)"></span>config {compPcts.config.toFixed(0)}%</span>{/if}
-        {#if compPcts.other > 0}<span class="comp-item"><span class="comp-dot" style="background:var(--comp-other)"></span>other {compPcts.other.toFixed(0)}%</span>{/if}
+        {#if compPcts.code > 0}<span class="comp-item"><span class="comp-dot" style="background:var(--comp-code)"></span>code {formatShare(compPcts.code)}</span>{/if}
+        {#if compPcts.docs > 0}<span class="comp-item"><span class="comp-dot" style="background:var(--comp-docs)"></span>docs {formatShare(compPcts.docs)}</span>{/if}
+        {#if compPcts.config > 0}<span class="comp-item"><span class="comp-dot" style="background:var(--comp-config)"></span>config {formatShare(compPcts.config)}</span>{/if}
+        {#if compPcts.other > 0}<span class="comp-item"><span class="comp-dot" style="background:var(--comp-other)"></span>other {formatShare(compPcts.other)}</span>{/if}
+        {#if scopeLabel}<span class="comp-scope" title="Sessions with observed file edits. Their cost includes all work within those sessions.">{scopeLabel}</span>{/if}
       </div>
     </div>
   {/if}
@@ -186,13 +202,18 @@
     font-weight: 400; text-transform: none;
     letter-spacing: .1px; color: var(--t4);
   }
+  .comp-note {
+    font: 400 7.5px/1.3 'Inter', sans-serif;
+    color: var(--t3);
+    margin-top: 4px;
+  }
   .comp-bar {
     display: flex; height: 5px; border-radius: 3px;
     overflow: hidden; background: var(--surface-2);
     margin-top: 5px;
     animation: hBarGrow .35s ease both .12s;
   }
-  .comp-seg { height: 100%; min-width: 2px; }
+  .comp-seg { height: 100%; flex-shrink: 0; }
   .comp-legend {
     display: flex; gap: 6px; flex-wrap: wrap;
     font: 400 7.5px/1 'Inter', sans-serif;
@@ -200,6 +221,7 @@
     margin-top: 4px;
   }
   .comp-item { display: flex; align-items: center; gap: 2px; }
+  .comp-scope { margin-left: auto; }
   .comp-dot {
     width: 4px; height: 4px; border-radius: 50%;
     flex-shrink: 0;

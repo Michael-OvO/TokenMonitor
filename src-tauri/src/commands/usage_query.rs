@@ -230,9 +230,21 @@ fn attach_local_stats(
     let mut change_events: Vec<_> = loaded.change_events.clone();
     change_events.retain(|event| bounds.contains_timestamp(event.timestamp));
     entries.retain(|entry| bounds.contains_timestamp(entry.timestamp));
+    // Session-level stats read the live rows: the archive rows that stand in
+    // for completed hours carry no session, which would fold every earlier
+    // hour into one session that never edited and never ran a subagent.
+    let session_entries: Vec<_> = loaded
+        .session_entries()
+        .filter(|entry| bounds.contains_timestamp(entry.timestamp))
+        .cloned()
+        .collect();
 
-    payload.change_stats =
-        aggregate_change_stats(&change_events, payload.total_cost, payload.total_tokens);
+    payload.change_stats = aggregate_change_stats(
+        &change_events,
+        &session_entries,
+        payload.total_cost,
+        payload.total_tokens,
+    );
     for model in &mut payload.model_breakdown {
         model.change_stats = aggregate_model_change_summary(&change_events, &model.model_key);
     }
@@ -247,7 +259,7 @@ fn attach_local_stats(
     }
 
     payload.subagent_stats = crate::stats::subagent::aggregate_subagent_stats(
-        &entries,
+        &session_entries,
         &change_events,
         payload.total_cost,
     );
@@ -1819,6 +1831,7 @@ mod tests {
 
                 merged.change_stats = aggregate_change_stats(
                     &all_change_events,
+                    &all_entries,
                     merged.total_cost,
                     merged.total_tokens,
                 );

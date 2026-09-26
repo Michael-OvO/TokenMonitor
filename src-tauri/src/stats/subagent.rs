@@ -110,15 +110,7 @@ impl ScopeSummaryBuilder {
     fn add_entry(&mut self, entry: &crate::usage::parser::ParsedEntry) {
         let model_key = crate::models::normalized_model_key(&entry.model);
         let pricing_available = crate::usage::pricing::pricing_available_for_key(&model_key);
-        let entry_cost = crate::usage::pricing::calculate_cost_for_key(
-            &model_key,
-            entry.input_tokens,
-            entry.output_tokens,
-            entry.cache_creation_5m_tokens,
-            entry.cache_creation_1h_tokens,
-            entry.cache_read_tokens,
-            entry.web_search_requests,
-        ) * crate::usage::pricing::provider_multiplier(&entry.model);
+        let entry_cost = entry.cost_usd();
         self.cost += entry_cost;
         self.input_tokens += entry.input_tokens;
         self.output_tokens += entry.output_tokens;
@@ -284,6 +276,7 @@ mod tests {
             category: crate::stats::change::FileCategory::Code,
             dedupe_key: None,
             agent_scope: scope,
+            session_key: String::new(),
         }
     }
 

@@ -9,7 +9,7 @@ use crate::stats::change::{classify_file, ChangeEventKind, ParsedChangeEvent};
 
 use super::parser::{
     count_diff_lines, glob_jsonl_files, modified_since, path_to_string, push_sample_path,
-    ParsedEntry, ProviderReadDebug, SessionParseResult,
+    DiffLineCounter, ParsedEntry, ProviderReadDebug, SessionParseResult,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,6 +180,7 @@ fn push_codex_change_event(
     added_lines: u64,
     removed_lines: u64,
     agent_scope: crate::stats::subagent::AgentScope,
+    session_key: &str,
 ) {
     change_events.push(ParsedChangeEvent {
         timestamp,
@@ -192,6 +193,7 @@ fn push_codex_change_event(
         removed_lines,
         dedupe_key: None,
         agent_scope,
+        session_key: session_key.to_string(),
     });
 
     if model_key.is_none() {
@@ -199,115 +201,140 @@ fn push_codex_change_event(
     }
 }
 
+/// Emit one change event per path in a Codex `FileChange` item. `changes`
+/// maps each path to `{type: "add" | "delete", content}` or
+/// `{type: "update", unified_diff}`. Items that did not complete are skipped.
+fn push_codex_file_change_events(
+    item: Option<&Value>,
+    timestamp: Option<&str>,
+    current_model: Option<&str>,
+    agent_scope: crate::stats::subagent::AgentScope,
+    session_key: &str,
+    change_events: &mut Vec<ParsedChangeEvent>,
+    pending_model_indices: &mut Vec<usize>,
+) {
+    let Some(item) = item else { return };
+    if item
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status != "completed")
+    {
+        return;
+    }
+    let Some(changes) = item.get("changes").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(ts) = timestamp.and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok()) else {
+        return;
+    };
+    let ts = ts.with_timezone(&Local);
+    let model_key = current_model.map(crate::models::normalized_model_key);
+
+    for (path, change) in changes {
+        let text = |key: &str| change.get(key).and_then(Value::as_str).unwrap_or("");
+        let (added, removed) = match change.get("type").and_then(Value::as_str) {
+            Some("add") => (text("content").lines().count() as u64, 0),
+            Some("delete") => (0, text("content").lines().count() as u64),
+            Some("update") => count_diff_lines(text("unified_diff")),
+            _ => (0, 0),
+        };
+        if added == 0 && removed == 0 {
+            continue;
+        }
+        push_codex_change_event(
+            change_events,
+            pending_model_indices,
+            model_key.as_deref(),
+            ts,
+            path.clone(),
+            ChangeEventKind::PatchEdit,
+            added,
+            removed,
+            agent_scope,
+            session_key,
+        );
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Diff helpers (used only by Codex patch parsing)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Extract file paths from unified diff headers.
-/// Looks for `+++ b/path` lines and strips the `b/` prefix.
-/// Falls back to `diff --git a/path b/path` headers.
+/// Extract the paths recognized by the same parser used for line attribution.
+#[cfg(test)]
 pub(crate) fn extract_diff_paths(patch: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    for line in patch.lines() {
-        if let Some(rest) = line.strip_prefix("+++ b/") {
-            let path = rest.trim();
-            if !path.is_empty() {
-                paths.push(path.to_string());
-            }
-        } else if let Some(rest) = line.strip_prefix("+++ ") {
-            // Handle `+++ path` without `b/` prefix (but skip `+++ /dev/null`)
-            let path = rest.trim();
-            if !path.is_empty() && path != "/dev/null" {
-                paths.push(path.to_string());
-            }
-        }
-    }
-    // Fall back to diff --git headers if no +++ lines found
-    if paths.is_empty() {
-        for line in patch.lines() {
-            if let Some(rest) = line.strip_prefix("diff --git ") {
-                // Format: "a/path b/path"
-                if let Some(b_idx) = rest.find(" b/") {
-                    let path = &rest[b_idx + 3..];
-                    let path = path.trim();
-                    if !path.is_empty() {
-                        paths.push(path.to_string());
-                    }
-                }
-            }
-        }
-    }
-    // Fall back to Codex *** Add/Update File: headers
-    if paths.is_empty() {
-        for line in patch.lines() {
-            let rest = line
-                .strip_prefix("*** Add File: ")
-                .or_else(|| line.strip_prefix("*** Update File: "))
-                .or_else(|| line.strip_prefix("*** Delete File: "));
-            if let Some(file_path) = rest {
-                let file_path = file_path.trim();
-                if !file_path.is_empty() {
-                    paths.push(file_path.to_string());
-                }
-            }
-        }
-    }
-    paths
+    split_patch_by_file(patch)
+        .into_iter()
+        .map(|(path, _, _)| path)
+        .filter(|path| path != "unknown")
+        .collect()
 }
 
-/// Split a multi-file unified diff into per-file (path, added, removed) tuples.
-fn split_patch_by_file(patch: &str, paths: &[String]) -> Vec<(String, u64, u64)> {
-    // Split on `diff --git` boundaries or `--- a/` boundaries
+/// Attribute each hunk to its exact file header. Unattributed lines stay
+/// unknown; distributing them across known files would invent categories.
+fn split_patch_by_file(patch: &str) -> Vec<(String, u64, u64)> {
     let mut results = Vec::new();
-    let mut current_path_idx: Option<usize> = None;
-    let mut current_added: u64 = 0;
-    let mut current_removed: u64 = 0;
+    let mut path = None;
+    let (mut added, mut removed) = (0, 0);
+    let mut counter = DiffLineCounter::default();
+    let mut saw_old_header = false;
+
+    let flush =
+        |results: &mut Vec<_>, path: &mut Option<String>, added: &mut u64, removed: &mut u64| {
+            if path.is_some() || *added > 0 || *removed > 0 {
+                results.push((
+                    path.take().unwrap_or_else(|| "unknown".to_string()),
+                    std::mem::take(added),
+                    std::mem::take(removed),
+                ));
+            }
+        };
+    let header_path = |header: &str, prefix: &str| {
+        // Unified diff timestamps, when present, follow a tab.
+        let value = header.split('\t').next().unwrap_or("").trim();
+        (!value.is_empty() && value != "/dev/null")
+            .then(|| value.strip_prefix(prefix).unwrap_or(value).to_string())
+    };
 
     for line in patch.lines() {
-        if line.starts_with("diff --git ")
-            || line.starts_with("--- a/")
-            || line.starts_with("--- ")
-            || line.starts_with("*** Add File: ")
-            || line.starts_with("*** Update File: ")
-            || line.starts_with("*** Delete File: ")
-        {
-            // Check if this starts a new file section
-            if let Some(new_idx) = paths.iter().position(|p| line.contains(p)) {
-                // Flush previous file
-                if let Some(idx) = current_path_idx {
-                    results.push((paths[idx].clone(), current_added, current_removed));
-                }
-                current_path_idx = Some(new_idx);
-                current_added = 0;
-                current_removed = 0;
-                continue;
+        let codex_path = line
+            .strip_prefix("*** Add File: ")
+            .or_else(|| line.strip_prefix("*** Update File: "))
+            .or_else(|| line.strip_prefix("*** Delete File: "));
+        if let Some(file_path) = codex_path {
+            flush(&mut results, &mut path, &mut added, &mut removed);
+            path = header_path(file_path, "");
+            counter = DiffLineCounter::default();
+            counter.count_line(line);
+            saw_old_header = false;
+        } else if let Some(header) = line.strip_prefix("diff --git ") {
+            flush(&mut results, &mut path, &mut added, &mut removed);
+            path = header
+                .split_once(" b/")
+                .and_then(|(_, value)| header_path(value, ""));
+            counter = DiffLineCounter::default();
+            saw_old_header = false;
+        } else if !counter.in_hunk() && line.starts_with("--- ") {
+            // The first old-file header belongs to the preceding `diff --git`.
+            // Later pairs can begin files without a `diff --git` separator.
+            if saw_old_header || added > 0 || removed > 0 {
+                flush(&mut results, &mut path, &mut added, &mut removed);
             }
-        }
-        if current_path_idx.is_some() {
-            if line.starts_with('+') && !line.starts_with("+++") {
-                current_added += 1;
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                current_removed += 1;
+            path = header_path(&line[4..], "a/");
+            counter = DiffLineCounter::default();
+            saw_old_header = true;
+        } else if !counter.in_hunk() && line.starts_with("+++ ") {
+            // Deletions have no new path: retain their old-file header.
+            if let Some(new_path) = header_path(&line[4..], "b/") {
+                path = Some(new_path);
             }
+        } else {
+            let (line_added, line_removed) = counter.count_line(line);
+            added += line_added;
+            removed += line_removed;
         }
     }
-    // Flush last file
-    if let Some(idx) = current_path_idx {
-        results.push((paths[idx].clone(), current_added, current_removed));
-    }
-
-    // If splitting failed, fall back to one entry per path with even distribution
-    if results.is_empty() && !paths.is_empty() {
-        let (total_added, total_removed) = count_diff_lines(patch);
-        for path in paths {
-            results.push((
-                path.clone(),
-                total_added / paths.len() as u64,
-                total_removed / paths.len() as u64,
-            ));
-        }
-    }
-
+    flush(&mut results, &mut path, &mut added, &mut removed);
     results
 }
 
@@ -341,6 +368,8 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
     let mut current_model: Option<String> = None;
     let mut pending_entry_model_indices = Vec::new();
     let mut pending_change_model_indices = Vec::new();
+    let mut apply_patch_event_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut saw_file_change_items = false;
     let mut lines_read = 0;
     let mut parse_failures = 0_usize;
     let mut session_key = format!("codex-file:{}", path_to_string(path));
@@ -364,7 +393,16 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
         if entry.entry_type == "session_meta" {
             if let Some(payload) = entry.payload.as_ref() {
                 if let Some(id) = payload.get("id").and_then(Value::as_str) {
-                    session_key = format!("codex:{id}");
+                    // Spawned subagents take the same `<parent>:subagent:<id>`
+                    // shape as Claude's, so their edits and cost group with
+                    // the conversation that spawned them.
+                    let parent = payload
+                        .pointer("/source/subagent/thread_spawn/parent_thread_id")
+                        .and_then(Value::as_str);
+                    session_key = match parent {
+                        Some(parent) => format!("codex:{parent}:subagent:{id}"),
+                        None => format!("codex:{id}"),
+                    };
                 }
                 if payload.pointer("/source/subagent").is_some() {
                     agent_scope = crate::stats::subagent::AgentScope::Subagent;
@@ -399,8 +437,33 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
             Some(p) => p,
             None => continue,
         };
-        // Check for apply_patch tool calls (change events)
         let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+
+        // Codex records every applied edit as a FileChange item, whichever
+        // tool made it. Current CLIs edit through `exec` (JS calling
+        // `tools.apply_patch`), so this is the only place those edits show up.
+        if payload_type == "item_completed" {
+            let item = payload.get("item");
+            if item
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str)
+                == Some("FileChange")
+            {
+                saw_file_change_items = true;
+                push_codex_file_change_events(
+                    item,
+                    entry.timestamp.as_deref(),
+                    current_model.as_deref(),
+                    agent_scope,
+                    &session_key,
+                    &mut change_events,
+                    &mut pending_change_model_indices,
+                );
+            }
+            continue;
+        }
+
+        // Check for apply_patch tool calls (change events)
         if payload_type == "function_call"
             || payload_type == "custom_tool_call"
             || payload_type == "tool_call"
@@ -423,6 +486,7 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if tool_name == "apply_patch" || tool_name.ends_with("apply_patch") {
+                let first_patch_event = change_events.len();
                 let patch_content = payload
                     .get("arguments")
                     .or_else(|| payload.get("content"))
@@ -441,56 +505,26 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
                         let model_key = model_raw
                             .as_deref()
                             .map(crate::models::normalized_model_key);
-                        let paths = extract_diff_paths(&patch);
-                        let (total_added, total_removed) = count_diff_lines(&patch);
-
-                        if paths.is_empty() {
-                            // Single file or unparseable diff — emit one event
-                            if total_added > 0 || total_removed > 0 {
-                                push_codex_change_event(
-                                    &mut change_events,
-                                    &mut pending_change_model_indices,
-                                    model_key.as_deref(),
-                                    ts,
-                                    String::from("unknown"),
-                                    ChangeEventKind::PatchEdit,
-                                    total_added,
-                                    total_removed,
-                                    agent_scope,
-                                );
+                        for (file_path, file_added, file_removed) in split_patch_by_file(&patch) {
+                            if file_added == 0 && file_removed == 0 {
+                                continue;
                             }
-                        } else if paths.len() == 1 {
                             push_codex_change_event(
                                 &mut change_events,
                                 &mut pending_change_model_indices,
                                 model_key.as_deref(),
                                 ts,
-                                paths[0].clone(),
+                                file_path,
                                 ChangeEventKind::PatchEdit,
-                                total_added,
-                                total_removed,
+                                file_added,
+                                file_removed,
                                 agent_scope,
+                                &session_key,
                             );
-                        } else {
-                            // Multiple files in one patch — split by file
-                            // Re-parse per-file diffs using `diff --git` or `--- a/` separators
-                            let file_diffs = split_patch_by_file(&patch, &paths);
-                            for (file_path, file_added, file_removed) in file_diffs {
-                                push_codex_change_event(
-                                    &mut change_events,
-                                    &mut pending_change_model_indices,
-                                    model_key.as_deref(),
-                                    ts,
-                                    file_path,
-                                    ChangeEventKind::PatchEdit,
-                                    file_added,
-                                    file_removed,
-                                    agent_scope,
-                                );
-                            }
                         }
                     }
                 }
+                apply_patch_event_ranges.push(first_patch_event..change_events.len());
             }
             continue;
         }
@@ -576,6 +610,17 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
         &mut pending_change_model_indices,
     );
 
+    // Sessions that log FileChange items also log the apply_patch call that
+    // produced each one. Keep the FileChange copy so an edit counts once.
+    if saw_file_change_items && !apply_patch_event_ranges.is_empty() {
+        let mut keep = vec![true; change_events.len()];
+        for range in apply_patch_event_ranges {
+            keep[range].fill(false);
+        }
+        let mut keep = keep.into_iter();
+        change_events.retain(|_| keep.next().unwrap_or(true));
+    }
+
     entries.sort_by_key(|a| a.timestamp);
 
     if parse_failures > 0 && entries.is_empty() && lines_read > 10 {
@@ -653,6 +698,112 @@ pub fn read_codex_entries(sessions_dir: &Path, since: Option<NaiveDate>) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_patch_changes(patch: &str) -> Vec<ParsedChangeEvent> {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let context = serde_json::json!({
+            "type": "turn_context", "payload": {"model": "gpt-5.4"}
+        });
+        let call = serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-03-21T10:00:00+00:00",
+            "payload": {"type": "custom_tool_call", "name": "apply_patch", "input": patch}
+        });
+        fs::write(&path, format!("{context}\n{call}\n")).unwrap();
+        parse_codex_session_file(&path).1
+    }
+
+    #[test]
+    fn diff_attribution_keeps_prefix_filenames_separate() {
+        let patches = [
+            "*** Begin Patch\n*** Update File: sample.py\n@@\n-old\n+new\n*** Add File: sample.py.md\n+doc 1\n+doc 2\n+doc 3\n*** End Patch\n",
+            "diff --git a/sample.py b/sample.py\n--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/sample.py.md b/sample.py.md\n--- /dev/null\n+++ b/sample.py.md\n@@ -0,0 +1,3 @@\n+doc 1\n+doc 2\n+doc 3\n",
+        ];
+        for patch in patches {
+            let changes = parse_patch_changes(patch);
+            let actual: Vec<_> = changes
+                .iter()
+                .map(|event| {
+                    (
+                        event.path.as_str(),
+                        event.added_lines,
+                        event.removed_lines,
+                        event.category,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                actual,
+                vec![
+                    ("sample.py", 1, 1, crate::stats::change::FileCategory::Code),
+                    (
+                        "sample.py.md",
+                        3,
+                        0,
+                        crate::stats::change::FileCategory::Docs
+                    ),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn diff_attribution_preserves_deleted_files_in_mixed_patch() {
+        let patch = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-doc 1\n-doc 2\ndiff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let changes = parse_patch_changes(patch);
+        let actual: Vec<_> = changes
+            .iter()
+            .map(|event| {
+                (
+                    event.path.as_str(),
+                    event.added_lines,
+                    event.removed_lines,
+                    event.category,
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            vec![
+                ("README.md", 0, 2, crate::stats::change::FileCategory::Docs),
+                ("main.rs", 1, 1, crate::stats::change::FileCategory::Code),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_attribution_keeps_header_like_content_in_its_file() {
+        let patch = "--- a/first.md\n+++ b/first.md\n@@ -1 +1 @@\n--- old\n+++ new\n--- a/second.rs\n+++ b/second.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let changes = parse_patch_changes(patch);
+        let actual: Vec<_> = changes
+            .iter()
+            .map(|event| (event.path.as_str(), event.added_lines, event.removed_lines))
+            .collect();
+        assert_eq!(actual, vec![("first.md", 1, 1), ("second.rs", 1, 1)]);
+    }
+
+    #[test]
+    fn diff_attribution_preserves_header_like_codex_additions() {
+        // Codex Add File sections do not have an @@ hunk marker.
+        let patch = "*** Begin Patch\n*** Add File: sample.md\n+++ heading\n+---\n*** End Patch\n";
+        assert_eq!(count_diff_lines(patch), (2, 0));
+        let changes = parse_patch_changes(patch);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "sample.md");
+        assert_eq!((changes[0].added_lines, changes[0].removed_lines), (2, 0));
+    }
+
+    #[test]
+    fn diff_attribution_keeps_unattributed_lines_unknown() {
+        let patch = "+unattributed 1\n+unattributed 2\n+unattributed 3\n*** Update File: main.rs\n@@\n-old\n+new\n";
+        let changes = parse_patch_changes(patch);
+        let actual: Vec<_> = changes
+            .iter()
+            .map(|event| (event.path.as_str(), event.added_lines, event.removed_lines))
+            .collect();
+        assert_eq!(actual, vec![("unknown", 3, 0), ("main.rs", 1, 1)]);
+    }
 
     fn usage(input: u64, output: u64, reasoning: u64, total: u64) -> CodexRawUsage {
         CodexRawUsage {

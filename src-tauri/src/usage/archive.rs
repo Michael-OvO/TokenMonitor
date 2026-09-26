@@ -140,6 +140,14 @@ pub struct ImportSourceStats {
 
 const STATE_VERSION: u32 = 1;
 
+/// Session key prefix of synthetic archive rows. They are bucketed per hour
+/// and model, so they carry no real session.
+const ARCHIVE_SESSION_PREFIX: &str = "archive:";
+
+pub(crate) fn is_archive_session_key(session_key: &str) -> bool {
+    session_key.starts_with(ARCHIVE_SESSION_PREFIX)
+}
+
 #[derive(Serialize, Deserialize)]
 struct ArchiveState {
     version: u32,
@@ -544,7 +552,7 @@ impl ArchiveManager {
                 cache_read_tokens: record.cr,
                 web_search_requests: record.ws,
                 unique_hash: None,
-                session_key: format!("archive:{source_key}"),
+                session_key: format!("{ARCHIVE_SESSION_PREFIX}{source_key}"),
                 agent_scope: crate::stats::subagent::AgentScope::Main,
             });
         }

@@ -47,6 +47,30 @@ pub struct ParsedEntry {
     pub agent_scope: crate::stats::subagent::AgentScope,
 }
 
+impl ParsedEntry {
+    /// List-price cost of this row in USD.
+    pub fn cost_usd(&self) -> f64 {
+        let model_key = crate::models::normalized_model_key(&self.model);
+        crate::usage::pricing::calculate_cost_for_key(
+            &model_key,
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_creation_5m_tokens,
+            self.cache_creation_1h_tokens,
+            self.cache_read_tokens,
+            self.web_search_requests,
+        ) * crate::usage::pricing::provider_multiplier(&self.model)
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_5m_tokens
+            + self.cache_creation_1h_tokens
+            + self.cache_read_tokens
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderReadDebug {
@@ -221,6 +245,22 @@ pub(crate) struct LoadedEntries {
     pub change_events: Vec<ParsedChangeEvent>,
     #[allow(dead_code)]
     pub reports: Vec<ProviderReadDebug>,
+    /// Live rows for hours the archive now stands in for. They stay out of
+    /// `entries`, where the archive rows carry the totals, but they still know
+    /// which session each row came from.
+    pub archived_live_entries: Vec<ParsedEntry>,
+}
+
+impl LoadedEntries {
+    /// Rows that still know their session: every live row, including the ones
+    /// the archive stands in for. Archive rows are bucketed per hour and model,
+    /// so they can't be tied to a session and are left out.
+    pub fn session_entries(&self) -> impl Iterator<Item = &ParsedEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| !super::archive::is_archive_session_key(&entry.session_key))
+            .chain(&self.archived_live_entries)
+    }
 }
 
 struct PayloadCacheEntry {
@@ -390,20 +430,67 @@ pub(crate) fn modified_since(path: &Path, since: NaiveDate) -> bool {
         .unwrap_or(true) // if we can't read metadata, include the file
 }
 
-/// Count added and removed lines in a unified diff.
-/// Lines starting with `+` (but not `+++`) are additions.
-/// Lines starting with `-` (but not `---`) are removals.
-pub(crate) fn count_diff_lines(patch: &str) -> (u64, u64) {
-    let mut added: u64 = 0;
-    let mut removed: u64 = 0;
-    for line in patch.lines() {
-        if line.starts_with('+') && !line.starts_with("+++") {
-            added += 1;
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            removed += 1;
-        }
+/// Tracks hunk boundaries so content beginning `---` or `+++` is not
+/// confused with file headers, including between adjacent unified diffs.
+#[derive(Default)]
+pub(crate) struct DiffLineCounter {
+    in_hunk: bool,
+    remaining: Option<(u64, u64)>,
+}
+
+impl DiffLineCounter {
+    pub(crate) fn in_hunk(&self) -> bool {
+        self.in_hunk
     }
-    (added, removed)
+
+    pub(crate) fn count_line(&mut self, line: &str) -> (u64, u64) {
+        if line.starts_with("diff --git ") || line.starts_with("*** ") {
+            *self = Self::default();
+            self.in_hunk = line.starts_with("*** Add File: ")
+                || line.starts_with("*** Update File: ")
+                || line.starts_with("*** Delete File: ");
+            return (0, 0);
+        }
+        if line.starts_with("@@") {
+            let mut fields = line.split_whitespace().skip(1);
+            let range_count = |field: Option<&str>, prefix: char| {
+                let range = field?.strip_prefix(prefix)?;
+                let (start, count) = range.split_once(',').unwrap_or((range, "1"));
+                start.parse::<u64>().ok()?;
+                count.parse::<u64>().ok()
+            };
+            self.remaining = range_count(fields.next(), '-').zip(range_count(fields.next(), '+'));
+            // Codex's bare `@@` has no lengths; its next file marker ends
+            // the hunk instead.
+            self.in_hunk = self.remaining != Some((0, 0));
+            return (0, 0);
+        }
+        if !self.in_hunk && (line.starts_with("--- ") || line.starts_with("+++ ")) {
+            return (0, 0);
+        }
+
+        let (added, removed) = match line.as_bytes().first() {
+            Some(b'+') => (1, 0),
+            Some(b'-') => (0, 1),
+            _ => (0, 0),
+        };
+        if let Some((old, new)) = self.remaining.as_mut() {
+            let context = u64::from(line.starts_with(' '));
+            *old = old.saturating_sub(removed + context);
+            *new = new.saturating_sub(added + context);
+            self.in_hunk = *old != 0 || *new != 0;
+        }
+        (added, removed)
+    }
+}
+
+/// Count additions and removals in unified, Codex, or headerless patch text.
+pub(crate) fn count_diff_lines(patch: &str) -> (u64, u64) {
+    let mut counter = DiffLineCounter::default();
+    patch.lines().fold((0, 0), |(added, removed), line| {
+        let (line_added, line_removed) = counter.count_line(line);
+        (added + line_added, removed + line_removed)
+    })
 }
 
 pub(crate) type SessionParseResult = (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, usize, bool);
@@ -481,15 +568,16 @@ fn entry_archive_hour(entry: &ParsedEntry) -> (NaiveDate, u8) {
     (entry.timestamp.date_naive(), entry.timestamp.hour() as u8)
 }
 
+/// Returns the live rows the archive replaced.
 fn merge_archived_and_live_entries(
     out: &mut Vec<ParsedEntry>,
     archived: Vec<ParsedEntry>,
     live: Vec<ParsedEntry>,
     frontier: Option<super::archive::ArchiveFrontier>,
-) {
+) -> Vec<ParsedEntry> {
     let Some(frontier) = frontier else {
         out.extend(live);
-        return;
+        return Vec::new();
     };
 
     let mut archived_keys_by_hour: HashMap<(NaiveDate, u8), HashSet<String>> = HashMap::new();
@@ -502,6 +590,7 @@ fn merge_archived_and_live_entries(
 
     let mut replacement_hours: HashSet<(NaiveDate, u8)> = HashSet::new();
     let mut live_to_add = Vec::new();
+    let mut replaced = Vec::new();
     for entry in live {
         let hour = entry_archive_hour(&entry);
         if frontier.covers(hour.0, hour.1) {
@@ -514,6 +603,8 @@ fn merge_archived_and_live_entries(
                     {
                         replacement_hours.insert(hour);
                         live_to_add.push(entry);
+                    } else {
+                        replaced.push(entry);
                     }
                 }
                 // Frontier can span empty hours between archived rows; keep
@@ -531,6 +622,7 @@ fn merge_archived_and_live_entries(
             && crate::models::normalized_model_key(&entry.model) == "unknown")
     }));
     out.extend(live_to_add);
+    replaced
 }
 
 fn segment_map_to_vec(map: HashMap<String, SegmentAgg>) -> Vec<ChartSegment> {
@@ -988,12 +1080,7 @@ impl UsageParser {
                 return cached.clone();
             }
         }
-        let (entries, change_events, reports) = self.load_entries(provider, since);
-        let loaded = Arc::new(LoadedEntries {
-            entries,
-            change_events,
-            reports,
-        });
+        let loaded = Arc::new(self.read_entries(provider, since));
         {
             let mut cache = self.entries_cache.lock().unwrap();
             cache.insert(key, (Instant::now(), loaded.clone()));
@@ -1685,13 +1772,44 @@ impl UsageParser {
         Vec<ParsedChangeEvent>,
         Vec<ProviderReadDebug>,
     ) {
-        let Some(selection) = UsageIntegrationSelection::parse(provider) else {
-            return (Vec::new(), Vec::new(), Vec::new());
-        };
+        let loaded = self.read_entries(provider, since);
+        let result = (
+            loaded.entries.clone(),
+            loaded.change_events.clone(),
+            loaded.reports.clone(),
+        );
 
+        // Write-through: populate entries_cache so subsequent load_entries_cached
+        // calls within the same request hit the cache instead of re-scanning.
+        let cache_key = format!(
+            "{}:{}",
+            provider,
+            since.map(|d| d.to_string()).unwrap_or_default()
+        );
+        {
+            let mut cache = self.entries_cache.lock().unwrap();
+            cache
+                .entry(cache_key)
+                .or_insert_with(|| (Instant::now(), Arc::new(loaded)));
+        }
+
+        result
+    }
+
+    fn read_entries(&self, provider: &str, since: Option<NaiveDate>) -> LoadedEntries {
         let mut entries = Vec::new();
         let mut change_events = Vec::new();
         let mut reports = Vec::new();
+        let mut archived_live_entries = Vec::new();
+
+        let Some(selection) = UsageIntegrationSelection::parse(provider) else {
+            return LoadedEntries {
+                entries,
+                change_events,
+                reports,
+                archived_live_entries,
+            };
+        };
 
         let archive_guard = self.archive.lock().unwrap();
         let archive = archive_guard.as_ref();
@@ -1713,7 +1831,12 @@ impl UsageParser {
                     let (next_entries, next_change_events, next_reports) =
                         self.load_claude_entries_with_debug(since);
 
-                    merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
+                    archived_live_entries.extend(merge_archived_and_live_entries(
+                        &mut entries,
+                        archived,
+                        next_entries,
+                        frontier,
+                    ));
                     change_events.extend(next_change_events);
                     reports.extend(next_reports);
                 }
@@ -1721,7 +1844,12 @@ impl UsageParser {
                     let (next_entries, next_change_events, next_report) =
                         self.load_codex_entries_with_debug(since);
 
-                    merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
+                    archived_live_entries.extend(merge_archived_and_live_entries(
+                        &mut entries,
+                        archived,
+                        next_entries,
+                        frontier,
+                    ));
                     change_events.extend(next_change_events);
                     reports.push(next_report);
                 }
@@ -1729,7 +1857,12 @@ impl UsageParser {
                     let (next_entries, next_change_events, next_report) =
                         self.load_cursor_entries_with_debug(since);
 
-                    merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
+                    archived_live_entries.extend(merge_archived_and_live_entries(
+                        &mut entries,
+                        archived,
+                        next_entries,
+                        frontier,
+                    ));
                     change_events.extend(next_change_events);
                     reports.push(next_report);
                 }
@@ -1737,7 +1870,12 @@ impl UsageParser {
                     let (next_entries, next_change_events, next_report) =
                         self.load_kimi_entries_with_debug(since);
 
-                    merge_archived_and_live_entries(&mut entries, archived, next_entries, frontier);
+                    archived_live_entries.extend(merge_archived_and_live_entries(
+                        &mut entries,
+                        archived,
+                        next_entries,
+                        frontier,
+                    ));
                     change_events.extend(next_change_events);
                     reports.push(next_report);
                 }
@@ -1750,29 +1888,14 @@ impl UsageParser {
         // main dashboard total diverges from the Per-Device breakdown, which
         // applies the same predicate to remote SSH rows.
         entries.retain(|e| provider_matches_model(provider, &e.model));
+        archived_live_entries.retain(|e| provider_matches_model(provider, &e.model));
 
-        // Write-through: populate entries_cache so subsequent load_entries_cached
-        // calls within the same request hit the cache instead of re-scanning.
-        let cache_key = format!(
-            "{}:{}",
-            provider,
-            since.map(|d| d.to_string()).unwrap_or_default()
-        );
-        {
-            let mut cache = self.entries_cache.lock().unwrap();
-            cache.entry(cache_key).or_insert_with(|| {
-                (
-                    Instant::now(),
-                    Arc::new(LoadedEntries {
-                        entries: entries.clone(),
-                        change_events: change_events.clone(),
-                        reports: reports.clone(),
-                    }),
-                )
-            });
+        LoadedEntries {
+            entries,
+            change_events,
+            reports,
+            archived_live_entries,
         }
-
-        (entries, change_events, reports)
     }
 
     // ── has_entries_before: check if data exists before a given date ──
@@ -2522,6 +2645,48 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].model, "claude-fable-5");
+    }
+
+    #[test]
+    fn archive_replaced_live_rows_stay_available_for_session_stats() {
+        let mut archived = test_entry("claude-sonnet-4-6", 10);
+        archived.session_key = String::from("archive:local:claude");
+        let mut replaced = test_entry("claude-sonnet-4-6", 10);
+        replaced.session_key = String::from("claude:s1:main");
+        let mut current = test_entry("claude-sonnet-4-6", 11);
+        current.session_key = String::from("claude:s2:main");
+        let frontier = crate::usage::archive::ArchiveFrontier {
+            date: archived.timestamp.date_naive(),
+            hour: 10,
+        };
+
+        let mut entries = Vec::new();
+        let archived_live_entries = merge_archived_and_live_entries(
+            &mut entries,
+            vec![archived],
+            vec![replaced, current],
+            Some(frontier),
+        );
+        let loaded = LoadedEntries {
+            entries,
+            change_events: Vec::new(),
+            reports: Vec::new(),
+            archived_live_entries,
+        };
+
+        // Totals keep the archive row; session stats see the live rows instead.
+        let totals: Vec<_> = loaded
+            .entries
+            .iter()
+            .map(|e| e.session_key.as_str())
+            .collect();
+        assert_eq!(totals, ["archive:local:claude", "claude:s2:main"]);
+        let mut sessions: Vec<_> = loaded
+            .session_entries()
+            .map(|e| e.session_key.as_str())
+            .collect();
+        sessions.sort_unstable();
+        assert_eq!(sessions, ["claude:s1:main", "claude:s2:main"]);
     }
 
     #[test]
@@ -3912,6 +4077,218 @@ mod tests {
     // Change event parsing (Edit / Write tool_use)
     // ─────────────────────────────────────────────────────────────────────────
 
+    fn claude_tool_fixture(name: &str, input: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant", "timestamp": "2026-03-21T10:00:00Z",
+            "requestId": "req_1", "sessionId": "session_1",
+            "message": {"id": "msg_1", "model": "claude-opus-4-6", "content": [
+                {"type": "tool_use", "id": "tool_1", "name": name, "input": input}
+            ]}
+        })
+    }
+
+    fn claude_result_fixture(content: serde_json::Value, failed: bool) -> serde_json::Value {
+        serde_json::json!({
+            "type": "user", "timestamp": "2026-03-21T10:00:01Z",
+            "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "tool_1", "is_error": failed, "content": content}
+            ]}
+        })
+    }
+
+    fn parse_claude_tool_fixtures(records: &[serde_json::Value]) -> Vec<ParsedChangeEvent> {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let content = records
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        write_file(&path, &content);
+        parse_claude_session_file(&path).1
+    }
+
+    #[test]
+    fn claude_text_results_count_confirmed_file_creation() {
+        let call = claude_tool_fixture(
+            "Write",
+            serde_json::json!({
+                "file_path": "/project/script.py", "content": "line 1\nline 2\nline 3\n"
+            }),
+        );
+        for content in [
+            serde_json::json!("File created successfully at: /project/script.py"),
+            serde_json::json!([{"type": "text", "text": "File created successfully at: /project/script.py\n(file state is current and in context)"}]),
+        ] {
+            let events =
+                parse_claude_tool_fixtures(&[call.clone(), claude_result_fixture(content, false)]);
+            assert_eq!(events.len(), 1);
+            assert_eq!((events[0].added_lines, events[0].removed_lines), (3, 0));
+            assert_eq!(events[0].category, FileCategory::Code);
+        }
+    }
+
+    #[test]
+    fn claude_text_results_do_not_infer_unknown_or_overwritten_files() {
+        let call = claude_tool_fixture(
+            "Write",
+            serde_json::json!({
+                "file_path": "/project/script.py", "content": "line 1\nline 2\n"
+            }),
+        );
+        for content in [
+            "Done",
+            "File updated successfully at: /project/script.py",
+            "File created successfully at: /project/script.py.other",
+        ] {
+            let events = parse_claude_tool_fixtures(&[
+                call.clone(),
+                claude_result_fixture(content.into(), false),
+            ]);
+            assert_eq!(
+                events
+                    .iter()
+                    .map(|event| event.added_lines + event.removed_lines)
+                    .sum::<u64>(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn claude_text_results_consume_failed_edits_without_fallback() {
+        let call = claude_tool_fixture(
+            "Edit",
+            serde_json::json!({
+                "file_path": "main.rs", "old_string": "old", "new_string": "new\nextra"
+            }),
+        );
+        for metadata in [
+            None,
+            Some(serde_json::json!("Error: no match")),
+            Some(serde_json::json!({})),
+        ] {
+            let mut result = claude_result_fixture("Error: no match".into(), true);
+            if let Some(metadata) = metadata {
+                result["toolUseResult"] = metadata;
+            }
+            let events = parse_claude_tool_fixtures(&[call.clone(), result, call.clone()]);
+            assert!(
+                events.is_empty(),
+                "failed calls and repeated snapshots must not become edits"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_text_results_trim_unchanged_edit_context() {
+        let call = claude_tool_fixture(
+            "Edit",
+            serde_json::json!({
+                "file_path": "/project/main.rs", "old_string": "context\nold\ncontext", "new_string": "context\nnew\nextra\ncontext"
+            }),
+        );
+        let result = claude_result_fixture(
+            "The file /project/main.rs has been updated successfully.".into(),
+            false,
+        );
+        let events = parse_claude_tool_fixtures(&[call, result]);
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].added_lines, events[0].removed_lines), (2, 1));
+        assert_eq!(
+            events[0].timestamp.timestamp(),
+            chrono::DateTime::parse_from_rfc3339("2026-03-21T10:00:01Z")
+                .unwrap()
+                .timestamp()
+        );
+    }
+
+    #[test]
+    fn claude_text_results_do_not_count_noop_edit() {
+        let call = claude_tool_fixture(
+            "Edit",
+            serde_json::json!({
+                "file_path": "/project/main.rs", "old_string": "same\nlines", "new_string": "same\nlines"
+            }),
+        );
+        let result = claude_result_fixture("The file /project/main.rs has been updated successfully. (file state is current in your context — no need to Read it back)".into(), false);
+        let events = parse_claude_tool_fixtures(&[call, result]);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.added_lines + event.removed_lines)
+                .sum::<u64>(),
+            0
+        );
+    }
+
+    #[test]
+    fn claude_text_results_repeated_snapshots_preserve_confirmed_patch() {
+        let call = claude_tool_fixture(
+            "Edit",
+            serde_json::json!({
+                "file_path": "main.rs", "old_string": "context\nold\ncontext", "new_string": "context\nnew\ncontext"
+            }),
+        );
+        let mut result = claude_result_fixture("Applied patch".into(), false);
+        result["toolUseResult"] = serde_json::json!({
+            "filePath": "main.rs", "structuredPatch": [{"lines": ["-old", "+new"]}]
+        });
+        let events = parse_claude_tool_fixtures(&[call.clone(), call.clone(), result, call]);
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].added_lines, events[0].removed_lines), (1, 1));
+    }
+
+    #[test]
+    fn claude_replacement_fallbacks_trim_pending_edit_context() {
+        for (new, expected) in [("keep\nnew\nend", (1, 1)), ("keep\nold\nend", (0, 0))] {
+            let call = claude_tool_fixture(
+                "Edit",
+                serde_json::json!({
+                    "file_path": "main.rs", "old_string": "keep\nold\nend", "new_string": new
+                }),
+            );
+            let events = parse_claude_tool_fixtures(&[call]);
+            assert_eq!((events[0].added_lines, events[0].removed_lines), expected);
+        }
+    }
+
+    #[test]
+    fn claude_replacement_fallbacks_trim_structured_edit_context() {
+        for (new, expected) in [("keep\nnew\nend", (1, 1)), ("keep\nold\nend", (0, 0))] {
+            let call = claude_tool_fixture(
+                "Edit",
+                serde_json::json!({
+                    "file_path": "main.rs", "old_string": "keep\nold\nend", "new_string": new
+                }),
+            );
+            let mut result = claude_result_fixture("Applied patch".into(), false);
+            result["toolUseResult"] = serde_json::json!({
+                "filePath": "main.rs", "oldString": "keep\nold\nend", "newString": new
+            });
+            let events = parse_claude_tool_fixtures(&[call, result]);
+            assert_eq!((events[0].added_lines, events[0].removed_lines), expected);
+        }
+    }
+
+    #[test]
+    fn claude_replacement_fallbacks_trim_structured_write_context() {
+        for (new, expected) in [("keep\nnew\nend", (1, 1)), ("keep\nold\nend", (0, 0))] {
+            let call = claude_tool_fixture(
+                "Write",
+                serde_json::json!({
+                    "file_path": "main.rs", "content": new
+                }),
+            );
+            let mut result = claude_result_fixture("Wrote file".into(), false);
+            result["toolUseResult"] = serde_json::json!({
+                "filePath": "main.rs", "originalFile": "keep\nold\nend", "content": new
+            });
+            let events = parse_claude_tool_fixtures(&[call, result]);
+            assert_eq!((events[0].added_lines, events[0].removed_lines), expected);
+        }
+    }
+
     #[test]
     fn count_lines_helper() {
         use crate::usage::claude_parser::test_count_lines as count_lines;
@@ -3941,6 +4318,20 @@ mod tests {
         assert_eq!(cev.removed_lines, 1);
         assert_eq!(cev.added_lines, 2);
         assert_eq!(cev.category, FileCategory::Code);
+    }
+
+    #[test]
+    fn parse_claude_headerless_structured_patch_counts_header_like_content() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"README.md","old_string":"-- old heading","new_string":"++ new heading"}}],"usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"user","timestamp":"2026-03-21T10:00:01+00:00","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":"Applied patch"}]},"toolUseResult":{"filePath":"README.md","structuredPatch":[{"lines":["--- old heading","+++ new heading"," context"]},{"lines":["----","+paragraph"]}]}}"#;
+        write_file(&dir.path().join("session.jsonl"), content);
+
+        let (_, changes, _, _) = parse_claude_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "README.md");
+        assert_eq!((changes[0].added_lines, changes[0].removed_lines), (2, 2));
+        assert_eq!(changes[0].category, FileCategory::Docs);
     }
 
     #[test]
@@ -4176,6 +4567,25 @@ diff --git a/src/main.rs b/src/main.rs
     }
 
     #[test]
+    fn diff_attribution_counts_header_like_hunk_content() {
+        let patch = "--- a/main.rs\n+++ b/main.rs\n@@ -1,2 +1,2 @@\n---counter;\n+++counter;\n--- old text\n+++ new text\n";
+        assert_eq!(count_diff_lines(patch), (2, 2));
+    }
+
+    #[test]
+    fn diff_attribution_counts_markdown_rules_in_codex_patch() {
+        let patch =
+            "*** Begin Patch\n*** Update File: README.md\n@@\n----\n+paragraph\n*** End Patch\n";
+        assert_eq!(count_diff_lines(patch), (1, 1));
+    }
+
+    #[test]
+    fn diff_attribution_ignores_headers_between_unified_hunks() {
+        let patch = "--- a/first.md\n+++ b/first.md\n@@ -1 +1 @@\n--- old\n+++ new\n--- a/second.rs\n+++ b/second.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        assert_eq!(count_diff_lines(patch), (2, 2));
+    }
+
+    #[test]
     fn extract_diff_paths_from_plus_plus_plus_b() {
         let patch = "\
 --- a/src/main.rs
@@ -4349,6 +4759,88 @@ diff --git a/src/main.rs b/src/main.rs
     }
 
     #[test]
+    fn parse_codex_file_change_items_from_exec_edits() {
+        // Current Codex CLIs edit through an `exec` tool running JS, so the
+        // only structured edit record is the FileChange item.
+        let dir = TempDir::new().unwrap();
+
+        let ts = "2026-09-21T10:00:00+00:00";
+        let content = format!(
+            r##"{{"type":"turn_context","payload":{{"cwd":"/tmp","model":"gpt-5.5"}}}}
+{{"type":"response_item","timestamp":"{ts}","payload":{{"type":"custom_tool_call","status":"completed","name":"exec","input":"text(await tools.apply_patch(patch));"}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"item_completed","item":{{"type":"FileChange","id":"exec-1","status":"completed","changes":{{"/p/src/lib.rs":{{"type":"update","unified_diff":"@@ -1,2 +1,2 @@\n-old\n+new\n keep\n"}},"/p/README.md":{{"type":"add","content":"# Title\n\nBody\n"}}}}}}}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"item_completed","item":{{"type":"FileChange","id":"exec-2","status":"failed","changes":{{"/p/src/main.rs":{{"type":"add","content":"fn main() {{}}\n"}}}}}}}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":100,"output_tokens":50}}}}}}}}"##,
+            ts = ts
+        );
+        write_file(&dir.path().join("session.jsonl"), &content);
+
+        let (entries, mut change_events, _, _) =
+            parse_codex_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(entries.len(), 1);
+        change_events.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            change_events.len(),
+            2,
+            "failed FileChange items are skipped"
+        );
+
+        let readme = &change_events[0];
+        assert_eq!(readme.path, "/p/README.md");
+        assert_eq!((readme.added_lines, readme.removed_lines), (3, 0));
+        assert_eq!(readme.category, FileCategory::Docs);
+        assert_eq!(readme.model, "gpt-5.5");
+
+        let lib = &change_events[1];
+        assert_eq!(lib.path, "/p/src/lib.rs");
+        assert_eq!((lib.added_lines, lib.removed_lines), (1, 1));
+        assert_eq!(lib.category, FileCategory::Code);
+    }
+
+    #[test]
+    fn codex_spawned_subagent_session_key_names_its_parent() {
+        let dir = TempDir::new().unwrap();
+        let ts = "2026-09-21T10:00:00+00:00";
+        let content = format!(
+            r#"{{"type":"session_meta","payload":{{"id":"child-1","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"parent-1","depth":1}}}}}}}}}}
+{{"type":"turn_context","payload":{{"cwd":"/tmp","model":"gpt-5.5"}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"item_completed","item":{{"type":"FileChange","id":"x","status":"completed","changes":{{"/p/a.py":{{"type":"add","content":"x = 1\n"}}}}}}}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":100,"output_tokens":50}}}}}}}}"#,
+            ts = ts
+        );
+        write_file(&dir.path().join("session.jsonl"), &content);
+
+        let (entries, change_events, _, _) =
+            parse_codex_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(entries[0].session_key, "codex:parent-1:subagent:child-1");
+        assert_eq!(change_events[0].session_key, entries[0].session_key);
+    }
+
+    #[test]
+    fn parse_codex_file_change_items_replace_apply_patch_copies() {
+        // Older sessions log both the apply_patch call and its FileChange item.
+        let dir = TempDir::new().unwrap();
+
+        let ts = "2026-07-10T10:00:00+00:00";
+        let content = format!(
+            r#"{{"type":"turn_context","payload":{{"cwd":"/tmp","model":"gpt-5.4"}}}}
+{{"type":"response_item","timestamp":"{ts}","payload":{{"type":"custom_tool_call","status":"completed","name":"apply_patch","input":"*** Begin Patch\n*** Update File: /p/src/main.rs\n@@\n-old_line\n+new_line\n+added_line"}}}}
+{{"type":"event_msg","timestamp":"{ts}","payload":{{"type":"item_completed","item":{{"type":"FileChange","id":"x","status":"completed","changes":{{"/p/src/main.rs":{{"type":"update","unified_diff":"@@ -1 +1,2 @@\n-old_line\n+new_line\n+added_line\n"}}}}}}}}}}"#,
+            ts = ts
+        );
+        write_file(&dir.path().join("session.jsonl"), &content);
+
+        let (_entries, change_events, _, _) =
+            parse_codex_session_file(&dir.path().join("session.jsonl"));
+        assert_eq!(change_events.len(), 1);
+        assert_eq!(change_events[0].path, "/p/src/main.rs");
+        assert_eq!(
+            (change_events[0].added_lines, change_events[0].removed_lines),
+            (2, 1)
+        );
+    }
+
+    #[test]
     fn extract_diff_paths_from_codex_patch_format() {
         let patch = "*** Begin Patch\n*** Add File: /Users/test/project/src/new.rs\n+fn main() {}\n*** Update File: /Users/test/project/src/lib.rs\n@@\n-old\n+new";
         let paths = extract_diff_paths(patch);
@@ -4483,7 +4975,7 @@ diff --git a/src/main.rs b/src/main.rs
             entries[0].agent_scope,
             crate::stats::subagent::AgentScope::Subagent
         );
-        assert_eq!(entries[0].session_key, "codex:sess-xyz");
+        assert_eq!(entries[0].session_key, "codex:parent-1:subagent:sess-xyz");
     }
 
     #[test]

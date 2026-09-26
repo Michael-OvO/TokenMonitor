@@ -2,14 +2,14 @@ use crate::stats::change::{classify_file, ChangeEventKind, ParsedChangeEvent};
 use crate::stats::subagent::AgentScope;
 use chrono::{DateTime, Local};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use super::parser::{
-    count_diff_lines, glob_jsonl_files, modified_since, path_to_string, push_sample_path,
-    ParsedEntry, ProviderReadDebug,
+    glob_jsonl_files, modified_since, path_to_string, push_sample_path, ParsedEntry,
+    ProviderReadDebug,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,7 +25,7 @@ struct ClaudeJsonlEntry {
     #[serde(rename = "requestId")]
     request_id: Option<String>,
     #[serde(rename = "toolUseResult")]
-    tool_use_result: Option<ClaudeToolUseResult>,
+    tool_use_result: Option<serde_json::Value>,
     message: Option<ClaudeJsonlMessage>,
     #[serde(rename = "isSidechain", default)]
     is_sidechain: Option<bool>,
@@ -57,6 +57,10 @@ enum ClaudeContentBlock {
     ToolResult {
         #[serde(rename = "tool_use_id")]
         tool_use_id: String,
+        #[serde(default)]
+        is_error: Option<bool>,
+        #[serde(default)]
+        content: serde_json::Value,
     },
     #[serde(other)]
     Other,
@@ -74,6 +78,7 @@ struct EditToolInput {
 #[derive(Deserialize)]
 struct WriteToolInput {
     file_path: String,
+    content: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -231,8 +236,10 @@ struct PendingClaudeTool {
     kind: ChangeEventKind,
     fallback_added_lines: u64,
     fallback_removed_lines: u64,
+    confirmed_text_counts: Option<(u64, u64)>,
     dedupe_key: Option<String>,
     agent_scope: AgentScope,
+    session_key: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -248,6 +255,51 @@ fn count_lines(s: &str) -> u64 {
     }
 }
 
+/// When no structured diff exists, exclude the identical leading/trailing
+/// context carried by old/new replacement strings.
+fn count_replacement_lines(old: &str, new: &str) -> (u64, u64) {
+    let old: Vec<_> = old.lines().collect();
+    let new: Vec<_> = new.lines().collect();
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (
+        (new.len() - prefix - suffix) as u64,
+        (old.len() - prefix - suffix) as u64,
+    )
+}
+
+fn confirms_text_tool_result(content: &serde_json::Value, pending: &PendingClaudeTool) -> bool {
+    let expected = match pending.kind {
+        ChangeEventKind::FullWrite => format!("File created successfully at: {}", pending.path),
+        ChangeEventKind::PatchEdit => {
+            format!("The file {} has been updated successfully.", pending.path)
+        }
+    };
+    let matches = |text: &str| {
+        text.trim().strip_prefix(&expected).is_some_and(|suffix| {
+            suffix.is_empty() || suffix.trim_start().starts_with("(file state is current")
+        })
+    };
+    if let Some(text) = content.as_str() {
+        matches(text)
+    } else {
+        content.as_array().is_some_and(|blocks| {
+            blocks.iter().any(|block| {
+                block.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                    && block
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(matches)
+            })
+        })
+    }
+}
+
 /// Returns true for provider-internal paths that should not be counted as user edits.
 fn is_provider_internal_path(path: &str) -> bool {
     path.contains("/.claude/plans/")
@@ -260,13 +312,19 @@ fn count_claude_structured_patch_lines(
         return None;
     }
 
-    let patch = chunks
-        .iter()
-        .flat_map(|chunk| chunk.lines.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let (added, removed) = count_diff_lines(&patch);
-    Some((added, removed))
+    // These are already hunk contents, without file headers. A content line
+    // beginning `---` or `+++` is still a removal or addition.
+    let counts =
+        chunks
+            .iter()
+            .flat_map(|chunk| &chunk.lines)
+            .fold((0, 0), |(added, removed), line| {
+                (
+                    added + u64::from(line.starts_with('+')),
+                    removed + u64::from(line.starts_with('-')),
+                )
+            });
+    Some(counts)
 }
 
 fn extract_claude_tool_result_counts(
@@ -281,14 +339,14 @@ fn extract_claude_tool_result_counts(
         tool_result.old_string.as_deref(),
         tool_result.new_string.as_deref(),
     ) {
-        return (count_lines(new), count_lines(old));
+        return count_replacement_lines(old, new);
     }
 
     if let (Some(old), Some(new)) = (
         tool_result.original_file.as_deref(),
         tool_result.content.as_deref(),
     ) {
-        return (count_lines(new), count_lines(old));
+        return count_replacement_lines(old, new);
     }
 
     if pending.kind == ChangeEventKind::FullWrite {
@@ -323,6 +381,7 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
     let mut change_events = Vec::new();
     let mut pending_tools: Vec<Option<PendingClaudeTool>> = Vec::new();
     let mut pending_tool_indices: HashMap<String, usize> = HashMap::new();
+    let mut completed_tool_ids = HashSet::new();
     let mut lines_read = 0;
     let mut parse_failures = 0_usize;
 
@@ -383,6 +442,8 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                                     if is_provider_internal_path(&edit.file_path) {
                                         return None;
                                     }
+                                    let replacement_counts =
+                                        count_replacement_lines(&edit.old_string, &edit.new_string);
                                     Some((
                                         id.clone(),
                                         PendingClaudeTool {
@@ -390,14 +451,16 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                                             timestamp: ts,
                                             path: edit.file_path.clone(),
                                             kind: ChangeEventKind::PatchEdit,
-                                            fallback_added_lines: count_lines(&edit.new_string),
-                                            fallback_removed_lines: count_lines(&edit.old_string),
+                                            fallback_added_lines: replacement_counts.0,
+                                            fallback_removed_lines: replacement_counts.1,
+                                            confirmed_text_counts: Some(replacement_counts),
                                             dedupe_key: create_claude_tool_dedupe_key(
                                                 unique_hash.as_ref(),
                                                 id.as_ref(),
                                                 block_index,
                                             ),
                                             agent_scope,
+                                            session_key: session_key.clone(),
                                         },
                                     ))
                                 })
@@ -418,12 +481,17 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                                             kind: ChangeEventKind::FullWrite,
                                             fallback_added_lines: 0,
                                             fallback_removed_lines: 0,
+                                            confirmed_text_counts: write
+                                                .content
+                                                .as_deref()
+                                                .map(|content| (count_lines(content), 0)),
                                             dedupe_key: create_claude_tool_dedupe_key(
                                                 unique_hash.as_ref(),
                                                 id.as_ref(),
                                                 block_index,
                                             ),
                                             agent_scope,
+                                            session_key: session_key.clone(),
                                         },
                                     ))
                                 })
@@ -432,10 +500,18 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                     };
 
                     if let Some((tool_id, pending)) = pending {
+                        if tool_id
+                            .as_ref()
+                            .is_some_and(|id| completed_tool_ids.contains(id))
+                        {
+                            continue;
+                        }
                         let idx = pending_tools.len();
                         pending_tools.push(Some(pending));
                         if let Some(tool_id) = tool_id {
-                            pending_tool_indices.insert(tool_id, idx);
+                            if let Some(previous) = pending_tool_indices.insert(tool_id, idx) {
+                                pending_tools[previous] = None;
+                            }
                         }
                     }
                 }
@@ -482,15 +558,20 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                 }
             }
             "user" => {
-                let Some(tool_result) = entry.tool_use_result.as_ref() else {
-                    continue;
-                };
                 let Some(msg) = entry.message.as_ref() else {
                     continue;
                 };
+                let tool_result = entry.tool_use_result.as_ref().and_then(|value| {
+                    serde_json::from_value::<ClaudeToolUseResult>(value.clone()).ok()
+                });
 
                 for block in &msg.content {
-                    let ClaudeContentBlock::ToolResult { tool_use_id } = block else {
+                    let ClaudeContentBlock::ToolResult {
+                        tool_use_id,
+                        is_error,
+                        content,
+                    } = block
+                    else {
                         continue;
                     };
                     let Some(idx) = pending_tool_indices.remove(tool_use_id) else {
@@ -499,14 +580,23 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                     let Some(pending) = pending_tools.get_mut(idx).and_then(Option::take) else {
                         continue;
                     };
+                    completed_tool_ids.insert(tool_use_id.clone());
+                    if *is_error == Some(true) {
+                        continue;
+                    }
 
                     let path = tool_result
-                        .file_path
-                        .clone()
+                        .as_ref()
+                        .and_then(|result| result.file_path.clone())
                         .filter(|path| !is_provider_internal_path(path))
                         .unwrap_or_else(|| pending.path.clone());
-                    let (added_lines, removed_lines) =
-                        extract_claude_tool_result_counts(tool_result, &pending);
+                    let (added_lines, removed_lines) = if let Some(result) = tool_result.as_ref() {
+                        extract_claude_tool_result_counts(result, &pending)
+                    } else if confirms_text_tool_result(content, &pending) {
+                        pending.confirmed_text_counts.unwrap_or((0, 0))
+                    } else {
+                        (pending.fallback_added_lines, pending.fallback_removed_lines)
+                    };
 
                     change_events.push(ParsedChangeEvent {
                         timestamp: ts,
@@ -519,6 +609,7 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                         category: classify_file(&path),
                         dedupe_key: pending.dedupe_key,
                         agent_scope: pending.agent_scope,
+                        session_key: pending.session_key,
                     });
                 }
             }
@@ -539,6 +630,7 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
             category: classify_file(&path),
             dedupe_key: pending.dedupe_key,
             agent_scope: pending.agent_scope,
+            session_key: pending.session_key,
         });
     }
 
