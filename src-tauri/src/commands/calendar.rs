@@ -196,6 +196,7 @@ pub async fn get_monthly_usage(
             usage_warning: Some(String::from("Usage access has not been enabled yet.")),
         });
     }
+    let _gate = state.compute.lock().await;
 
     let (payload, queries) = get_monthly_usage_with_debug(&state, &provider, year, month).await?;
     set_last_usage_debug(

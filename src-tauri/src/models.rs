@@ -152,6 +152,12 @@ pub struct RateLimitWindow {
     pub label: String,
     pub utilization: f64,
     pub resets_at: Option<String>,
+    /// Window length when the vendor reports it (Codex, Kimi).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<u64>,
+    /// Dollar size of the pool when the vendor states it (Cursor API pool).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
 }
 
 impl RateLimitWindow {
@@ -167,7 +173,19 @@ impl RateLimitWindow {
             label,
             utilization,
             resets_at,
+            window_minutes: None,
+            budget_usd: None,
         }
+    }
+
+    pub fn with_minutes(mut self, minutes: Option<u64>) -> Self {
+        self.window_minutes = minutes;
+        self
+    }
+
+    pub fn with_budget_usd(mut self, usd: Option<f64>) -> Self {
+        self.budget_usd = usd;
+        self
     }
 }
 
@@ -269,7 +287,33 @@ fn looks_like_moonshot_k_series(normalized: &str) -> bool {
     )
 }
 
+/// Distinct model names number in the tens while every view normalizes and
+/// prices each entry several times, so the pure per-name functions are
+/// memoized. The cap only bounds an unexpected stream of distinct names.
+const MODEL_MEMO_CAP: usize = 4096;
+
+type ModelMemo<T> = OnceLock<RwLock<HashMap<String, T>>>;
+
+fn memoized<T: Clone>(memo: &ModelMemo<T>, raw: &str, compute: fn(&str) -> T) -> T {
+    let memo = memo.get_or_init(Default::default);
+    if let Some(hit) = memo.read().ok().and_then(|m| m.get(raw).cloned()) {
+        return hit;
+    }
+    let value = compute(raw);
+    if let Ok(mut m) = memo.write() {
+        if m.len() < MODEL_MEMO_CAP {
+            m.insert(raw.to_string(), value.clone());
+        }
+    }
+    value
+}
+
 pub fn detect_model_family(raw: &str) -> ModelFamily {
+    static FAMILIES: ModelMemo<ModelFamily> = OnceLock::new();
+    memoized(&FAMILIES, raw, detect_family)
+}
+
+fn detect_family(raw: &str) -> ModelFamily {
     // Dashes read as spaces and a Cursor "cursor-" prefix is dropped, so
     // "cursor-gpt-5" is detected as OpenAI like "gpt 5".
     let spaced = raw.trim().to_ascii_lowercase().replace('-', " ");
@@ -577,6 +621,11 @@ pub fn normalize_generic_model(raw: &str) -> (String, String) {
 /// lose their "cursor" prefix. The key keeps coming from the raw name so
 /// archived history stays grouped under the same model.
 pub fn normalize_model(raw: &str) -> (String, String) {
+    static NORMALIZED: ModelMemo<(String, String)> = OnceLock::new();
+    memoized(&NORMALIZED, raw, normalize_model_uncached)
+}
+
+fn normalize_model_uncached(raw: &str) -> (String, String) {
     let trimmed = raw.trim();
     let stripped = trimmed
         .get(..7)
@@ -677,11 +726,15 @@ static MODEL_DISPLAY_OVERRIDES: OnceLock<RwLock<HashMap<String, String>>> = Once
 /// Register display-name overrides keyed by normalized model key. Replaces any
 /// previously registered set. Keys are normalized model keys (see
 /// [`normalized_model_key`]); values are the display names to show instead.
-pub fn set_model_display_overrides(overrides: HashMap<String, String>) {
+/// Returns whether they changed.
+pub fn set_model_display_overrides(overrides: HashMap<String, String>) -> bool {
     let lock = MODEL_DISPLAY_OVERRIDES.get_or_init(|| RwLock::new(HashMap::new()));
-    if let Ok(mut guard) = lock.write() {
-        *guard = overrides;
-    }
+    let Ok(mut guard) = lock.write() else {
+        return false;
+    };
+    let changed = *guard != overrides;
+    *guard = overrides;
+    changed
 }
 
 fn display_override_for(model_key: &str) -> Option<String> {

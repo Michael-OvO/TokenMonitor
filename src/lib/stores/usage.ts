@@ -97,6 +97,8 @@ export const setupStatus = writable({ ready: false, installing: false, error: nu
 
 const payloadCache = new Map<string, { data: UsagePayload; at: number }>();
 const CACHE_TTL = 300_000; // 5 min — generous; background refresh keeps it current
+/** Keys fetched since the last publish: the backend still has them current. */
+const fetchedSincePublish = new Set<string>();
 
 /** Cold-path fetchData only: concurrent calls for the same key share one IPC round-trip. */
 const fetchInFlight = new Map<string, Promise<UsagePayload>>();
@@ -150,6 +152,7 @@ function invalidateMatchingUsageCache(
     const entry = parseCacheEntryScope(key);
     if (entry && matches(entry)) {
       payloadCache.delete(key);
+      fetchedSincePublish.delete(key);
     }
   }
 
@@ -167,17 +170,23 @@ function invalidateMatchingUsageCache(
   usageRefreshError.set(null);
 }
 
+/** `background` requests (warm-ups) do not become the backend's active view. */
 function requestUsagePayload(
   provider: UsageProvider,
   period: UsagePeriod,
   offset: number,
+  background = false,
 ) {
-  return invoke<UsagePayload>("get_usage_data", { provider, period, offset });
+  return invoke<UsagePayload>(
+    "get_usage_data",
+    background ? { provider, period, offset, background: true } : { provider, period, offset },
+  );
 }
 
 function cachePayload(key: string, data: UsagePayload, epoch: number = currentCacheEpoch) {
   if (epoch !== currentCacheEpoch) return false;
   payloadCache.set(key, { data, at: Date.now() });
+  fetchedSincePublish.add(key);
   return true;
 }
 
@@ -189,6 +198,10 @@ function applyUsageDataIfCurrent(requestId: number, data: UsagePayload): boolean
     // already displayed — prevents unnecessary re-renders and resize cycles.
     if (current === null || !shallowPayloadEqual(current, data)) {
       usageData.set(data);
+    } else if (current.from_cache !== data.from_cache || current.last_updated !== data.last_updated) {
+      // The same numbers from a newer sample: move the footer's stamp (and
+      // drop a launch-time "cached" label) while the chart keeps its data.
+      usageData.set({ ...current, from_cache: data.from_cache, last_updated: data.last_updated });
     }
     isPlaceholderLoading.set(false);
     usageRefreshError.set(null);
@@ -336,6 +349,9 @@ export async function fetchData(
     return;
   }
 
+  // A navigation: the warm-ups still queued would only delay what it shows.
+  warmGeneration += 1;
+
   // ── Stale-while-revalidate: instant show + silent refresh ──
   const cached = payloadCache.get(key);
   if (cached && Date.now() - cached.at < CACHE_TTL) {
@@ -396,40 +412,71 @@ export async function fetchData(
   }
 }
 
+/** Warm requests run one at a time, so at most one is ever queued ahead of a click. */
+let warmChain: Promise<unknown> = Promise.resolve();
+/** Bumped by each navigation: the warm-ups queued before it are dropped. */
+let warmGeneration = 0;
+let releaseWarmups: (() => void) | null = null;
+
+/**
+ * Hold the warm-ups queued from now on until the next publish. At launch the
+ * backend's first refresh drops every payload computed before it, so a
+ * warm-up sent earlier would be computed twice.
+ */
+export function holdWarmupsUntilPublish() {
+  const held = new Promise<void>((resolve) => {
+    releaseWarmups = resolve;
+  });
+  warmChain = warmChain.then(() => held);
+}
+
+/** A `data-updated` arrived: any view may have changed since it was fetched. */
+export function notePublish() {
+  fetchedSincePublish.clear();
+  releaseWarmups?.();
+  releaseWarmups = null;
+}
+
 /**
  * Warm backend + frontend caches for a provider/period.
  * Fire-and-forget: the resolved payload is stored in the frontend cache
- * so subsequent tab switches are synchronous.
+ * so subsequent tab switches are synchronous. Never `year`, the most
+ * expensive aggregation; nothing fetched since the last publish.
  */
 export function warmCache(
   provider: UsageProvider,
   period: UsagePeriod,
   offset: number = 0,
 ) {
+  if (period === "year") return;
   const scope = backendScope(provider);
   const key = cacheKey(scope, period, offset);
   const cacheEpoch = currentCacheEpoch;
-  requestUsagePayload(scope, period, offset)
-    .then((data: UsagePayload) => {
-      logPayloadWarning({ provider, period, offset, cacheKey: key }, data, "warm-cache");
-      cachePayload(key, data, cacheEpoch);
-      void logUsageReadDebug("usage:warm-cache-resolved", {
-        provider,
-        period,
-        offset,
-        cacheKey: key,
-        fromPayloadCache: data.from_cache,
+  const generation = warmGeneration;
+  warmChain = warmChain.then(() => {
+    if (generation !== warmGeneration || fetchedSincePublish.has(key)) return;
+    return requestUsagePayload(scope, period, offset, true)
+      .then((data: UsagePayload) => {
+        logPayloadWarning({ provider, period, offset, cacheKey: key }, data, "warm-cache");
+        cachePayload(key, data, cacheEpoch);
+        void logUsageReadDebug("usage:warm-cache-resolved", {
+          provider,
+          period,
+          offset,
+          cacheKey: key,
+          fromPayloadCache: data.from_cache,
+        });
+      })
+      .catch((error) => {
+        logResizeDebug("usage:warm-cache-rejected", {
+          provider,
+          period,
+          offset,
+          cacheKey: key,
+          error: formatDebugError(error),
+        });
       });
-    })
-    .catch((error) => {
-      logResizeDebug("usage:warm-cache-rejected", {
-        provider,
-        period,
-        offset,
-        cacheKey: key,
-        error: formatDebugError(error),
-      });
-    });
+  });
 }
 
 const WARM_PERIODS = ["5h", "day", "week", "month"] as const;

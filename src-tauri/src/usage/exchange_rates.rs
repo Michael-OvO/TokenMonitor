@@ -49,7 +49,12 @@ pub fn load_cached(app_data_dir: &Path) -> Option<HashMap<String, f64>> {
 }
 
 pub async fn fetch_and_cache(app_data_dir: &Path) -> Result<HashMap<String, f64>, String> {
-    let body = reqwest::get(crate::ops::frankfurter_latest_url())
+    let body = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Exchange rate HTTP client build failed: {e}"))?
+        .get(crate::ops::frankfurter_latest_url())
+        .send()
         .await
         .map_err(|e| format!("Exchange rate HTTP fetch failed: {e}"))?
         .text()

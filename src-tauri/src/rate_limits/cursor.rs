@@ -1,4 +1,5 @@
 use crate::models::{ExtraUsageInfo, ProviderRateLimits, RateLimitWindow};
+use crate::usage::cursor_parser::{forget_cursor_ide_token, read_cursor_ide_access_token};
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 use serde_json::Value;
@@ -161,12 +162,20 @@ fn plan_usage_windows(plan: &Value, resets_at: Option<String>) -> Vec<RateLimitW
         let Some(pct) = obj.get(*api_field).and_then(as_percent) else {
             continue;
         };
-        windows.push(RateLimitWindow::new(
-            (*window_id).to_string(),
-            label_for_known_meter(window_id, plan),
-            pct,
-            resets_at.clone(),
-        ));
+        let budget_usd = if *window_id == "api" {
+            plan_limit_cents(plan).map(|cents| cents / 100.0)
+        } else {
+            None
+        };
+        windows.push(
+            RateLimitWindow::new(
+                (*window_id).to_string(),
+                label_for_known_meter(window_id, plan),
+                pct,
+                resets_at.clone(),
+            )
+            .with_budget_usd(budget_usd),
+        );
     }
 
     // Skip the rollup — Cursor's dashboard bars are the pools, not total%.
@@ -236,13 +245,31 @@ fn build_cursor_rate_limits(resp: CursorPeriodUsageResponse) -> ProviderRateLimi
 }
 
 pub(super) async fn fetch_cursor_rate_limits() -> Result<ProviderRateLimits, RateLimitFetchError> {
-    let token = crate::usage::cursor_parser::read_cursor_ide_access_token().ok_or_else(|| {
-        RateLimitFetchError::message(
-            "Cursor IDE is not signed in on this machine (no access token found in state.vscdb)",
-        )
-    })?;
+    // Off the async worker: a changed state DB means a `sqlite3` spawn.
+    let token = tokio::task::spawn_blocking(read_cursor_ide_access_token)
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            RateLimitFetchError::message(
+                "Cursor IDE is not signed in on this machine (no access token found in state.vscdb)",
+            )
+        })?;
 
-    let client = reqwest::Client::new();
+    // One client for every probe, so its connections and TLS setup are reused.
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = match CLIENT.get() {
+        Some(client) => client,
+        None => {
+            let client = reqwest::Client::builder()
+                .timeout(super::HTTP_TIMEOUT)
+                .build()
+                .map_err(|e| {
+                    RateLimitFetchError::message(format!("HTTP client build failed: {e}"))
+                })?;
+            CLIENT.get_or_init(|| client)
+        }
+    };
     let response = client
         .post(format!(
             "{}/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
@@ -259,6 +286,9 @@ pub(super) async fn fetch_cursor_rate_limits() -> Result<ProviderRateLimits, Rat
         })?;
 
     if !response.status().is_success() {
+        if matches!(response.status().as_u16(), 401 | 403) {
+            forget_cursor_ide_token();
+        }
         return Err(rate_limit_error_from_response(&response));
     }
 

@@ -8,7 +8,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Soft cap on the events file. When exceeded on read we keep only the last
@@ -17,6 +17,8 @@ use std::path::Path;
 /// window.
 const SOFT_SIZE_LIMIT_BYTES: u64 = 1_024 * 1_024;
 const RETAIN_TAIL_LINES: usize = 200;
+/// How much of the file's end a read looks at first: a few dozen events.
+const TAIL_BYTES: u64 = 64 * 1024;
 
 /// One envelope appended by the statusline script. We deliberately avoid
 /// strict typing on `payload` so a CC version bump that adds new fields
@@ -82,32 +84,37 @@ impl LatestActiveSession {
 
 /// Read the events file and return the most recent envelope's session info.
 /// Returns `Ok(None)` when the file doesn't exist or contains no parseable
-/// lines — a brand-new install before CC has fired.
-pub fn latest_active_session(events_file: &Path) -> io::Result<Option<LatestActiveSession>> {
-    if !events_file.exists() {
+/// lines — a brand-new install before CC has fired — and, without reading it,
+/// when the file was last written before `not_before`: no event in it can be
+/// newer than that write.
+pub fn latest_active_session(
+    events_file: &Path,
+    not_before: DateTime<Utc>,
+) -> io::Result<Option<LatestActiveSession>> {
+    let meta = match fs::metadata(events_file) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if meta
+        .modified()
+        .is_ok_and(|mtime| DateTime::<Utc>::from(mtime) < not_before)
+    {
         return Ok(None);
     }
-    let file = fs::File::open(events_file)?;
-    let reader = BufReader::new(file);
 
-    let mut latest: Option<(DateTime<Utc>, StatuslineEvent)> = None;
-    for line in reader.lines() {
-        let Ok(line) = line else { continue };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(event) = serde_json::from_str::<StatuslineEvent>(trimmed) else {
-            continue;
-        };
-        let Ok(ts) = DateTime::parse_from_rfc3339(&event.ts) else {
-            continue;
-        };
-        let ts_utc = ts.with_timezone(&Utc);
-        match latest.as_ref() {
-            Some((prev, _)) if *prev >= ts_utc => {}
-            _ => latest = Some((ts_utc, event)),
-        }
+    // Events are appended in order, so the newest is in the tail. The cut
+    // first line fails to parse and is skipped; a tail with no whole event
+    // (one oversized line) falls back to reading everything.
+    let mut file = fs::File::open(events_file)?;
+    let mut latest = None;
+    if meta.len() > TAIL_BYTES {
+        file.seek(SeekFrom::Start(meta.len() - TAIL_BYTES))?;
+        latest = latest_event(BufReader::new(&file));
+    }
+    if latest.is_none() {
+        file.rewind()?;
+        latest = latest_event(BufReader::new(&file));
     }
 
     Ok(latest.map(|(ts, event)| {
@@ -130,6 +137,29 @@ pub fn latest_active_session(events_file: &Path) -> io::Result<Option<LatestActi
             windows: extract_rate_limit_windows(payload),
         }
     }))
+}
+
+fn latest_event(reader: impl BufRead) -> Option<(DateTime<Utc>, StatuslineEvent)> {
+    let mut latest: Option<(DateTime<Utc>, StatuslineEvent)> = None;
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<StatuslineEvent>(trimmed) else {
+            continue;
+        };
+        let Ok(ts) = DateTime::parse_from_rfc3339(&event.ts) else {
+            continue;
+        };
+        let ts_utc = ts.with_timezone(&Utc);
+        match latest.as_ref() {
+            Some((prev, _)) if *prev >= ts_utc => {}
+            _ => latest = Some((ts_utc, event)),
+        }
+    }
+    latest
 }
 
 fn string_field(payload: &serde_json::Value, key: &str) -> Option<String> {
@@ -256,6 +286,11 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
+    /// The latest session, however old the file.
+    fn latest(path: &Path) -> Option<LatestActiveSession> {
+        latest_active_session(path, DateTime::<Utc>::MIN_UTC).unwrap()
+    }
+
     fn write_events(dir: &Path, events: &[&str]) -> std::path::PathBuf {
         let path = dir.join("events.jsonl");
         let mut file = fs::File::create(&path).unwrap();
@@ -269,7 +304,7 @@ mod tests {
     fn returns_none_when_file_missing() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("missing.jsonl");
-        assert!(latest_active_session(&path).unwrap().is_none());
+        assert!(latest(&path).is_none());
     }
 
     #[test]
@@ -282,7 +317,7 @@ mod tests {
                 r#"{"ts":"2026-04-29T11:00:00Z","payload":{"session_id":"new","model":{"id":"sonnet-4-6"}}}"#,
             ],
         );
-        let session = latest_active_session(&path).unwrap().unwrap();
+        let session = latest(&path).unwrap();
         assert_eq!(session.session_id.as_deref(), Some("new"));
         assert_eq!(session.model_id.as_deref(), Some("sonnet-4-6"));
     }
@@ -298,8 +333,29 @@ mod tests {
                 r#"{"ts":"2026-04-29T10:00:00Z","payload":{"session_id":"good"}}"#,
             ],
         );
-        let session = latest_active_session(&path).unwrap().unwrap();
+        let session = latest(&path).unwrap();
         assert_eq!(session.session_id.as_deref(), Some("good"));
+    }
+
+    #[test]
+    fn reads_the_tail_and_skips_a_file_written_before_the_bound() {
+        let dir = tempdir().unwrap();
+        let filler = format!(
+            r#"{{"ts":"2026-04-29T10:00:00Z","payload":{{"session_id":"old","pad":"{}"}}}}"#,
+            "x".repeat(TAIL_BYTES as usize)
+        );
+        let newest = r#"{"ts":"2026-04-29T11:00:00Z","payload":{"session_id":"new"}}"#;
+        let path = write_events(dir.path(), &[&filler, newest]);
+        let session = latest(&path);
+        assert_eq!(session.unwrap().session_id.as_deref(), Some("new"));
+
+        // A single event longer than the tail is found by the full read.
+        let path = write_events(dir.path(), &[&filler]);
+        let session = latest(&path);
+        assert_eq!(session.unwrap().session_id.as_deref(), Some("old"));
+
+        let later = Utc::now() + Duration::hours(1);
+        assert!(latest_active_session(&path, later).unwrap().is_none());
     }
 
     #[test]
@@ -327,7 +383,7 @@ mod tests {
                 r#"{"ts":"2026-04-29T11:00:00Z","payload":{"session_id":"s1","rate_limits":{"five_hour":{"used_percentage":6,"resets_at":1777516200},"seven_day":{"used_percentage":21,"resets_at":1777622400}}}}"#,
             ],
         );
-        let session = latest_active_session(&path).unwrap().unwrap();
+        let session = latest(&path).unwrap();
         assert_eq!(session.windows.len(), 2);
         assert_eq!(session.windows[0].window_id, "five_hour");
         assert_eq!(session.windows[0].window.used_percentage, 6.0);
@@ -346,7 +402,7 @@ mod tests {
                 r#"{"ts":"2026-04-29T11:00:00Z","payload":{"session_id":"s1","rate_limits":{"seven_day":{"used_percentage":21,"resets_at":1777622400},"bonus_pool":{"used_percentage":5,"resets_at":1777700000}}}}"#,
             ],
         );
-        let session = latest_active_session(&path).unwrap().unwrap();
+        let session = latest(&path).unwrap();
         assert_eq!(session.windows.len(), 2);
         assert_eq!(session.windows[0].window_id, "seven_day");
         assert_eq!(session.windows[1].window_id, "bonus_pool");
@@ -360,7 +416,7 @@ mod tests {
             dir.path(),
             &[r#"{"ts":"2026-04-29T11:00:00Z","payload":{"session_id":"s1"}}"#],
         );
-        let session = latest_active_session(&path).unwrap().unwrap();
+        let session = latest(&path).unwrap();
         assert!(session.windows.is_empty());
     }
 

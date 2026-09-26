@@ -62,11 +62,11 @@ pub fn init_logging(app_data_dir: &Path) -> LoggingState {
     std::fs::create_dir_all(&log_dir).ok();
 
     // Backend: tracing subscriber with daily-rotating file appender
-    let backend_appender = RollingFileAppender::new(Rotation::DAILY, &log_dir, "backend.log");
+    let backend_appender = daily_appender(&log_dir, "backend.log");
     let (non_blocking, backend_guard) = tracing_appender::non_blocking(backend_appender);
 
     // Frontend: separate daily-rotating file appender (written to directly via IPC)
-    let frontend_appender = RollingFileAppender::new(Rotation::DAILY, &log_dir, "frontend.log");
+    let frontend_appender = daily_appender(&log_dir, "frontend.log");
 
     // Reloadable EnvFilter for runtime level switching
     let default_filter_spec =
@@ -96,6 +96,18 @@ pub fn init_logging(app_data_dir: &Path) -> LoggingState {
         current_level: Mutex::new(normalize_log_level(&default_filter_spec).to_string()),
         _backend_guard: backend_guard,
     }
+}
+
+/// A daily log that keeps a week of files. The appender prunes at each
+/// rollover, so a process that runs for weeks stays bounded too;
+/// `cleanup_old_logs` only runs at launch.
+fn daily_appender(log_dir: &Path, prefix: &str) -> RollingFileAppender {
+    RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix(prefix)
+        .max_log_files(7)
+        .build(log_dir)
+        .expect("initializing rolling file appender failed")
 }
 
 fn normalize_log_level(level: &str) -> &'static str {

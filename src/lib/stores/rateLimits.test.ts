@@ -527,4 +527,149 @@ describe("fetchRateLimits", () => {
     expect(get(rateLimitsMonitorState).claude.error).toBeNull();
     expect(get(rateLimitsRequestState).error).toBeNull();
   });
+
+  it("asks the backend to probe only when the fetch is forced", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-17T12:00:30.000Z"));
+
+    installStoreMap({
+      "rate-limits.json": makeStore(),
+      "rate-limits-claude.json": makeStore(),
+      "rate-limits-codex.json": makeStore(),
+      "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
+    });
+    mockInvoke.mockResolvedValue(makePayload({ codex: null }));
+
+    const { fetchRateLimits } = await loadRateLimitStore();
+
+    await fetchRateLimits("claude", { force: true });
+
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("get_rate_limits", {
+      provider: "claude",
+      force: true,
+    });
+  });
+
+  it("runs a forced fetch after a plain read already in flight instead of reusing it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-17T12:00:30.000Z"));
+
+    installStoreMap({
+      "rate-limits.json": makeStore(),
+      "rate-limits-claude.json": makeStore(),
+      "rate-limits-codex.json": makeStore(),
+      "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
+    });
+    const plainRead = deferred<RateLimitsPayload>();
+    mockInvoke.mockReturnValueOnce(plainRead.promise);
+    mockInvoke.mockResolvedValue(makePayload({ codex: null }));
+
+    const { fetchRateLimits } = await loadRateLimitStore();
+
+    const plain = fetchRateLimits("claude");
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
+    });
+    const forced = fetchRateLimits("claude", { force: true });
+    plainRead.resolve(makePayload({ codex: null }));
+    await Promise.all([plain, forced]);
+
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke).toHaveBeenNthCalledWith(1, "get_rate_limits", { provider: "claude" });
+    expect(mockInvoke).toHaveBeenNthCalledWith(2, "get_rate_limits", {
+      provider: "claude",
+      force: true,
+    });
+  });
+
+  it("serves a plain read from a forced fetch already in flight", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-17T12:00:30.000Z"));
+
+    installStoreMap({
+      "rate-limits.json": makeStore(),
+      "rate-limits-claude.json": makeStore(),
+      "rate-limits-codex.json": makeStore(),
+      "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
+    });
+    const probe = deferred<RateLimitsPayload>();
+    mockInvoke.mockReturnValueOnce(probe.promise);
+
+    const { fetchRateLimits } = await loadRateLimitStore();
+
+    const forced = fetchRateLimits("claude", { force: true });
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
+    });
+    const plain = fetchRateLimits("claude");
+    probe.resolve(makePayload({ codex: null }));
+    await Promise.all([forced, plain]);
+
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("rewrites a provider's file only when its record changed", async () => {
+    const claudeStore = makeStore();
+    installStoreMap({
+      "rate-limits.json": makeStore(),
+      "rate-limits-claude.json": claudeStore,
+      "rate-limits-codex.json": makeStore(),
+      "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
+    });
+    const reading = makePayload({ codex: null });
+    const newer = makePayload({
+      claude: providerRateLimits("claude", { fetchedAt: "2026-03-17T00:05:00.000Z" }),
+      codex: null,
+    });
+    mockInvoke
+      .mockResolvedValueOnce(reading)
+      .mockResolvedValueOnce(structuredClone(reading))
+      .mockResolvedValueOnce(newer);
+
+    const { fetchRateLimits } = await loadRateLimitStore();
+
+    await fetchRateLimits("claude");
+    await fetchRateLimits("claude");
+    expect(claudeStore.save).toHaveBeenCalledTimes(1);
+    await fetchRateLimits("claude");
+    expect(claudeStore.save).toHaveBeenCalledTimes(2);
+  });
+
+  it("holds deferred retries while the popover is hidden and re-arms them on show", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-17T12:00:00.000Z"));
+
+    installStoreMap({
+      "rate-limits.json": makeStore(),
+      "rate-limits-claude.json": makeStore({
+        payload: providerRateLimits("claude", {
+          cooldownUntil: "2026-03-17T12:00:05.000Z",
+          fetchedAt: "2026-03-17T12:00:00.000Z",
+        }),
+      }),
+      "rate-limits-codex.json": makeStore(),
+      "rate-limits-cursor.json": makeStore(),
+      "rate-limits-kimi.json": makeStore(),
+    });
+    mockInvoke.mockResolvedValue(makePayload({ codex: null }));
+
+    const { fetchRateLimits, setRateLimitRetriesPaused } = await loadRateLimitStore();
+
+    await fetchRateLimits("claude");
+    expect(vi.getTimerCount()).toBe(1);
+    setRateLimitRetriesPaused(true);
+    expect(vi.getTimerCount()).toBe(0);
+    await fetchRateLimits("claude");
+    expect(vi.getTimerCount()).toBe(0);
+
+    setRateLimitRetriesPaused(false);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(5_100);
+    expect(mockInvoke).toHaveBeenCalledWith("get_rate_limits", { provider: "claude" });
+  });
 });

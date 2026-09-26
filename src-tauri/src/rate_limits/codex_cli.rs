@@ -2,7 +2,7 @@ use crate::models::{CreditsInfo, ProviderRateLimits, UsageLimitReset, UsageLimit
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
@@ -108,6 +108,65 @@ fn resolve_codex_cli_path_uncached() -> Result<PathBuf, String> {
     Err("Codex CLI was not found on this system".to_string())
 }
 
+/// The command for the CLI at `cli_path`: on Windows, the binary an npm
+/// shim would start, when it is found, with the environment `codex.js` gives
+/// it; else the path itself.
+fn codex_command(cli_path: &Path) -> TokioCommand {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some((exe, package_root)) = vendored_codex(cli_path) {
+            let mut command = TokioCommand::new(exe);
+            command.env("CODEX_MANAGED_PACKAGE_ROOT", package_root);
+            command.env("CODEX_MANAGED_BY_NPM", "1");
+            return command;
+        }
+    }
+    TokioCommand::new(cli_path)
+}
+
+/// The npm platform package and target triple `codex.js` picks here.
+#[cfg(target_os = "windows")]
+const CODEX_PLATFORM: (&str, &str) = if cfg!(target_arch = "aarch64") {
+    ("codex-win32-arm64", "aarch64-pc-windows-msvc")
+} else {
+    ("codex-win32-x64", "x86_64-pc-windows-msvc")
+};
+
+/// An npm `codex.cmd` runs cmd.exe, which runs node on `codex.js`, which
+/// runs the native binary: three processes per probe, and killing the child
+/// reaches only cmd.exe. The binary, found where `codex.js` looks for it,
+/// with the package root it passes along: `(codex.exe, package root)`.
+#[cfg(target_os = "windows")]
+fn vendored_codex(shim: &Path) -> Option<(PathBuf, PathBuf)> {
+    if !shim
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"))
+    {
+        return None;
+    }
+    let root = shim
+        .parent()?
+        .join("node_modules")
+        .join("@openai")
+        .join("codex");
+    let (package, triple) = CODEX_PLATFORM;
+    // Its platform package, nested or hoisted, then its own vendor dir.
+    [
+        root.join("node_modules").join("@openai").join(package),
+        root.with_file_name(package),
+        root.clone(),
+    ]
+    .into_iter()
+    .map(|dir| {
+        dir.join("vendor")
+            .join(triple)
+            .join("bin")
+            .join("codex.exe")
+    })
+    .find(|exe| exe.is_file())
+    .map(|exe| (exe, root))
+}
+
 // ── App-server JSON-RPC response types ──
 
 #[derive(Deserialize)]
@@ -134,6 +193,8 @@ struct RateLimitsReadResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreditsSnapshot {
+    // Codex's session logs spell it in snake case.
+    #[serde(alias = "has_credits")]
     has_credits: bool,
     unlimited: bool,
     balance: Option<String>,
@@ -225,8 +286,21 @@ pub(super) fn parse_rate_limits_response(
         .result
         .ok_or_else(|| RateLimitFetchError::message("Codex app-server returned empty result"))?;
 
-    let snapshot = result.rate_limits;
-    let windows = codex_windows_from_rate_limits(&snapshot);
+    let mut reading = reading_from_snapshot(&result.rate_limits);
+    // Reset credits sit beside the snapshot, so only the app-server has them.
+    if let Some(credits) = reading.credits.as_mut() {
+        credits.usage_limit_resets = result
+            .rate_limit_reset_credits
+            .as_ref()
+            .map(usage_limit_resets_from_value);
+    }
+    Ok(reading)
+}
+
+/// A reading from a `rate_limits` snapshot, as the app-server returns it or
+/// Codex logs it.
+pub(super) fn reading_from_snapshot(snapshot: &Value) -> ProviderRateLimits {
+    let windows = codex_windows_from_rate_limits(snapshot);
 
     let plan_tier = snapshot
         .get("planType")
@@ -238,14 +312,6 @@ pub(super) fn parse_rate_limits_response(
         .cloned()
         .and_then(|v| serde_json::from_value::<CreditsSnapshot>(v).ok())
         .map(credits_from_snapshot);
-    let usage_limit_resets = result
-        .rate_limit_reset_credits
-        .as_ref()
-        .map(usage_limit_resets_from_value);
-    let credits = credits.map(|credits| CreditsInfo {
-        usage_limit_resets,
-        ..credits
-    });
 
     let rate_limit_reached = snapshot
         .get("rateLimitReachedType")
@@ -276,7 +342,7 @@ pub(super) fn parse_rate_limits_response(
         })
     });
 
-    Ok(ProviderRateLimits {
+    ProviderRateLimits {
         provider: "codex".to_string(),
         plan_tier,
         windows,
@@ -287,7 +353,7 @@ pub(super) fn parse_rate_limits_response(
         retry_after_seconds,
         cooldown_until,
         fetched_at: Local::now().to_rfc3339(),
-    })
+    }
 }
 
 // ── App-server probe ──
@@ -296,7 +362,7 @@ pub(super) async fn fetch_codex_rate_limits_via_cli(
 ) -> Result<ProviderRateLimits, RateLimitFetchError> {
     let cli_path = resolve_codex_cli_path().map_err(RateLimitFetchError::message)?;
 
-    let mut command = TokioCommand::new(cli_path);
+    let mut command = codex_command(&cli_path);
     command.kill_on_drop(true);
     command.args(["app-server"]);
     command.stdin(std::process::Stdio::piped());
@@ -553,6 +619,56 @@ mod tests {
             .unwrap();
         assert_eq!(primary.utilization, 76.0);
         assert!(!result.stale);
+    }
+
+    #[test]
+    fn reads_a_snapshot_as_codex_logs_it() {
+        let logged = serde_json::json!({
+            "limit_id": "codex",
+            "primary": {"used_percent": 5.0, "window_minutes": 300, "resets_at": 1790148598},
+            "secondary": {"used_percent": 43.0, "window_minutes": 10080, "resets_at": 1790426576},
+            "credits": {"has_credits": true, "unlimited": false, "balance": "12.5"},
+            "plan_type": "plus",
+            "rate_limit_reached_type": null
+        });
+        let reading = reading_from_snapshot(&logged);
+        assert_eq!(reading.windows.len(), 2);
+        assert_eq!(reading.plan_tier.as_deref(), Some("Plus"));
+        let credits = reading.credits.expect("snake-case credits");
+        assert!(credits.has_credits);
+        assert_eq!(credits.balance, Some(12.5));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn an_npm_shim_gives_way_to_the_binary_it_starts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let shim = dir.path().join("codex.cmd");
+        std::fs::write(&shim, "").unwrap();
+        assert_eq!(vendored_codex(&shim), None, "no binary: the shim runs");
+
+        let root = dir
+            .path()
+            .join("node_modules")
+            .join("@openai")
+            .join("codex");
+        let (package, triple) = CODEX_PLATFORM;
+        let exe = root
+            .join("node_modules")
+            .join("@openai")
+            .join(package)
+            .join("vendor")
+            .join(triple)
+            .join("bin")
+            .join("codex.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(vendored_codex(&shim), Some((exe, root)));
+        assert_eq!(
+            vendored_codex(&dir.path().join("codex.exe")),
+            None,
+            "not a shim"
+        );
     }
 
     #[test]

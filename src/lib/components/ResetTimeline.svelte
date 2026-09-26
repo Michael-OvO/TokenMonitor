@@ -169,7 +169,7 @@
     height: 15px;
     box-sizing: border-box;
     padding: 0 6px;
-    font: 500 9px/1 'Inter', sans-serif;
+    font: 500 9px/1 system-ui, sans-serif;
     font-variant-numeric: tabular-nums;
     color: var(--t2);
     background: var(--surface-2);

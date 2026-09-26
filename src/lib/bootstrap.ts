@@ -150,13 +150,25 @@ export async function initializeRuntimeFromSettings(
     invokeFn("set_cursor_auth_config", {
       apiKey: saved.cursorApiKey,
     }),
+  ]);
+
+  // Not awaited: at launch their paint computes the day cost cold, under the
+  // backend's compute gate, which may take seconds. The refresh loop starts
+  // meanwhile, and its network I/O runs beside that compute.
+  const paints: Promise<unknown>[] = [
     // The tray title, the Cursor meter label and the float-ball amount are
     // rendered in Rust, which cannot read the settings store. Push the currency
     // before the first tray sync so the menu bar never flashes the wrong symbol.
     invokeFn("set_currency", { code: saved.currency }),
-  ]);
+    syncTrayConfig(saved.trayConfig, null, invokeFn),
+  ];
+  if (saved.floatBall) {
+    paints.push(invokeFn("create_float_ball"));
+  }
+  void Promise.allSettled(paints);
 
-  const calls: Promise<unknown>[] = [
+  // The settings the first refresh cycle reads, all cheap to store.
+  const cycleSettings: Promise<unknown>[] = [
     invokeFn("set_refresh_interval", { interval: saved.refreshInterval }),
     invokeFn("set_period_config", { weekStart: saved.weekStart, rolling: saved.rollingPeriods }),
     invokeFn("set_rate_limits_enabled", { enabled: saved.rateLimitsEnabled }),
@@ -176,15 +188,13 @@ export async function initializeRuntimeFromSettings(
       fiveHourTokens: saved.claudePlanCustomFiveHourTokens,
       weeklyTokens: saved.claudePlanCustomWeeklyTokens,
     }),
-    syncTrayConfig(saved.trayConfig, null, invokeFn),
   ];
   if (saved.sshHosts.length > 0) {
-    calls.push(invokeFn("init_ssh_hosts", { hosts: saved.sshHosts }));
+    cycleSettings.push(invokeFn("init_ssh_hosts", { hosts: saved.sshHosts }));
   }
-  if (saved.floatBall) {
-    calls.push(invokeFn("create_float_ball"));
-  }
-  await Promise.allSettled(calls);
+  await Promise.allSettled(cycleSettings);
+  // The backend's first refresh waits for these settings; let it start.
+  invokeFn("refresh_ready").catch((e) => logger.debug("bootstrap", `refresh_ready failed: ${e}`));
 
   // Sync debug log level to Rust backend
   if (saved.debugLogging) {

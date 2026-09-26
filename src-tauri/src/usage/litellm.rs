@@ -94,7 +94,12 @@ pub fn load_cached(app_data_dir: &Path) -> Option<HashMap<String, DynamicModelRa
 ///
 /// Returns the parsed rates HashMap, or an error string.
 async fn fetch_litellm() -> Result<HashMap<String, DynamicModelRates>, String> {
-    let body = reqwest::get(crate::ops::litellm_prices_url())
+    let body = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("LiteLLM HTTP client build failed: {e}"))?
+        .get(crate::ops::litellm_prices_url())
+        .send()
         .await
         .map_err(|e| format!("LiteLLM HTTP fetch failed: {e}"))?
         .text()

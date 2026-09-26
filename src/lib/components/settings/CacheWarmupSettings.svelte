@@ -133,7 +133,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     padding: 2px 8px;
-    font: 400 8px/1.2 'Inter', sans-serif;
+    font: 400 8px/1.2 system-ui, sans-serif;
     color: var(--t2);
     cursor: pointer;
     white-space: nowrap;
