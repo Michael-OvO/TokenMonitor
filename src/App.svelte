@@ -1053,9 +1053,62 @@
      ponytail: the fade is static — it stays put once you scroll to the bottom.
      Making it retract there needs a scroll listener plus a second piece of
      state; add that only if the constant fade reads as noise. */
-  .pop-content.is-scroll-locked {
+  .pop-content.is-scroll-locked:not(:has(.app-footer)) {
     -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
     mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
+  }
+  /* With the footer pinned, that mask would fade the footer itself: its
+     timestamp and buttons sit in exactly those last 24px. Draw the fade as a
+     band just above the footer instead, in the footer's own background, so
+     scrolled content dissolves into the page. Absolutely positioned, so it
+     never reaches the measured height either. */
+  .pop-content.is-scroll-locked .app-footer::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 100%;
+    height: 24px;
+    background: inherit;
+    -webkit-mask-image: linear-gradient(to bottom, transparent, #000);
+    mask-image: linear-gradient(to bottom, transparent, #000);
+    pointer-events: none;
+  }
+  /* Retract the band over the last 24px of scroll so the final rows are not
+     left half-faded at the bottom. Where scroll timelines are missing the band
+     simply stays, as the old mask did. */
+  @supports (animation-timeline: scroll()) {
+    .pop-content.is-scroll-locked .app-footer::before {
+      animation: footerFadeRetract linear both;
+      animation-timeline: scroll(nearest block);
+      animation-range: calc(100% - 24px) 100%;
+    }
+  }
+  @keyframes footerFadeRetract {
+    to { opacity: 0; }
+  }
+  /* The same fade under the header, for content scrolling up out of view. It
+     grows in over the first 24px of scroll, so at the top it never covers the
+     date row; without scroll timelines there is no band at all. */
+  @supports (animation-timeline: scroll()) {
+    .pop-content.is-scroll-locked .app-header::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 100%;
+      height: 24px;
+      background: inherit;
+      -webkit-mask-image: linear-gradient(to top, transparent, #000);
+      mask-image: linear-gradient(to top, transparent, #000);
+      pointer-events: none;
+      animation: headerFadeReveal linear both;
+      animation-timeline: scroll(nearest block);
+      animation-range: 0px 24px;
+    }
+  }
+  @keyframes headerFadeReveal {
+    from { opacity: 0; }
   }
   .pop-content::-webkit-scrollbar {
     display: none;
@@ -1091,14 +1144,17 @@
        `translateZ(0)` since `will-change` alone doesn't change
        layout. */
   }
+  /* Same surface + provider tint as `#app` and the header, so the pinned
+     footer reads as the bottom of the page rather than a neutral slab laid
+     over a tinted one. */
   .app-footer {
     position: sticky;
     bottom: 0;
     z-index: 3;
     background: var(--surface);
+    background-image: linear-gradient(var(--provider-bg), var(--provider-bg));
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
-    box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.15);
   }
   .hr { height: 1px; background: var(--border-subtle); margin: 0 12px; }
   .loading {
