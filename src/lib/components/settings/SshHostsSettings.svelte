@@ -357,120 +357,115 @@
 </script>
 
 <div class="block">
-  <button class="row collapsible-toggle" type="button" aria-expanded={devicesExpanded} onclick={() => (devicesExpanded = !devicesExpanded)}>
-    <span class="label">Remote Devices</span>
-    <div class="collapsible-right">
-      {#if !devicesExpanded && totalRemoteDeviceCount > 0}
-        <span
-          role="button"
-          tabindex="0"
-          class="ssh-btn sync-collapsed"
-          aria-disabled={sshSyncing}
-          onclick={(e) => {
-            e.stopPropagation();
-            if (!sshSyncing) syncAllRemoteDevices();
-          }}
-          onkeydown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.stopPropagation();
-              e.preventDefault();
-              if (!sshSyncing) syncAllRemoteDevices();
-            }
-          }}
-        >
-          {sshSyncing ? "Syncing..." : "Sync All"}
-        </span>
-      {/if}
-      <span class="count">
-        {activeRemoteDeviceCount} of {totalRemoteDeviceCount}
+  <div class="devices-header">
+    <button class="row collapsible-toggle" type="button" aria-expanded={devicesExpanded} onclick={() => (devicesExpanded = !devicesExpanded)}>
+      <span class="label">Remote Devices</span>
+      <span class="collapsible-right">
+        <span class="count">{activeRemoteDeviceCount} of {totalRemoteDeviceCount}</span>
+        <svg class="collapsible-chevron" class:open={devicesExpanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
       </span>
-      <svg class="collapsible-chevron" class:open={devicesExpanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="6 9 12 15 18 9"></polyline>
-      </svg>
-    </div>
-  </button>
+    </button>
+    {#if !devicesExpanded && totalRemoteDeviceCount > 0}
+      <button class="ssh-btn sync-collapsed" type="button" onclick={syncAllRemoteDevices} disabled={sshSyncing || sshTestingAll || sshTestingHost !== null}>
+        {sshSyncing ? "Syncing…" : "Sync All"}
+      </button>
+    {/if}
+  </div>
   <SettingsDisclosure open={devicesExpanded}>
-    <div class="remote-section">
-      <div class="section-heading">
-        <span class="section-title">SSH Remote Host</span>
-        <span class="section-count">{activeSshHostCount} of {sshHosts.length}</span>
-      </div>
-      <div class="ssh-hosts">
-        {#each sshHosts as host (host.alias)}
-          {@const configured = sshConfiguredHosts.find((h) => h.alias === host.alias)}
-          <div class="ssh-host-row">
-            <div class="ssh-host-info">
-              <span class="ssh-alias">{sshHostNames.get(host.alias) ?? host.alias}</span>
-              <span class="ssh-detail">{host.hostname}{host.user ? ` (${host.user})` : ""}{host.port !== 22 ? `:${host.port}` : ""}</span>
-            </div>
-            <div class="ssh-host-actions">
-              {#if sshTestingHost === host.alias}
-                <span class="ssh-testing">...</span>
-              {:else if sshTestResults[host.alias]}
-                <span class="ssh-result" class:ssh-ok={sshTestResults[host.alias].success} class:ssh-fail={!sshTestResults[host.alias].success}>
-                  {sshTestResults[host.alias].success ? "OK" : "Fail"}
-                </span>
-              {/if}
-              <button class="ssh-btn" type="button" onclick={() => testSshHost(host.alias)}>Test</button>
-              <div class="mini-toggle">
+    <div class="remote-content">
+      <section class="remote-section" aria-label="SSH hosts">
+        <div class="section-heading">
+          <span class="section-title">SSH Hosts</span>
+          <span class="section-count">{activeSshHostCount} of {sshHosts.length}</span>
+        </div>
+        <p class="section-description">Sync selected hosts and include their usage.</p>
+        <div class="ssh-hosts">
+          {#each sshHosts as host (host.alias)}
+            {@const configured = sshConfiguredHosts.find((h) => h.alias === host.alias)}
+            {@const name = sshHostNames.get(host.alias) ?? host.alias}
+            {@const result = sshTestResults[host.alias]}
+            <div class="ssh-host-row">
+              <div class="device-heading">
+                <div class="ssh-host-info">
+                  <span class="ssh-alias" title={host.alias}>{name}</span>
+                  <span class="ssh-detail">{host.user ? `${host.user}@` : ""}{host.hostname}{host.port !== 22 ? `:${host.port}` : ""}</span>
+                </div>
                 <ToggleSwitch
                   checked={isSshHostActive(configured)}
+                  label={`Sync and include ${name}`}
                   onChange={(checked) => toggleSshHost(host.alias, checked)}
                 />
               </div>
-            </div>
-          </div>
-        {/each}
-        {#if sshHosts.length === 0}
-          <div class="ssh-empty">No hosts found in ~/.ssh/config</div>
-        {/if}
-      </div>
-    </div>
-
-    <div class="remote-section auto-section">
-      <div class="section-heading">
-        <span class="section-title">Remote Devices</span>
-        <span class="section-count">{activeAutoSyncDeviceCount} of {autoSyncDevices.length}</span>
-      </div>
-      {#if deviceUsageLoading}
-        <div class="ssh-empty">Loading devices...</div>
-      {:else if deviceUsageError}
-        <div class="ssh-empty error-text">{deviceUsageError}</div>
-      {:else if autoSyncDevices.length > 0}
-        <div class="auto-devices">
-          {#each autoSyncDevices as device (device.alias)}
-            <div class="auto-device-row">
-              <div class="ssh-host-info">
-                <span class="ssh-alias">{autoSyncDeviceNames.get(device.alias) ?? device.alias}</span>
-                <span class="ssh-detail">{autoSyncDetail(device)}</span>
+              <div class="ssh-host-actions">
+                <button class="ssh-btn" type="button" aria-label={`Test connection to ${name}`} disabled={sshTestingHost !== null || sshTestingAll || sshSyncing} onclick={() => testSshHost(host.alias)}>
+                  {sshTestingHost === host.alias ? "Testing…" : "Test connection"}
+                </button>
+                <span class="ssh-result" class:ssh-ok={result?.success} class:ssh-fail={result && !result.success} role="status" title={result?.message}>
+                  {#if sshTestingHost !== host.alias && result}
+                    {result.success ? "Test passed" : "Test failed"}
+                  {/if}
+                </span>
               </div>
-              <div class="mini-toggle">
+              {#if result && !result.success && sshTestingHost !== host.alias}
+                <p class="ssh-test-message">{result.message}</p>
+              {/if}
+            </div>
+          {/each}
+          {#if sshHosts.length === 0}
+            <div class="ssh-empty">No hosts found in ~/.ssh/config</div>
+          {/if}
+        </div>
+      </section>
+
+      <section class="remote-section auto-section" aria-label="Auto Sync devices">
+        <div class="section-heading">
+          <span class="section-title">Auto Sync</span>
+          <span class="section-count">{activeAutoSyncDeviceCount} of {autoSyncDevices.length}</span>
+        </div>
+        <p class="section-description">Include synced devices in your usage.</p>
+        {#if deviceUsageLoading}
+          <div class="ssh-empty" role="status">Loading devices…</div>
+        {:else if deviceUsageError}
+          <div class="ssh-empty error-text" role="status">{deviceUsageError}</div>
+        {:else if autoSyncDevices.length > 0}
+          <div class="auto-devices">
+            {#each autoSyncDevices as device (device.alias)}
+              {@const name = autoSyncDeviceNames.get(device.alias) ?? device.alias}
+              <div class="auto-device-row">
+                <div class="ssh-host-info">
+                  <span class="ssh-alias" title={device.alias}>{name}</span>
+                  <span class="ssh-detail" class:error-text={device.error_message}>{autoSyncDetail(device)}</span>
+                </div>
                 <ToggleSwitch
                   checked={device.include_in_stats}
+                  label={`Include ${name} in usage`}
                   onChange={(checked) => toggleRemoteDeviceInclude(device, checked)}
                 />
               </div>
-            </div>
-          {/each}
-        </div>
-      {:else}
-        <div class="ssh-empty">No Auto Sync devices found</div>
-      {/if}
+            {/each}
+          </div>
+        {:else}
+          <div class="ssh-empty">No Auto Sync devices found</div>
+        {/if}
+      </section>
     </div>
 
     <div class="ssh-sync-row">
-      <span class="ssh-sync-label">
+      <span class="ssh-sync-label" role="status">
         {#if sshSyncResult}
           <span class="ssh-sync-status" class:ssh-sync-error={sshSyncResult.msg.startsWith("Failed")}>{sshSyncResult.msg}</span>
         {:else}
-          {activeRemoteDeviceCount} device(s) enabled
+          {activeRemoteDeviceCount} {activeRemoteDeviceCount === 1 ? "device" : "devices"} enabled
         {/if}
       </span>
       <div class="ssh-sync-actions">
-        <button class="ssh-btn" type="button" onclick={testAllSshHosts} disabled={sshTestingAll || sshHosts.length === 0}>
-          {sshTestingAll ? "Testing..." : "Test All"}
-        </button><button class="ssh-btn" type="button" onclick={syncAllRemoteDevices} disabled={sshSyncing}>
-          {sshSyncing ? "Syncing..." : "Sync All"}
+        <button class="ssh-btn sync-btn" type="button" onclick={testAllSshHosts} disabled={sshTestingAll || sshTestingHost !== null || sshSyncing || sshHosts.length === 0}>
+          {sshTestingAll ? "Testing…" : "Test All"}
+        </button>
+        <button class="ssh-btn sync-btn" type="button" onclick={syncAllRemoteDevices} disabled={sshSyncing || sshTestingAll || sshTestingHost !== null}>
+          {sshSyncing ? "Syncing…" : "Sync All"}
         </button>
       </div>
     </div>
@@ -481,158 +476,39 @@
   .block {
     border-top: 1px solid var(--border-subtle);
   }
-  .remote-section {
-    padding: 0;
-    border-top: 1px solid var(--border-subtle);
-  }
-  .auto-section {
-    border-top-color: var(--border);
-  }
-  .section-heading {
+  .devices-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 6px 10px 3px;
-  }
-  .section-title {
-    font: 600 8px/1 'Inter', sans-serif;
-    color: var(--t3);
-    text-transform: uppercase;
-    letter-spacing: 0;
-  }
-  .section-count {
-    font: 400 8px/1 'Inter', sans-serif;
-    color: var(--t4);
-  }
-  .ssh-host-row,
-  .auto-device-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 3px 10px;
-    min-height: 25px;
-  }
-  .ssh-host-row + .ssh-host-row,
-  .auto-device-row + .auto-device-row {
-    border-top: 1px solid var(--border);
-  }
-  .ssh-host-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    min-width: 0;
-    flex: 1;
-  }
-  .ssh-alias {
-    font: 500 9px/1.1 'Inter', sans-serif;
-    color: var(--t1);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ssh-detail {
-    font: 400 7.5px/1.1 'Inter', sans-serif;
-    color: var(--t4);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ssh-host-actions {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-  }
-  .mini-toggle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font: 400 7.5px/1 'Inter', sans-serif;
-    color: var(--t4);
-    white-space: nowrap;
-  }
-  .ssh-btn {
-    background: var(--surface-hover);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 2px 8px;
-    font: 400 8px/1.2 'Inter', sans-serif;
-    color: var(--t2);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .ssh-btn:hover:not(:disabled) {
-    color: var(--t1);
-    border-color: var(--t3);
-  }
-  .ssh-btn:disabled {
-    opacity: 0.55;
-    cursor: default;
-  }
-  .sync-collapsed[aria-disabled="true"] {
-    opacity: 0.55;
-    cursor: default;
-  }
-  .ssh-testing {
-    font: 400 8px/1 'Inter', sans-serif;
-    color: var(--t4);
-  }
-  .ssh-result {
-    font: 500 8px/1 'Inter', sans-serif;
-  }
-  .ssh-ok { color: #22c55e; }
-  .ssh-fail { color: #ef4444; }
-  .ssh-empty {
-    padding: 10px;
-    font: 400 9px/1.4 'Inter', sans-serif;
-    color: var(--t3);
-  }
-  .error-text {
-    color: #ef4444;
-  }
-  .ssh-sync-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 4px 10px;
-    border-top: 1px solid var(--border);
-  }
-  .ssh-sync-actions {
-    display: flex;
-  }
-  .ssh-sync-label {
-    font: 400 8px/1 'Inter', sans-serif;
-    color: var(--t3);
-  }
-  .ssh-sync-status {
-    color: var(--accent, #4caf50);
-  }
-  .ssh-sync-error {
-    color: #f44336;
+    gap: 12px;
+    padding: 0 12px;
   }
   .collapsible-toggle {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
+    min-height: 36px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
     background: none;
     border: none;
     cursor: pointer;
     user-select: none;
-    padding: 7px 10px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+    text-align: left;
   }
-  .collapsible-toggle:hover {
+  .devices-header:has(.collapsible-toggle:hover) {
     background: var(--surface-hover);
   }
   .label {
-    font: 400 10px/1 'Inter', sans-serif;
+    font: 400 10px/1.3 "Inter", sans-serif;
     color: var(--t1);
   }
   .collapsible-right {
     display: flex;
+    flex-shrink: 0;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
   }
   .collapsible-chevron {
     color: var(--t3);
@@ -642,8 +518,165 @@
     transform: rotate(0deg);
   }
   .count {
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 "Inter", sans-serif;
     color: var(--t3);
     white-space: nowrap;
+  }
+  .remote-content {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 4px 12px 12px;
+  }
+  .section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .section-title {
+    font: 600 10px/1.4 "Inter", sans-serif;
+    color: var(--t1);
+  }
+  .section-count {
+    font: 400 9px/1.4 "Inter", sans-serif;
+    color: var(--t2);
+    white-space: nowrap;
+  }
+  .section-description {
+    margin-top: 4px;
+    font: 400 9px/1.4 "Inter", sans-serif;
+    color: var(--t2);
+  }
+  .ssh-hosts,
+  .auto-devices {
+    margin-top: 8px;
+  }
+  .ssh-host-row,
+  .auto-device-row {
+    padding: 10px 0;
+  }
+  .ssh-host-row + .ssh-host-row,
+  .auto-device-row + .auto-device-row {
+    border-top: 1px solid var(--border-subtle);
+  }
+  .ssh-host-row:last-child,
+  .auto-device-row:last-child {
+    padding-bottom: 0;
+  }
+  .device-heading,
+  .auto-device-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .ssh-host-info {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .ssh-alias {
+    font: 500 10.5px/1.35 "Inter", sans-serif;
+    color: var(--t1);
+    overflow-wrap: anywhere;
+  }
+  .ssh-detail {
+    font: 400 9px/1.4 "Inter", sans-serif;
+    color: var(--t2);
+    overflow-wrap: anywhere;
+  }
+  .ssh-host-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .ssh-btn {
+    flex-shrink: 0;
+    min-height: 24px;
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 8px;
+    font: 400 9px/1.3 "Inter", sans-serif;
+    color: var(--t2);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--t-fast) ease, color var(--t-fast) ease, border-color var(--t-fast) ease;
+  }
+  .ssh-btn:hover:not(:disabled) {
+    background: var(--surface-2);
+    color: var(--t1);
+    border-color: var(--t3);
+  }
+  .ssh-btn:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+  .ssh-btn:focus-visible,
+  .collapsible-toggle:focus-visible {
+    outline: 2px solid var(--t2);
+    outline-offset: 2px;
+  }
+  .collapsible-toggle:focus-visible {
+    outline-offset: -2px;
+  }
+  .ssh-result {
+    font: 500 9px/1.4 "Inter", sans-serif;
+  }
+  .ssh-ok { color: var(--ch-plus); }
+  .ssh-fail,
+  .ssh-test-message,
+  .error-text { color: var(--ch-minus); }
+  .ssh-test-message {
+    margin-top: 6px;
+    font: 400 9px/1.4 "Inter", sans-serif;
+    overflow-wrap: anywhere;
+  }
+  .ssh-empty {
+    padding: 12px 0 4px;
+    font: 400 9px/1.5 "Inter", sans-serif;
+    color: var(--t2);
+    overflow-wrap: anywhere;
+  }
+  .ssh-empty.error-text {
+    color: var(--ch-minus);
+  }
+  .ssh-sync-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .ssh-sync-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+  }
+  .ssh-sync-label {
+    flex: 1;
+    min-width: 0;
+    font: 400 9px/1.4 "Inter", sans-serif;
+    color: var(--t2);
+    overflow-wrap: anywhere;
+  }
+  .ssh-sync-status {
+    color: var(--ch-plus);
+  }
+  .ssh-sync-error {
+    color: var(--ch-minus);
+  }
+  .sync-btn {
+    min-height: 28px;
+    padding: 6px 10px;
+    color: var(--t1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ssh-btn { transition: none; }
   }
 </style>
