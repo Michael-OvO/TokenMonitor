@@ -4,7 +4,7 @@
     getRateLimitIdleSummary,
     isRateLimitProvider,
   } from "../providerMetadata.js";
-  import { formatCostRange, formatCreditAmount, formatDuration, formatRetryIn } from "../utils/format.js";
+  import { formatCost, formatCostRange, formatCreditAmount, formatDuration, formatRetryIn } from "../utils/format.js";
   import {
     currentRateLimitWindows,
     providerHasActiveCooldown,
@@ -65,6 +65,8 @@
   /** Credits sit in the header as a pill, like the plan, so they do not cost a row. */
   function creditsLabel(credits: CreditsInfo): string {
     if (credits.unlimited) return "Unlimited credits";
+    // Claude's usage credits are a USD balance; Codex counts credits.
+    if (credits.balance != null && rateLimits.provider === "claude") return `${formatCost(credits.balance)} credits`;
     if (credits.balance != null) return `${Math.round(credits.balance).toLocaleString()} credits`;
     return credits.hasCredits ? "Credits available" : "No credits";
   }

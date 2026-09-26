@@ -1,26 +1,18 @@
 <script lang="ts">
-  import { formatCost, formatTimeAgo } from "../utils/format.js";
+  import { formatTimeAgo } from "../utils/format.js";
   import { untrack } from "svelte";
-  import { footerFiveHourPct } from "../views/footer.js";
   import { popoverVisible } from "../visibility.js";
-  import type { UsagePayload, RateLimitsPayload, UsageProvider, UsagePeriod } from "../types/index.js";
+  import type { UsagePayload } from "../types/index.js";
 
   interface Props {
     data: UsagePayload;
-    provider: UsageProvider;
-    period: UsagePeriod;
-    rateLimits?: RateLimitsPayload | null;
     onSettings: () => void;
     onCalendar: () => void;
     onDevices?: () => void;
   }
-  let { data, provider, period, rateLimits, onSettings, onCalendar, onDevices }: Props = $props();
+  let { data, onSettings, onCalendar, onDevices }: Props = $props();
 
   let refreshTick = $state(0);
-  let fiveHourPct = $derived.by(() => {
-    refreshTick;
-    return footerFiveHourPct(rateLimits, provider, Date.now());
-  });
   let timeAgo = $derived.by(() => {
     refreshTick;
     return formatTimeAgo(data.last_updated);
@@ -37,17 +29,6 @@
   });
 </script>
 
-{#if period === "5h"}
-  <div class="ft">
-    <div class="ft-l">
-      {#if fiveHourPct != null}
-        <span>{fiveHourPct}% used</span>
-      {:else}
-        <span>{formatCost(data.five_hour_cost)}</span>
-      {/if}
-    </div>
-  </div>
-{/if}
 <div class="ft2">
   <span class="ft-ts">
     {#if data.from_cache}cached · {/if}{timeAgo}
@@ -80,14 +61,8 @@
 </div>
 
 <style>
-  .ft {
-    padding: 8px 12px 4px;
-    display: flex; justify-content: space-between; align-items: center;
-    animation: fadeUp var(--t-slow) var(--ease-out) both .14s;
-  }
-  .ft-l { display: flex; align-items: center; gap: 4px; font: 400 9px/1 system-ui, sans-serif; color: var(--t2); }
   .ft2 {
-    padding: 4px 12px 8px;
+    padding: 8px 12px;
     display: flex;
     justify-content: space-between;
     align-items: center;

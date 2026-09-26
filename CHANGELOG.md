@@ -5,6 +5,7 @@
 ### 新增
 - **套餐预算估算**：限额条（5h、每周以及 Cursor 月度池）在重置时间后显示这个窗口按 API 价格大约值多少钱，如 `· $120–180 / 5h`（按显示货币换算，两位有效数字），悬停列出每个模型各自的预算。每次探测限额时，读数有变化的窗口会追加到应用数据目录的 `limit-samples.jsonl`；两次读数之间若某个模型占本地花费 ≥90%，这段花费 ÷ 限额上涨的百分点就是该模型每个点的价格，过去两周累计满 10 个点后给出该模型的整窗预算，各模型从便宜到贵构成显示的区间（整数百分比的取整误差计入上下限）。读数不够时退回粗略区间：窗口内本地花费 ÷ 已用百分比，再留 ±20% 的模型组合余量（已用 ≥5% 才显示；只计本机日志，在别处的用量会让它偏低）。Codex 的读数直接取自会话日志里每条 `token_count` 事件，两周历史自动回填，第一次打开就有按模型的区间；Cursor API 池按官方给出的美元额度显示。窗口长度改用厂商上报的 `window_minutes`（Codex、Kimi），长度未知的窗口不再猜测节奏与耗尽时间（`plan_budget.rs`、`views/planBudget.ts`）
 - **Codex 可用的 usage limit reset 次数**：Codex app-server 的 `account/rateLimits/read` 会一并返回 `rateLimitResetCredits`（OpenAI 发放的、可一次性清空当前用量限制的 reset），此前被丢弃。现在解析可用数量与每个 reset 的到期 / 发放时间，挂在 Codex 的 credits 上，5h 页 Credits 下方新增「Resets」行：右侧显示可用数量，下方是一条从今天到最后到期日（按整周向上取整、至少四周）的迷你时间轴，每个 reset 一个圆点（相邻过近时略微错开、不再重叠），每个圆点正下方有一枚小标签，同时写出到期日与倒计时（"Oct 5 · 11d"），相邻两个 reset 靠得太近时标签分置于时间轴上下两侧、各自仍对准自己的圆点，再多才向旁边推开，均以细线连回各自的圆点（标签仍覆盖圆点所在位置时连线保持竖直，包括贴边被卡住的标签），三天内到期的用警示色；标题行给出最近一次到期的倒计时（"3 available · next in 11d"），悬停圆点或标签可见完整到期与发放时间。Codex 的 credits 余额改为与套餐一样以标签形式放在提供方标题行，不再单独占一行。reset 只有 app-server 探测会给出，所以即使 Codex 限额取自会话日志，启动时和之后每 15 分钟（`CODEX_RESETS_REFRESH_SECS`）仍探测一次，其间沿用上次探测到的 reset
+- **Claude 的 Usage credits 余额**：与 Claude Code 自己的做法相同，从 `~/.claude.json` 取组织 ID，请求 `/api/oauth/organizations/{org}/prepaid/credits`（`amount` 以美分计），每小时一次（`CLAUDE_CREDITS_REFRESH_SECS`），失败或两次之间沿用上次的值；All 页 Claude 标题行与 Codex 一样显示「$X credits」标签。claude.ai 设置页的 Claude「Resets」只由网页接口（浏览器登录态）提供，Claude Code 与 OAuth usage 接口都没有，暂不显示
 
 ### 刷新
 - **一次只算一件事，算完一起显示**：新模块 `refresh.rs` 接管全部周期性工作，取代原来的后台循环、2s statusline 轮询（连同其 `statusline-poll` `[PROFILE]` 日志）、启动探测和预算 worker。每次刷新先做网络请求（Cursor 当日数据；限额按 Claude → Codex → Cursor → Kimi 逐个探测，最多 min(20s, 间隔/2)，来不及的提供方沿用缓存值），再做一次日志扫描（唯一的缓存失效点），之后在 FIFO 计算闸门下依次算托盘费用和当前页面，最后一次发布：托盘、FloatBall 与面板在同一次刷新里一起变化，两次刷新之间数值不动。同一时刻最多只有一个重 CPU 任务，解析线程池限制为一半核心；切换标签等操作仍立即计算，不等刷新
@@ -25,9 +26,12 @@
 
 ### 修复
 - **Claude 的 Weekly Fable / Weekly Opus 窗口消失**：Claude Code statusline 事件只带 `five_hour` 与 `seven_day` 两个全局窗口，而按模型划分的每周窗口只有 `claude -p "/usage"` 与 OAuth 接口会给出；此前只要 statusline 事件新鲜（活跃会话中一直如此）就直接采用它，模型窗口便消失。现在 statusline 只覆盖它报告的窗口，其余窗口从更完整的来源叠加保留，且每 15 分钟（`CLAUDE_MODEL_WINDOWS_REFRESH_SECS`）通过 CLI / OAuth 刷新一次，已过重置时间的旧窗口不再沿用
+- **OAuth 接口改版后丢失 Weekly Fable 与 extra usage**：`/api/oauth/usage` 不再返回 `seven_day_fable` 等键，按模型的每周额度改放在新的 `limits` 列表里（`kind: weekly_scoped`，`scope.model.display_name`），现在从该列表读取并沿用 `seven_day_<模型>` 的 id（旧键仍在时以旧键为准）；`extra_usage` 在未开启时金额字段为 `null`，此前整块解析失败被丢弃，现在按可空读取，并按接口给出的 `decimal_places` 换算（缺省按美分）
+- **Claude 限额优先读 Claude Code 自己的缓存**：Claude Code 会把最近一次 `/api/oauth/usage` 的完整返回存在 `~/.claude.json` 的 `cachedUsageUtilization`（带 `fetchedAtMs` 和账号 ID）。现在这份缓存比上一次读数新且不超过 285s 时直接采用、不再启动 `claude` CLI；statusline 活跃时，15 分钟内的缓存直接作为按模型每周窗口的来源，同样不启动 CLI。无需网络请求、不占 OAuth 限流，Weekly Fable 与 extra usage 也随之出现；缓存属于其他账号或已过期时仍走 CLI → OAuth。文件按修改时间与大小判断是否重读
 
 ### UI
 - **弹窗最大高度 500 → 560**：5h 页同时展示两个提供方的窗口、credits 与 Codex reset 时间轴后内容超过 500px，末尾被固定在底部的页脚遮住；固定高度与滚动阈值的上限一并提高到 560（仍受屏幕尺寸比例约束）
+- **页脚**：去掉 5h 页左下角时间戳上方的「N% used」/ 5h 费用一行（与上方限额条重复）；置底页脚补上与面板和顶栏相同的提供方底色（`--provider-bg`），不再比上方内容颜色偏淡
 
 ## v0.16.0 — macOS 27 兼容、饼图交互与性能修复
 

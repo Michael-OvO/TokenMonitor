@@ -57,12 +57,16 @@ docs/                    DEVELOPMENT.md, tutorial.md, testing/ procedures
 ```
 
 Data flow: local JSONL logs → Rust parsers + pricing → in-memory/disk caches → Tauri IPC → Svelte stores → UI.
-Claude rate limits prefer a fresh statusline event, then the CLI probe
+Claude rate limits prefer a fresh statusline event, then Claude Code's own last usage response
+(`cachedUsageUtilization` in `~/.claude.json`, newer than our reading and under 285 s old), then the CLI probe
 `claude -p /usage --no-session-persistence --safe-mode` (CLIs that reject those flags get the old fixed-session
 form), then the OAuth usage API (cooldown-gated); the OAuth token comes from `~/.claude/.credentials.json` or
 Claude Code's own Keychain item read through `/usr/bin/security`, never from an app-owned Keychain entry. The
-statusline carries only the 5h and 7d windows, so while it is live the model-specific weekly windows come from the
-probe every 15 min and are carried forward in between (`overlay_live_windows`). Codex
+statusline carries only the 5h and 7d windows, so while it is live the model-specific weekly windows come from
+Claude Code's cache while under 15 min old, else from the probe every 15 min, and are carried forward in between
+(`overlay_live_windows`). The usage API lists those windows in `limits` (`weekly_scoped`); they keep the
+`seven_day_<model>` ids. The usage-credit balance
+comes hourly from `prepaid/credits`, with the organization id read from `~/.claude.json`, as Claude Code does. Codex
 limits use the newest meters Codex logged (`token_count`) when newer than the last reading and under 285 s old,
 else the `codex app-server` probe, which on Windows starts the vendored `codex.exe` behind the npm shim; only
 the probe reports usage-limit resets, so it still runs at launch and every 15 min, and a logged reading keeps

@@ -22,6 +22,7 @@
   "urls": {
     "anthropic_usage": "https://api.anthropic.com/api/oauth/usage",
     "anthropic_account": "https://api.anthropic.com/api/oauth/account",
+    "anthropic_prepaid_credits": "https://api.anthropic.com/api/oauth/organizations/{org}/prepaid/credits",
     "cursor_official_api": "https://api.cursor.com",
     "cursor_dashboard": "https://cursor.com",
     "cursor_ide": "https://api2.cursor.sh",

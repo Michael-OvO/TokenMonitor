@@ -1,4 +1,4 @@
-use crate::models::{ExtraUsageInfo, ProviderRateLimits, RateLimitWindow};
+use crate::models::{CreditsInfo, ExtraUsageInfo, ProviderRateLimits, RateLimitWindow};
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
 use serde_json::Value;
@@ -170,12 +170,16 @@ const KNOWN_CLAUDE_WINDOWS: &[(&str, &str)] = &[
     ("seven_day_cowork", "Weekly Cowork"),
 ];
 
+/// Every amount may be null (it is while extra usage is off).
 #[derive(Deserialize)]
 pub(crate) struct ClaudeExtraUsageData {
     pub is_enabled: bool,
-    pub monthly_limit: f64,
-    pub used_credits: f64,
+    pub monthly_limit: Option<f64>,
+    pub used_credits: Option<f64>,
     pub utilization: Option<f64>,
+    /// Minor-unit digits of the amounts; absent means cents.
+    #[serde(default)]
+    pub decimal_places: Option<i32>,
 }
 
 /// Display label for a Claude window id. Known ids get Anthropic-aligned
@@ -235,6 +239,40 @@ pub(super) fn claude_usage_windows(usage: &Value) -> Vec<RateLimitWindow> {
         ));
     }
 
+    // Model-scoped weekly limits moved from their own keys (`seven_day_fable`)
+    // into the `limits` list; they keep the old id.
+    for limit in obj
+        .get("limits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|limit| limit.get("kind").and_then(Value::as_str) == Some("weekly_scoped"))
+    {
+        let Some(model) = limit
+            .pointer("/scope/model/display_name")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(percent) = limit.get("percent").and_then(as_f64) else {
+            continue;
+        };
+        let id = format!("seven_day_{}", model.to_lowercase().replace(' ', "_"));
+        if windows.iter().any(|w| w.window_id == id) {
+            continue;
+        }
+        let resets_at = limit
+            .get("resets_at")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        windows.push(RateLimitWindow::new(
+            id,
+            format!("Weekly {model}"),
+            percent,
+            resets_at,
+        ));
+    }
+
     let mut extras: Vec<(&String, f64, Option<String>)> = obj
         .iter()
         .filter(|(key, _)| !consumed.contains(key.as_str()))
@@ -264,13 +302,125 @@ pub(super) fn claude_usage_windows(usage: &Value) -> Vec<RateLimitWindow> {
 }
 
 pub(crate) fn normalize_claude_extra_usage(extra_usage: ClaudeExtraUsageData) -> ExtraUsageInfo {
+    // The OAuth usage endpoint reports credit values in minor units (cents).
+    let unit = 10f64.powi(extra_usage.decimal_places.unwrap_or(2));
     ExtraUsageInfo {
         is_enabled: extra_usage.is_enabled,
-        // The OAuth usage endpoint reports credit values in cents.
-        monthly_limit: extra_usage.monthly_limit / 100.0,
-        used_credits: extra_usage.used_credits / 100.0,
+        monthly_limit: extra_usage.monthly_limit.unwrap_or(0.0) / unit,
+        used_credits: extra_usage.used_credits.unwrap_or(0.0) / unit,
         utilization: extra_usage.utilization,
     }
+}
+
+/// The account's usage-credit balance ("Usage credits" on claude.ai), read
+/// the way Claude Code reads it: its organization from `~/.claude.json`, then
+/// `prepaid/credits`. `Ok(None)` when the account has no organization or the
+/// endpoint reports no balance.
+pub(super) async fn fetch_claude_usage_credits() -> Result<Option<CreditsInfo>, RateLimitFetchError>
+{
+    let Some(org) = claude_organization_uuid() else {
+        return Ok(None);
+    };
+    let token = get_claude_oauth_token().map_err(RateLimitFetchError::message)?;
+    let resp = reqwest::Client::builder()
+        .timeout(super::HTTP_TIMEOUT)
+        .build()
+        .map_err(|e| RateLimitFetchError::message(format!("HTTP client build failed: {e}")))?
+        .get(crate::ops::anthropic_prepaid_credits_url(&org))
+        .bearer_auth(&token)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .await
+        .map_err(|e| RateLimitFetchError::message(format!("prepaid/credits failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(rate_limit_error_from_response(&resp));
+    }
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| RateLimitFetchError::message(format!("prepaid/credits unreadable: {e}")))?;
+    Ok(usage_credits_from_prepaid(&body))
+}
+
+/// Claude Code keeps its last `/api/oauth/usage` response in `~/.claude.json`
+/// (`cachedUsageUtilization`), with every window (Weekly Fable included, in
+/// `limits`) and extra usage. The reading it holds, dated when Claude Code
+/// fetched it; its age is the caller's to judge. Parsed again only when the
+/// file changes.
+pub(super) fn claude_code_cached_usage() -> Option<ProviderRateLimits> {
+    type Memo = Option<((std::time::SystemTime, u64), Option<ProviderRateLimits>)>;
+    static MEMO: Mutex<Memo> = Mutex::new(None);
+
+    let path = crate::paths::claude_global_config_file()?;
+    let meta = std::fs::metadata(&path).ok()?;
+    let stamp = (meta.modified().ok()?, meta.len());
+    let mut memo = MEMO.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((seen, reading)) = memo.as_ref() {
+        if *seen == stamp {
+            return reading.clone();
+        }
+    }
+    let reading = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|config| reading_from_claude_config(&config));
+    *memo = Some((stamp, reading.clone()));
+    reading
+}
+
+fn reading_from_claude_config(config: &Value) -> Option<ProviderRateLimits> {
+    let cached = config.get("cachedUsageUtilization")?;
+    // The cache outlives a switch of account; only the signed-in one counts.
+    let account = config.pointer("/oauthAccount/accountUuid")?;
+    if cached.get("accountUuid") != Some(account) {
+        return None;
+    }
+    let fetched = cached
+        .get("fetchedAtMs")
+        .and_then(Value::as_i64)
+        .and_then(DateTime::<Utc>::from_timestamp_millis)?;
+    let usage = cached.get("utilization")?;
+    let windows = claude_usage_windows(usage);
+    if windows.is_empty() {
+        return None;
+    }
+    Some(ProviderRateLimits {
+        provider: "claude".to_string(),
+        plan_tier: None,
+        windows,
+        extra_usage: usage
+            .get("extra_usage")
+            .cloned()
+            .and_then(|v| serde_json::from_value::<ClaudeExtraUsageData>(v).ok())
+            .map(normalize_claude_extra_usage),
+        credits: None,
+        stale: false,
+        error: None,
+        retry_after_seconds: None,
+        cooldown_until: None,
+        fetched_at: fetched.with_timezone(&Local).to_rfc3339(),
+    })
+}
+
+fn claude_organization_uuid() -> Option<String> {
+    let path = crate::paths::claude_global_config_file()?;
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    config["oauthAccount"]["organizationUuid"]
+        .as_str()
+        .map(str::to_string)
+}
+
+/// `amount` is in cents, as Claude Code reads it.
+// ponytail: `currency` is null on the accounts seen so far and taken as USD;
+// convert here if a non-USD balance ever shows up.
+fn usage_credits_from_prepaid(body: &Value) -> Option<CreditsInfo> {
+    let cents = body.get("amount").and_then(as_f64)?;
+    Some(CreditsInfo {
+        balance: Some(cents / 100.0),
+        has_credits: cents > 0.0,
+        unlimited: false,
+        usage_limit_resets: None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -500,19 +650,164 @@ mod tests {
         assert!(window_ids.contains(&"seven_day"));
     }
 
+    /// Prints the raw OAuth usage payload, to see which fields the API has
+    /// added (reset credits, extra usage) before parsing them:
+    /// `cargo test --lib rate_limits::claude::tests::live_usage_payload_shape -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "requires local Claude credentials and network access"]
+    async fn live_usage_payload_shape() {
+        let token = get_claude_oauth_token().expect("no Claude OAuth token");
+        let usage: Value = reqwest::Client::new()
+            .get(crate::ops::anthropic_usage_url())
+            .bearer_auth(&token)
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        println!("{}", serde_json::to_string_pretty(&usage).unwrap());
+
+        let credits = fetch_claude_usage_credits().await.unwrap();
+        println!("usage credits: {credits:?}");
+        assert!(credits.is_some(), "no organization or no prepaid balance");
+    }
+
+    #[test]
+    fn reads_the_usage_credit_balance_in_cents() {
+        let credits = usage_credits_from_prepaid(
+            &serde_json::json!({"amount": 1240, "currency": null, "balance": null}),
+        )
+        .unwrap();
+        assert_eq!(credits.balance, Some(12.4));
+        assert!(credits.has_credits);
+        let empty = usage_credits_from_prepaid(&serde_json::json!({"amount": 0})).unwrap();
+        assert!(!empty.has_credits);
+        assert!(usage_credits_from_prepaid(&serde_json::json!({"amount": null})).is_none());
+    }
+
     #[test]
     fn normalizes_claude_extra_usage_from_cents_to_usd() {
         let extra_usage = normalize_claude_extra_usage(ClaudeExtraUsageData {
             is_enabled: true,
-            monthly_limit: 5000.0,
-            used_credits: 710.0,
+            monthly_limit: Some(5000.0),
+            used_credits: Some(710.0),
             utilization: Some(14.2),
+            decimal_places: None,
         });
 
         assert!(extra_usage.is_enabled);
         assert_eq!(extra_usage.monthly_limit, 50.0);
         assert_eq!(extra_usage.used_credits, 7.1);
         assert_eq!(extra_usage.utilization, Some(14.2));
+    }
+
+    #[test]
+    fn reads_extra_usage_whose_amounts_are_null() {
+        // The live shape while extra usage is off: every amount null.
+        let raw = serde_json::json!({
+            "credits_ever_enabled": false, "currency": null, "daily": null,
+            "decimal_places": null, "disabled_reason": null, "is_enabled": false,
+            "monthly_limit": null, "spend_limit_reached": false, "used_credits": null,
+            "user_disabled": false, "utilization": null, "weekly": null
+        });
+        let extra = normalize_claude_extra_usage(serde_json::from_value(raw).unwrap());
+        assert!(!extra.is_enabled);
+        assert_eq!(extra.monthly_limit, 0.0);
+
+        let raw = serde_json::json!({
+            "is_enabled": true, "monthly_limit": 50000, "used_credits": 1250,
+            "utilization": 2.5, "decimal_places": 3
+        });
+        let extra = normalize_claude_extra_usage(serde_json::from_value(raw).unwrap());
+        assert_eq!((extra.monthly_limit, extra.used_credits), (50.0, 1.25));
+    }
+
+    #[test]
+    #[ignore = "reads this machine's ~/.claude.json"]
+    fn live_reads_claude_codes_usage_cache() {
+        let reading = claude_code_cached_usage().expect("no usable cachedUsageUtilization");
+        for w in &reading.windows {
+            println!(
+                "{} {}% resets {:?}",
+                w.window_id, w.utilization, w.resets_at
+            );
+        }
+        println!("fetched_at {}", reading.fetched_at);
+    }
+
+    #[test]
+    fn reads_claude_codes_cached_usage_for_the_signed_in_account() {
+        let config = serde_json::json!({
+            "oauthAccount": { "accountUuid": "acct-1" },
+            "cachedUsageUtilization": {
+                "fetchedAtMs": 1790390027551_i64,
+                "accountUuid": "acct-1",
+                "utilization": {
+                    "five_hour": { "utilization": 3, "resets_at": "2026-09-26T07:20:00+00:00" },
+                    "seven_day": { "utilization": 41, "resets_at": "2026-09-29T04:00:00+00:00" },
+                    "seven_day_opus": null,
+                    "extra_usage": { "is_enabled": false, "monthly_limit": null, "used_credits": null, "utilization": null },
+                    "limits": [{ "kind": "weekly_scoped", "percent": 9,
+                        "resets_at": "2026-09-29T04:00:00+00:00",
+                        "scope": { "model": { "display_name": "Fable" } } }]
+                }
+            }
+        });
+        let reading = reading_from_claude_config(&config).unwrap();
+        let ids: Vec<&str> = reading
+            .windows
+            .iter()
+            .map(|w| w.window_id.as_str())
+            .collect();
+        assert_eq!(ids, ["five_hour", "seven_day", "seven_day_fable"]);
+        assert!(!reading.extra_usage.unwrap().is_enabled);
+        let fetched = DateTime::parse_from_rfc3339(&reading.fetched_at).unwrap();
+        assert_eq!(fetched.timestamp_millis(), 1790390027551);
+
+        let mut other = config.clone();
+        other["oauthAccount"]["accountUuid"] = "acct-2".into();
+        assert!(
+            reading_from_claude_config(&other).is_none(),
+            "another account's cache"
+        );
+        assert!(reading_from_claude_config(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn reads_model_weekly_windows_from_the_limits_list() {
+        // Live shape: no `seven_day_fable` key, the Fable pool only in `limits`.
+        let usage = serde_json::json!({
+            "five_hour": { "utilization": 5.0, "resets_at": "2026-09-26T01:20:00Z" },
+            "seven_day": { "utilization": 40.0, "resets_at": "2026-09-29T04:00:00Z" },
+            "seven_day_opus": null,
+            "limits": [
+                { "kind": "session", "percent": 5, "resets_at": "2026-09-26T01:20:00Z", "scope": null },
+                { "kind": "weekly_all", "percent": 40, "resets_at": "2026-09-29T04:00:00Z", "scope": null },
+                { "kind": "weekly_scoped", "percent": 9, "resets_at": "2026-09-29T04:00:00Z",
+                  "scope": { "model": { "display_name": "Fable", "id": null }, "surface": null } }
+            ]
+        });
+        let windows = claude_usage_windows(&usage);
+        let ids: Vec<&str> = windows.iter().map(|w| w.window_id.as_str()).collect();
+        assert_eq!(ids, ["five_hour", "seven_day", "seven_day_fable"]);
+        assert_eq!(windows[2].label, "Weekly Fable");
+        assert_eq!(windows[2].utilization, 9.0);
+
+        // An old-style key wins over the list entry for the same pool.
+        let mut usage = usage;
+        usage["seven_day_fable"] =
+            serde_json::json!({ "utilization": 12.0, "resets_at": "2026-09-29T04:00:00Z" });
+        let windows = claude_usage_windows(&usage);
+        assert_eq!(
+            windows
+                .iter()
+                .filter(|w| w.window_id == "seven_day_fable")
+                .count(),
+            1
+        );
+        assert_eq!(windows[2].utilization, 12.0);
     }
 
     #[test]

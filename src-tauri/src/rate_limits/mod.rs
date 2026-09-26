@@ -178,6 +178,42 @@ static CLAUDE_MODEL_WINDOWS_REFRESHED_AT: Mutex<Option<Instant>> = Mutex::new(No
 const CODEX_RESETS_REFRESH_SECS: u64 = 900;
 /// When the Codex app-server was last probed (or attempted).
 static CODEX_APP_SERVER_PROBED_AT: Mutex<Option<Instant>> = Mutex::new(None);
+/// Claude's usage-credit balance changes only on a purchase or a grant.
+const CLAUDE_CREDITS_REFRESH_SECS: u64 = 3600;
+/// When Claude's usage credits were last fetched (or attempted).
+static CLAUDE_CREDITS_FETCHED_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Lay the usage-credit balance on Claude's reading: fetched every
+/// [`CLAUDE_CREDITS_REFRESH_SECS`], the last one kept in between and when a
+/// fetch fails. No probe source reports it, so it would drop out otherwise.
+async fn with_usage_credits(
+    reading: Option<ProviderRateLimits>,
+    kept: Option<crate::models::CreditsInfo>,
+) -> Option<ProviderRateLimits> {
+    let mut reading = reading?;
+    let slot = &CLAUDE_CREDITS_FETCHED_AT;
+    let fetched = if refresh_due(
+        last_attempt(slot),
+        Instant::now(),
+        CLAUDE_CREDITS_REFRESH_SECS,
+    ) {
+        mark_attempt(slot, Instant::now());
+        match claude::fetch_claude_usage_credits().await {
+            Ok(credits) => Some(credits),
+            Err(error) => {
+                tracing::debug!(error = %error.message, "Claude usage credits fetch failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    reading.credits = match fetched {
+        Some(credits) => credits,
+        None => reading.credits.or(kept),
+    };
+    Some(reading)
+}
 
 fn last_attempt(slot: &Mutex<Option<Instant>>) -> Option<Instant> {
     *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -335,13 +371,15 @@ fn is_fresh(
         .unwrap_or(false)
 }
 
-/// Whether a reading Codex logged can stand in for a probe: it has meters, was
-/// logged after the `cached` reading was taken, is no older than a probed
-/// reading still kept, and no window has reset since (a probe would show that
-/// window at zero).
+/// Whether a reading the vendor's own client left on disk (Codex's session
+/// logs, Claude Code's usage cache) can stand in for a probe: it has meters,
+/// was taken after the `cached` reading, is within `floor_secs` (a probe's
+/// floor), and no window has reset since (a probe would show that window at
+/// zero).
 fn stands_in_for_probe(
     logged: &ProviderRateLimits,
     cached: Option<&ProviderRateLimits>,
+    floor_secs: i64,
     now: DateTime<Utc>,
 ) -> bool {
     let taken = |rl: &ProviderRateLimits| DateTime::parse_from_rfc3339(&rl.fetched_at).ok();
@@ -351,7 +389,7 @@ fn stands_in_for_probe(
     };
     newer
         && !logged.windows.is_empty()
-        && is_fresh(Some(logged), CODEX_MIN_REFETCH_SECS, now, false)
+        && is_fresh(Some(logged), floor_secs, now, false)
         && !codex::has_reset(&logged.windows, now)
 }
 
@@ -470,6 +508,7 @@ pub async fn fetch_selected_rate_limits_until(
     let cached_cursor = cached.and_then(|payload| payload.cursor.clone());
     let cached_kimi = cached.and_then(|payload| payload.kimi.clone());
 
+    let cached_claude_credits = cached_claude.as_ref().and_then(|rl| rl.credits.clone());
     let claude_future = async {
         let provider_t0 = std::time::Instant::now();
         let result = async {
@@ -478,6 +517,18 @@ pub async fn fetch_selected_rate_limits_until(
             }
 
             let now = Utc::now();
+
+            // Claude Code's own last usage response (`~/.claude.json`): every
+            // window, Weekly Fable included, with no process or request. While
+            // fresh it takes the place of a probe; the plan stays as cached.
+            let claude_code = tokio::task::spawn_blocking(claude::claude_code_cached_usage)
+                .await
+                .ok()
+                .flatten()
+                .map(|mut reading| {
+                    reading.plan_tier = cached_claude.as_ref().and_then(|rl| rl.plan_tier.clone());
+                    reading
+                });
 
             // Primary: statusline — CC pushes server-authoritative used_percentage
             // on every prompt, no network call, no budget cost. It carries only
@@ -492,7 +543,12 @@ pub async fn fetch_selected_rate_limits_until(
             {
                 tracing::debug!("Claude rate limits served from statusline");
                 let slot = &CLAUDE_MODEL_WINDOWS_REFRESHED_AT;
-                let base = if refresh_due(
+                let window_secs = CLAUDE_MODEL_WINDOWS_REFRESH_SECS as i64;
+                let base = if let Some(reading) =
+                    claude_code.filter(|reading| is_fresh(Some(reading), window_secs, now, false))
+                {
+                    Some(reading)
+                } else if refresh_due(
                     last_attempt(slot),
                     Instant::now(),
                     CLAUDE_MODEL_WINDOWS_REFRESH_SECS,
@@ -521,9 +577,26 @@ pub async fn fetch_selected_rate_limits_until(
                 return cached_claude;
             }
 
+            if let Some(reading) = claude_code.filter(|reading| {
+                stands_in_for_probe(
+                    reading,
+                    cached_claude.as_ref(),
+                    CLAUDE_MIN_REFETCH_SECS,
+                    now,
+                )
+            }) {
+                tracing::debug!("Claude rate limits served from Claude Code's usage cache");
+                return Some(reading);
+            }
+
             Some(probe_claude_rich(cached_claude.as_ref(), now).await)
         }
         .await;
+        let result = if selection.includes_claude() {
+            with_usage_credits(result, cached_claude_credits).await
+        } else {
+            result
+        };
         (result, provider_t0.elapsed())
     };
 
@@ -551,7 +624,9 @@ pub async fn fetch_selected_rate_limits_until(
                 .await
                 .ok()
                 .flatten()
-                .filter(|logged| stands_in_for_probe(logged, cached_codex.as_ref(), now))
+                .filter(|logged| {
+                    stands_in_for_probe(logged, cached_codex.as_ref(), CODEX_MIN_REFETCH_SECS, now)
+                })
                 .map(|logged| keep_probed_resets(logged, cached_codex.as_ref()));
             if logged.is_some() {
                 tracing::debug!("Codex rate limits served from its session logs");
@@ -1050,7 +1125,8 @@ mod tests {
             )
         };
         let probed = reading(400, 3600);
-        let stands_in = |logged, cached| stands_in_for_probe(&logged, cached, now);
+        let stands_in =
+            |logged, cached| stands_in_for_probe(&logged, cached, CODEX_MIN_REFETCH_SECS, now);
         assert!(
             stands_in(reading(60, 3600), Some(&probed)),
             "logged since the probe"

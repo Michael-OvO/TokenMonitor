@@ -1062,7 +1062,7 @@
       </div>
       {/if}
       <div class="app-footer">
-        <Footer {data} {provider} {period} {rateLimits} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} onDevices={() => { showDevices = true; }} />
+        <Footer {data} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} onDevices={() => { showDevices = true; }} />
       </div>
       </div>
     {:else}
@@ -1147,6 +1147,7 @@
     bottom: 0;
     z-index: 3;
     background: var(--surface);
+    background-image: linear-gradient(var(--provider-bg), var(--provider-bg));
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.15);
