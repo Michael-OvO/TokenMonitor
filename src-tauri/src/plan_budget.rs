@@ -3,7 +3,8 @@
 //!
 //! Every rate-limit refresh appends the meters whose reading changed to
 //! `limit-samples.jsonl` in the app data dir. A stretch between two readings
-//! where one model made ≥90% of the local spend gives that model's dollars
+//! where one model made ≥90% of the spend (this machine plus the remote
+//! devices counted in the main total) gives that model's dollars
 //! per percentage point; summing its stretches over the last two weeks gives
 //! its budget for a full window.
 
@@ -86,7 +87,8 @@ pub struct ModelBudget {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanBudget {
-    /// Local spend since the window started (for the rough fallback range).
+    /// Spend since the window started, this machine plus the remote devices
+    /// counted in the main total (for the rough fallback range).
     pub spend: f64,
     /// Budget per model with enough single-model stretches, cheapest first.
     pub models: Vec<ModelBudget>,
@@ -444,10 +446,42 @@ async fn compute_blocking(
     provider: String,
     bars: Bars,
 ) -> Option<Vec<PlanBudget>> {
+    // Meters count every machine on the account, so spend does too: add the
+    // remote devices counted in the main total.
+    let now = Local::now();
+    let bounds = crate::commands::period::PeriodBounds::from_range(
+        lookback_start(&bars).with_timezone(&Local),
+        now + Duration::seconds(1),
+        String::new(),
+    );
+    let remote: Vec<Priced> =
+        crate::usage::device_aggregation::included_remote_rows(state, &provider, &bounds)
+            .await
+            .into_iter()
+            .map(|r| {
+                (
+                    r.ts.with_timezone(&Utc),
+                    r.display_name,
+                    r.model_key,
+                    r.cost,
+                )
+            })
+            .collect();
     let parser = state.parser.clone();
-    tokio::task::spawn_blocking(move || compute(&parser, &provider, &bars))
+    tokio::task::spawn_blocking(move || compute(&parser, &provider, &bars, remote))
         .await
         .ok()
+}
+
+/// (time, display name, model key, USD)
+type Priced = (DateTime<Utc>, String, String, f64);
+
+/// The earliest instant a compute reads: the lookback or the oldest bar.
+fn lookback_start(bars: &[(String, DateTime<Utc>)]) -> DateTime<Utc> {
+    let lookback = Utc::now() - Duration::days(LOOKBACK_DAYS);
+    bars.iter()
+        .map(|(_, since)| *since)
+        .fold(lookback, DateTime::min)
 }
 
 fn lock<T: Default>(cell: &'static OnceLock<Mutex<T>>) -> std::sync::MutexGuard<'static, T> {
@@ -462,17 +496,19 @@ fn compute(
     parser: &UsageParser,
     provider: &str,
     bars: &[(String, DateTime<Utc>)],
+    remote: Vec<Priced>,
 ) -> Vec<PlanBudget> {
     let lookback = Utc::now() - Duration::days(LOOKBACK_DAYS);
-    let start = bars
-        .iter()
-        .map(|(_, since)| *since)
-        .fold(lookback, DateTime::min);
-    let entries: Vec<_> = parser
+    let start = lookback_start(bars);
+    // ponytail: archived remote hours arrive as one row at the top of the
+    // hour, so a stretch shorter than an hour can misplace a peer's spend.
+    let mut entries: Vec<Priced> = parser
         .priced_entries_since(provider, start.with_timezone(&Local))
         .into_iter()
         .map(|(t, name, key, usd)| (t.with_timezone(&Utc), name, key, usd))
+        .chain(remote)
         .collect();
+    entries.sort_by_key(|e| e.0);
     let samples: Vec<Sample> = match (provider, SAMPLES_FILE.get()) {
         // Cursor's first-party meter shares spend with its API pool; no clean stretches.
         ("cursor", _) => Vec::new(),
@@ -1008,9 +1044,20 @@ mod tests {
         );
         // A window that opened between the two holds only the later one.
         let since = (hour + Duration::minutes(30)).with_timezone(&Utc);
-        let got = &compute(&state.parser, "claude", &[("test-archived".into(), since)])[0];
+        let bars = [("test-archived".into(), since)];
+        let got = &compute(&state.parser, "claude", &bars, Vec::new())[0];
         assert!(rows[1].3 > 0.0, "guard: the request is priced");
         assert!((got.spend - rows[1].3).abs() < 1e-12, "spend {}", got.spend);
+
+        // Another device's spend in the window counts too; before it does not.
+        let peer = |t: DateTime<Utc>| (t, "Sonnet".into(), "sonnet".into(), 2.0);
+        let remote = vec![peer(since - Duration::minutes(1)), peer(since)];
+        let got = &compute(&state.parser, "claude", &bars, remote)[0];
+        assert!(
+            (got.spend - rows[1].3 - 2.0).abs() < 1e-12,
+            "spend {}",
+            got.spend
+        );
     }
 
     #[tokio::test]

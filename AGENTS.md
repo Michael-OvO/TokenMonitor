@@ -48,7 +48,7 @@ src-tauri/src/           Rust backend
   tray/  platform/         RGBA tray icon rendering in pure Rust; OS-specific window behavior
   updater/  paths.rs       update scheduling/state/channels; central registry of every filesystem path the app reads
   refresh.rs               the refresh loop: owns all periodic work (sample → publish, then spaced slot jobs)
-  plan_budget.rs           $ per rate-limit window, learned from meter readings vs local spend per model
+  plan_budget.rs           $ per rate-limit window, learned from meter readings vs all-device spend per model
   ops.rs / ops.json        vendor-facing constants (API hosts, plan budgets, LiteLLM cache TTL)
 build/                   installer build code (index.mjs) + per-platform tauri config overlays
 scripts/                 release.sh, sync-tauri-versions.mjs

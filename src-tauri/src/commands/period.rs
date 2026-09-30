@@ -94,7 +94,7 @@ impl PeriodBounds {
         }
     }
 
-    fn from_range(
+    pub(crate) fn from_range(
         range_start: DateTime<Local>,
         range_end: DateTime<Local>,
         period_label: String,
