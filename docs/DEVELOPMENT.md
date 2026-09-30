@@ -158,6 +158,38 @@ Rules that keep this working:
 `backend.log` has one `[PROFILE] cycle` line per cycle and one `[PROFILE] slot` line
 per slot job.
 
+### Claude usage-limit resets (investigated, not implemented)
+
+claude.ai's usage settings show a "Resets" card, e.g. a promotional grant that refills
+the limits once before a deadline. TokenMonitor deliberately does not show it. What was
+found (Claude Code 2.1.280, September 2026):
+
+- **Where the data is.** The card comes from the same usage endpoint TokenMonitor already
+  reads, with a flag: `GET /api/oauth/usage?cedar_ember=1&skip_spend=1`. The flag fills
+  the `cedar_ember` object, which holds:
+  - `eligible`, `ineligible_reason`, `at_limit`;
+  - `next_grant_id`, `weekly_resets_at`;
+  - `grants[]`: `id`, `label`, `starts_at`, `ends_at`, `resets_left`, `resets_total`,
+    `usable_now`, `clears` (the windows a reset refills), and `percent_used`.
+- **Why TokenMonitor doesn't get it.** The server gates the grants by client
+  ("surface"). With TokenMonitor's own headers the answer is `eligible: false`,
+  `ineligible_reason: "surface"` and an empty `grants` list. The grants appear only when
+  the request carries Claude Code's `User-Agent: claude-cli/<version> (external, cli)`
+  and `x-app: cli`.
+- **No local copy.** Claude Code asks only when a limit is hit, or from its hidden
+  interactive `/limit-reset` command, which is also how a reset is redeemed. It does not
+  write the grants to disk: `~/.claude.json` keeps only a dedupe key, and the Claude
+  desktop app's caches hold none either.
+- **Decision.** Showing resets would mean TokenMonitor presenting itself as Claude
+  Code, so it stays out. Users can see and redeem resets on claude.ai or with
+  `/limit-reset` in Claude Code.
+- **If this is revisited.**
+  - The grants map one-to-one onto the Codex `UsageLimitResets` shape: `resets_left`
+    gives the count, `label` the title, and `starts_at` / `ends_at` the granted and
+    expiry times.
+  - The existing Resets row and `ResetTimeline.svelte` would then render them unchanged.
+  - The request must stay read-only. `/limit-reset`'s redeem call must never be made.
+
 ## Validation
 
 Run the smallest relevant check while developing, then the complete set before a PR:
