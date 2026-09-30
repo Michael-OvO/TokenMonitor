@@ -560,22 +560,36 @@ pub(crate) async fn build_device_breakdown_for_payload(
     Some(devices)
 }
 
-pub(crate) async fn build_included_devices_payload(
+/// One priced usage row from a remote device counted in the main total.
+pub(crate) struct RemoteRow {
+    pub ts: DateTime<Local>,
+    pub display_name: String,
+    pub model_key: String,
+    pub cost: f64,
+    pub pricing_available: bool,
+    pub input: u64,
+    pub output: u64,
+    pub cache_5m: u64,
+    pub cache_1h: u64,
+    pub cache_read: u64,
+}
+
+/// Priced rows inside `bounds` from every remote device flagged "include in
+/// stats": archived hourly rows (one per hour, at the top of the hour) plus
+/// live SSH rows for hours the archive holds nothing for.
+pub(crate) async fn included_remote_rows(
     state: &AppState,
     provider: &str,
-    period: &str,
-    offset: i32,
-) -> Option<crate::models::UsagePayload> {
-    use crate::models::{ModelSummary, UsagePayload, UsageSource};
+    bounds: &PeriodBounds,
+) -> Vec<RemoteRow> {
     use crate::usage::pricing::{
         calculate_cost_for_key, pricing_available_for_key, provider_multiplier,
     };
-    use std::collections::HashMap;
 
+    let mut rows = Vec::new();
     if !provider_includes_remote_ssh_usage(provider) {
-        return None;
+        return rows;
     }
-
     let configs = state.ssh_hosts.read().await;
     let archive = state.parser.archive();
     // Devices = enabled SSH hosts ∪ archive (file-imported peer) devices.
@@ -583,22 +597,27 @@ pub(crate) async fn build_included_devices_payload(
         let remote_include_flags = state.remote_device_include_flags.read().await;
         enumerate_agg_devices(&configs, archive.as_ref(), &remote_include_flags)
     };
-    if agg_devices.is_empty() {
-        return None;
-    }
-
-    let bounds = period_bounds_for(state, provider, period, offset).await?;
     let since = bounds.start;
     let cache_mgr = state.ssh_cache.read().await;
     let mgr = cache_mgr.as_ref();
-
-    let mut model_map: HashMap<String, (String, f64, u64, bool)> = HashMap::new();
-    let mut chart_entries: Vec<(DateTime<Local>, String, f64, u64, bool)> = Vec::new();
-    let mut input_tokens = 0_u64;
-    let mut output_tokens = 0_u64;
-    let mut cache_read_tokens = 0_u64;
-    let mut cache_write_5m_tokens = 0_u64;
-    let mut cache_write_1h_tokens = 0_u64;
+    let price = |model: &str, input, output, cache_5m, cache_1h, cache_read, ts| {
+        let (display_name, model_key) = crate::models::normalize_model(model);
+        let cost =
+            calculate_cost_for_key(&model_key, input, output, cache_5m, cache_1h, cache_read, 0)
+                * provider_multiplier(model);
+        RemoteRow {
+            ts,
+            pricing_available: pricing_available_for_key(&model_key),
+            display_name,
+            model_key,
+            cost,
+            input,
+            output,
+            cache_5m,
+            cache_1h,
+            cache_read,
+        }
+    };
 
     for dev in &agg_devices {
         // Only devices flagged "include in stats" contribute to the MAIN total.
@@ -622,86 +641,88 @@ pub(crate) async fn build_included_devices_payload(
                 if !bounds.contains_timestamp(entry.timestamp) {
                     continue;
                 }
-                let (display_name, model_key) = crate::models::normalize_model(&entry.model);
-                let pricing_available = pricing_available_for_key(&model_key);
-                let cost = calculate_cost_for_key(
-                    &model_key,
+                rows.push(price(
+                    &entry.model,
                     entry.input_tokens,
                     entry.output_tokens,
                     entry.cache_creation_5m_tokens,
                     entry.cache_creation_1h_tokens,
                     entry.cache_read_tokens,
-                    0,
-                ) * provider_multiplier(&entry.model);
-                // Same definition as the local payload (parser::entry_total_tokens):
-                // cache counts, otherwise a peer's cache-heavy usage vanishes
-                // from the Tokens card while still being priced into Cost.
-                let tokens = entry.input_tokens
-                    + entry.output_tokens
-                    + entry.cache_creation_5m_tokens
-                    + entry.cache_creation_1h_tokens
-                    + entry.cache_read_tokens;
-                input_tokens += entry.input_tokens;
-                output_tokens += entry.output_tokens;
-                cache_write_5m_tokens += entry.cache_creation_5m_tokens;
-                cache_write_1h_tokens += entry.cache_creation_1h_tokens;
-                cache_read_tokens += entry.cache_read_tokens;
-
-                let agg = model_map
-                    .entry(model_key.clone())
-                    .or_insert_with(|| (display_name, 0.0, 0, true));
-                agg.1 += cost;
-                agg.2 += tokens;
-                agg.3 &= pricing_available;
-
-                chart_entries.push((entry.timestamp, model_key, cost, tokens, pricing_available));
+                    entry.timestamp,
+                ));
             }
         }
 
         // ── Live compact rows for configured hosts (peers have no SSH cache) ──
         let index = live_index(mgr, dev);
-        for (local, record) in live_records_in(
-            &index,
-            provider,
-            &bounds,
-            frontier.as_ref(),
-            &archived_hours,
-        ) {
+        for (local, record) in
+            live_records_in(&index, provider, bounds, frontier.as_ref(), &archived_hours)
+        {
             if record.model.starts_with('<') {
                 continue;
             }
-
-            let (display_name, model_key) = crate::models::normalize_model(&record.model);
-            let pricing_available = pricing_available_for_key(&model_key);
-            let cost = calculate_cost_for_key(
-                &model_key,
+            rows.push(price(
+                &record.model,
                 record.input_tokens,
                 record.output_tokens,
                 record.cache_5m,
                 record.cache_1h,
                 record.cache_read,
-                0,
-            ) * provider_multiplier(&record.model);
-            let tokens = record.input_tokens
-                + record.output_tokens
-                + record.cache_5m
-                + record.cache_1h
-                + record.cache_read;
-            input_tokens += record.input_tokens;
-            output_tokens += record.output_tokens;
-            cache_write_5m_tokens += record.cache_5m;
-            cache_write_1h_tokens += record.cache_1h;
-            cache_read_tokens += record.cache_read;
-
-            let agg = model_map
-                .entry(model_key.clone())
-                .or_insert_with(|| (display_name, 0.0, 0, true));
-            agg.1 += cost;
-            agg.2 += tokens;
-            agg.3 &= pricing_available;
-
-            chart_entries.push((*local, model_key, cost, tokens, pricing_available));
+                *local,
+            ));
         }
+    }
+    rows
+}
+
+pub(crate) async fn build_included_devices_payload(
+    state: &AppState,
+    provider: &str,
+    period: &str,
+    offset: i32,
+) -> Option<crate::models::UsagePayload> {
+    use crate::models::{ModelSummary, UsagePayload, UsageSource};
+    use std::collections::HashMap;
+
+    if !provider_includes_remote_ssh_usage(provider) {
+        return None;
+    }
+    let bounds = period_bounds_for(state, provider, period, offset).await?;
+    let rows = included_remote_rows(state, provider, &bounds).await;
+
+    let mut model_map: HashMap<String, (String, f64, u64, bool)> = HashMap::new();
+    let mut chart_entries: Vec<(DateTime<Local>, String, f64, u64, bool)> = Vec::new();
+    let mut input_tokens = 0_u64;
+    let mut output_tokens = 0_u64;
+    let mut cache_read_tokens = 0_u64;
+    let mut cache_write_5m_tokens = 0_u64;
+    let mut cache_write_1h_tokens = 0_u64;
+
+    for row in rows {
+        // Same definition as the local payload (parser::entry_total_tokens):
+        // cache counts, otherwise a peer's cache-heavy usage vanishes
+        // from the Tokens card while still being priced into Cost.
+        let tokens = row.input + row.output + row.cache_5m + row.cache_1h + row.cache_read;
+        input_tokens += row.input;
+        output_tokens += row.output;
+        cache_write_5m_tokens += row.cache_5m;
+        cache_write_1h_tokens += row.cache_1h;
+        cache_read_tokens += row.cache_read;
+
+        let agg = model_map
+            .entry(row.model_key.clone())
+            .or_insert_with(|| (row.display_name, 0.0, 0, true));
+        agg.1 += row.cost;
+        agg.2 += tokens;
+        agg.3 &= row.pricing_available;
+
+        chart_entries.push((
+            row.ts,
+            row.model_key,
+            row.cost,
+            tokens,
+            row.pricing_available,
+        ));
     }
 
     if model_map.is_empty() {

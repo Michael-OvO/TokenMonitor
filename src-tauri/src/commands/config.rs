@@ -788,7 +788,7 @@ pub async fn get_exchange_rates() -> Result<std::collections::HashMap<String, f6
 
 #[tauri::command]
 pub async fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
-    app.exit(0);
+    crate::quit_app(&app);
     Ok(())
 }
 

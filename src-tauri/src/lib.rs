@@ -153,6 +153,48 @@ fn show_main_window_inner(window: &tauri::WebviewWindow) {
     let _ = window.set_focus();
 }
 
+/// Quit the app for good, from the tray or the settings page.
+pub(crate) fn quit_app(app: &tauri::AppHandle) {
+    notify_dev_server_quit(app);
+    app.exit(0);
+}
+
+/// In `tauri dev`, tell the Vite dev server to exit too (`quitWithApp` in
+/// vite.config.ts): `tauri dev` kills only its npm wrapper, and on Windows
+/// Vite then kept holding its port. A restart after a Rust change kills the
+/// app without coming here, so Vite stays up across those.
+fn notify_dev_server_quit(app: &tauri::AppHandle) {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(url) = app.config().build.dev_url.as_ref() else {
+        return;
+    };
+    let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
+        return;
+    };
+    let timeout = Duration::from_millis(500);
+    // `localhost` may resolve to ::1 or 127.0.0.1; Vite listens on one.
+    let Some(mut stream) = (host, port)
+        .to_socket_addrs()
+        .into_iter()
+        .flatten()
+        .find_map(|addr| TcpStream::connect_timeout(&addr, timeout).ok())
+    else {
+        return;
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = write!(
+        stream,
+        "POST /__tm_quit HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    // Wait for the ack so the request is read before this process exits.
+    let _ = stream.read(&mut [0u8; 64]);
+}
+
 /// Thread-safe entry point to surface the main window. Dispatches the actual
 /// show to the main thread, so it is safe to call from the single-instance
 /// accept loop (a non-main thread) on FOCUS.
@@ -250,7 +292,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     if event.id() == "quit" {
-                        app.exit(0);
+                        quit_app(app);
                     } else if event.id() == "show" {
                         if let Some(window) = app.get_webview_window("main") {
                             show_main_window_inner(&window);
