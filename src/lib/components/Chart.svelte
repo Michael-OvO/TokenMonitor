@@ -1,8 +1,8 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import { modelColor, formatCost, formatModelCost, currencySymbol, convertCost, deviceColor, deviceDisplayNames } from "../utils/format.js";
+  import { modelColor, formatCost, formatModelCost, formatTokens, currencySymbol, convertCost, deviceColor, deviceDisplayNames } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
-  import { activeOffset, activePeriod, chartMode, chartSegmentMode } from "../stores/usage.js";
+  import { activeOffset, activePeriod, chartMetric, chartMode, chartSegmentMode } from "../stores/usage.js";
   import { logger } from "../utils/logger.js";
   import type { ChartBucket, ChartHoverDetail } from "../types/index.js";
   import { filterVisibleChartBuckets, getXAxisLabels } from "./chartBuckets.js";
@@ -66,14 +66,24 @@
     $chartSegmentMode === "device" && deviceBuckets ? deviceBuckets : buckets
   );
 
-  // Filter hidden models from buckets (only applies in model mode).
+  // The chart plots either cost or tokens; everything below reads `val`.
+  let byTokens = $derived($chartMetric === "tokens");
+  function val(s: { cost: number; tokens: number }): number {
+    return byTokens ? s.tokens : s.cost;
+  }
+  function fmtVal(v: number): string {
+    return byTokens ? formatTokens(v) : formatCost(v);
+  }
+
+  // Filter hidden models from buckets (only applies in model mode); `total`
+  // is in the chosen metric.
   let filteredBuckets = $derived(
-    $chartSegmentMode === "device"
-      ? activeBuckets
-      : activeBuckets.map((b) => {
-          const segs = b.segments.filter((s) => !hiddenModels.includes(s.model_key));
-          return { ...b, segments: segs, total: segs.reduce((sum, s) => sum + s.cost, 0) };
-        })
+    activeBuckets.map((b) => {
+      const segs = $chartSegmentMode === "device"
+        ? b.segments
+        : b.segments.filter((s) => !hiddenModels.includes(s.model_key));
+      return { ...b, segments: segs, total: segs.reduce((sum, s) => sum + val(s), 0) };
+    })
   );
   let visibleBuckets = $derived(filterVisibleChartBuckets(filteredBuckets, $activePeriod, $activeOffset));
   let xAxisLabels = $derived(getXAxisLabels(visibleBuckets));
@@ -85,7 +95,7 @@
     ...visibleBuckets.flatMap((b) => {
       const merged = new Map<string, number>();
       for (const s of b.segments) {
-        merged.set(s.model_key, (merged.get(s.model_key) ?? 0) + s.cost);
+        merged.set(s.model_key, (merged.get(s.model_key) ?? 0) + val(s));
       }
       return Array.from(merged.values());
     }),
@@ -242,9 +252,9 @@
       for (const s of b.segments) {
         const existing = agg.get(s.model_key);
         if (existing) {
-          existing.cost += s.cost;
+          existing.cost += val(s);
         } else {
-          agg.set(s.model_key, { key: s.model_key, name: segDisplayName(s.model_key, s.model), cost: s.cost });
+          agg.set(s.model_key, { key: s.model_key, name: segDisplayName(s.model_key, s.model), cost: val(s) });
         }
       }
     }
@@ -264,6 +274,11 @@
   });
 
   function niceMax(v: number): number {
+    if (byTokens) {
+      // 1 / 2 / 5 × 10^k, so the half-way tick stays a round number too.
+      const p = 10 ** Math.floor(Math.log10(Math.max(v, 1)));
+      return [1, 2, 5, 10].map((m) => m * p).find((s) => v <= s) ?? 10 * p;
+    }
     const steps = [0.5, 1, 2, 5, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 500, 750, 1000];
     for (const s of steps) {
       if (v <= s) return s;
@@ -272,6 +287,7 @@
   }
 
   function yLabel(v: number): string {
+    if (byTokens) return formatTokens(v);
     const sym = currencySymbol();
     const c = convertCost(v);
     if (c === 0) return `${sym}0`;
@@ -293,7 +309,7 @@
         merged.set(seg.model_key, { ...seg });
       }
     }
-    return Array.from(merged.values()).sort((a, b) => b.cost - a.cost);
+    return Array.from(merged.values()).sort((a, b) => val(b) - val(a));
   }
 
 
@@ -311,9 +327,9 @@
         }
       }
     }
-    return Array.from(merged.values()).filter((s) => s.cost > 0).sort((a, b) => b.cost - a.cost);
+    return Array.from(merged.values()).filter((s) => val(s) > 0).sort((a, b) => val(b) - val(a));
   });
-  let pieTotal = $derived(pieSlices().reduce((sum, s) => sum + s.cost, 0));
+  let pieTotal = $derived(pieSlices().reduce((sum, s) => sum + val(s), 0));
   let hoveredSlice = $state(-1);
   /** Grace before the centre falls back to the total after the pointer leaves
    * a slice or row. Slices and rows are hit-tested without gaps (see the hit
@@ -338,18 +354,18 @@
   const PIE_HIT_PAD = 2;
 
   /** `path` draws the ring segment; `hit` is its gapless sector for hover. */
-  interface PieArc { key: string; name: string; cost: number; path: string; hit: string; pct: number; }
+  interface PieArc { key: string; name: string; value: number; path: string; hit: string; pct: number; }
 
   let pieArcs = $derived((): PieArc[] => {
     const slices = pieSlices();
     const total = pieTotal;
     if (total <= 0 || slices.length === 0) return [];
-    const hits = pieHitSectorPaths(slices.map((s) => s.cost), PIE_CX, PIE_CY, PIE_R_OUTER + PIE_HIT_PAD);
+    const hits = pieHitSectorPaths(slices.map((s) => val(s)), PIE_CX, PIE_CY, PIE_R_OUTER + PIE_HIT_PAD);
     if (slices.length === 1) {
       return [{
         key: slices[0].key,
         name: slices[0].name,
-        cost: slices[0].cost,
+        value: val(slices[0]),
         path: donutFullRing(),
         hit: hits[0],
         pct: 1,
@@ -357,16 +373,16 @@
     }
     let angle = -Math.PI / 2;
     return slices.map((s, i) => {
-      const span = (s.cost / total) * Math.PI * 2;
+      const span = (val(s) / total) * Math.PI * 2;
       const a0 = angle + PIE_GAP_RAD / 2;
       const a1 = angle + span - PIE_GAP_RAD / 2;
       const arc: PieArc = {
         key: s.key,
         name: s.name,
-        cost: s.cost,
+        value: val(s),
         path: donutArc(a0, a1),
         hit: hits[i],
-        pct: s.cost / total,
+        pct: val(s) / total,
       };
       angle += span;
       return arc;
@@ -393,7 +409,7 @@
   }
 
   function sliceAriaLabel(arc: PieArc): string {
-    return `${arc.name}: ${formatCost(arc.cost)} (${(arc.pct * 100).toFixed(1)}%)`;
+    return `${arc.name}: ${fmtVal(arc.value)} (${(arc.pct * 100).toFixed(1)}%)`;
   }
 
   // Bar chart geometry — fill full width, small gaps
@@ -422,7 +438,7 @@
       const points = visibleBuckets.map((b, i) => {
         const cost = b.segments
           .filter((s) => s.model_key === m.key)
-          .reduce((sum, s) => sum + s.cost, 0);
+          .reduce((sum, s) => sum + val(s), 0);
         const x = visibleBuckets.length > 1 ? i * stepX : CHART_W / 2;
         const y = CHART_H - (cost / niceM) * CHART_H;
         return { x, y, cost };
@@ -454,7 +470,7 @@
   }
 
   function bucketAriaLabel(bucket: ChartBucket): string {
-    return `${bucket.label}: ${formatCost(bucket.total)}`;
+    return `${bucket.label}: ${fmtVal(bucket.total)}`;
   }
 
 </script>
@@ -468,8 +484,12 @@
   aria-label="Usage chart"
 >
   <div class="ch-top">
-    <span class="ch-t">Cost by {$chartSegmentMode === "device" ? "device" : "model"}</span>
+    <span class="ch-t">{byTokens ? "Tokens" : "Cost"} by {$chartSegmentMode === "device" ? "device" : "model"}</span>
     <div class="ch-right">
+      <div class="mode-toggle seg-toggle">
+        <button type="button" class:on={!byTokens} aria-pressed={!byTokens} title="Show cost" onclick={() => chartMetric.set("cost")}>{currencySymbol()}</button>
+        <button type="button" class:on={byTokens} aria-pressed={byTokens} title="Show tokens" onclick={() => chartMetric.set("tokens")}>T</button>
+      </div>
       {#if deviceBuckets}
         <div class="mode-toggle seg-toggle">
           <button type="button" class:on={$chartSegmentMode === "model"} title="By model" onclick={() => { logger.info("chart", "Segment: model"); chartSegmentMode.set("model"); }}>M</button>
@@ -536,7 +556,7 @@
       <div class="detail-inner">
         <div class="detail-head">
           <span class="detail-label">{displayed.label}</span>
-          <span class="detail-total">{formatCost(displayed.total)}</span>
+          <span class="detail-total">{fmtVal(displayed.total)}</span>
         </div>
         {#if segs.length > 0}
           <div class="detail-rows">
@@ -544,7 +564,7 @@
               <div class="detail-row">
                 <span class="detail-dot" style="background:{segmentColorFn(seg.model_key)}"></span>
                 <span class="detail-name">{segDisplayName(seg.model_key, seg.model)}</span>
-                <span class="detail-cost">{formatModelCost(seg.cost, seg.pricing_available)}</span>
+                <span class="detail-cost">{byTokens ? formatTokens(seg.tokens) : formatModelCost(seg.cost, seg.pricing_available)}</span>
               </div>
             {/each}
           </div>
@@ -565,7 +585,7 @@
 
     <!-- Chart area -->
     <div class="chart-area">
-      {#key `${dataKey}-${$chartMode}`}
+      {#key `${dataKey}-${$chartMode}-${$chartMetric}`}
       <div class="chart-fade">
         {#if $chartMode === "pie"}
           <!-- PIE / DONUT CHART -->
@@ -600,7 +620,7 @@
                   {focus ? focus.name : "Total"}
                 </text>
                 <text x={PIE_CX} y={PIE_CY + 7} text-anchor="middle" dominant-baseline="central" class="pie-center-value">
-                  {focus ? `${(focus.pct * 100).toFixed(1)}%` : formatCost(total)}
+                  {focus ? `${(focus.pct * 100).toFixed(1)}%` : fmtVal(total)}
                 </text>
                 <!-- Gapless hit sectors over the whole disc: inside it the
                      pointer is always on exactly one slice, so sliding between
@@ -632,7 +652,7 @@
                     <span class="pie-row-dot" style="background:{segmentColorFn(arc.key)}"></span>
                     <span class="pie-row-name" title={arc.name}>{arc.name}</span>
                     <span class="pie-row-pct">{(arc.pct * 100).toFixed(0)}%</span>
-                    <span class="pie-row-cost">{formatCost(arc.cost)}</span>
+                    <span class="pie-row-cost">{fmtVal(arc.value)}</span>
                   </li>
                 {/each}
               </ul>
@@ -664,8 +684,8 @@
 
                 <!-- Stacked segments (bottom to top, sorted by cost desc) -->
                 {#each segs as seg, si}
-                  {@const segH = (seg.cost / niceM) * CHART_H}
-                  {@const prevH = segs.slice(0, si).reduce((a, s) => a + (s.cost / niceM) * CHART_H, 0)}
+                  {@const segH = (val(seg) / niceM) * CHART_H}
+                  {@const prevH = segs.slice(0, si).reduce((a, s) => a + (val(s) / niceM) * CHART_H, 0)}
                   {@const segY = CHART_H - prevH - segH}
                   <rect
                     x={x}

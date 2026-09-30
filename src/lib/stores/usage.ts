@@ -20,6 +20,7 @@ export const activePeriod = writable<UsagePeriod>("day");
 export const activeOffset = writable<number>(0);
 export const chartMode = writable<"bar" | "line" | "pie">("bar");
 export const chartSegmentMode = writable<"model" | "device">("model");
+export const chartMetric = writable<"cost" | "tokens">("cost");
 export const usageData = writable<UsagePayload | null>(null);
 export const isLoading = writable(false);
 export const isPlaceholderLoading = writable(false);
