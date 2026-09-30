@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## Unreleased
+## v0.17.0 — 套餐预算、统一刷新与能耗优化
 
 ### 新增
 - **套餐预算估算**：限额条（5h、每周以及 Cursor 月度池）在重置时间后显示这个窗口按 API 价格大约值多少钱，如 `· $120–180 / 5h`（按显示货币换算，两位有效数字），悬停列出每个模型各自的预算。每次探测限额时，读数有变化的窗口会追加到应用数据目录的 `limit-samples.jsonl`；两次读数之间若某个模型占本地花费 ≥90%，这段花费 ÷ 限额上涨的百分点就是该模型每个点的价格，过去两周累计满 10 个点后给出该模型的整窗预算，各模型从便宜到贵构成显示的区间（整数百分比的取整误差计入上下限）。读数不够时退回粗略区间：窗口内本地花费 ÷ 已用百分比，再留 ±20% 的模型组合余量（已用 ≥5% 才显示；只计本机日志，在别处的用量会让它偏低）。Codex 的读数直接取自会话日志里每条 `token_count` 事件，两周历史自动回填，第一次打开就有按模型的区间；Cursor API 池按官方给出的美元额度显示。窗口长度改用厂商上报的 `window_minutes`（Codex、Kimi），长度未知的窗口不再猜测节奏与耗尽时间（`plan_budget.rs`、`views/planBudget.ts`）
@@ -29,10 +29,14 @@
 - **Claude 的 Weekly Fable / Weekly Opus 窗口消失**：Claude Code statusline 事件只带 `five_hour` 与 `seven_day` 两个全局窗口，而按模型划分的每周窗口只有 `claude -p "/usage"` 与 OAuth 接口会给出；此前只要 statusline 事件新鲜（活跃会话中一直如此）就直接采用它，模型窗口便消失。现在 statusline 只覆盖它报告的窗口，其余窗口从更完整的来源叠加保留，且每 15 分钟（`CLAUDE_MODEL_WINDOWS_REFRESH_SECS`）通过 CLI / OAuth 刷新一次，已过重置时间的旧窗口不再沿用
 - **OAuth 接口改版后丢失 Weekly Fable 与 extra usage**：`/api/oauth/usage` 不再返回 `seven_day_fable` 等键，按模型的每周额度改放在新的 `limits` 列表里（`kind: weekly_scoped`，`scope.model.display_name`），现在从该列表读取并沿用 `seven_day_<模型>` 的 id（旧键仍在时以旧键为准）；`extra_usage` 在未开启时金额字段为 `null`，此前整块解析失败被丢弃，现在按可空读取，并按接口给出的 `decimal_places` 换算（缺省按美分）
 - **Claude 限额优先读 Claude Code 自己的缓存**：Claude Code 会把最近一次 `/api/oauth/usage` 的完整返回存在 `~/.claude.json` 的 `cachedUsageUtilization`（带 `fetchedAtMs` 和账号 ID）。现在这份缓存比上一次读数新且不超过 285s 时直接采用、不再启动 `claude` CLI；statusline 活跃时，15 分钟内的缓存直接作为按模型每周窗口的来源，同样不启动 CLI。无需网络请求、不占 OAuth 限流，Weekly Fable 与 extra usage 也随之出现；缓存属于其他账号或已过期时仍走 CLI → OAuth。文件按修改时间与大小判断是否重读
+- **文件编辑统计按文件归属**：多文件补丁按各自的文件头计算增删行数，不再把行数平摊到各个文件，无法归属的行保持未知；新版 Codex CLI 通过 `exec` 调用 `tools.apply_patch` 所做的编辑只记录在 `FileChange` 项里，现在也计入（同一次编辑的 `apply_patch` 副本只算一次）；文件类型除扩展名外也按文件名识别清单、构建与工具配置、测试数据和文档（如 `requirements.txt`、`vite.config.ts`、`fixtures/`、`README`）。会话级统计改读带会话信息的实时日志行（包括已由归档代替的小时），已完成的小时不再被并成一个既没有编辑、也没有跑子代理的会话
 
 ### UI
 - **弹窗最大高度 500 → 560**：5h 页同时展示两个提供方的窗口、credits 与 Codex reset 时间轴后内容超过 500px，末尾被固定在底部的页脚遮住；固定高度与滚动阈值的上限一并提高到 560（仍受屏幕尺寸比例约束）
 - **页脚**：去掉 5h 页左下角时间戳上方的「N% used」/ 5h 费用一行（与上方限额条重复）；置底页脚补上与面板和顶栏相同的提供方底色（`--provider-bg`），不再比上方内容颜色偏淡
+- **「Composition」卡片改为「File edits」**：注明比例是新增 + 删除行数的占比，不足 1% 显示 `<1%`；当期有会话没有编辑文件（调研、聊天）时，标出统计覆盖了几个会话、这些会话占多少费用（如 `from 3 of 8 sessions · 42% of cost`），不再让以调研为主的一天看起来全是写代码
+- **滚动渐隐不再盖住页脚**：内容滚动时的渐隐改为画在置底页脚上方的一条带（取页脚自身的底色），滚到底时收起；支持滚动时间轴的系统上，顶栏下方也有一条随滚动出现的渐隐
+- **远程设备设置重做**：更大的字号与间距，每个分区一句说明，主机显示为 `user@host`，测试失败时在行内给出原因，每个开关都有可读的无障碍标签；折叠时的 Sync All 改为真正的按钮；Test All 与 Sync All 并排，测试与同步进行时互相禁用
 
 ## v0.16.0 — macOS 27 兼容、饼图交互与性能修复
 
