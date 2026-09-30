@@ -88,9 +88,19 @@ const TRACK_COLOR_LIGHT: Color = Color {
     a: 40,
 }; // black @ ~16% for light bar
 
+/// A `defaults` spawn per call, so the answer is kept for a minute rather
+/// than paid on every tray paint.
 #[cfg(target_os = "macos")]
 fn system_tray_is_dark() -> bool {
-    std::process::Command::new("defaults")
+    static CACHED: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
+        std::sync::Mutex::new(None);
+    let mut cached = CACHED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, dark)) = *cached {
+        if at.elapsed() < std::time::Duration::from_secs(60) {
+            return dark;
+        }
+    }
+    let dark = std::process::Command::new("defaults")
         .args(["read", "-g", "AppleInterfaceStyle"])
         .output()
         .ok()
@@ -100,7 +110,9 @@ fn system_tray_is_dark() -> bool {
                 .trim()
                 .eq_ignore_ascii_case("Dark")
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+    *cached = Some((std::time::Instant::now(), dark));
+    dark
 }
 
 #[cfg(target_os = "windows")]

@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::SystemTime;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 const EXPORT_FORMAT: &str = "tokenmonitor-usage-export";
 const EXPORT_FORMAT_VERSION: u32 = 1;
@@ -102,10 +102,6 @@ pub struct AutoExportRuntime {
     /// Per-source high-water frontier already written to the file. Drives both
     /// the cheap "nothing changed" skip and the incremental append window.
     pub cursors: HashMap<String, ArchiveFrontier>,
-    /// Last-seen mtime of each PEER file (other devices') we've merged from the
-    /// sync folder, keyed by file name. Gates re-merging so an unchanged peer
-    /// file isn't re-parsed/re-imported every tick.
-    pub peer_mtimes: HashMap<String, Option<SystemTime>>,
 }
 
 // ── Export wire types (serialize-only) ───────────────────────────────────────
@@ -616,18 +612,21 @@ pub async fn export_usage_data(
     hidden_models: Option<Vec<String>>,
 ) -> Result<ExportResult, String> {
     let hidden = normalize_hidden_models(hidden_models.unwrap_or_default());
-    run_export(&app, &state, &path, &hidden).await
+    let app_version = app.package_info().version.to_string();
+    let _gate = state.compute.lock().await;
+    run_export(&state, &path, &hidden, &app_version).await
 }
 
 /// Core snapshot routine for the manual Export button. Flushes completed local +
 /// SSH-device hours, then writes every archived source to one pretty JSON file.
 /// Records whose model is in `hidden` (the UI's hidden-models set) are excluded,
-/// so the snapshot reflects what the dashboard currently shows.
+/// so the snapshot reflects what the dashboard currently shows. The caller
+/// holds the compute gate.
 pub(crate) async fn run_export(
-    app: &AppHandle,
     state: &AppState,
     path: &str,
     hidden: &HashSet<String>,
+    app_version: &str,
 ) -> Result<ExportResult, String> {
     let archive = state
         .parser
@@ -635,9 +634,11 @@ pub(crate) async fn run_export(
         .ok_or_else(|| "Usage archive is not available".to_string())?;
 
     // Flush completed local + SSH-device hours so the export reflects the latest
-    // data. SSH devices are otherwise only archived on the background tick, so a
-    // just-synced host could lag without this explicit flush.
-    crate::archive_local_usage(state);
+    // data. SSH devices are otherwise only archived after a refresh's sample, so
+    // a just-synced host could lag without this explicit flush. The sweep first:
+    // between samples the file cache may predate what was logged since.
+    let horizon = crate::refresh::sweep_before_user_archive(state).await;
+    crate::archive_local_usage(state, horizon);
     crate::archive_ssh_device_usage(state).await;
 
     // Collect owned records first so the borrowed export views can reference them.
@@ -675,7 +676,7 @@ pub(crate) async fn run_export(
         format: EXPORT_FORMAT,
         format_version: EXPORT_FORMAT_VERSION,
         exported_at: chrono::Local::now().to_rfc3339(),
-        app_version: app.package_info().version.to_string(),
+        app_version: app_version.to_string(),
         device: device_label(),
         device_id: device_slug(),
         sources,
@@ -699,18 +700,33 @@ pub(crate) async fn run_export(
 
 // ── Background JSONL auto-export ─────────────────────────────────────────────
 
-/// Run one auto-export pass if it's enabled and a destination folder is set.
-/// Called from the refresh loop on every tick (and once synchronously after an
-/// import). Best-effort: failures are logged and swallowed.
+/// How long a pass waits on the auto-export folder: a network share that is
+/// unreachable, or an online-only cloud placeholder, may not answer for long.
+const FOLDER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run one auto-export pass if a destination folder is set: merge the peers'
+/// files into the archive, then write this machine's own file. Started in the
+/// background after a refresh slot's archive, and by the user's own sync
+/// actions; a pass never archives, so it exports what the refresh archived.
+/// Best-effort: failures are logged and swallowed.
 ///
-/// Concurrency: the heavy archive flush (with its `.await`) runs BEFORE the
-/// runtime lock is taken, so the lock is never held across an await. All fs work
-/// in `do_auto_export` is synchronous; holding the lock across it both serializes
-/// file access against import's one-shot call and keeps `synced`/`cursors`
-/// consistent. The cheap frontier pre-check returns before any read_raw/write on
-/// the common (nothing-changed) tick, so command handlers contending for the
-/// lock normally wait only microseconds.
-pub(crate) async fn run_auto_export(app: &AppHandle, state: &AppState) {
+/// Returns whether peers' data was merged. The views built before it stay
+/// published: the merge is marked as a pending change for the next sample.
+///
+/// The folder may be a network or cloud-synced share, so its I/O runs on the
+/// blocking pool, outside the compute gate, and the pass stops waiting on it
+/// after [`FOLDER_IO_TIMEOUT`]. Only the archive work between the read and
+/// the write takes the gate, so the caller must not hold it. One pass runs
+/// at a time: it holds the runtime throughout, and a pass that finds it held
+/// skips.
+pub(crate) async fn run_auto_export(app: &AppHandle, state: &AppState) -> bool {
+    let app_version = app.package_info().version.to_string();
+    auto_export_pass(state, &auto_export_file_name(), &app_version).await
+}
+
+/// `run_auto_export` with this machine's file name in the folder and the app
+/// version its header carries.
+async fn auto_export_pass(state: &AppState, own_file: &str, app_version: &str) -> bool {
     let (enabled, folder, hidden) = {
         let cfg = state.auto_export.read().await;
         (cfg.enabled, cfg.folder.clone(), cfg.hidden_models.clone())
@@ -721,22 +737,16 @@ pub(crate) async fn run_auto_export(app: &AppHandle, state: &AppState) {
     // without the user having to manually Import. Writing our own file (below)
     // still honors `enabled`.
     let Some(folder) = folder else {
-        return;
+        return false;
     };
     let Some(archive) = state.parser.archive() else {
-        return;
+        return false;
     };
-
-    // Self-sufficient flush (mirrors run_export) so frontiers/records are current
-    // even when periodic refresh is Off and we're driven from the idle branch.
-    crate::archive_local_usage(state);
-    crate::archive_ssh_device_usage(state).await;
-
-    let folder_path = Path::new(&folder);
-    let own_file = auto_export_file_name();
-    // This machine's label (computer name + OS), computed before the lock. Cached
-    // in a OnceLock so the underlying lookup runs at most once per process.
-    let local_device = device_label();
+    let Ok(mut rt) = state.auto_export_runtime.clone().try_write_owned() else {
+        tracing::debug!("Auto-sync: a pass is already running, skipping this one");
+        return false;
+    };
+    let folder_path = std::path::PathBuf::from(&folder);
 
     // Devices THIS machine owns besides local:* = ALL its configured SSH hosts,
     // ENABLED OR NOT. The export file is a backup of everything this machine
@@ -750,44 +760,155 @@ pub(crate) async fn run_auto_export(app: &AppHandle, state: &AppState) {
         hosts.iter().map(|h| h.alias.clone()).collect()
     };
 
-    // ── 1. Pull in peers: merge every OTHER device's file from this folder ──
-    let merged = {
-        let mut rt = state.auto_export_runtime.write().await;
-        merge_peer_files(&archive, folder_path, &own_file, &ssh_aliases, &mut rt)
+    // ── 1. Read every OTHER device's file that changed: folder I/O ──
+    // The mtime each peer file had when this archive merged it, in this
+    // session or an earlier one: at launch, unchanged files merge nothing.
+    let mut peer_mtimes = archive.merged_peers(&folder);
+    let scan = {
+        let (folder, own_file) = (folder_path.clone(), own_file.to_string());
+        let merged_at = peer_mtimes.clone();
+        folder_io(state, move || {
+            scan_peer_files(&folder, &own_file, &merged_at)
+        })
+        .await
     };
-    if merged {
-        // Peer data landed in the archive — refresh caches + notify the UI,
-        // mirroring import_usage_data so the combined view appears live.
-        state.parser.clear_payload_cache();
-        if let Some(ref disk_cache) = *state.payload_disk_cache.read().await {
-            disk_cache.clear_all();
-        }
-        let _ = app.emit("data-updated", 0u64);
-    }
+    let Some(scan) = scan else {
+        return false;
+    };
+    let own_file_present = scan.own_file_present;
 
-    // ── 2. Write THIS machine's own file (owned sources only) — only when the
-    // "sync out / write my backup" toggle is enabled. Reading peers above is
-    // unconditional once a folder is set.
-    if enabled {
-        let owned: Vec<String> = archive
-            .list_sources()
-            .into_iter()
-            .filter(|s| is_own_source(s, &ssh_aliases))
-            .collect();
-        let path = folder_path.join(&own_file);
-        let mut rt = state.auto_export_runtime.write().await;
-        if let Err(e) = do_auto_export(&archive, &path, app, local_device, &owned, &hidden, &mut rt)
-        {
+    // ── 2. Merge them, and build this machine's file: archive work ──
+    let (merged, own_write) = {
+        let _gate = state.compute.lock().await;
+        let merged_before = peer_mtimes.clone();
+        let merged = merge_peer_files(&archive, scan, &ssh_aliases, &mut peer_mtimes);
+        if peer_mtimes != merged_before {
+            archive.save_merged_peers(&folder, &peer_mtimes);
+        }
+        if merged {
+            // Peer data landed in the archive — collapse any duplicate device
+            // rows it brought. The next sample drops the views it makes stale.
+            crate::cleanup_duplicate_devices(state).await;
+            state
+                .refresh
+                .pending_change
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        // THIS machine's own file (owned sources only) — only when the "sync
+        // out / write my backup" toggle is enabled. Reading peers above is
+        // unconditional once a folder is set.
+        let own_write = enabled.then(|| {
+            let owned: Vec<String> = archive
+                .list_sources()
+                .into_iter()
+                .filter(|s| is_own_source(s, &ssh_aliases))
+                .collect();
+            // This machine's label (computer name + OS). Cached in a OnceLock so
+            // the underlying lookup runs at most once per process.
+            let local_device = device_label();
+            plan_own_file(
+                &archive,
+                app_version,
+                local_device,
+                &owned,
+                &hidden,
+                &rt,
+                own_file_present,
+            )
+        });
+        (merged, own_write)
+    };
+
+    // ── 3. Write it: folder I/O again ──
+    match own_write {
+        Some(Ok(OwnFilePlan {
+            write,
+            cursors,
+            records,
+        })) => {
+            let path = folder_path.join(own_file);
+            match folder_io(state, move || write_own_file(&path, &write)).await {
+                Some(Ok(())) => {
+                    rt.cursors = cursors;
+                    rt.synced = true;
+                    tracing::debug!(records, "Auto-export wrote this machine's file");
+                }
+                Some(Err(e)) => {
+                    // Rewrite cleanly next time rather than append onto a
+                    // possibly-partial file; the cursors stay where they were.
+                    rt.synced = false;
+                    tracing::warn!(error = %e, folder = folder.as_str(), "Auto-sync write failed");
+                }
+                // The write may still land: rewrite the whole file next time.
+                None => rt.synced = false,
+            }
+        }
+        Some(Err(e)) => {
             tracing::warn!(error = %e, folder = folder.as_str(), "Auto-sync write failed");
         }
+        None => {}
     }
+    merged
 }
 
 /// Trigger one auto-sync pass from the Settings "Sync All" button.
 #[tauri::command]
 pub async fn sync_remote_devices(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    run_auto_export(&app, &state).await;
+    if run_auto_export(&app, &state).await {
+        crate::refresh::request_refresh(&state);
+    }
     Ok(())
+}
+
+/// Run `io` against the auto-export folder on the blocking pool, waiting at
+/// most [`FOLDER_IO_TIMEOUT`]. `None` while the folder is still busy with an
+/// earlier pass's I/O, or when `io` panicked or overran. One that overran
+/// finishes in the background and keeps the folder busy until it does, so
+/// the passes meanwhile skip instead of piling up behind it.
+async fn folder_io<T: Send + 'static>(
+    state: &AppState,
+    io: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    use std::sync::atomic::Ordering;
+    if state
+        .refresh
+        .export_folder_busy
+        .swap(true, Ordering::SeqCst)
+    {
+        tracing::debug!("Auto-sync: the folder is still busy with an earlier pass");
+        return None;
+    }
+    // Moved into the task, so the folder stays busy for as long as it runs,
+    // and is freed even if the task never starts.
+    let busy = FolderBusy(state.refresh.clone());
+    let task = tokio::task::spawn_blocking(move || {
+        let _busy = busy;
+        io()
+    });
+    match tokio::time::timeout(FOLDER_IO_TIMEOUT, task).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "Auto-sync folder I/O failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                "Auto-sync: no answer from the folder within {FOLDER_IO_TIMEOUT:?}; it finishes in the background"
+            );
+            None
+        }
+    }
+}
+
+/// Marks the auto-export folder busy until dropped.
+struct FolderBusy(std::sync::Arc<crate::refresh::RefreshState>);
+
+impl Drop for FolderBusy {
+    fn drop(&mut self) {
+        self.0
+            .export_folder_busy
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// True if a source belongs to THIS machine (so it's ours to export): the local
@@ -818,51 +939,72 @@ fn remap_peer_source(source_key: &str, peer_slug: &str) -> Option<String> {
     }
 }
 
-/// Scan the sync folder for OTHER devices' export files and merge them into the
-/// archive (idempotent field-wise-max dedup). Skips our own file and any file
-/// whose mtime is unchanged since the last merge. Returns true if anything was
-/// imported (so the caller can refresh caches + notify the UI).
-fn merge_peer_files(
-    archive: &ArchiveManager,
+/// A peer's export file that changed since it was last merged.
+struct PeerFile {
+    name: String,
+    slug: String,
+    mtime: Option<SystemTime>,
+    content: String,
+}
+
+/// What a read of the sync folder found.
+#[derive(Default)]
+struct PeerScan {
+    /// The folder could be listed; nothing else is set when it could not.
+    listed: bool,
+    /// This machine's own file is in it.
+    own_file_present: bool,
+    /// Every peer file in it, by name.
+    seen: HashSet<String>,
+    /// The peer files changed since their last merge.
+    changed: Vec<PeerFile>,
+    /// (name, slug) of each file this machine wrote under an older name,
+    /// deleted from the folder.
+    stale_own: Vec<(String, String)>,
+}
+
+/// Read the sync folder for OTHER devices' export files: those whose mtime
+/// differs from the one they were last merged at (`merged_at`), and none of
+/// ours. A file this machine wrote under an older name is deleted. Only
+/// folder I/O: [`merge_peer_files`] merges what this finds.
+fn scan_peer_files(
     folder: &Path,
     own_file: &str,
-    ssh_aliases: &HashSet<String>,
-    rt: &mut AutoExportRuntime,
-) -> bool {
+    merged_at: &HashMap<String, Option<SystemTime>>,
+) -> PeerScan {
     let read_dir = match std::fs::read_dir(folder) {
         Ok(r) => r,
-        Err(_) => return false,
+        Err(_) => return PeerScan::default(),
     };
-
-    let now = chrono::Local::now();
-    let current_date = now.date_naive();
-    let current_hour = now.hour() as u8;
-
-    let mut changed = false;
-    let mut seen_files: HashSet<String> = HashSet::new();
+    let mut scan = PeerScan {
+        listed: true,
+        ..PeerScan::default()
+    };
 
     for entry in read_dir.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name == own_file {
+            scan.own_file_present = true;
             continue;
         }
         // Must match our per-device naming and yield a safe device alias.
         let Some(slug) = name
             .strip_prefix(AUTO_EXPORT_FILE_PREFIX)
             .and_then(|s| s.strip_suffix(AUTO_EXPORT_FILE_SUFFIX))
+            .map(str::to_string)
         else {
             continue;
         };
         if !is_valid_source_key(&format!("device:{slug}")) {
             continue;
         }
-        seen_files.insert(name.clone());
+        scan.seen.insert(name.clone());
 
         // mtime gate: skip a peer file we've already merged at this version. When
         // the filesystem can't report an mtime (None), never gate on it — always
         // re-merge (idempotent dedup makes that safe) so changes aren't missed.
         let mtime = entry.metadata().ok().and_then(|m| m.modified().ok());
-        if mtime.is_some() && rt.peer_mtimes.get(&name) == Some(&mtime) {
+        if mtime.is_some() && merged_at.get(&name) == Some(&mtime) {
             continue;
         }
 
@@ -902,24 +1044,60 @@ fn merge_peer_files(
                     "Failed to remove stale own export file"
                 );
             }
-            if !ssh_aliases.contains(slug) {
-                archive.remove_source(&format!("device:{slug}"));
-                changed = true;
-            }
-            rt.peer_mtimes.remove(&name);
+            scan.stale_own.push((name, slug));
             continue;
         }
 
-        let (groups, _skipped) = match parse_import_payload(&content) {
+        scan.changed.push(PeerFile {
+            name,
+            slug,
+            mtime,
+            content,
+        });
+    }
+    scan
+}
+
+/// Merge what [`scan_peer_files`] found into the archive (idempotent
+/// field-wise-max dedup), and drop the phantom device sources this machine's
+/// stale files left. `peer_mtimes` holds the mtime each peer file was merged
+/// at, by name. Returns true if anything was imported (so the caller can
+/// refresh caches + notify the UI). The caller holds the compute gate.
+fn merge_peer_files(
+    archive: &ArchiveManager,
+    scan: PeerScan,
+    ssh_aliases: &HashSet<String>,
+    peer_mtimes: &mut HashMap<String, Option<SystemTime>>,
+) -> bool {
+    if !scan.listed {
+        return false;
+    }
+    let now = chrono::Local::now();
+    let current_date = now.date_naive();
+    let current_hour = now.hour() as u8;
+    let mut changed = false;
+
+    for (name, slug) in scan.stale_own {
+        // Keep the source when the slug is a real SSH host we sync (the hashed
+        // slug realistically never collides with a user alias, but be safe).
+        if !ssh_aliases.contains(&slug) {
+            archive.remove_source(&format!("device:{slug}"));
+            changed = true;
+        }
+        peer_mtimes.remove(&name);
+    }
+
+    for file in scan.changed {
+        let (groups, _skipped) = match parse_import_payload(&file.content) {
             Ok(g) => g,
             Err(e) => {
-                tracing::warn!(file = name.as_str(), error = %e, "Auto-export peer parse failed");
+                tracing::warn!(file = file.name.as_str(), error = %e, "Auto-export peer parse failed");
                 continue;
             }
         };
 
         for (source_key, records) in groups {
-            let Some(target) = remap_peer_source(&source_key, slug) else {
+            let Some(target) = remap_peer_source(&source_key, &file.slug) else {
                 continue;
             };
             if !is_valid_source_key(&target) {
@@ -932,36 +1110,49 @@ fn merge_peer_files(
             changed = true;
         }
 
-        rt.peer_mtimes.insert(name, mtime);
+        peer_mtimes.insert(file.name, file.mtime);
     }
 
     // Forget peers whose files disappeared, so a returning file re-merges.
-    rt.peer_mtimes.retain(|k, _| seen_files.contains(k));
+    peer_mtimes.retain(|k, _| scan.seen.contains(k));
 
     changed
 }
 
-/// Synchronous core of the auto-export. Either does a full reconciliation (first
-/// run this session, after an import/folder-change, or a missing file) or appends
-/// only records past each source's cursor.
-fn do_auto_export(
+/// What a pass writes to this machine's file.
+enum OwnFileWrite {
+    /// Replace the whole file with this.
+    Rewrite(String),
+    /// Append these complete lines (possibly none).
+    Append(String),
+}
+
+/// What a pass writes to this machine's file, and where each source's
+/// cursor stands once it is written.
+struct OwnFilePlan {
+    write: OwnFileWrite,
+    cursors: HashMap<String, ArchiveFrontier>,
+    records: usize,
+}
+
+/// Plan this machine's file from the archive: a full reconciliation (first
+/// run this session, after an import/folder-change, or a missing file), or an
+/// append of only the records past each source's cursor. Reads the archive
+/// only; [`write_own_file`] does the folder I/O. The caller holds the gate.
+fn plan_own_file(
     archive: &ArchiveManager,
-    path: &Path,
-    app: &AppHandle,
+    app_version: &str,
     local_device: &str,
     owned: &[String],
     hidden: &HashSet<String>,
-    rt: &mut AutoExportRuntime,
-) -> Result<(), String> {
+    rt: &AutoExportRuntime,
+    file_present: bool,
+) -> Result<OwnFilePlan, String> {
     // Once-per-session (or post-import / folder-change / hidden-models-change /
     // missing-file) full reconciliation guarantees the file holds everything
     // archived so far, filtered to the currently-visible models.
-    if !rt.synced || !path.exists() {
-        let cursors = full_rewrite(archive, path, app, local_device, owned, hidden)?;
-        rt.cursors = cursors;
-        rt.synced = true;
-        tracing::debug!(path = %path.display(), "Auto-export full sync complete");
-        return Ok(());
+    if !rt.synced || !file_present {
+        return full_export(archive, app_version, local_device, owned, hidden);
     }
 
     // Incremental: append only completed-hour records past each source's cursor.
@@ -998,7 +1189,7 @@ fn do_auto_export(
             }
             // Skip hidden models so the mirror matches the dashboard. A change to
             // the hidden set resets synced+cursors (see set_auto_export_config),
-            // forcing a full_rewrite, so previously-appended hidden rows don't
+            // forcing a full export, so previously-appended hidden rows don't
             // linger and un-hidden rows reappear.
             if record_hidden(&record, hidden) {
                 continue;
@@ -1010,28 +1201,44 @@ fn do_auto_export(
         updates.push((source_key.to_string(), cur));
     }
 
-    if !batch.is_empty() {
-        if let Err(e) = append_lines(path, &batch) {
-            // Leave synced=false so the next tick rewrites cleanly rather than
-            // appending onto a possibly-partial file; don't advance cursors.
-            rt.synced = false;
-            return Err(e);
-        }
-        tracing::debug!(records = count, "Auto-export appended new records");
-    }
     // Advance cursors after a successful (or empty) append. Cursors track each
     // source's completed-hour FRONTIER, not individual record writes, so an
     // empty batch on an advanced frontier (a genuinely empty completed hour) is
     // correct to commit — nothing was lost. Anchoring on the frontier (rather
     // than the max written record) avoids re-emitting/duplicating records when
     // the newest completed hour happens to be empty.
-    for (k, v) in updates {
-        rt.cursors.insert(k, v);
-    }
+    let mut cursors = rt.cursors.clone();
+    cursors.extend(updates);
     // Drop cursors for sources no longer owned (e.g. an SSH host was disabled),
     // keeping the cursor map aligned with what we actually export.
-    rt.cursors.retain(|k, _| owned.iter().any(|s| s == k));
-    Ok(())
+    cursors.retain(|k, _| owned.iter().any(|s| s == k));
+    Ok(OwnFilePlan {
+        write: OwnFileWrite::Append(batch),
+        cursors,
+        records: count,
+    })
+}
+
+/// Write a planned file to `path`. A rewrite is published atomically via a
+/// sibling temp file + rename so a crash mid-write never leaves a torn
+/// mirror — the previous good file survives until the rename succeeds.
+fn write_own_file(path: &Path, write: &OwnFileWrite) -> Result<(), String> {
+    match write {
+        OwnFileWrite::Append(batch) if batch.is_empty() => Ok(()),
+        OwnFileWrite::Append(batch) => append_lines(path, batch),
+        OwnFileWrite::Rewrite(content) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create auto-export dir: {e}"))?;
+            }
+            let mut tmp = path.as_os_str().to_owned();
+            tmp.push(".tmp");
+            let tmp = std::path::PathBuf::from(tmp);
+            std::fs::write(&tmp, content.as_bytes())
+                .map_err(|e| format!("Failed to write auto-export: {e}"))?;
+            std::fs::rename(&tmp, path).map_err(|e| format!("Failed to publish auto-export: {e}"))
+        }
+    }
 }
 
 /// Serialize one record as a JSONL line body (no trailing newline). `device` is
@@ -1047,29 +1254,22 @@ fn record_line(source_key: &str, device: &str, record: &ArchivedHourly) -> Resul
     .map_err(|e| format!("Failed to serialize record: {e}"))
 }
 
-/// Rewrite the entire JSONL file from scratch (header + every archived record)
-/// and return the per-source cursors it represents. Published atomically via a
-/// sibling temp file + rename so a crash mid-write never leaves a torn mirror —
-/// the previous good file survives until the rename succeeds.
-fn full_rewrite(
+/// The entire JSONL file from scratch (header + every archived record), with
+/// the per-source cursors it represents.
+fn full_export(
     archive: &ArchiveManager,
-    path: &Path,
-    app: &AppHandle,
+    app_version: &str,
     local_device: &str,
     owned: &[String],
     hidden: &HashSet<String>,
-) -> Result<HashMap<String, ArchiveFrontier>, String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create auto-export dir: {e}"))?;
-    }
-
+) -> Result<OwnFilePlan, String> {
     let mut out = String::new();
+    let mut count = 0usize;
     let header = JsonlHeader {
         format: EXPORT_FORMAT_JSONL,
         format_version: EXPORT_FORMAT_JSONL_VERSION,
         exported_at: chrono::Local::now().to_rfc3339(),
-        app_version: app.package_info().version.to_string(),
+        app_version: app_version.to_string(),
         device: local_device,
         device_id: device_slug(),
     };
@@ -1091,19 +1291,17 @@ fn full_rewrite(
             }
             out.push_str(&record_line(source_key, &device, record)?);
             out.push('\n');
+            count += 1;
         }
         if let Some(f) = archive.frontier(source_key) {
             cursors.insert(source_key.to_string(), f);
         }
     }
-
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
-    std::fs::write(&tmp, out.as_bytes())
-        .map_err(|e| format!("Failed to write auto-export: {e}"))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("Failed to publish auto-export: {e}"))?;
-    Ok(cursors)
+    Ok(OwnFilePlan {
+        write: OwnFileWrite::Rewrite(out),
+        cursors,
+        records: count,
+    })
 }
 
 /// Append a batch of complete (newline-terminated) lines, guarding against a
@@ -1159,12 +1357,33 @@ pub async fn import_usage_data(
     json: String,
     file_name: Option<String>,
 ) -> Result<ImportResult, String> {
+    let app_version = app.package_info().version.to_string();
+    import_payload(
+        &state,
+        &json,
+        file_name.as_deref(),
+        &auto_export_file_name(),
+        &app_version,
+    )
+    .await
+}
+
+/// `import_usage_data` with this machine's file name in the auto-export
+/// folder and the app version its header carries.
+async fn import_payload(
+    state: &AppState,
+    json: &str,
+    file_name: Option<&str>,
+    own_file: &str,
+    app_version: &str,
+) -> Result<ImportResult, String> {
     let archive = state
         .parser
         .archive()
         .ok_or_else(|| "Usage archive is not available".to_string())?;
+    let gate = state.compute.lock().await;
 
-    let (sources, skipped) = parse_import_payload(&json)?;
+    let (sources, skipped) = parse_import_payload(json)?;
 
     // Decide whether this file is THIS machine's own backup (restore verbatim) or
     // another machine's export. For a peer file, remap its `local:*` blocks to a
@@ -1172,15 +1391,13 @@ pub async fn import_usage_data(
     // other machine's usage is attributed to that device instead of being summed
     // into THIS machine's local total. Unknown origin (legacy / header-less file)
     // → verbatim, preserving the original restore behavior.
-    let (origin_id, origin_dev) = detect_import_origin(&json);
+    let (origin_id, origin_dev) = detect_import_origin(json);
     // The auto-export FILE NAME encodes the writer's frozen device slug
     // (`slugify(label)` + hash). Auto-sync's peer merge keys off THAT slug, so a
     // manual import must use it too: an old-format file (no `device_id` header)
     // would otherwise fall back to `slugify(label)` WITHOUT the hash and land
     // under a SECOND `device:<slug>` for the same machine — the duplicate device.
-    let file_slug = file_name
-        .as_deref()
-        .and_then(peer_slug_from_export_filename);
+    let file_slug = file_name.and_then(peer_slug_from_export_filename);
     let is_own = (!origin_id.is_empty() && origin_id == device_slug())
         || (!origin_dev.is_empty() && origin_dev == device_label())
         || file_slug.as_deref() == Some(device_slug());
@@ -1199,8 +1416,11 @@ pub async fn import_usage_data(
     };
 
     // Flush local completed hours first so advancing a frontier on import never
-    // hides un-archived live data (see ECL DEC-004).
-    crate::archive_local_usage(&state);
+    // hides un-archived live data (see ECL DEC-004). The sweep before it: between
+    // samples the file cache may predate what was logged since, and the frontier
+    // would then hide that for good.
+    let horizon = crate::refresh::sweep_before_user_archive(state).await;
+    crate::archive_local_usage(state, horizon);
 
     let now = chrono::Local::now();
     let current_date = now.date_naive();
@@ -1238,14 +1458,12 @@ pub async fn import_usage_data(
         result.sources.push(stats);
     }
 
-    // The archive changed but no source JSONL did, so invalidate caches manually
-    // (mirrors the clear_payload_cache command) and notify the UI to refetch.
-    // NOTE: never call parser.clear_cache() here — it resets the archive.
-    state.parser.clear_payload_cache();
-    if let Some(ref disk_cache) = *state.payload_disk_cache.read().await {
-        disk_cache.clear_all();
-    }
-    let _ = app.emit("data-updated", 0u64);
+    // Purge duplicate device sources the merge may have surfaced (defense in
+    // depth; the filename-slug remap above already keeps a peer under one alias).
+    crate::cleanup_duplicate_devices(state).await;
+    // The pass below takes the gate itself, only for its archive work, while
+    // it holds the runtime: holding the gate across the reset could deadlock.
+    drop(gate);
 
     // Imports can field-wise-max-bump OLD, already-exported buckets that sit
     // behind the auto-export cursor, so the incremental path would miss them.
@@ -1258,11 +1476,16 @@ pub async fn import_usage_data(
         rt.synced = false;
         rt.cursors.clear();
     }
-    run_auto_export(&app, &state).await;
+    auto_export_pass(state, own_file, app_version).await;
 
-    // Purge duplicate device sources the merge may have surfaced (defense in
-    // depth; the filename-slug remap above already keeps a peer under one alias).
-    crate::cleanup_duplicate_devices(&state).await;
+    // The archive changed where the sweep cannot see it. The refresh this
+    // requests drops the views built before the import and publishes it; until
+    // then the published views stay.
+    state
+        .refresh
+        .pending_change
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::refresh::request_refresh(state);
 
     Ok(result)
 }
@@ -1738,7 +1961,8 @@ mod tests {
     #[test]
     fn import_reconstructs_provider_from_jsonl_line() {
         // New JSONL: record has no p; the bucket p is rebuilt from the line-level
-        // provider (here derived from the gpt model → codex).
+        // provider (here derived from the gpt model → codex). The archive layer
+        // re-tags device:* rows to "all" on import (see import_source).
         let mut rec = sample_record("all", "2026-06-15", 10);
         rec.mk = "gpt-5".to_string();
         let body = format!("{}\n", record_line("device:srv", "srv", &rec).unwrap());
@@ -1849,5 +2073,360 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "device:../escape");
         assert!(!is_valid_source_key(&groups[0].0));
+    }
+
+    /// Usage access on, logs and archive under `dir`, listings frozen as the
+    /// refresh loop runs. Only the fixture's Claude logs are archived: this
+    /// machine's own Cursor and Kimi logs count as scanned this hour.
+    fn archive_state(dir: &Path) -> AppState {
+        let mut st = AppState::new();
+        st.usage_access_enabled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        std::fs::create_dir_all(dir.join("claude")).unwrap();
+        st.parser = std::sync::Arc::new(crate::usage::parser::UsageParser::with_dirs(
+            dir.join("claude"),
+            dir.join("codex"),
+        ));
+        st.parser.set_listings_frozen(true);
+        let archive = ArchiveManager::new(dir);
+        let now = chrono::Local::now();
+        for source in ["local:codex", "local:cursor", "local:kimi"] {
+            archive.should_scan(source, now.date_naive(), now.hour() as u8, 0);
+        }
+        st.parser.set_archive(archive);
+        st
+    }
+
+    fn own_file() -> String {
+        format!("{AUTO_EXPORT_FILE_PREFIX}this-box{AUTO_EXPORT_FILE_SUFFIX}")
+    }
+
+    /// Two days ago at `hour`: long completed.
+    fn completed_hour(hour: u32) -> chrono::DateTime<chrono::Local> {
+        (chrono::Local::now() - chrono::Duration::days(2))
+            .date_naive()
+            .and_hms_opt(hour, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap()
+    }
+
+    fn append_claude_line(dir: &Path, at: chrono::DateTime<chrono::Local>) {
+        let line = format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":1000,"output_tokens":500}},"stop_reason":"end_turn"}}}}"#,
+            at.to_rfc3339()
+        );
+        std::fs::File::options()
+            .create(true)
+            .append(true)
+            .open(dir.join("claude").join("session.jsonl"))
+            .unwrap()
+            .write_all(format!("{line}\n").as_bytes())
+            .unwrap();
+    }
+
+    /// Log a completed hour and build the file cache from it, as a query
+    /// between samples does; then log the next completed hour, which only a
+    /// sweep sees. Returns their date.
+    fn log_behind_the_file_cache(st: &AppState, dir: &Path) -> String {
+        append_claude_line(dir, completed_hour(10));
+        let day = completed_hour(10).date_naive();
+        st.parser
+            .get_daily("claude", &day.format("%Y%m%d").to_string());
+        append_claude_line(dir, completed_hour(11));
+        day.format("%Y-%m-%d").to_string()
+    }
+
+    fn archived_hours(st: &AppState, source: &str) -> Vec<(String, u8)> {
+        st.parser
+            .archive()
+            .unwrap()
+            .read_raw(source)
+            .into_iter()
+            .map(|r| (r.d, r.h))
+            .collect()
+    }
+
+    fn refresh_requested_with_a_pending_change(st: &AppState) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        st.refresh.pending_change.load(SeqCst) && st.refresh.requested.load(SeqCst)
+    }
+
+    /// DEC-004: an import that moves a local frontier must not hide the live
+    /// hours behind it. They are archived first, from a swept file cache.
+    #[tokio::test]
+    async fn an_import_archives_the_live_hours_before_it_moves_a_frontier() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let st = archive_state(dir.path());
+        let day = log_behind_the_file_cache(&st, dir.path());
+
+        // A backup newer than both hours: importing it moves the frontier
+        // past them. With no device on its line its origin is unknown, so it
+        // is restored verbatim into local:claude.
+        let yesterday = (chrono::Local::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut line: serde_json::Value = serde_json::from_str(&jsonl_line(
+            "local:claude",
+            &sample_record("claude", &yesterday, 10),
+        ))
+        .unwrap();
+        line.as_object_mut().unwrap().remove("device");
+        let json = format!("{line}\n");
+        import_payload(&st, &json, None, &own_file(), "0.0.0")
+            .await
+            .unwrap();
+
+        let archived = archived_hours(&st, "local:claude");
+        assert!(
+            archived.contains(&(yesterday, 10)),
+            "guard: the import landed: {archived:?}"
+        );
+        assert!(
+            archived.contains(&(day.clone(), 10)),
+            "the live hours are archived before the frontier moves: {archived:?}"
+        );
+        assert!(
+            archived.contains(&(day, 11)),
+            "including what was logged after the file cache was built: {archived:?}"
+        );
+        assert!(refresh_requested_with_a_pending_change(&st));
+    }
+
+    #[tokio::test]
+    async fn an_export_archives_what_was_logged_since_the_file_cache_was_built() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let st = archive_state(dir.path());
+        let day = log_behind_the_file_cache(&st, dir.path());
+        let view = "usage-view:claude:day:0:test";
+        st.parser
+            .store_cache(view, st.parser.get_daily("claude", "20260101"));
+
+        let path = dir.path().join("export.json");
+        let result = run_export(&st, &path.to_string_lossy(), &HashSet::new(), "0.0.0")
+            .await
+            .unwrap();
+
+        assert_eq!(result.record_count, 2, "both hours are exported");
+        assert!(archived_hours(&st, "local:claude").contains(&(day, 11)));
+        assert!(
+            st.parser.check_cache_as_stored(view).is_none(),
+            "the views built without the sweep's change are dropped"
+        );
+        assert!(
+            refresh_requested_with_a_pending_change(&st),
+            "and the refresh that publishes it is requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_import_requests_a_refresh_and_keeps_the_views_until_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let st = archive_state(dir.path());
+        let view = "usage-view:claude:day:0:test";
+        st.parser
+            .store_cache(view, st.parser.get_daily("claude", "20260101"));
+
+        let date = (chrono::Local::now() - chrono::Duration::days(3))
+            .format("%Y-%m-%d")
+            .to_string();
+        let json = format!(
+            "{}\n",
+            jsonl_line("local:claude", &sample_record("claude", &date, 10))
+        );
+        let own_file = format!("{AUTO_EXPORT_FILE_PREFIX}this-box{AUTO_EXPORT_FILE_SUFFIX}");
+        let result = import_payload(&st, &json, None, &own_file, "0.0.0")
+            .await
+            .unwrap();
+        assert_eq!(result.total_new, 1, "guard: the record was imported");
+
+        assert!(
+            st.refresh
+                .pending_change
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the sample drops the views the import made stale"
+        );
+        assert!(
+            st.refresh
+                .requested
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "and runs now"
+        );
+        assert!(
+            st.parser.check_cache_as_stored(view).is_some(),
+            "until then the published view stays"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_merge_marks_a_pending_change_and_keeps_the_views() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let st = archive_state(dir.path());
+
+        // A peer's export in the sync folder; writing our own file is off.
+        let folder = dir.path().join("sync");
+        std::fs::create_dir_all(&folder).unwrap();
+        let date = (chrono::Local::now() - chrono::Duration::days(3))
+            .format("%Y-%m-%d")
+            .to_string();
+        let line = jsonl_line("local:claude", &sample_record("claude", &date, 10));
+        std::fs::write(
+            folder.join(format!(
+                "{AUTO_EXPORT_FILE_PREFIX}peer-box{AUTO_EXPORT_FILE_SUFFIX}"
+            )),
+            format!("{line}\n"),
+        )
+        .unwrap();
+        st.auto_export.write().await.folder = Some(folder.to_string_lossy().into_owned());
+
+        // A view published before the merge.
+        let view = "usage-view:claude:day:0:test";
+        st.parser
+            .store_cache(view, st.parser.get_daily("claude", "20260101"));
+
+        let own_file = format!("{AUTO_EXPORT_FILE_PREFIX}this-box{AUTO_EXPORT_FILE_SUFFIX}");
+        assert!(auto_export_pass(&st, &own_file, "0.0.0").await);
+        assert!(
+            st.refresh
+                .pending_change
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the next sample picks the merge up"
+        );
+        assert!(
+            st.parser.check_cache_as_stored(view).is_some(),
+            "and until then the published view stays"
+        );
+        assert!(
+            !auto_export_pass(&st, &own_file, "0.0.0").await,
+            "an unchanged peer file merges nothing"
+        );
+    }
+
+    /// The archive remembers the peer files it merged, so the next launch's
+    /// first pass merges nothing unchanged and forces no second cycle.
+    #[tokio::test]
+    async fn a_new_session_does_not_merge_an_unchanged_peer_file_again() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let folder = dir.path().join("sync");
+        std::fs::create_dir_all(&folder).unwrap();
+        let date = (chrono::Local::now() - chrono::Duration::days(3))
+            .format("%Y-%m-%d")
+            .to_string();
+        let line = jsonl_line("local:claude", &sample_record("claude", &date, 10));
+        std::fs::write(
+            folder.join(format!(
+                "{AUTO_EXPORT_FILE_PREFIX}peer-box{AUTO_EXPORT_FILE_SUFFIX}"
+            )),
+            format!("{line}\n"),
+        )
+        .unwrap();
+        let session = || async {
+            let st = archive_state(dir.path());
+            st.auto_export.write().await.folder = Some(folder.to_string_lossy().into_owned());
+            st
+        };
+
+        assert!(auto_export_pass(&session().await, &own_file(), "0.0.0").await);
+        let next = session().await;
+        assert!(!auto_export_pass(&next, &own_file(), "0.0.0").await);
+
+        next.parser.archive().unwrap().reset();
+        assert!(
+            auto_export_pass(&next, &own_file(), "0.0.0").await,
+            "an archive reset forgets what it merged"
+        );
+    }
+
+    /// The record lines (not the header) of this machine's file.
+    fn own_file_records(folder: &Path) -> Vec<String> {
+        std::fs::read_to_string(folder.join(own_file()))
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("\"source_key\""))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_pass_writes_this_machines_file_whole_then_appends() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let st = archive_state(dir.path());
+        let archive = st.parser.archive().unwrap();
+        let folder = dir.path().join("sync");
+        {
+            let mut cfg = st.auto_export.write().await;
+            cfg.enabled = true;
+            cfg.folder = Some(folder.to_string_lossy().into_owned());
+        }
+        let now = chrono::Local::now();
+        let (today, hour) = (now.date_naive(), now.hour() as u8);
+        let day = |days: i64| {
+            (now - chrono::Duration::days(days))
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        archive.import_source(
+            "local:claude",
+            &[sample_record("claude", &day(3), 10)],
+            today,
+            hour,
+        );
+
+        assert!(!auto_export_pass(&st, &own_file(), "0.0.0").await);
+        assert_eq!(own_file_records(&folder).len(), 1, "the whole archive");
+        assert!(st.auto_export_runtime.read().await.synced);
+
+        archive.import_source(
+            "local:claude",
+            &[sample_record("claude", &day(2), 10)],
+            today,
+            hour,
+        );
+        auto_export_pass(&st, &own_file(), "0.0.0").await;
+        let lines = own_file_records(&folder);
+        assert_eq!(lines.len(), 2, "only the new hour is appended: {lines:?}");
+        assert!(lines[1].contains(&day(2)));
+        assert!(
+            !st.refresh
+                .export_folder_busy
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the folder is free again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pass_skips_while_the_folder_is_busy_with_an_earlier_one() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let dir = tempfile::TempDir::new().unwrap();
+        let st = archive_state(dir.path());
+        let folder = dir.path().join("sync");
+        std::fs::create_dir_all(&folder).unwrap();
+        let date = (chrono::Local::now() - chrono::Duration::days(3))
+            .format("%Y-%m-%d")
+            .to_string();
+        let line = jsonl_line("local:claude", &sample_record("claude", &date, 10));
+        std::fs::write(
+            folder.join(format!(
+                "{AUTO_EXPORT_FILE_PREFIX}peer-box{AUTO_EXPORT_FILE_SUFFIX}"
+            )),
+            format!("{line}\n"),
+        )
+        .unwrap();
+        st.auto_export.write().await.folder = Some(folder.to_string_lossy().into_owned());
+
+        // An earlier pass's I/O overran and still runs.
+        st.refresh.export_folder_busy.store(true, SeqCst);
+        assert!(!auto_export_pass(&st, &own_file(), "0.0.0").await);
+        assert!(
+            st.refresh.export_folder_busy.load(SeqCst),
+            "its claim stays"
+        );
+
+        st.refresh.export_folder_busy.store(false, SeqCst);
+        assert!(
+            auto_export_pass(&st, &own_file(), "0.0.0").await,
+            "once it ends, the next pass merges"
+        );
+        assert!(!st.refresh.export_folder_busy.load(SeqCst));
     }
 }

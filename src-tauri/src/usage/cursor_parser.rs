@@ -6,11 +6,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
-use super::parser::{
-    modified_since, path_to_string, push_sample_path, ParsedEntry, ProviderReadDebug,
-    SessionParseResult,
-};
+use super::parser::{path_to_string, ParsedEntry, SessionParseResult};
 
 /// Windows: CREATE_NO_WINDOW flag prevents a console window from flashing.
 #[cfg(target_os = "windows")]
@@ -73,10 +71,53 @@ fn normalize_optional_secret(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Bumped by every set of the Cursor secret, under this lock.
+static CURSOR_AUTH_VERSION: Mutex<u64> = Mutex::new(0);
+
+/// The version of the Cursor secret now set: see
+/// [`set_cursor_auth_config_if_unchanged`].
+pub(crate) fn cursor_auth_version() -> u64 {
+    *CURSOR_AUTH_VERSION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 pub(crate) fn set_cursor_auth_config(
     api_key: Option<String>,
     backend: crate::secrets::StorageBackend,
 ) -> CursorAuthStatus {
+    let mut version = CURSOR_AUTH_VERSION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    store_cursor_auth_config(&mut version, api_key, backend);
+    drop(version);
+    cursor_auth_status()
+}
+
+/// [`set_cursor_auth_config`] unless another set came since `version`: a
+/// background read of the stored secret, begun before a newer set, must not
+/// undo it. Returns whether it set it.
+pub(crate) fn set_cursor_auth_config_if_unchanged(
+    version: u64,
+    api_key: Option<String>,
+    backend: crate::secrets::StorageBackend,
+) -> bool {
+    let mut current = CURSOR_AUTH_VERSION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if *current != version {
+        return false;
+    }
+    store_cursor_auth_config(&mut current, api_key, backend);
+    true
+}
+
+fn store_cursor_auth_config(
+    version: &mut u64,
+    api_key: Option<String>,
+    backend: crate::secrets::StorageBackend,
+) {
+    *version += 1;
     if let Ok(mut guard) = cursor_secret_override_cell().lock() {
         *guard = normalize_optional_secret(api_key);
     }
@@ -84,7 +125,6 @@ pub(crate) fn set_cursor_auth_config(
         *guard = backend;
     }
     set_cursor_warning(None);
-    cursor_auth_status()
 }
 
 pub(crate) fn set_cursor_warning(message: Option<String>) {
@@ -400,66 +440,6 @@ pub(crate) fn parse_cursor_session_file(path: &Path) -> SessionParseResult {
     (entries, Vec::new(), lines_read, true)
 }
 
-pub(crate) fn glob_cursor_chat_session_files(dir: &Path) -> Vec<PathBuf> {
-    let mut results = Vec::new();
-    if !dir.exists() {
-        return results;
-    }
-    tracing::trace!(path = %dir.display(), "read_dir (glob_cursor_chat_session_files)");
-    let rd = match fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(error) => {
-            tracing::warn!(
-                path = %path_to_string(dir),
-                error = %error,
-                "Failed to read Cursor workspace storage directory"
-            );
-            return results;
-        }
-    };
-    for entry in rd.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_symlink() {
-            tracing::debug!(path = %entry.path().display(), "skipping symlink");
-            continue;
-        }
-        let path = entry.path();
-        if file_type.is_dir() {
-            if path.file_name().is_some_and(|name| name == "chatSessions") {
-                let chat_rd = match fs::read_dir(&path) {
-                    Ok(chat_rd) => chat_rd,
-                    Err(error) => {
-                        tracing::warn!(
-                            path = %path_to_string(&path),
-                            error = %error,
-                            "Failed to read Cursor chatSessions directory"
-                        );
-                        continue;
-                    }
-                };
-                for chat_entry in chat_rd.flatten() {
-                    let Ok(chat_ft) = chat_entry.file_type() else {
-                        continue;
-                    };
-                    if chat_ft.is_symlink() || !chat_ft.is_file() {
-                        continue;
-                    }
-                    let chat_path = chat_entry.path();
-                    if chat_path.extension().is_some_and(|ext| ext == "json") {
-                        results.push(chat_path);
-                    }
-                }
-            } else {
-                results.extend(glob_cursor_chat_session_files(&path));
-            }
-        }
-    }
-    results.sort();
-    results
-}
-
 pub(crate) fn cursor_global_state_path_from_env() -> Option<PathBuf> {
     let raw = std::env::var(CURSOR_USER_DIR_ENV).ok()?;
     let trimmed = raw.trim();
@@ -559,18 +539,87 @@ pub(crate) fn resolve_cursor_auth() -> Option<CursorAuth> {
     )
 }
 
+/// `(mtime, len)` of Cursor's state DB and of its WAL, where the IDE writes
+/// first. Taken from the files themselves: on Windows a directory listing
+/// lags behind a file that is still open for writing.
+type StateDbStamp = [Option<(SystemTime, u64)>; 2];
+
+fn state_db_stamp(db_path: &Path) -> StateDbStamp {
+    let stamp = |path: &Path| {
+        let meta = fs::metadata(path).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
+    };
+    let mut wal = db_path.as_os_str().to_owned();
+    wal.push("-wal");
+    [stamp(db_path), stamp(Path::new(&wal))]
+}
+
+fn cursor_state_db_path() -> Option<PathBuf> {
+    cursor_global_state_path_from_env().or_else(crate::paths::cursor_global_state_vscdb_default)
+}
+
+/// An IDE token read, with the DB path and stamp it was read at.
+type TokenRead = (PathBuf, StateDbStamp, Option<String>);
+
+/// The IDE token last read: while the (multi-GB) DB is unchanged, a read
+/// costs two stats, not a `sqlite3` spawn. [`forget_cursor_ide_token`] drops
+/// it when the API rejects it.
+static CURSOR_IDE_TOKEN_READ: Mutex<Option<TokenRead>> = Mutex::new(None);
+
 pub(crate) fn read_cursor_ide_access_token() -> Option<String> {
-    let path = cursor_global_state_path_from_env()
-        .or_else(crate::paths::cursor_global_state_vscdb_default)?;
-    let raw = read_cursor_state_value_from_sqlite3(&path, CURSOR_IDE_ACCESS_TOKEN_KEY)
-        .ok()
-        .flatten()?;
-    let trimmed = raw.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
+    let path = cursor_state_db_path()?;
+    let stamp = state_db_stamp(&path);
+    let mut last = CURSOR_IDE_TOKEN_READ
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    read_unless_unchanged(&mut last, path, stamp, |path| {
+        read_cursor_state_value_from_sqlite3(path, CURSOR_IDE_ACCESS_TOKEN_KEY)
+    })
+}
+
+/// The token `read` finds at `path`, or the one `last` holds while the DB
+/// still has the stamp it was read at. A failed read is not remembered: it
+/// may be a lock the IDE holds.
+fn read_unless_unchanged(
+    last: &mut Option<TokenRead>,
+    path: PathBuf,
+    stamp: StateDbStamp,
+    read: impl FnOnce(&Path) -> Result<Option<String>, String>,
+) -> Option<String> {
+    if let Some((read_path, read_stamp, token)) = last.as_ref() {
+        if *read_path == path && *read_stamp == stamp {
+            return token.clone();
+        }
     }
+    let token = read(&path)
+        .ok()?
+        .map(|raw| raw.trim().to_string())
+        .filter(|token| !token.is_empty());
+    *last = Some((path, stamp, token.clone()));
+    token
+}
+
+/// The API rejected the IDE token: read it from the DB again next time.
+pub(crate) fn forget_cursor_ide_token() {
+    if let Ok(mut read) = CURSOR_IDE_TOKEN_READ.lock() {
+        *read = None;
+    }
+}
+
+/// Whether Cursor IDE wrote its state DB since the last call: it is in use
+/// here, so its usage and meters may be moving. False on the first call.
+pub(crate) fn cursor_ide_touched() -> bool {
+    static SEEN: Mutex<Option<StateDbStamp>> = Mutex::new(None);
+    let Some(path) = cursor_state_db_path() else {
+        return false;
+    };
+    let stamp = state_db_stamp(&path);
+    let Ok(mut seen) = SEEN.lock() else {
+        return false;
+    };
+    let touched = seen.is_some_and(|last| last != stamp);
+    *seen = Some(stamp);
+    touched
 }
 
 fn refresh_cursor_ide_token() {
@@ -589,7 +638,9 @@ fn refresh_cursor_ide_token() {
     }
 }
 
+/// Read the IDE token afresh (at launch, or when the user retries).
 pub(crate) fn prime_ide_access_token() -> bool {
+    forget_cursor_ide_token();
     if let Some(token) = read_cursor_ide_access_token() {
         if let Ok(mut guard) = cursor_ide_token_cell().lock() {
             *guard = Some(token);
@@ -807,14 +858,22 @@ fn fetch_cursor_usage_events(
     let auth_kind = auth.kind();
     let auth_label = cursor_auth_label(auth_kind);
     let session_key = cursor_session_key_for(auth_kind);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .build()
-        .map_err(|e| {
-            let message = format!("Failed to build Cursor HTTP client ({auth_label}): {e}");
-            tracing::error!(error = %message, "Cursor HTTP client initialization failed");
-            message
-        })?;
+    // One client for every fetch, so its connections and TLS setup are reused.
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    let client = match CLIENT.get() {
+        Some(client) => client,
+        None => {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(12))
+                .build()
+                .map_err(|e| {
+                    let message = format!("Failed to build Cursor HTTP client ({auth_label}): {e}");
+                    tracing::error!(error = %message, "Cursor HTTP client initialization failed");
+                    message
+                })?;
+            CLIENT.get_or_init(|| client)
+        }
+    };
 
     let url = cursor_request_url(auth);
     let mut page = 1usize;
@@ -843,6 +902,9 @@ fn fetch_cursor_usage_events(
                 status = %response.status(),
                 "Cursor API rejected the configured credentials"
             );
+            if auth_kind == CursorAuthKind::IdeBearer {
+                forget_cursor_ide_token();
+            }
             return Err(match auth_kind {
                 CursorAuthKind::Admin => format!(
                     "Cursor admin API rejected the configured key with HTTP {}.",
@@ -885,7 +947,7 @@ fn fetch_cursor_usage_events(
         page += 1;
     }
 
-    tracing::info!(
+    tracing::debug!(
         since = ?since,
         auth = auth_label,
         entries = entries.len(),
@@ -913,88 +975,32 @@ pub(crate) fn fetch_cursor_remote_entries(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Cursor local entry loading (used by UsageParser)
-// ─────────────────────────────────────────────────────────────────────────────
-
-pub(crate) fn load_cursor_local_entries(
-    root_dir: &Path,
-    since: Option<NaiveDate>,
-) -> (Vec<ParsedEntry>, ProviderReadDebug) {
-    let root_exists = root_dir.exists();
-    let mut report = ProviderReadDebug {
-        provider: String::from("cursor"),
-        root_dir: path_to_string(root_dir),
-        root_exists,
-        since: since.map(|d| d.format("%Y-%m-%d").to_string()),
-        strategy: String::from("workspace-chat-json-token-probe"),
-        ..ProviderReadDebug::default()
-    };
-    if !root_exists {
-        tracing::warn!(
-            root_dir = %report.root_dir,
-            "Cursor workspace storage root does not exist"
-        );
-        return (Vec::new(), report);
-    }
-
-    let files = glob_cursor_chat_session_files(root_dir);
-    report.discovered_paths = files.len();
-    if files.is_empty() {
-        tracing::warn!(
-            root_dir = %report.root_dir,
-            "No Cursor chat session files were discovered"
-        );
-    }
-    let mut entries = Vec::new();
-    for path in files {
-        report.attempted_paths += 1;
-        push_sample_path(&mut report.sample_paths, &path);
-        if let Some(since_date) = since {
-            if !modified_since(&path, since_date) {
-                report.skipped_paths += 1;
-                report.skipped_by_mtime += 1;
-                push_sample_path(&mut report.sample_skipped_paths, &path);
-                continue;
-            }
-        }
-
-        let (parsed_entries, _change_events, lines_read, opened) = parse_cursor_session_file(&path);
-        report.lines_read += lines_read;
-        if opened {
-            report.opened_paths += 1;
-        } else {
-            report.failed_paths += 1;
-            continue;
-        }
-        for entry in parsed_entries {
-            if since.is_some_and(|since_date| entry.timestamp.date_naive() < since_date) {
-                continue;
-            }
-            entries.push(entry);
-        }
-    }
-
-    entries.sort_by_key(|entry| entry.timestamp);
-    report.emitted_entries = entries.len();
-    if entries.is_empty() && report.opened_paths > 0 {
-        tracing::warn!(
-            root_dir = %report.root_dir,
-            discovered_paths = report.discovered_paths,
-            opened_paths = report.opened_paths,
-            lines_read = report.lines_read,
-            "Cursor chat session files were readable but contained no token usage entries"
-        );
-    }
-    (entries, report)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The launch prime reads the stored secret in the background; a set
+    /// from the frontend that lands first is newer and stays. Sets the
+    /// default (no secret) throughout, which other tests rely on.
+    #[test]
+    fn a_background_prime_does_not_undo_a_newer_set() {
+        use crate::secrets::StorageBackend;
+        let before_read = cursor_auth_version();
+        set_cursor_auth_config(None, StorageBackend::None);
+        assert!(!set_cursor_auth_config_if_unchanged(
+            before_read,
+            None,
+            StorageBackend::None
+        ));
+        assert!(set_cursor_auth_config_if_unchanged(
+            cursor_auth_version(),
+            None,
+            StorageBackend::None
+        ));
+    }
 
     #[test]
     fn classify_cursor_secret_admin_key() {
@@ -1048,6 +1054,27 @@ mod tests {
         assert!(choose_cursor_auth(None, None, None, None).is_none());
     }
 
+    #[test]
+    fn the_ide_token_is_read_again_only_when_the_state_db_changed() {
+        let at = |secs| {
+            let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+            [Some((modified, 1)), None]
+        };
+        let mut last = None;
+        let mut reads = 0;
+        let mut read = |stamp, found: Result<Option<String>, String>| {
+            read_unless_unchanged(&mut last, PathBuf::from("state.vscdb"), stamp, |_| {
+                reads += 1;
+                found
+            })
+        };
+        assert_eq!(read(at(1), Ok(Some(" t1 ".into()))), Some("t1".into()));
+        assert_eq!(read(at(1), Ok(Some("unread".into()))), Some("t1".into()));
+        assert_eq!(read(at(2), Err("database is locked".into())), None);
+        assert_eq!(read(at(2), Ok(Some("t2".into()))), Some("t2".into()));
+        assert_eq!(reads, 3);
+    }
+
     // THROWAWAY profiling probe (ccplan PROBE-002). Isolates the real cursor
     // cold-start path into stages against live data. Remove after profiling.
     #[test]
@@ -1070,37 +1097,6 @@ mod tests {
             primed,
             t.elapsed()
         );
-
-        let root = crate::paths::cursor_workspace_storage_default();
-        println!("[local root] {root:?}");
-
-        // Stage 2a: pure glob walk of the workspaceStorage tree
-        if let Some(root) = root.clone() {
-            let t = Instant::now();
-            let files = glob_cursor_chat_session_files(&root);
-            println!(
-                "[STAGE2a glob-walk] elapsed={:?} chatSession_files={}",
-                t.elapsed(),
-                files.len()
-            );
-        }
-
-        // Stage 2b: full local scan (glob + mtime filter + JSON parse) per range
-        if let Some(root) = root {
-            for (label, since) in ranges {
-                let t = Instant::now();
-                let (entries, report) = load_cursor_local_entries(&root, Some(since));
-                println!(
-                    "[STAGE2b local-scan {label}] elapsed={:?} discovered={} opened={} skipped_mtime={} lines_read={} emitted={}",
-                    t.elapsed(),
-                    report.discovered_paths,
-                    report.opened_paths,
-                    report.skipped_by_mtime,
-                    report.lines_read,
-                    entries.len()
-                );
-            }
-        }
 
         // Stage 3: remote API fetch (paginated) per range
         for (label, since) in ranges {

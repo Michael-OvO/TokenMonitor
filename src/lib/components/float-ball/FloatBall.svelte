@@ -533,7 +533,7 @@
     overflow: clip;
     scrollbar-width: none;
     background: transparent;
-    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
 
   /* Suppress WebKitGTK scrollbars that appear when the GTK viewport is

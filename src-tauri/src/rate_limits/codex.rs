@@ -103,19 +103,34 @@ fn normalize_plan_type_label(plan_type: &str) -> String {
     }
 }
 
+/// A reading from the newest `codex` meters Codex logged at or after
+/// `since`, dated when they were logged.
+pub(super) fn codex_log_reading(
+    codex_dir: &Path,
+    since: DateTime<Utc>,
+) -> Option<ProviderRateLimits> {
+    let (logged, rl) = crate::plan_budget::latest_codex_reading(codex_dir, since)?;
+    let mut reading = super::codex_cli::reading_from_snapshot(&rl);
+    reading.fetched_at = logged.with_timezone(&Local).to_rfc3339();
+    Some(reading)
+}
+
+/// Whether a window has reset since its reading was taken.
+pub(super) fn has_reset(windows: &[RateLimitWindow], now: DateTime<Utc>) -> bool {
+    windows
+        .iter()
+        .filter_map(|window| window.resets_at.as_deref())
+        .filter_map(|resets_at| DateTime::parse_from_rfc3339(resets_at).ok())
+        .any(|reset_dt| now > reset_dt.with_timezone(&Utc))
+}
+
 fn is_codex_data_stale(
     file_mtime: SystemTime,
     windows: &[RateLimitWindow],
     now: DateTime<Utc>,
 ) -> bool {
-    for window in windows {
-        if let Some(resets_at) = &window.resets_at {
-            if let Ok(reset_dt) = DateTime::parse_from_rfc3339(resets_at) {
-                if now > reset_dt.with_timezone(&Utc) {
-                    return true;
-                }
-            }
-        }
+    if has_reset(windows, now) {
+        return true;
     }
 
     if let Ok(elapsed) = file_mtime.elapsed() {
@@ -193,12 +208,15 @@ fn codex_value_to_window(id: &str, value: &Value) -> Option<RateLimitWindow> {
         .and_then(|v| v.as_u64())
         .and_then(|ts| DateTime::<Utc>::from_timestamp(ts as i64, 0).map(|dt| dt.to_rfc3339()));
 
-    Some(RateLimitWindow::new(
-        id.to_string(),
-        codex_window_label(id, window_minutes),
-        used_percent,
-        resets_at,
-    ))
+    Some(
+        RateLimitWindow::new(
+            id.to_string(),
+            codex_window_label(id, window_minutes),
+            used_percent,
+            resets_at,
+        )
+        .with_minutes(Some(window_minutes)),
+    )
 }
 
 pub(super) fn codex_window_label(id: &str, minutes: u64) -> String {

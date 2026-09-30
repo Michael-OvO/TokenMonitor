@@ -216,12 +216,12 @@ mod tests {
     #[test]
     fn merges_cached_windows_with_fresh_error_metadata() {
         let cached = provider_rate_limits(
-            vec![RateLimitWindow {
-                window_id: "five_hour".to_string(),
-                label: "Session (5hr)".to_string(),
-                utilization: 33.0,
-                resets_at: Some("2026-03-17T14:00:00Z".to_string()),
-            }],
+            vec![RateLimitWindow::new(
+                "five_hour".to_string(),
+                "Session (5hr)".to_string(),
+                33.0,
+                Some("2026-03-17T14:00:00Z".to_string()),
+            )],
             None,
             None,
         );

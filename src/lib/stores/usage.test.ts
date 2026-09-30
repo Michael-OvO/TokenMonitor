@@ -359,6 +359,7 @@ describe("warmCache", () => {
         provider: "claude",
         period: "month",
         offset: 0,
+        background: true,
       });
     });
     expect(get(usageData)).toBeNull();
@@ -427,6 +428,54 @@ describe("warmCache", () => {
         expect.stringContaining("Backend warning (warm-cache): provider=cursor period=week offset=0"),
       );
     });
+  });
+
+  it("never warms year, the most expensive view", async () => {
+    const { warmCache } = await loadUsageModule();
+    mockInvoke.mockResolvedValue(makePayload());
+
+    warmCache("claude", "year");
+    warmCache("claude", "week");
+
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+    expect(mockInvoke).toHaveBeenCalledWith("get_usage_data", expect.objectContaining({ period: "week" }));
+  });
+
+  it("skips a view fetched since the last publish, and warms it after the next", async () => {
+    const { fetchData, notePublish, warmCache } = await loadUsageModule();
+    mockInvoke.mockResolvedValue(makePayload());
+    await fetchData("claude", "week");
+
+    warmCache("claude", "week");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+
+    notePublish();
+    warmCache("claude", "week");
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(2));
+  });
+
+  it("holds warm-ups until the publish, and a navigation drops those still queued", async () => {
+    const { fetchData, holdWarmupsUntilPublish, notePublish, warmCache } = await loadUsageModule();
+    mockInvoke.mockResolvedValue(makePayload());
+
+    holdWarmupsUntilPublish();
+    warmCache("claude", "week");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockInvoke).not.toHaveBeenCalled();
+
+    notePublish();
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    holdWarmupsUntilPublish();
+    warmCache("claude", "month");
+    await fetchData("codex", "day");
+    notePublish();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+    expect(mockInvoke).not.toHaveBeenCalledWith("get_usage_data", expect.objectContaining({ period: "month" }));
   });
 });
 
@@ -565,6 +614,35 @@ describe("fetchData — shallow equality dedup", () => {
     expect(updates.length).toBeLessThanOrEqual(1);
     unsub();
   });
+
+  it("moves only the stamp when a newer sample brings the same numbers", async () => {
+    const { usageData, fetchData } = await loadUsageModule();
+    // At launch: last session's copy, restored from disk.
+    const restored = makePayload({
+      total_cost: 5.0,
+      from_cache: true,
+      last_updated: "2026-03-16T00:00:00.000Z",
+    });
+    mockInvoke.mockResolvedValueOnce(restored);
+    await fetchData("claude", "day");
+    const shown = get(usageData)!;
+
+    // The first refresh publishes the same totals from a fresh sample.
+    const published = makePayload({
+      total_cost: 5.0,
+      from_cache: false,
+      last_updated: "2026-03-16T00:40:00.000Z",
+    });
+    mockInvoke.mockResolvedValueOnce(published);
+    await fetchData("claude", "day", 0, { silent: true });
+
+    await vi.waitFor(() => {
+      expect(get(usageData)?.from_cache).toBe(false);
+    });
+    const now = get(usageData)!;
+    expect(now.last_updated).toBe(published.last_updated);
+    expect(now.chart_buckets).toBe(shown.chart_buckets);
+  });
 });
 
 describe("warmAllPeriods", () => {
@@ -585,6 +663,51 @@ describe("warmAllPeriods", () => {
     );
 
     expect(calledPeriods).toEqual(new Set(["5h", "week", "month"]));
+  });
+
+  it("issues each warm request only after the previous one resolves", async () => {
+    const { warmAllPeriods } = await loadUsageModule();
+    const first = deferred<UsagePayload>();
+    const second = deferred<UsagePayload>();
+    mockInvoke
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockResolvedValue(makePayload());
+
+    warmAllPeriods("claude", "day");
+
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+
+    first.resolve(makePayload());
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledTimes(2);
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+
+    second.reject(new Error("backend unavailable"));
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  it("marks warm requests as background so they do not move the active view", async () => {
+    const { warmAllPeriods } = await loadUsageModule();
+    mockInvoke.mockResolvedValue(makePayload());
+
+    warmAllPeriods("codex", "5h");
+
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledTimes(3);
+    });
+    for (const [command, args] of mockInvoke.mock.calls) {
+      expect(command).toBe("get_usage_data");
+      expect(args).toEqual(expect.objectContaining({ provider: "codex", background: true }));
+    }
   });
 });
 

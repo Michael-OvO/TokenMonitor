@@ -501,7 +501,7 @@
     background: var(--surface-hover);
   }
   .label {
-    font: 400 10px/1.3 "Inter", sans-serif;
+    font: 400 10px/1.3 system-ui, sans-serif;
     color: var(--t1);
   }
   .collapsible-right {
@@ -518,7 +518,7 @@
     transform: rotate(0deg);
   }
   .count {
-    font: 400 9px/1 "Inter", sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
     white-space: nowrap;
   }
@@ -535,17 +535,17 @@
     gap: 12px;
   }
   .section-title {
-    font: 600 10px/1.4 "Inter", sans-serif;
+    font: 600 10px/1.4 system-ui, sans-serif;
     color: var(--t1);
   }
   .section-count {
-    font: 400 9px/1.4 "Inter", sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     color: var(--t2);
     white-space: nowrap;
   }
   .section-description {
     margin-top: 4px;
-    font: 400 9px/1.4 "Inter", sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     color: var(--t2);
   }
   .ssh-hosts,
@@ -578,12 +578,12 @@
     min-width: 0;
   }
   .ssh-alias {
-    font: 500 10.5px/1.35 "Inter", sans-serif;
+    font: 500 10.5px/1.35 system-ui, sans-serif;
     color: var(--t1);
     overflow-wrap: anywhere;
   }
   .ssh-detail {
-    font: 400 9px/1.4 "Inter", sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     color: var(--t2);
     overflow-wrap: anywhere;
   }
@@ -601,7 +601,7 @@
     border: 1px solid var(--border);
     border-radius: 5px;
     padding: 4px 8px;
-    font: 400 9px/1.3 "Inter", sans-serif;
+    font: 400 9px/1.3 system-ui, sans-serif;
     color: var(--t2);
     cursor: pointer;
     white-space: nowrap;
@@ -625,7 +625,7 @@
     outline-offset: -2px;
   }
   .ssh-result {
-    font: 500 9px/1.4 "Inter", sans-serif;
+    font: 500 9px/1.4 system-ui, sans-serif;
   }
   .ssh-ok { color: var(--ch-plus); }
   .ssh-fail,
@@ -633,12 +633,12 @@
   .error-text { color: var(--ch-minus); }
   .ssh-test-message {
     margin-top: 6px;
-    font: 400 9px/1.4 "Inter", sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     overflow-wrap: anywhere;
   }
   .ssh-empty {
     padding: 12px 0 4px;
-    font: 400 9px/1.5 "Inter", sans-serif;
+    font: 400 9px/1.5 system-ui, sans-serif;
     color: var(--t2);
     overflow-wrap: anywhere;
   }
@@ -661,7 +661,7 @@
   .ssh-sync-label {
     flex: 1;
     min-width: 0;
-    font: 400 9px/1.4 "Inter", sans-serif;
+    font: 400 9px/1.4 system-ui, sans-serif;
     color: var(--t2);
     overflow-wrap: anywhere;
   }

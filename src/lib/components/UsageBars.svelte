@@ -4,7 +4,7 @@
     getRateLimitIdleSummary,
     isRateLimitProvider,
   } from "../providerMetadata.js";
-  import { formatCreditAmount, formatDuration, formatRetryIn } from "../utils/format.js";
+  import { formatCost, formatCostRange, formatCreditAmount, formatDuration, formatRetryIn } from "../utils/format.js";
   import {
     currentRateLimitWindows,
     providerHasActiveCooldown,
@@ -12,7 +12,11 @@
     rateLimitWindowResetLabel,
     resetTimelineLayout,
   } from "../views/rateLimits.js";
-  import type { CreditsInfo, ProviderRateLimits, RateLimitWindow } from "../types/index.js";
+  import type { CreditsInfo, PlanBudget, ProviderRateLimits, RateLimitWindow } from "../types/index.js";
+  import { invoke } from "@tauri-apps/api/core";
+  import { untrack } from "svelte";
+  import { budgetAsks, budgetRange, windowSpan, type BudgetAsk } from "../views/planBudget.js";
+  import { popoverVisible } from "../visibility.js";
   import ResetTimeline from "./ResetTimeline.svelte";
 
   interface Props {
@@ -21,20 +25,61 @@
   }
   let { providerLabel, rateLimits }: Props = $props();
 
-  // Refresh "Resets in" + pace every 30s
-  let refreshTick = $state(0);
+  // Plan budget per provider and windowId; refetched when a new reading
+  // arrives, not each time the page sets the same one again. Keyed by provider
+  // too: providers share window ids ("five_hour"), and this instance may be
+  // handed another provider's limits.
+  let budgets = $state<Record<string, PlanBudget>>({});
+  const budgetKey = (provider: string, windowId: string) => `${provider}:${windowId}`;
+  let asks = $derived(budgetAsks(rateLimits));
+  $effect(() => {
+    const { provider, asks: bars } = JSON.parse(asks) as { provider: string; asks: BudgetAsk[] };
+    let cancelled = false;
+    for (const { windowId, since } of bars) {
+      const key = budgetKey(provider, windowId);
+      invoke<PlanBudget | null>("get_plan_budget", { provider, windowId, since })
+        .then((b) => { if (b && !cancelled) budgets = { ...budgets, [key]: b }; })
+        .catch(() => {});
+    }
+    return () => { cancelled = true; };
+  });
+
+  function budgetFor(w: RateLimitWindow): PlanBudget | undefined {
+    return budgets[budgetKey(rateLimits.provider, w.windowId)];
+  }
+
+  function budgetLabel(w: RateLimitWindow): string {
+    const span = windowSpan(rateLimits.provider, w);
+    const range = span && budgetRange(rateLimits.provider, w, budgetFor(w), rateLimits.windows);
+    return range ? `${formatCostRange(...range)} / ${span.unit}` : "";
+  }
+
+  // "Opus 4.1 $900 · Sonnet 4.5 $2,500" when per-model budgets are known.
+  function budgetTitle(w: RateLimitWindow): string {
+    if (w.budgetUsd) return "Included in the plan";
+    const models = budgetFor(w)?.models ?? [];
+    if (models.length === 0) return "Plan budget at API prices (rough until more usage is recorded)";
+    return models.map((m) => `${m.model} ${formatCostRange(m.usd, m.usd)}`).join(" · ");
+  }
+
   /** Credits sit in the header as a pill, like the plan, so they do not cost a row. */
   function creditsLabel(credits: CreditsInfo): string {
     if (credits.unlimited) return "Unlimited credits";
+    // Claude's usage credits are a USD balance; Codex counts credits.
+    if (credits.balance != null && rateLimits.provider === "claude") return `${formatCost(credits.balance)} credits`;
     if (credits.balance != null) return `${Math.round(credits.balance).toLocaleString()} credits`;
     return credits.hasCredits ? "Credits available" : "No credits";
   }
 
+  // Refresh "Resets in", pace and the reset timeline every 30s while shown, and at once on show.
+  let refreshTick = $state(0);
   let resetTimeline = $derived.by(() => {
     void refreshTick;
     return resetTimelineLayout(rateLimits.credits?.usageLimitResets);
   });
   $effect(() => {
+    if (!$popoverVisible) return;
+    refreshTick = untrack(() => refreshTick) + 1;
     const interval = setInterval(() => { refreshTick += 1; }, 30_000);
     return () => clearInterval(interval);
   });
@@ -118,13 +163,9 @@
     return "var(--t2)";
   }
 
-  function windowHours(windowId: string): number {
-    if (windowId === "five_hour" || windowId === "primary") return 5;
-    if (windowId === "secondary") return 168;
-    if (windowId.startsWith("seven_day")) return 168;
-    // Cursor billing-cycle pools (monthly). Keep auto_composer for stale caches.
-    if (windowId === "first_party" || windowId === "auto_composer" || windowId === "api") return 720;
-    return 5;
+  // 0 = unknown length, which turns pace and ETA off instead of guessing.
+  function windowHours(w: RateLimitWindow): number {
+    return (windowSpan(rateLimits.provider, w)?.minutes ?? 0) / 60;
   }
 
   function utilizationLabel(pct: number): string {
@@ -166,7 +207,8 @@
 
   {#if viewState === "ready"}
     {#each visibleWindows as w, i}
-      {@const hours = windowHours(w.windowId)}
+      {@const hours = windowHours(w)}
+      {@const budget = budgetLabel(w)}
       {@const pace = paceLabel(w, hours)}
       {@const eta = etaToLimit(w, hours)}
       <div class="ub-row">
@@ -191,6 +233,9 @@
             <span class="ub-eta-reset"> · {resetsIn(w.resetsAt)}</span>
           {:else}
             {resetsIn(w.resetsAt)}
+          {/if}
+          {#if budget}
+            <span title={budgetTitle(w)}>· {budget}</span>
           {/if}
         </div>
       </div>
@@ -257,12 +302,12 @@
     gap: 6px;
   }
   .ub-provider-name {
-    font: 600 10px/1 'Inter', sans-serif;
+    font: 600 10px/1 system-ui, sans-serif;
     color: var(--t2);
 
       }
   .ub-plan {
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
     background: var(--surface-2);
     padding: 2px 5px;
@@ -284,15 +329,15 @@
     gap: 5px;
   }
   .ub-pace-badge {
-    font: 500 9px/1 'Inter', sans-serif;
+    font: 500 9px/1 system-ui, sans-serif;
     font-variant-numeric: tabular-nums;
   }
   .ub-label {
-    font: 500 11px/1 'Inter', sans-serif;
+    font: 500 11px/1 system-ui, sans-serif;
     color: var(--t1);
   }
   .ub-val {
-    font: 500 11px/1 'Inter', sans-serif;
+    font: 500 11px/1 system-ui, sans-serif;
     color: var(--t1);
     font-variant-numeric: tabular-nums;
   }
@@ -327,7 +372,7 @@
   }
   /* Shimmer overlay removed — read calmer without the white sheen flash. */
   .ub-sub {
-    font: 400 9px/1 'Inter', sans-serif;
+    font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
   }
   .ub-eta {
@@ -343,11 +388,11 @@
     padding: 8px 0 2px;
   }
   .ub-empty-title {
-    font: 500 11px/1 'Inter', sans-serif;
+    font: 500 11px/1 system-ui, sans-serif;
     color: var(--t1);
   }
   .ub-empty-text {
-    font: 400 9px/1.35 'Inter', sans-serif;
+    font: 400 9px/1.35 system-ui, sans-serif;
     color: var(--t3);
   }
   .ub-empty.error .ub-empty-title {
