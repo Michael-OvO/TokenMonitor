@@ -22,6 +22,10 @@ export interface ResizeOrchestratorDeps {
   getPopEl: () => HTMLDivElement | null;
   /** Optional fixed chrome below the scroll body (e.g. main-view footer). */
   getFooterEl?: () => HTMLElement | null;
+  /** Optional scroll pane inside the popover (the main view's, between its
+   * header and footer). Once capped it reports only its visible height to the
+   * popover, so its hidden overflow is added back to measure the content. */
+  getScrollPaneEl?: () => HTMLElement | null;
   invoke: (cmd: string, args: Record<string, unknown>) => Promise<void>;
   onScrollLockChange: (locked: boolean) => void;
   currentMonitor: () => Promise<{
@@ -214,8 +218,10 @@ export function createResizeOrchestrator(
     const popEl = deps.getPopEl();
     if (!popEl) return null;
     const footerHeight = deps.getFooterEl?.()?.offsetHeight ?? 0;
+    const pane = deps.getScrollPaneEl?.();
+    const paneOverflow = pane ? Math.max(0, pane.scrollHeight - pane.clientHeight) : 0;
     const rawMeasuredHeight = measureTargetWindowHeight(
-      popEl.scrollHeight + footerHeight,
+      popEl.scrollHeight + footerHeight + paneOverflow,
     );
     const effectiveMaxWindowH = getEffectiveWindowMaxHeight();
     const scrollLocked = isWindowScrollLocked(

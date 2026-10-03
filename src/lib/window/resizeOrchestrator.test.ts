@@ -74,10 +74,12 @@ function createTestOrchestrator(options?: {
   invoke?: (cmd: string, args: Record<string, unknown>) => Promise<void>;
   popEl?: HTMLDivElement | null;
   footerEl?: HTMLElement | null;
+  scrollPaneEl?: HTMLElement | null;
 }) {
   return createResizeOrchestrator({
     getPopEl: () => options?.popEl ?? null,
     getFooterEl: () => options?.footerEl ?? null,
+    getScrollPaneEl: () => options?.scrollPaneEl ?? null,
     invoke: options?.invoke ?? (() => Promise.resolve()),
     onScrollLockChange: () => {},
     currentMonitor: async () => null,
@@ -330,6 +332,31 @@ describe("createResizeOrchestrator", () => {
     expect(invoke).toHaveBeenCalledWith("set_window_size_and_align", {
       width: WINDOW_WIDTH,
       height: 444,
+    });
+
+    orchestrator.destroy();
+  });
+
+  it("measures the full content of a capped scroll pane, not just its visible part", async () => {
+    installWindowStub(320);
+    installRafStub();
+    // The pane shows 500px of its 900px content, so the popover itself only
+    // reports 600px; the window still has to size for all of it.
+    const popEl = createPopEl(600);
+    const scrollPaneEl = { scrollHeight: 900, clientHeight: 500 } as HTMLElement;
+    const invoke = vi.fn(() => Promise.resolve());
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: popEl.element,
+      scrollPaneEl,
+    });
+
+    orchestrator.syncSizeAndVerify("with-pane");
+    await flushMicrotasks();
+
+    expect(invoke).toHaveBeenCalledWith("set_window_size_and_align", {
+      width: WINDOW_WIDTH,
+      height: 1000,
     });
 
     orchestrator.destroy();

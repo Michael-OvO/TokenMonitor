@@ -135,6 +135,8 @@
   let brandTheming = $state(true);
   let headerTabs = $state<HeaderTabs>(DEFAULT_HEADER_TABS);
   let popEl: HTMLDivElement | null = null;
+  /** The main view's scroll pane, between its header and footer. */
+  let scrollPaneEl: HTMLDivElement | null = $state(null);
   let resizeOrch: ResizeOrchestrator | null = null;
   let scrollThresholdH = $state(DEFAULT_MAX_WINDOW_HEIGHT);
   // Written by the orchestrator callback. Drives both the scroll affordance on
@@ -553,6 +555,7 @@
 
     resizeOrch = createResizeOrchestrator({
       getPopEl: () => popEl,
+      getScrollPaneEl: () => scrollPaneEl,
       invoke: (cmd, args) => invoke(cmd, args),
       onScrollLockChange: (locked) => {
         isScrollLocked = locked;
@@ -888,7 +891,7 @@
       {:else if showDevices}
         <div class={viewTransitionClass}><DevicesView onBack={() => { showDevices = false; }} onDeviceSelect={handleDeviceSelect} onSettings={handleSettingsOpen} /></div>
       {:else if data}
-        <div class={viewTransitionClass}>
+        <div class="data-view {viewTransitionClass}">
         {#if showRefresh}<div class="refresh-bar" aria-hidden="true"></div>{/if}
         <div class="app-header">
           <Toggle
@@ -899,6 +902,8 @@
           />
           <TimeTabs active={period} onChange={handlePeriodChange} />
         </div>
+        <div class="app-scroll" bind:this={scrollPaneEl}>
+        <div class="edge-fade top" aria-hidden="true"></div>
         {#if period !== "5h" && data}
           <DateNav
             periodLabel={data.period_label}
@@ -1061,6 +1066,8 @@
           {/if}
       </div>
       {/if}
+        <div class="edge-fade bottom" aria-hidden="true"></div>
+        </div>
       <div class="app-footer">
         <Footer {data} onSettings={handleSettingsOpen} onCalendar={handleCalendarOpen} onDevices={() => { showDevices = true; }} />
       </div>
@@ -1087,7 +1094,7 @@
     -ms-overflow-style: none;
     /* `none` disables the macOS rubber-band overscroll on this region.
        Without it, an over-swipe past the top translates the entire
-       scroll content (including the sticky `.app-header` below) as a
+       scroll content (including any sticky header in it) as a
        single visual unit — the header rides along with the bounce
        instead of staying pinned, which reads as a bug since the header
        is the user's stable anchor. With elastic motion off, the sticky
@@ -1108,104 +1115,103 @@
     -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
     mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
   }
-  /* With the footer pinned, that mask would fade the footer itself: its
-     timestamp and buttons sit in exactly those last 24px. Draw the fade as a
-     band just above the footer instead, in the footer's own background, so
-     scrolled content dissolves into the page. Absolutely positioned, so it
-     never reaches the measured height either. */
-  .pop-content.is-scroll-locked .app-footer::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 100%;
-    height: 24px;
-    background: inherit;
-    -webkit-mask-image: linear-gradient(to bottom, transparent, #000);
-    mask-image: linear-gradient(to bottom, transparent, #000);
-    pointer-events: none;
-  }
-  /* Retract the band over the last 24px of scroll so the final rows are not
-     left half-faded at the bottom. Where scroll timelines are missing the band
-     simply stays, as the old mask did. */
-  @supports (animation-timeline: scroll()) {
-    .pop-content.is-scroll-locked .app-footer::before {
-      animation: footerFadeRetract linear both;
-      animation-timeline: scroll(nearest block);
-      animation-range: calc(100% - 24px) 100%;
-    }
-  }
-  @keyframes footerFadeRetract {
-    to { opacity: 0; }
-  }
-  /* The same fade under the header, for content scrolling up out of view. It
-     grows in over the first 24px of scroll, so at the top it never covers the
-     date row; without scroll timelines there is no band at all. */
-  @supports (animation-timeline: scroll()) {
-    .pop-content.is-scroll-locked .app-header::after {
-      content: "";
-      position: absolute;
-      left: 0;
-      right: 0;
-      top: 100%;
-      height: 24px;
-      background: inherit;
-      -webkit-mask-image: linear-gradient(to top, transparent, #000);
-      mask-image: linear-gradient(to top, transparent, #000);
-      pointer-events: none;
-      animation: headerFadeReveal linear both;
-      animation-timeline: scroll(nearest block);
-      animation-range: 0px 24px;
-    }
-  }
-  @keyframes headerFadeReveal {
-    from { opacity: 0; }
-  }
   .pop-content::-webkit-scrollbar {
     display: none;
   }
-  /* Sticky main-app header. Pins the provider Toggle (All / Claude /
-     Codex / Cursor) at the top of the popover scroll viewport so the
-     active-provider context stays visible when the user scrolls deep
-     into charts, breakdowns, or rate-limit panels. TimeTabs and DateNav
-     deliberately scroll with the data — they're sub-controls, not
-     primary identity. `--surface` matches the popover's own base in
-     dark/light modes (opaque) and gives the header a frosted shell in
-     glass mode (translucent + backdrop-filter), so scrolled data never
-     bleeds through. The bottom box-shadow is the same vertical-offset/
-     blur the Settings page uses for visual parity between the two
-     scroll surfaces. */
-  .app-header {
-    position: sticky;
-    top: 0;
-    z-index: 3;
-    background: var(--surface);
-    background-image: linear-gradient(var(--provider-bg), var(--provider-bg));
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    /* No `transform: translateZ(0)` here. On `position: sticky`
-       elements, that creates a new containing block which can throw
-       off `popEl.scrollHeight` measurements while the layout is in
-       flux during a background refresh — the resize orchestrator was
-       briefly writing an over-measured height to the OS window,
-       making the popover look stretched while the refresh-bar was
-       up. Now that `saturate` is gone the blur is cheap enough that
-       a dedicated compositor layer isn't required for smooth scroll;
-       if upswipe judder returns, prefer `will-change: transform` over
-       `translateZ(0)` since `will-change` alone doesn't change
-       layout. */
+  /* The main view is header | scroll pane | footer, and only the pane
+     scrolls. Content never passes under the bars, so they paint no backdrop
+     of their own: in glass mode one doubled the translucent tint into darker
+     slabs with hard edges, and its blur was recomputed on every scroll frame.
+     The popover's max-height caps the view and the pane gives way; the resize
+     orchestrator adds the pane's hidden overflow back when it measures
+     (getScrollPaneEl). The provider Toggle and TimeTabs stay in the header;
+     DateNav scrolls with the data. */
+  .pop-content:has(> .data-view) {
+    display: flex;
+    flex-direction: column;
   }
-  /* Same surface + provider tint as `#app` and the header, so the pinned
-     footer reads as the bottom of the page rather than a neutral slab laid
-     over a tinted one. */
+  .data-view {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
+    min-height: 0;
+  }
+  .app-header,
   .app-footer {
+    flex: none;
+  }
+  .app-scroll {
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: none;
+    /* Native momentum and edge bounce stay on: with the bars outside the
+       pane, a bounce moves only the content. `contain` stops it chaining. */
+    overscroll-behavior: contain;
+  }
+  .app-scroll::-webkit-scrollbar {
+    display: none;
+  }
+  /* Outside glass mode the surface is opaque, so a strip of it fades content
+     into the bars: under the header once content is scrolled past the top,
+     above the footer while more is below. The strips are sticky children of
+     the pane that take no height, so the compositor carries them with the
+     scroll. Glass mode clips at the bars instead: its translucent surface
+     can't cover content, and a tinted strip over glass reads as a slab.
+     Measured against alternatives in a scroll trace: a mask on the pane
+     repaints the whole pane whenever it changes, and strips laid over the
+     pane from outside it, or toggled by scroll-event flags, drop frames. */
+  .edge-fade {
+    display: none;
     position: sticky;
-    bottom: 0;
-    z-index: 3;
+    z-index: 1;
+    height: 24px;
+    pointer-events: none;
     background: var(--surface);
     background-image: linear-gradient(var(--provider-bg), var(--provider-bg));
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    opacity: 0;
+  }
+  :global(:root:not([data-glass="true"])) .edge-fade {
+    display: block;
+  }
+  .edge-fade.top {
+    top: 0;
+    margin-bottom: -24px;
+    -webkit-mask-image: linear-gradient(to bottom, #000, transparent);
+    mask-image: linear-gradient(to bottom, #000, transparent);
+  }
+  .edge-fade.bottom {
+    bottom: 0;
+    margin-top: -24px;
+    -webkit-mask-image: linear-gradient(to top, #000, transparent);
+    mask-image: linear-gradient(to top, #000, transparent);
+  }
+  /* Scroll-driven, so the compositor runs them with the scroll and the main
+     thread never wakes: the top strip grows in over the first 24px of scroll
+     and the bottom one retracts over the last 24px. Without scroll timelines
+     there are no strips. */
+  @supports (animation-timeline: scroll()) {
+    .edge-fade {
+      animation-timing-function: linear;
+      animation-fill-mode: both;
+      animation-timeline: scroll(nearest block);
+    }
+    .edge-fade.top {
+      animation-name: edgeFadeIn;
+      animation-range: 0px 24px;
+    }
+    .edge-fade.bottom {
+      animation-name: edgeFadeOut;
+      animation-range: calc(100% - 24px) 100%;
+    }
+  }
+  @keyframes edgeFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes edgeFadeOut {
+    from { opacity: 1; }
+    to { opacity: 0; }
   }
   .hr { height: 1px; background: var(--border-subtle); margin: 0 12px; }
   .loading {
@@ -1391,9 +1397,7 @@
     left: 0;
     right: 0;
     height: 2px;
-    /* Must sit above `.app-header` (z-index: 3); otherwise the header's
-       `backdrop-filter: blur(...)` smears the shimmer since absolute +
-       sticky both anchor at top: 0 and overlap. */
+    /* Overlays the top edge of the popover. */
     z-index: 4;
     pointer-events: none;
     background: linear-gradient(90deg, transparent 0%, var(--t3) 50%, transparent 100%);
