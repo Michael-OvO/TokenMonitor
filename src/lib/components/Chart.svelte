@@ -1,11 +1,15 @@
 <script lang="ts">
-  import { tick } from "svelte";
-  import { modelColor, formatCost, formatModelCost, formatTokens, currencySymbol, convertCost, deviceColor, deviceDisplayNames } from "../utils/format.js";
+  import { tick, untrack } from "svelte";
+  import { Tween } from "svelte/motion";
+  import { cubicOut } from "svelte/easing";
+  import { fade } from "svelte/transition";
+  import { modelColor, formatCost, formatModelCost, formatTokens, formatAxisTokens, currencySymbol, convertCost, deviceColor, deviceDisplayNames } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
-  import { activeOffset, activePeriod, chartMetric, chartMode, chartSegmentMode } from "../stores/usage.js";
+  import { activeOffset, activePeriod, chartMetric, chartMode, chartSegmentMode, chartShowTotal } from "../stores/usage.js";
   import { logger } from "../utils/logger.js";
   import type { ChartBucket, ChartHoverDetail } from "../types/index.js";
   import { filterVisibleChartBuckets, getXAxisLabels } from "./chartBuckets.js";
+  import { lineChartPeak, lineSeriesValues } from "./chartLines.js";
   import { pieHitSectorPaths } from "./pieHitAreas.js";
   import { disclosureMotion } from "../utils/disclosureMotion.js";
   import { scrollFade } from "../utils/scrollFade.js";
@@ -90,18 +94,6 @@
 
   const CHART_H = 108;
   const CHART_W = 280; // SVG viewbox width (y-axis labels sit outside)
-  let maxCostStacked = $derived(Math.max(...visibleBuckets.map((b) => b.total), 0.01));
-  let maxCostSingle = $derived(Math.max(
-    ...visibleBuckets.flatMap((b) => {
-      const merged = new Map<string, number>();
-      for (const s of b.segments) {
-        merged.set(s.model_key, (merged.get(s.model_key) ?? 0) + val(s));
-      }
-      return Array.from(merged.values());
-    }),
-    0.01,
-  ));
-  let maxCost = $derived($chartMode === "line" ? maxCostSingle : maxCostStacked);
   let hoveredIdx = $state(-1);
 
   // The detail panel has two pieces of state: `displayedIdx` says which
@@ -263,9 +255,60 @@
       .map(({ key, name }) => ({ key, name }));
   });
 
+  // Line chart series: each model's own value per bucket (the lines overlap,
+  // they don't stack), plus a neutral total line once two models share it.
+  let lineValues = $derived(lineSeriesValues(visibleBuckets, legendModels().map((m) => m.key), val));
+  let bucketTotals = $derived(visibleBuckets.map((b) => b.total));
+  let hasTotalLine = $derived(lineValues.length > 1);
+  let showTotal = $derived(hasTotalLine && $chartShowTotal);
+
+  // Bars stack, so the busiest bucket's total sets their scale; the line chart
+  // fits whatever it currently draws.
+  let maxCost = $derived(Math.max(
+    $chartMode === "line"
+      ? lineChartPeak(lineValues, bucketTotals, showTotal)
+      : Math.max(...bucketTotals),
+    0.01,
+  ));
+
+  // Toggling the total line refits the axis. The plot's scale glides to the
+  // new fit so the model lines ease to their heights rather than jump; data,
+  // tab and metric changes still land at once.
+  const SCALE_GLIDE_MS = 320;
+  const TOTAL_FADE_MS = 200;
+  const plotMax = new Tween(untrack(() => niceMax(maxCost)), { easing: cubicOut });
+  let glideScale = false;
+  $effect.pre(() => {
+    const target = niceMax(maxCost);
+    plotMax.set(target, { duration: glideScale && !prefersReducedMotion() ? SCALE_GLIDE_MS : 0 });
+  });
+
+  // After a toggle the total line only fades; the draw-in belongs to the
+  // chart's entrance, which re-keying (tab, mode, metric) brings back.
+  let totalToggled = $state(false);
+  $effect(() => {
+    void dataKey; void $chartMode; void $chartMetric;
+    totalToggled = false;
+  });
+
+  async function toggleTotal() {
+    logger.info("chart", `Total line: ${showTotal ? "off" : "on"}`);
+    totalToggled = true;
+    glideScale = true;
+    chartShowTotal.update((on) => !on);
+    await tick();
+    glideScale = false;
+  }
+
+  function totalFadeMs(): number {
+    return prefersReducedMotion() ? 0 : TOTAL_FADE_MS;
+  }
+
   // Y-axis ticks (3 ticks: 0, mid, max)
+  // Read from the plot's scale, so while it glides after a Total toggle the
+  // labels count along with the lines; at any other time it equals the target.
   let yTicks = $derived(() => {
-    const nice = niceMax(maxCost);
+    const nice = plotMax.current;
     return [
       { val: nice, y: 0 },
       { val: nice / 2, y: CHART_H / 2 },
@@ -287,7 +330,7 @@
   }
 
   function yLabel(v: number): string {
-    if (byTokens) return formatTokens(v);
+    if (byTokens) return formatAxisTokens(v);
     const sym = currencySymbol();
     const c = convertCost(v);
     if (c === 0) return `${sym}0`;
@@ -428,24 +471,25 @@
     return i * (barWidth + barGap);
   }
 
-  // Line chart: compute points per model, stacked
-  let lineData = $derived(() => {
-    const models = legendModels();
-    const niceM = niceMax(maxCost);
-    const stepX = visibleBuckets.length > 1 ? CHART_W / (visibleBuckets.length - 1) : CHART_W / 2;
+  // Line chart: one overlapping (unstacked) line per model, on the gliding scale.
+  let lineData = $derived(() =>
+    legendModels().map((m, si) => ({ key: m.key, name: m.name, points: linePoints(lineValues[si], plotMax.current) })),
+  );
 
-    return models.map((m) => {
-      const points = visibleBuckets.map((b, i) => {
-        const cost = b.segments
-          .filter((s) => s.model_key === m.key)
-          .reduce((sum, s) => sum + val(s), 0);
-        const x = visibleBuckets.length > 1 ? i * stepX : CHART_W / 2;
-        const y = CHART_H - (cost / niceM) * CHART_H;
-        return { x, y, cost };
-      });
-      return { key: m.key, name: m.name, points };
-    });
-  });
+  // The total line always sits on the totals' own scale, which is the plot's
+  // whenever it shows: it fades in place while the model lines glide around it.
+  let totalPoints = $derived(
+    hasTotalLine ? linePoints(bucketTotals, niceMax(Math.max(...bucketTotals, 0.01))) : [],
+  );
+
+  function linePoints(values: number[], niceM: number): Array<{x: number; y: number}> {
+    const n = visibleBuckets.length;
+    const stepX = n > 1 ? CHART_W / (n - 1) : CHART_W / 2;
+    return values.map((v, i) => ({
+      x: n > 1 ? i * stepX : CHART_W / 2,
+      y: CHART_H - (v / niceM) * CHART_H,
+    }));
+  }
 
   // Smooth SVG path from points (cardinal spline approximation)
   function smoothPath(pts: Array<{x: number; y: number}>): string {
@@ -484,7 +528,32 @@
   aria-label="Usage chart"
 >
   <div class="ch-top">
-    <span class="ch-t">{byTokens ? "Tokens" : "Cost"} by {$chartSegmentMode === "device" ? "device" : "model"}</span>
+    <div class="ch-left">
+      <span class="ch-t">{byTokens ? "Tokens" : "Cost"} by {$chartSegmentMode === "device" ? "device" : "model"}</span>
+      {#if $chartMode === "line" && hasTotalLine}
+        <!-- Legend chip for the total line: labels it and toggles it -->
+        <button
+          type="button"
+          class="total-chip"
+          class:on={showTotal}
+          aria-pressed={showTotal}
+          title={showTotal ? "Hide the total line" : "Show the total line"}
+          onclick={toggleTotal}
+          transition:fade={{ duration: prefersReducedMotion() ? 0 : 120 }}
+        >
+          <svg class="total-swatch" width="14" height="6" viewBox="0 0 14 6" aria-hidden="true">
+            <!-- Each side's stroke stops at the dot's edge, never inside it -->
+            <path class="swatch-seg track left" d="M0.5,3 H4.8" pathLength="1"/>
+            <path class="swatch-seg ink left" d="M0.5,3 H4.8" pathLength="1"/>
+            <path class="swatch-seg track right" d="M9.2,3 H13.5" pathLength="1"/>
+            <path class="swatch-seg ink right" d="M9.2,3 H13.5" pathLength="1"/>
+            <circle class="swatch-ring" cx="7" cy="3" r="1.75"/>
+            <circle class="swatch-fill" cx="7" cy="3" r="2.25"/>
+          </svg>
+          Total
+        </button>
+      {/if}
+    </div>
     <div class="ch-right">
       <div class="mode-toggle seg-toggle">
         <button type="button" class:on={!byTokens} aria-pressed={!byTokens} title="Show cost" onclick={() => chartMetric.set("cost")}>{currencySymbol()}</button>
@@ -744,6 +813,30 @@
               {/each}
             {/each}
 
+            <!-- Total, drawn last so it sits over the model lines -->
+            {#if showTotal}
+              <g transition:fade={{ duration: totalFadeMs() }}>
+                <path
+                  d={smoothPath(totalPoints)}
+                  pathLength="1"
+                  fill="none"
+                  style="stroke: var(--t2)"
+                  stroke-width="1.25"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  class="line-path"
+                  class:no-draw={totalToggled}
+                />
+                {#each totalPoints as pt, i}
+                  <circle
+                    cx={pt.x} cy={pt.y} r={hoveredIdx === i ? 3 : 1.5}
+                    class="dot"
+                    style="fill: var(--t2); transition: r .15s ease"
+                  />
+                {/each}
+              </g>
+            {/if}
+
             <!-- Hover hit areas (invisible columns) -->
             {#each visibleBuckets as bucket, i}
               {@const stepX = visibleBuckets.length > 1 ? CHART_W / (visibleBuckets.length - 1) : CHART_W}
@@ -804,7 +897,83 @@
   .ch.detail-above .xa { order: 4; }
 
   .ch-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 8px; }
+  .ch-left { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .ch-t { font: 500 8px/1 system-ui, sans-serif; color: var(--t3); flex-shrink: 0; }
+
+  /* Total-line legend chip. Its swatch is the line in miniature and draws in
+     step by step, the way the chart's own lines draw in: the left stroke runs
+     up to the dot, the dot fills out from its centre, the right stroke carries
+     on. Off plays it backwards and leaves a faint track and an empty ring. */
+  .total-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 16px;
+    padding: 0 6px 0 5px;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--t4);
+    font: 500 8px/1 system-ui, sans-serif;
+    cursor: pointer;
+    transition:
+      color var(--t-fast) ease,
+      background var(--t-fast) ease,
+      transform var(--t-fast) var(--ease-out);
+  }
+  .total-chip:hover { color: var(--t3); background: var(--surface-2); }
+  .total-chip.on { color: var(--t2); background: var(--surface-2); }
+  .total-chip.on:hover { color: var(--t1); background: var(--surface-hover); }
+  .total-chip:active { transform: scale(0.96); }
+  .total-chip:focus-visible { outline: 1.5px solid var(--t2); outline-offset: 1px; }
+  .total-swatch { flex-shrink: 0; overflow: visible; }
+  /* The colour tokens are translucent, so no two swatch shapes may overlap at
+     rest or the overlap reads darker. Each stroke is split between ink (the
+     drawn part) and track (the rest) by complementary dash patterns that move
+     together; the fill covers the ring while the ring fades out. */
+  .swatch-seg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.25;
+    stroke-dashoffset: 1;
+    transition: stroke-dashoffset 100ms var(--ease-out);
+  }
+  .swatch-seg.ink { stroke-dasharray: 1 1; }
+  .swatch-seg.track { stroke-dasharray: 0 1 1 0; opacity: 0.35; }
+  .swatch-ring {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1;
+    transition: opacity 100ms ease 80ms;
+  }
+  .swatch-fill {
+    fill: currentColor;
+    transform-box: fill-box;
+    transform-origin: center;
+    transform: scale(0);
+    transition: transform 100ms cubic-bezier(0.4, 0, 1, 1) 80ms;
+  }
+  /* Turning off: right stroke retracts, the dot empties, then the left. */
+  .swatch-seg.left { transition-delay: 160ms; }
+  /* Turning on: left stroke, the dot (with a slight overshoot), right stroke. */
+  .total-chip.on .swatch-seg { stroke-dashoffset: 0; transition-duration: 120ms; }
+  .total-chip.on .swatch-seg.left { transition-delay: 0ms; }
+  .total-chip.on .swatch-seg.right { transition-delay: 210ms; }
+  .total-chip.on .swatch-ring { opacity: 0; transition: opacity 150ms ease 100ms; }
+  .total-chip.on .swatch-fill {
+    transform: scale(1);
+    transition: transform 150ms var(--ease-spring) 100ms;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .total-chip,
+    .total-chip .swatch-seg,
+    .total-chip.on .swatch-seg,
+    .total-chip .swatch-ring,
+    .total-chip.on .swatch-ring,
+    .total-chip .swatch-fill,
+    .total-chip.on .swatch-fill { transition: none; }
+  }
   .ch-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
   /* Mode toggle */
@@ -862,6 +1031,7 @@
     font: 500 8px/1 system-ui, sans-serif;
     color: var(--t2);
     font-variant-numeric: tabular-nums;
+    white-space: nowrap; /* a label wider than the column must not wrap off its tick */
     transform: translateY(-50%);
   }
 
@@ -1030,10 +1200,22 @@
   }
 
   /* Line chart */
+  .line-path.no-draw {
+    animation: none;
+    stroke-dasharray: none;
+    stroke-dashoffset: 0;
+  }
   .line-path {
     stroke-dasharray: 1;
     stroke-dashoffset: 1;
     animation: drawLine .6s ease both;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .line-path {
+      animation: none;
+      stroke-dasharray: none;
+      stroke-dashoffset: 0;
+    }
   }
   .area-path {
     animation: fadeIn .8s ease both;

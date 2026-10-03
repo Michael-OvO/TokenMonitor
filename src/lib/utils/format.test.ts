@@ -7,6 +7,7 @@ import {
   formatCreditAmount,
   formatModelCost,
   formatTokens,
+  formatAxisTokens,
   formatTimeAgo,
   formatDuration,
   modelColor,
@@ -154,6 +155,29 @@ describe("formatTokens", () => {
     [6_225_500_000, "6.2B"],
   ])("formats %d as %s", (input, expected) => {
     expect(formatTokens(input)).toBe(expected);
+  });
+});
+
+// ── formatAxisTokens ────────────────────────────────────────────────
+
+describe("formatAxisTokens", () => {
+  // Chart ticks are 1/2/5 × 10^k and their halves: short enough for the
+  // y-axis column, and a half step is never rounded away.
+  it.each([
+    [0, "0"],
+    [500, "500"],
+    [1000, "1K"],
+    [2500, "2.5K"],
+    [250_000, "250K"],
+    [1_000_000, "1M"],
+    [2_500_000, "2.5M"],
+    [25_000_000, "25M"],
+    [200_000_000, "200M"],
+    [500_000_000, "500M"],
+    [1_000_000_000, "1B"],
+    [2_500_000_000, "2.5B"],
+  ])("formats %d as %s", (input, expected) => {
+    expect(formatAxisTokens(input)).toBe(expected);
   });
 });
 

@@ -88,6 +88,19 @@ export function formatTokens(count: number): string {
   return count.toString();
 }
 
+/**
+ * Token counts on a chart axis. Ticks are round (1/2/5 × 10^k) or half of one,
+ * so a trailing ".0" is noise and a half step has to keep its decimal (2.5K,
+ * where formatTokens would round to 3K). Short enough for the y-axis column.
+ */
+export function formatAxisTokens(count: number): string {
+  const units: Array<[number, string]> = [[1e9, "B"], [1e6, "M"], [1e3, "K"]];
+  for (const [size, suffix] of units) {
+    if (count >= size) return `${Number((count / size).toFixed(1))}${suffix}`;
+  }
+  return `${Number(count.toFixed(1))}`;
+}
+
 export function formatTimeAgo(isoString: string): string {
   const seconds = Math.floor((Date.now() - new Date(isoString).getTime()) / 1000);
   if (seconds < 5) return "just now";
