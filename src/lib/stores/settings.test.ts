@@ -622,3 +622,31 @@ describe("theme and provider application", () => {
     expect(root.removeAttribute).toHaveBeenCalledWith("data-provider");
   });
 });
+
+
+describe("period mode compatibility", () => {
+  it("fixes legacy week starts to Monday while preserving the rolling choice", async () => {
+    mockLoad.mockResolvedValue(makePersistedStore({ weekStart: "sun", rollingPeriods: true }));
+    const { loadSettings } = await loadSettingsModule();
+    const saved = await loadSettings();
+    expect(saved.weekStart).toBe("mon");
+    expect(saved.rollingPeriods).toBe(true);
+  });
+
+  it("waits for the backend mode before the caller refreshes usage", async () => {
+    mockLoad.mockResolvedValue(makePersistedStore());
+    const { updateSetting } = await loadSettingsModule();
+    let resolveConfig!: () => void;
+    mockInvoke.mockImplementation((command: string) => command === "set_period_config"
+      ? new Promise<void>(resolve => { resolveConfig = resolve; })
+      : Promise.resolve());
+    let finished = false;
+    const update = updateSetting("rollingPeriods", true).then(() => { finished = true; });
+    await Promise.resolve();
+    expect(mockInvoke).toHaveBeenCalledWith("set_period_config", { weekStart: "mon", rolling: true });
+    expect(finished).toBe(false);
+    resolveConfig();
+    await update;
+    expect(finished).toBe(true);
+  });
+});

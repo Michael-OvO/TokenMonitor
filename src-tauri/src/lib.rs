@@ -645,12 +645,16 @@ pub(crate) fn archive_local_usage(state: &AppState, horizon: chrono::DateTime<ch
         }
 
         // Hours up to the frontier are skipped, so load from its day on: the
-        // mtime filter then leaves the older logs unread. Not Cursor's: an
-        // all-time load gets its remote rows only from an all-time fetch,
-        // which keeps them out of the archive as before.
-        let since = frontier
-            .filter(|_| integration_id != usage::integrations::UsageIntegrationId::Cursor)
-            .map(|f| f.date);
+        // mtime filter then leaves the older logs unread. Cursor with no
+        // frontier starts at the remote cache's covered day instead of
+        // asking for an all-time load the cache cannot serve.
+        let since = if frontier.is_none()
+            && integration_id == usage::integrations::UsageIntegrationId::Cursor
+        {
+            state.parser.cursor_covered_since()
+        } else {
+            frontier.map(|f| f.date)
+        };
         let (entries, _, _) = state.parser.load_entries(integration_id.as_str(), since);
 
         let count = archive.archive_completed_hours(

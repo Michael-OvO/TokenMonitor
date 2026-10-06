@@ -976,8 +976,7 @@ pub(crate) async fn build_device_time_chart_buckets(
 
 pub(crate) fn bucket_key_for_local(local: &DateTime<Local>, period: &str) -> String {
     match period {
-        "5h" => local.format("%Y-%m-%dT%H:00:00%z").to_string(),
-        "day" => format!("{:02}", local.hour()),
+        "5h" | "day" => local.format("%Y-%m-%dT%H:00:00%z").to_string(),
         "week" | "month" => local.format("%Y-%m-%d").to_string(),
         "year" => local.format("%Y-%m").to_string(),
         _ => local.format("%Y-%m-%d").to_string(),
@@ -986,9 +985,9 @@ pub(crate) fn bucket_key_for_local(local: &DateTime<Local>, period: &str) -> Str
 
 pub(crate) fn bucket_label_for_key(sort_key: &str, period: &str) -> String {
     match period {
-        "day" => {
-            if let Ok(h) = sort_key.parse::<u32>() {
-                return crate::usage::parser::format_hour(h);
+        "5h" | "day" => {
+            if let Ok(at) = DateTime::parse_from_str(sort_key, "%Y-%m-%dT%H:%M:%S%z") {
+                return crate::usage::parser::format_hour(at.hour());
             }
         }
         "week" | "month" => {
@@ -1696,15 +1695,16 @@ mod tests {
         }];
 
         let local_date = parse_remote_ts_to_local_date(&records[0].ts);
-        let noon = local_date
-            .and_hms_opt(12, 0, 0)
+        let end_of_day = local_date
+            .and_hms_opt(23, 59, 59)
             .unwrap()
             .and_local_timezone(Local)
             .single()
             .unwrap();
-        let hit = crate::commands::period::resolve_period_bounds_at("day", 0, noon, None).unwrap();
+        let hit =
+            crate::commands::period::resolve_period_bounds_at("day", 0, end_of_day, None).unwrap();
         let miss =
-            crate::commands::period::resolve_period_bounds_at("day", -1, noon, None).unwrap();
+            crate::commands::period::resolve_period_bounds_at("day", -1, end_of_day, None).unwrap();
 
         let summary = build_device_summary_from_compact("test-host", &records, &hit);
         assert_eq!(

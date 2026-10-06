@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, SUPPORTED_WEEK_STARTS } from "../stores/settings.js";
+  import { settings } from "../stores/settings.js";
   import { activeProvider } from "../stores/usage.js";
   import { formatCost } from "../utils/format.js";
   import { intensityLevel, computeEarned, heatmapColor } from "../utils/calendar.js";
@@ -23,8 +23,8 @@
   let loading = $state(false);
   let provider = $state<UsageProvider>("claude");
   let brandTheming = $state(true);
-  // 0 = Monday … 6 = Sunday; mirrors the Week Starts setting.
-  let weekStartIndex = $state(0);
+  // Calendar weeks always start on Monday.
+  const weekStartIndex = 0;
   let dismissedWarningText = $state<string | null>(null);
   let rateLimits = $state<RateLimitsPayload | null>(null);
 
@@ -34,7 +34,6 @@
     const unsub1 = activeProvider.subscribe((p) => (provider = p));
     const unsub2 = settings.subscribe((s) => {
       brandTheming = s.brandTheming;
-      weekStartIndex = Math.max(0, SUPPORTED_WEEK_STARTS.indexOf(s.weekStart));
     });
     const unsub3 = rateLimitsData.subscribe((r) => { rateLimits = r; });
     return () => { unsub1(); unsub2(); unsub3(); };

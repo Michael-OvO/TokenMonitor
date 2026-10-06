@@ -618,14 +618,17 @@ pub fn normalize_generic_model(raw: &str) -> (String, String) {
 }
 
 /// Display names never show dashes, and Cursor slugs ("cursor-grok-4.6-fast")
-/// lose their "cursor" prefix. The key keeps coming from the raw name so
-/// archived history stays grouped under the same model.
+/// lose their "cursor" prefix. Grok effort levels collapse into one model;
+/// other keys keep coming from the raw name so archived history stays grouped.
 pub fn normalize_model(raw: &str) -> (String, String) {
     static NORMALIZED: ModelMemo<(String, String)> = OnceLock::new();
     memoized(&NORMALIZED, raw, normalize_model_uncached)
 }
 
 fn normalize_model_uncached(raw: &str) -> (String, String) {
+    if raw.to_ascii_lowercase().contains("grok") {
+        return normalize_grok_model(raw);
+    }
     let trimmed = raw.trim();
     let stripped = trimmed
         .get(..7)
@@ -636,6 +639,82 @@ fn normalize_model_uncached(raw: &str) -> (String, String) {
     let (_, key) = normalize_model_by_family(raw);
     let (display, _) = normalize_model_by_family(stripped);
     (display.replace('-', " "), key)
+}
+
+/// Grok effort (`high`, `xhigh`, `extra high`, …) is not a separate model.
+/// `fast` stays. Display title-cases the product words; the key joins the rest with `-`.
+fn normalize_grok_model(raw: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .get(..7)
+        .filter(|prefix| {
+            prefix.eq_ignore_ascii_case("cursor-") || prefix.eq_ignore_ascii_case("cursor ")
+        })
+        .map(|_| &trimmed[7..])
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(trimmed);
+    let tokens: Vec<&str> = stripped
+        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .collect();
+    let mut kept = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let lower = tokens[index].to_ascii_lowercase();
+        if lower == "extra"
+            && tokens
+                .get(index + 1)
+                .is_some_and(|next| next.eq_ignore_ascii_case("high"))
+        {
+            index += 2;
+            continue;
+        }
+        if matches!(
+            lower.as_str(),
+            "low" | "medium" | "high" | "xhigh" | "extrahigh"
+        ) {
+            index += 1;
+            continue;
+        }
+        kept.push(tokens[index]);
+        index += 1;
+    }
+    let display = kept
+        .iter()
+        .copied()
+        .map(grok_display_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let key = kept
+        .iter()
+        .map(|token| token.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("-");
+    (
+        if display.is_empty() {
+            String::from("Grok")
+        } else {
+            display
+        },
+        if key.is_empty() {
+            String::from("grok")
+        } else {
+            key
+        },
+    )
+}
+
+fn grok_display_token(token: &str) -> String {
+    match token.to_ascii_lowercase().as_str() {
+        "grok" => String::from("Grok"),
+        "fast" => String::from("Fast"),
+        "bot" => String::from("Bot"),
+        "default" => String::from("Default"),
+        "cua" => String::from("Cua"),
+        "build" => String::from("Build"),
+        "latest" => String::from("Latest"),
+        _ => token.to_string(),
+    }
 }
 
 fn normalize_model_by_family(raw: &str) -> (String, String) {
@@ -758,8 +837,8 @@ mod tests {
     #[test]
     fn cursor_display_name_drops_prefix_and_dashes() {
         let (d, k) = normalize_model("cursor-grok-4.6-xhigh-fast");
-        assert_eq!(d, "grok 4.6 xhigh fast");
-        assert_eq!(k, normalize_model_by_family("cursor-grok-4.6-xhigh-fast").1);
+        assert_eq!(d, "Grok 4.6 Fast");
+        assert_eq!(k, "grok-4.6-fast");
         assert_eq!(normalize_model("Cursor-claude-4.5-sonnet").0, "Sonnet 4.5");
         assert_eq!(
             normalize_model("claude-3-7-sonnet-thinking").0,
@@ -778,6 +857,32 @@ mod tests {
         assert_eq!(
             detect_model_family("cursor-gemini-2.5-pro"),
             ModelFamily::Google
+        );
+    }
+
+    #[test]
+    fn grok_effort_collapses_into_one_model() {
+        for raw in [
+            "cursor-grok-4.7-high",
+            "Grok 4.7 High",
+            "Grok 4.7 xhigh",
+            "grok-4.7",
+        ] {
+            assert_eq!(normalize_model(raw), ("Grok 4.7".into(), "grok-4.7".into()));
+        }
+        for raw in ["cursor-grok-4.7-high-fast", "grok-4.7-fast-xhigh"] {
+            assert_eq!(
+                normalize_model(raw),
+                ("Grok 4.7 Fast".into(), "grok-4.7-fast".into())
+            );
+        }
+        assert_eq!(
+            normalize_model("cursor-grok-4.6-xhigh-fast"),
+            ("Grok 4.6 Fast".into(), "grok-4.6-fast".into())
+        );
+        assert_eq!(
+            normalize_model("grok-extra-high"),
+            ("Grok".into(), "grok".into())
         );
     }
 

@@ -227,6 +227,14 @@ fn get_rates_for_key(model: &str) -> Option<ModelRates> {
 /// Checks dynamic LiteLLM/OpenRouter pricing first, then `pricing_fallback.json`,
 /// then inline hardcoded rates.
 fn lookup_rates_for_key(model: &str) -> Option<ModelRates> {
+    // Effort slugs and display names ("Grok 4.7 High") share grok-4.7.
+    let canonical = if model.to_ascii_lowercase().contains("grok") {
+        crate::models::normalized_model_key(model)
+    } else {
+        model.to_string()
+    };
+    let model = canonical.as_str();
+
     // Dynamic pricing from LiteLLM + OpenRouter (refreshed on startup, cached 7d).
     if let Some(rates) = lookup_dynamic(model) {
         return Some(rates);
@@ -248,6 +256,28 @@ fn lookup_rates_for_key(model: &str) -> Option<ModelRates> {
     // Claude models: handled entirely by get_fallback_rates() using family-level
     // detection (opus/sonnet/haiku). LiteLLM dynamic pricing above provides
     // per-version accuracy; the family fallback uses latest known rates.
+
+    // ── Grok 4.7 (Cursor / xAI) ──────────────────────────────────────────────
+    // Cursor docs: standard $2/$6, Fast $4/$12. Cache read = 25% of input.
+    // Checked before 4.5/4.6 so a 4.7 slug never inherits the older Fast rate.
+    if model.contains("grok-4.7") {
+        if model.contains("fast") {
+            return Some(ModelRates {
+                input: 4.0,
+                output: 12.0,
+                cache_write_5m: 5.0,
+                cache_write_1h: 5.0,
+                cache_read: 1.0,
+            });
+        }
+        return Some(ModelRates {
+            input: 2.0,
+            output: 6.0,
+            cache_write_5m: 2.5,
+            cache_write_1h: 2.5,
+            cache_read: 0.5,
+        });
+    }
 
     // ── Grok 4.5 / 4.6 (Cursor / xAI) ────────────────────────────────────────
     // Cursor docs: standard $2/$6, Fast $4/$18. Cache read = 25% of input.
@@ -708,6 +738,24 @@ mod tests {
         assert!(approx_eq(cost("cursor-grok-4.6-xhigh-fast", M, M), 22.0));
         assert!(approx_eq(cost("grok-4.6-fast", M, M), 22.0));
         assert!(approx_eq(cost("grok-4.6-fast-xhigh", M, M), 22.0));
+    }
+
+    #[test]
+    fn grok_4_7_standard_pricing() {
+        assert!(pricing_available_for_key("grok-4.7"));
+        assert!(approx_eq(cost("grok-4.7", M, M), 8.0));
+        assert!(approx_eq(cost("cursor-grok-4.7-high", M, M), 8.0));
+        assert!(approx_eq(cost("Grok 4.7 High", M, M), 8.0));
+    }
+
+    #[test]
+    fn grok_4_7_fast_pricing() {
+        // Fast: $4/$12 → $16 per 1M in + 1M out
+        assert!(pricing_available_for_key("grok-4.7-fast"));
+        assert!(pricing_available_for_key("cursor-grok-4.7-high-fast"));
+        assert!(approx_eq(cost("cursor-grok-4.7-high-fast", M, M), 16.0));
+        assert!(approx_eq(cost("grok-4.7-fast-xhigh", M, M), 16.0));
+        assert!(approx_eq(cost("grok-4.7-fast", M, M), 16.0));
     }
 
     #[test]

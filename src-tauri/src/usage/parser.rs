@@ -365,6 +365,7 @@ pub(crate) fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Parse a `since` string in `YYYYMMDD` format into a `NaiveDate`.
+#[cfg(test)]
 pub(crate) fn parse_since_date(since: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(since, "%Y%m%d").ok()
 }
@@ -2330,23 +2331,30 @@ impl UsageParser {
         &self,
         since: Option<NaiveDate>,
     ) -> (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, ProviderReadDebug) {
+        // The account feed wins whenever the cache covers this range. Local
+        // chats are a fallback for a range the remote cache does not cover.
+        if let Some(entries) = self.cursor_remote_for(since) {
+            let strategy = self
+                .integration_config(UsageIntegrationId::Cursor)
+                .map(|config| config.scan_strategy())
+                .unwrap_or("cursor");
+            let report = ProviderReadDebug {
+                strategy: format!("{strategy}+cursor-remote-cache"),
+                emitted_entries: entries.len(),
+                ..ProviderReadDebug::default()
+            };
+            set_cursor_warning(None);
+            return (entries, Vec::new(), report);
+        }
+
         let (local_entries, mut report) = self.load_cursor_local_entries_with_debug(since);
         if !local_entries.is_empty() {
             set_cursor_warning(None);
             return (local_entries, Vec::new(), report);
         }
 
-        // Serve from the non-consuming, range-tagged remote cache when it covers
-        // the requested range (entries are filtered to `since`).
-        if let Some(entries) = self.cursor_remote_for(since) {
-            report.strategy = format!("{}+cursor-remote-cache", report.strategy);
-            report.emitted_entries = entries.len();
-            set_cursor_warning(None);
-            return (entries, Vec::new(), report);
-        }
-
-        // No local entries and no cache — signal that async fetch is needed.
-        // The caller (usage_query) will spawn a background task.
+        // No cache for this range and no local entries — signal that async
+        // fetch is needed. The caller (usage_query) will spawn a background task.
         report.strategy = format!("{}+cursor-remote-pending", report.strategy);
         (Vec::new(), Vec::new(), report)
     }
@@ -2388,6 +2396,15 @@ impl UsageParser {
         resolve_cursor_auth().is_some()
             && !self.cursor_remote_failure_cooldown_active()
             && self.cursor_remote_cache_uncovered(req_since)
+    }
+
+    /// The `since` stored on the Cursor remote cache, when one is loaded.
+    pub(crate) fn cursor_covered_since(&self) -> Option<NaiveDate> {
+        self.cursor_remote_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|cache| cache.covered_since)
     }
 
     /// The first day the Cursor remote cache covers, when a fetch since
@@ -2614,6 +2631,7 @@ impl UsageParser {
 
     // ── Aggregation: daily ──
 
+    #[cfg(test)]
     pub fn get_daily(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("daily:{}:{}", provider, since);
         let since_date = parse_since_date(since);
@@ -2712,6 +2730,7 @@ impl UsageParser {
 
     // ── Aggregation: monthly ──
 
+    #[cfg(test)]
     pub fn get_monthly(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("monthly:{}:{}", provider, since);
         let since_date = parse_since_date(since);
@@ -2814,6 +2833,7 @@ impl UsageParser {
 
     // ── Aggregation: hourly ──
 
+    #[cfg(test)]
     pub fn get_hourly(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("hourly:{}:{}", provider, since);
         let since_date = parse_since_date(since);
@@ -2957,6 +2977,17 @@ impl UsageParser {
         start: DateTime<Local>,
         end: DateTime<Local>,
     ) -> UsagePayload {
+        self.get_period_range(provider, start, end, "5h")
+    }
+
+    pub(crate) fn get_period_range(
+        &self,
+        provider: &str,
+        start: DateTime<Local>,
+        end: DateTime<Local>,
+        period: &str,
+    ) -> UsagePayload {
+        use super::device_aggregation::{bucket_key_for_local, bucket_label_for_key};
         let loaded = self.load_entries_cached(provider, Some(start.date_naive()));
         let entries: Vec<&ParsedEntry> = loaded
             .entries
@@ -2978,12 +3009,32 @@ impl UsageParser {
             sources: loaded.reports.clone(),
         });
 
-        let mut hour_map: HashMap<DateTime<Local>, Vec<&ParsedEntry>> = HashMap::new();
+        let mut buckets: std::collections::BTreeMap<String, Vec<&ParsedEntry>> =
+            std::collections::BTreeMap::new();
         for entry in &entries {
-            hour_map
-                .entry(truncate_hour(entry.timestamp))
+            buckets
+                .entry(bucket_key_for_local(&entry.timestamp, period))
                 .or_default()
                 .push(*entry);
+        }
+        // Pad only the selected range, at the chart's resolution.
+        if matches!(period, "5h" | "day") {
+            let mut hour = truncate_hour(start);
+            while hour < end {
+                buckets
+                    .entry(bucket_key_for_local(&hour, period))
+                    .or_default();
+                hour += Duration::hours(1);
+            }
+        } else if period != "year" {
+            let mut date = start.date_naive();
+            while date < end.date_naive()
+                || (date == end.date_naive() && end.time() != chrono::NaiveTime::MIN)
+            {
+                let key = date.format("%Y-%m-%d").to_string();
+                buckets.entry(key).or_default();
+                date += Duration::days(1);
+            }
         }
 
         let mut chart_buckets: Vec<ChartBucket> = Vec::new();
@@ -2993,9 +3044,8 @@ impl UsageParser {
         let mut total_output = 0u64;
         let mut global_model_map: HashMap<String, SegmentAgg> = HashMap::new();
 
-        let mut hour = truncate_hour(start);
-        while hour < end {
-            let hour_entries = hour_map.get(&hour).map(|v| v.as_slice()).unwrap_or(&[]);
+        for (key, bucket_entries) in buckets {
+            let hour_entries = bucket_entries.as_slice();
             let seg_map = build_segment_map(hour_entries);
             let bucket_cost: f64 = seg_map.values().map(|agg| agg.cost).sum();
             let bucket_tokens: u64 = seg_map.values().map(|agg| agg.tokens).sum();
@@ -3019,19 +3069,18 @@ impl UsageParser {
             }
 
             chart_buckets.push(ChartBucket {
-                label: format_hour(hour.hour()),
-                sort_key: hour.format("%Y-%m-%dT%H:00:00%z").to_string(),
+                label: bucket_label_for_key(&key, period),
+                sort_key: key,
                 total: bucket_cost,
                 segments: segment_map_to_vec(seg_map),
             });
-            hour += Duration::hours(1);
         }
 
         let now = Local::now();
         let elapsed_hours = (now - start).num_milliseconds().max(1) as f64 / 3_600_000.0;
         // Rolling fallback ends at resolve-time `now` (exclusive), so the live
         // check needs a small grace for the aggregation that follows.
-        let active_block = if now >= start && now < end + Duration::seconds(2) {
+        let active_block = if period == "5h" && now >= start && now < end + Duration::seconds(2) {
             let burn_rate_per_hour = total_cost / elapsed_hours;
             Some(ActiveBlock {
                 cost: total_cost,
@@ -3056,13 +3105,15 @@ impl UsageParser {
             chart_buckets,
             model_breakdown: segment_map_to_model_summaries(&global_model_map),
             active_block,
-            five_hour_cost: total_cost,
+            five_hour_cost: if period == "5h" { total_cost } else { 0.0 },
             last_updated: now.to_rfc3339(),
             from_cache: false,
             usage_source: UsageSource::Parser,
             usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
-            has_earlier_data: false,
+            has_earlier_data: period != "5h"
+                && (self.has_entries_before(provider, start.date_naive())
+                    || loaded.entries.iter().any(|entry| entry.timestamp < start)),
             change_stats: None,
             subagent_stats: None,
             device_breakdown: None,
@@ -3759,6 +3810,51 @@ mod tests {
         assert!(parser.invalidate_if_changed());
         let (entries, _) = parser.load_cursor_local_entries_with_debug(None);
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn cursor_load_prefers_remote_cache_and_falls_back_to_local_chats() {
+        use chrono::TimeZone;
+        let root = TempDir::new().unwrap();
+        let chat_dir = root.path().join("workspace-a").join("chatSessions");
+        fs::create_dir_all(&chat_dir).unwrap();
+        write_file(
+            &chat_dir.join("session.json"),
+            r#"{"messages":[{"id":"local-1","timestamp":"2026-03-15T12:00:00+00:00","model":"local-model","tokenUsage":{"inputTokens":100,"outputTokens":50}}]}"#,
+        );
+        let parser = UsageParser::from_integrations(usage_integration_configs_with_overrides(
+            None,
+            None,
+            Some(vec![root.path().to_path_buf()]),
+        ));
+        let jun1 = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let remote = ParsedEntry {
+            timestamp: Local
+                .with_ymd_and_hms(2026, 6, 1, 12, 0, 0)
+                .single()
+                .unwrap(),
+            model: "remote-model".to_string(),
+            input_tokens: 7,
+            output_tokens: 1,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            cache_read_tokens: 0,
+            web_search_requests: 0,
+            unique_hash: Some("remote-1".to_string()),
+            session_key: "cursor-ide".to_string(),
+            agent_scope: crate::stats::subagent::AgentScope::Main,
+        };
+        parser.store_cursor_remote(vec![remote], Some(jun1));
+
+        let (covered, _, _) = parser.load_cursor_entries_with_debug(Some(jun1));
+        assert_eq!(covered.len(), 1);
+        assert_eq!(covered[0].model, "remote-model");
+
+        let jan1 = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let (wider, _, _) = parser.load_cursor_entries_with_debug(Some(jan1));
+        assert_eq!(wider.len(), 1);
+        assert_eq!(wider[0].model, "local-model");
+        assert_eq!(wider[0].input_tokens, 100);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -4924,6 +5020,46 @@ mod tests {
         assert!(payload.active_block.is_none());
         assert!((payload.five_hour_cost - payload.total_cost).abs() < f64::EPSILON);
         assert!(payload.total_cost > 0.0);
+    }
+
+    #[test]
+    fn period_range_filters_partial_days_before_grouping() {
+        use chrono::TimeZone;
+        let start = Local.with_ymd_and_hms(2026, 3, 15, 12, 30, 0).unwrap();
+        let end = start + Duration::hours(24);
+        let times = [
+            start - Duration::seconds(1),
+            start,
+            end - Duration::seconds(1),
+            end,
+        ];
+        let content = times.iter().map(|at| format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#,
+            at.to_rfc3339()
+        )).collect::<Vec<_>>().join("\n");
+        let (_dir, parser) = make_parser_with_claude_data(&content);
+        for period in ["day", "week", "month", "year"] {
+            let p = parser.get_period_range("claude", start, end, period);
+            assert_eq!(p.total_tokens, 300, "{period}");
+            assert_eq!(p.input_tokens, 200, "{period}");
+            assert_eq!(
+                p.chart_buckets
+                    .iter()
+                    .flat_map(|b| &b.segments)
+                    .map(|s| s.tokens)
+                    .sum::<u64>(),
+                300
+            );
+            assert!(p.active_block.is_none());
+            assert!(p.has_earlier_data);
+            if period == "day" {
+                assert_eq!(p.chart_buckets.len(), 25);
+                assert_ne!(
+                    p.chart_buckets.first().unwrap().sort_key,
+                    p.chart_buckets.last().unwrap().sort_key
+                );
+            }
+        }
     }
 
     #[test]
@@ -6391,7 +6527,8 @@ mod path_a_smoke {
 
         let result = fetch_cursor_remote_entries(None);
         match result {
-            Ok(Some(entries)) => {
+            Ok(Some(fetched)) => {
+                let entries = &fetched.entries;
                 eprintln!(
                     "Got {} parsed entries from production pipeline",
                     entries.len()

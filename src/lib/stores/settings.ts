@@ -115,11 +115,11 @@ export interface Settings {
   autoExportEnabled: boolean;
   /** Destination folder for the auto-export file. `null` until the user picks one. */
   autoExportFolder: string | null;
-  /** First day of the calendar week used by the Week period. */
+  /** Legacy persisted field, normalized to Monday. */
   weekStart: WeekStart;
   /**
-   * When `true`, Week/Month/Year end today (today is the last day) and reach
-   * back one unit, instead of aligning to the calendar. Day and 5h are unaffected.
+   * Rolling day/week/month/year ending now; otherwise calendar-to-date.
+   * The Usage (5h) window is independent.
    */
   rollingPeriods: boolean;
 }
@@ -129,7 +129,7 @@ export type WeekStart = (typeof SUPPORTED_WEEK_STARTS)[number];
 
 /** Rust resolves every period window, so it must learn about changes here. */
 function pushPeriodConfig(s: Settings) {
-  invoke("set_period_config", { weekStart: s.weekStart, rolling: s.rollingPeriods }).catch(
+  return invoke("set_period_config", { weekStart: "mon", rolling: s.rollingPeriods }).catch(
     (error) => logger.warn("settings", `set_period_config failed: ${error}`),
   );
 }
@@ -474,7 +474,7 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
     usageAccessEnabled: normalizeBoolean(saved?.usageAccessEnabled, DEFAULTS.usageAccessEnabled),
     autoExportEnabled: normalizeBoolean(saved?.autoExportEnabled, DEFAULTS.autoExportEnabled),
     autoExportFolder: normalizeAutoExportFolder(saved?.autoExportFolder),
-    weekStart: normalizeStringChoice(saved?.weekStart, SUPPORTED_WEEK_STARTS, DEFAULTS.weekStart),
+    weekStart: "mon",
     rollingPeriods: normalizeBoolean(saved?.rollingPeriods, DEFAULTS.rollingPeriods),
   };
 }
@@ -685,7 +685,7 @@ export async function updateSetting<K extends keyof Settings>(
   }
 
   if (key === "weekStart" || key === "rollingPeriods") {
-    pushPeriodConfig(updated);
+    await pushPeriodConfig(updated);
   }
 
   if (key !== "cursorApiKey") {

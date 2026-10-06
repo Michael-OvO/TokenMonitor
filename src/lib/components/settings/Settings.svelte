@@ -8,11 +8,10 @@
   import {
     getVisibleHeaderProviders,
     settings,
-    SUPPORTED_WEEK_STARTS,
     updateSetting,
     type Settings as SettingsType,
   } from "../../stores/settings.js";
-  import { clearUsageCache } from "../../stores/usage.js";
+  import { clearUsageCache, fetchData, activeProvider, activePeriod, activeOffset } from "../../stores/usage.js";
   import {
     exportUsageData,
     importUsageData,
@@ -184,14 +183,11 @@
     updateSetting("defaultPeriod", val as SettingsType["defaultPeriod"]);
   }
 
-  async function handleWeekStart(val: string) {
-    // "To date" is rolling mode; any weekday switches back to calendar weeks.
-    if (val === "todate") {
-      await updateSetting("rollingPeriods", true);
-      return;
-    }
-    await updateSetting("weekStart", val as SettingsType["weekStart"]);
-    await updateSetting("rollingPeriods", false);
+  async function handlePeriodMode(val: string) {
+    await updateSetting("rollingPeriods", val === "rolling");
+    clearUsageCache();
+    activeOffset.set(0);
+    await fetchData($activeProvider, $activePeriod, 0);
   }
 
   function handleCurrency(val: string) {
@@ -682,17 +678,15 @@
           />
         </div>
         <div class="row border">
-          <span class="label">Week Starts</span>
-          <select
-            class="currency-select"
-            value={current.rollingPeriods ? "todate" : current.weekStart}
-            onchange={(e) => handleWeekStart((e.target as HTMLSelectElement).value)}
-          >
-            {#each SUPPORTED_WEEK_STARTS as day}
-              <option value={day}>{day[0].toUpperCase() + day.slice(1)}</option>
-            {/each}
-            <option value="todate" title="Week/Month/Year end today and reach back one unit">To date</option>
-          </select>
+          <span class="label">Period Mode</span>
+          <SegmentedControl
+            options={[
+              { value: "todate", label: "To date" },
+              { value: "rolling", label: "Rolling" },
+            ]}
+            value={current.rollingPeriods ? "rolling" : "todate"}
+            onChange={handlePeriodMode}
+          />
         </div>
         <div class="row border">
           <span class="label">Currency</span>

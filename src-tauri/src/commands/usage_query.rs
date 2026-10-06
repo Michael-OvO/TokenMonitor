@@ -184,12 +184,16 @@ pub(crate) async fn fetch_cursor_remote_now(
         CursorFetch::Unchanged
     };
     match result {
-        Ok(Ok(Some(entries))) => {
-            let fetched = entries.len();
-            match parser.store_cursor_remote_if_current(entries, since, generation) {
+        Ok(Ok(Some(fetched))) => {
+            let count = fetched.entries.len();
+            match parser.store_cursor_remote_if_current(
+                fetched.entries,
+                fetched.covered_since,
+                generation,
+            ) {
                 Some(changed) => {
                     tracing::debug!(
-                        "[cursor-async] Fetch complete: {fetched} entries, changed={changed}"
+                        "[cursor-async] Fetch complete: {count} entries, changed={changed}"
                     );
                     match (changed, widening_from) {
                         (false, _) => CursorFetch::Unchanged,
@@ -199,7 +203,7 @@ pub(crate) async fn fetch_cursor_remote_now(
                 }
                 None => {
                     tracing::info!(
-                        "[cursor-async] Dropped {fetched} entries: the Cursor data was cleared while fetching"
+                        "[cursor-async] Dropped {count} entries: the Cursor data was cleared while fetching"
                     );
                     CursorFetch::Unchanged
                 }
@@ -214,42 +218,24 @@ pub(crate) async fn fetch_cursor_remote_now(
     }
 }
 
-/// Ensure every day in [start, end) has a chart bucket, inserting empty buckets
-/// for days with no data.  This prevents the chart from appearing "cut off" when
-/// the current month hasn't ended yet.
-fn pad_daily_buckets(payload: &mut UsagePayload, start: NaiveDate, end: NaiveDate) {
-    let existing: std::collections::HashSet<String> = payload
-        .chart_buckets
-        .iter()
-        .map(|b| b.sort_key.clone())
-        .collect();
-
-    let mut date = start;
-    while date < end {
-        let key = date.format("%Y-%m-%d").to_string();
-        if !existing.contains(&key) {
-            payload.chart_buckets.push(ChartBucket {
-                label: date.format("%b %-d").to_string(),
-                sort_key: key,
-                total: 0.0,
-                segments: Vec::new(),
-            });
-        }
-        date += chrono::Duration::days(1);
-    }
-
-    payload
-        .chart_buckets
-        .sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+#[cfg(test)]
+fn bucket_span(sort_key: &str) -> Option<(NaiveDate, NaiveDate)> {
+    let bucket_start = parse_bucket_start_date(sort_key).ok()?;
+    let bucket_end = if NaiveDate::parse_from_str(sort_key, "%Y-%m-%d").is_ok() {
+        bucket_start + chrono::Duration::days(1)
+    } else {
+        first_of_next_month(bucket_start.year(), bucket_start.month())?
+    };
+    Some((bucket_start, bucket_end))
 }
 
-/// Filter a UsagePayload's chart_buckets to only include dates in [start, end).
-/// Recalculates total_cost, total_tokens, and model_breakdown from the retained buckets.
+/// A bucket stays when its span overlaps `[start, end)`. A `YYYY-MM` bar is
+/// the whole month, so a rolling year that opens mid-month keeps that month.
+#[cfg(test)]
 fn filter_buckets_to_range(payload: &mut UsagePayload, start: NaiveDate, end: NaiveDate) {
     payload.chart_buckets.retain(|bucket| {
-        parse_bucket_start_date(&bucket.sort_key)
-            .map(|d| d >= start && d < end)
-            .unwrap_or(false)
+        bucket_span(&bucket.sort_key)
+            .is_some_and(|(bucket_start, bucket_end)| bucket_start < end && bucket_end > start)
     });
 
     payload.total_cost = payload.chart_buckets.iter().map(|b| b.total).sum();
@@ -307,35 +293,15 @@ fn parser_payload_for_period(
     period: &str,
     bounds: &PeriodBounds,
 ) -> Result<UsagePayload, String> {
-    let since_str = bounds.start.format("%Y%m%d").to_string();
-
-    let mut payload = match period {
-        "5h" => parser.get_time_range(provider, bounds.range_start, bounds.range_end),
-        "day" => parser.get_hourly(provider, &since_str),
-        "week" => {
-            let mut p = parser.get_daily(provider, &since_str);
-            filter_buckets_to_range(&mut p, bounds.start, bounds.end);
-            pad_daily_buckets(&mut p, bounds.start, bounds.end);
-            p
-        }
-        "month" => {
-            let mut p = parser.get_daily(provider, &since_str);
-            filter_buckets_to_range(&mut p, bounds.start, bounds.end);
-            pad_daily_buckets(&mut p, bounds.start, bounds.end);
-            p
-        }
-        "year" => {
-            let mut p = parser.get_monthly(provider, &since_str);
-            filter_buckets_to_range(&mut p, bounds.start, bounds.end);
-            p
-        }
-        _ => return Err(format!("Unknown period: {period}")),
-    };
-
-    payload.period_label = bounds.period_label.clone();
-    if period != "5h" {
-        payload.has_earlier_data = parser.has_entries_before(provider, bounds.start);
+    if !matches!(period, "5h" | "day" | "week" | "month" | "year") {
+        return Err(format!("Unknown period: {period}"));
     }
+    let mut payload = if period == "5h" {
+        parser.get_time_range(provider, bounds.range_start, bounds.range_end)
+    } else {
+        parser.get_period_range(provider, bounds.range_start, bounds.range_end, period)
+    };
+    payload.period_label = bounds.period_label.clone();
 
     Ok(payload)
 }
@@ -413,9 +379,37 @@ fn usage_cache_tags_with_reset(
     generation: u64,
     five_hour_reset: Option<chrono::DateTime<chrono::Local>>,
 ) -> String {
-    let date_tag = resolve_period_bounds_with_reset(period, offset, five_hour_reset)
+    usage_cache_tags_for_mode(
+        period,
+        offset,
+        generation,
+        five_hour_reset,
+        period_config().1,
+    )
+}
+
+fn usage_cache_tags_for_mode(
+    period: &str,
+    offset: i32,
+    generation: u64,
+    five_hour_reset: Option<chrono::DateTime<chrono::Local>>,
+    rolling: bool,
+) -> String {
+    let mut date_tag = resolve_period_bounds_with_reset(period, offset, five_hour_reset)
         .map(|b| b.start.format("%Y%m%d").to_string())
         .unwrap_or_default();
+    if period != "5h" {
+        // Separate the new semantics from old persisted views. Rolling windows
+        // move even with unchanged logs, including while browsing history.
+        date_tag.push_str(":period-v2");
+        if rolling {
+            return format!("{date_tag}:rolling:g{generation}");
+        }
+        date_tag.push_str(&format!(
+            ":todate:{}",
+            chrono::Local::now().format("%Y%m%d")
+        ));
+    }
     if period == "day" && offset == 0 {
         return format!("{date_tag}:h{}", chrono::Local::now().hour());
     }
@@ -1638,6 +1632,29 @@ mod tests {
     }
 
     #[test]
+    fn filter_buckets_to_range_keeps_months_that_overlap_the_window() {
+        let mut payload = payload_with_buckets(vec![
+            bucket("Oct 1", "2025-10-01", 9.0),
+            bucket("Oct", "2025-10", 1.5),
+            bucket("Nov", "2025-11", 2.5),
+        ]);
+
+        filter_buckets_to_range(
+            &mut payload,
+            NaiveDate::from_ymd_opt(2025, 10, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 6).unwrap(),
+        );
+
+        let keys: Vec<_> = payload
+            .chart_buckets
+            .iter()
+            .map(|bucket| bucket.sort_key.as_str())
+            .collect();
+        assert_eq!(keys, vec!["2025-10", "2025-11"]);
+        assert_eq!(payload.total_cost, 4.0);
+    }
+
+    #[test]
     fn year_period_filters_to_target_year_only() {
         let claude_dir = TempDir::new().unwrap();
         let codex_dir = TempDir::new().unwrap();
@@ -1798,6 +1815,25 @@ mod tests {
         assert!(
             second.from_cache,
             "second request should hit the full cache"
+        );
+    }
+
+    #[test]
+    fn period_mode_cache_keys_separate_modes_and_rolling_generations() {
+        for period in ["day", "week", "month", "year"] {
+            for offset in [0, -1] {
+                let to_date = usage_cache_tags_for_mode(period, offset, 1, None, false);
+                let rolling = usage_cache_tags_for_mode(period, offset, 1, None, true);
+                assert_ne!(to_date, rolling);
+                assert_ne!(
+                    rolling,
+                    usage_cache_tags_for_mode(period, offset, 2, None, true)
+                );
+            }
+        }
+        assert_eq!(
+            usage_cache_tags_for_mode("5h", 0, 1, None, false),
+            usage_cache_tags_for_mode("5h", 0, 1, None, true)
         );
     }
 

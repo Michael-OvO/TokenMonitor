@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -35,9 +36,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 //     schedule; we just re-read state.vscdb before each remote call.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ponytail: 50 × 100 = 5000 events per fetch; raise again if a year view
-// ever truncates for heavy users.
+// 50 × 100 = 5000 events per chunk. A full page cap starts another chunk
+// ending 1 ms before the oldest event, up to CURSOR_API_MAX_CHUNKS.
 const CURSOR_API_MAX_PAGES: usize = 50;
+const CURSOR_API_MAX_CHUNKS: usize = 12;
 const CURSOR_API_PAGE_SIZE: usize = 100;
 const CURSOR_API_KEY_ENV: &str = "CURSOR_API_KEY";
 const CURSOR_SESSION_TOKEN_ENV: &str = "CURSOR_SESSION_TOKEN";
@@ -650,16 +652,33 @@ pub(crate) fn prime_ide_access_token() -> bool {
     false
 }
 
-fn cursor_api_time_range_ms(since: Option<NaiveDate>) -> (String, String) {
-    let now_local = Local::now();
-    let start_local = since
+fn cursor_api_start_ms(since: Option<NaiveDate>, now_ms: i64) -> i64 {
+    since
         .and_then(|date| date.and_hms_opt(0, 0, 0))
         .and_then(|dt| Local.from_local_datetime(&dt).single())
-        .unwrap_or_else(|| now_local - chrono::Duration::hours(24));
-    (
-        start_local.timestamp_millis().to_string(),
-        now_local.timestamp_millis().to_string(),
-    )
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or(now_ms - 24 * 60 * 60 * 1000)
+}
+
+/// End of the next newest-first chunk: 1 ms before the oldest event already
+/// collected. `None` when that instant would not move backward.
+fn next_cursor_chunk_end_ms(entries: &[ParsedEntry], current_end_ms: i64) -> Option<i64> {
+    let oldest_ms = entries
+        .iter()
+        .map(|entry| entry.timestamp.timestamp_millis())
+        .min()?;
+    let next = oldest_ms.checked_sub(1)?;
+    (next < current_end_ms).then_some(next)
+}
+
+pub(crate) struct CursorRemoteFetch {
+    pub entries: Vec<ParsedEntry>,
+    pub covered_since: Option<NaiveDate>,
+}
+
+struct CursorUsageChunk {
+    entries: Vec<ParsedEntry>,
+    another_page: bool,
 }
 
 fn parsed_entry_from_cursor_event(
@@ -826,19 +845,19 @@ fn cursor_auth_label(auth_kind: CursorAuthKind) -> &'static str {
 fn build_cursor_usage_request_payload(
     auth: &CursorAuth,
     page: usize,
-    since: Option<NaiveDate>,
+    start_ms: i64,
+    end_ms: i64,
 ) -> Value {
-    let (start_ms, end_ms) = cursor_api_time_range_ms(since);
     let mut payload = match auth {
         CursorAuth::IdeBearer(_) => serde_json::json!({
-            "startDate": start_ms,
-            "endDate": end_ms,
+            "startDate": start_ms.to_string(),
+            "endDate": end_ms.to_string(),
             "page": page,
             "pageSize": CURSOR_API_PAGE_SIZE,
         }),
         _ => serde_json::json!({
-            "startDate": start_ms.parse::<i64>().unwrap_or_default(),
-            "endDate": end_ms.parse::<i64>().unwrap_or_default(),
+            "startDate": start_ms,
+            "endDate": end_ms,
             "page": page,
             "pageSize": CURSOR_API_PAGE_SIZE,
         }),
@@ -851,35 +870,21 @@ fn build_cursor_usage_request_payload(
     payload
 }
 
-fn fetch_cursor_usage_events(
+fn fetch_cursor_usage_chunk(
+    client: &reqwest::blocking::Client,
     auth: &CursorAuth,
     since: Option<NaiveDate>,
-) -> Result<Vec<ParsedEntry>, String> {
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<CursorUsageChunk, String> {
     let auth_kind = auth.kind();
     let auth_label = cursor_auth_label(auth_kind);
     let session_key = cursor_session_key_for(auth_kind);
-    // One client for every fetch, so its connections and TLS setup are reused.
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    let client = match CLIENT.get() {
-        Some(client) => client,
-        None => {
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(12))
-                .build()
-                .map_err(|e| {
-                    let message = format!("Failed to build Cursor HTTP client ({auth_label}): {e}");
-                    tracing::error!(error = %message, "Cursor HTTP client initialization failed");
-                    message
-                })?;
-            CLIENT.get_or_init(|| client)
-        }
-    };
-
     let url = cursor_request_url(auth);
     let mut page = 1usize;
     let mut entries = Vec::new();
     loop {
-        let payload = build_cursor_usage_request_payload(auth, page, since);
+        let payload = build_cursor_usage_request_payload(auth, page, start_ms, end_ms);
         let mut req = client
             .post(&url)
             .header("Content-Type", "application/json")
@@ -941,24 +946,107 @@ fn fetch_cursor_usage_events(
         let mut next_entries = parse_cursor_official_usage_events(&data, since, session_key)?;
         entries.append(&mut next_entries);
         let has_next = cursor_response_has_next_page(&data, page, CURSOR_API_PAGE_SIZE);
-        if !has_next || page >= CURSOR_API_MAX_PAGES {
-            break;
+        if !has_next {
+            return Ok(CursorUsageChunk {
+                entries,
+                another_page: false,
+            });
+        }
+        if page >= CURSOR_API_MAX_PAGES {
+            return Ok(CursorUsageChunk {
+                entries,
+                another_page: true,
+            });
         }
         page += 1;
     }
+}
 
+fn fetch_cursor_usage_events(
+    auth: &CursorAuth,
+    since: Option<NaiveDate>,
+) -> Result<CursorRemoteFetch, String> {
+    let auth_label = cursor_auth_label(auth.kind());
+    // One client for every fetch, so its connections and TLS setup are reused.
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    let client = match CLIENT.get() {
+        Some(client) => client,
+        None => {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(12))
+                .build()
+                .map_err(|e| {
+                    let message = format!("Failed to build Cursor HTTP client ({auth_label}): {e}");
+                    tracing::error!(error = %message, "Cursor HTTP client initialization failed");
+                    message
+                })?;
+            CLIENT.get_or_init(|| client)
+        }
+    };
+
+    let now_ms = Local::now().timestamp_millis();
+    let start_ms = cursor_api_start_ms(since, now_ms);
+    let mut end_ms = now_ms;
+    let mut entries = Vec::new();
+    let mut seen = HashSet::new();
+    let mut truncated = false;
+    for chunk_index in 0..CURSOR_API_MAX_CHUNKS {
+        let chunk = fetch_cursor_usage_chunk(client, auth, since, start_ms, end_ms)?;
+        if chunk.entries.is_empty() {
+            break;
+        }
+        let oldest = chunk.entries.iter().map(|entry| entry.timestamp).min();
+        for entry in chunk.entries {
+            if entry
+                .unique_hash
+                .as_ref()
+                .is_some_and(|hash| !seen.insert(hash.clone()))
+            {
+                continue;
+            }
+            entries.push(entry);
+        }
+        if oldest.is_some_and(|ts| since.is_some_and(|start| ts.date_naive() <= start)) {
+            break;
+        }
+        if !chunk.another_page {
+            break;
+        }
+        if chunk_index + 1 == CURSOR_API_MAX_CHUNKS {
+            truncated = true;
+            break;
+        }
+        let Some(next_end) = next_cursor_chunk_end_ms(&entries, end_ms) else {
+            break;
+        };
+        end_ms = next_end;
+    }
+
+    let covered_since = if truncated {
+        entries
+            .iter()
+            .map(|entry| entry.timestamp.date_naive())
+            .min()
+    } else {
+        since
+    };
     tracing::debug!(
         since = ?since,
+        covered_since = ?covered_since,
         auth = auth_label,
         entries = entries.len(),
+        truncated,
         "Loaded Cursor token usage entries from remote API"
     );
-    Ok(entries)
+    Ok(CursorRemoteFetch {
+        entries,
+        covered_since,
+    })
 }
 
 pub(crate) fn fetch_cursor_remote_entries(
     since: Option<NaiveDate>,
-) -> Result<Option<Vec<ParsedEntry>>, String> {
+) -> Result<Option<CursorRemoteFetch>, String> {
     refresh_cursor_ide_token();
     let Some(auth) = resolve_cursor_auth() else {
         tracing::warn!(
@@ -1075,6 +1163,41 @@ mod tests {
         assert_eq!(reads, 3);
     }
 
+    #[test]
+    fn next_cursor_chunk_end_is_one_millisecond_before_the_oldest_event() {
+        let oldest = Local
+            .with_ymd_and_hms(2026, 1, 15, 12, 0, 0)
+            .single()
+            .unwrap();
+        let newer = oldest + chrono::Duration::hours(1);
+        let entry = |timestamp: DateTime<Local>| ParsedEntry {
+            timestamp,
+            model: "grok-4.7".into(),
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            cache_read_tokens: 0,
+            web_search_requests: 0,
+            unique_hash: None,
+            session_key: "test".into(),
+            agent_scope: crate::stats::subagent::AgentScope::Main,
+        };
+        let entries = vec![entry(newer), entry(oldest)];
+        let oldest_ms = oldest.timestamp_millis();
+        let current_end = newer.timestamp_millis();
+        assert_eq!(
+            next_cursor_chunk_end_ms(&entries, current_end),
+            Some(oldest_ms - 1)
+        );
+        assert_eq!(next_cursor_chunk_end_ms(&entries, oldest_ms - 1), None);
+        assert_eq!(
+            next_cursor_chunk_end_ms(&entries, oldest_ms),
+            Some(oldest_ms - 1)
+        );
+        assert_eq!(next_cursor_chunk_end_ms(&[], current_end), None);
+    }
+
     // THROWAWAY profiling probe (ccplan PROBE-002). Isolates the real cursor
     // cold-start path into stages against live data. Remove after profiling.
     #[test]
@@ -1103,7 +1226,7 @@ mod tests {
             let t = Instant::now();
             let res = fetch_cursor_remote_entries(Some(since));
             let desc = match &res {
-                Ok(Some(v)) => format!("ok entries={}", v.len()),
+                Ok(Some(fetched)) => format!("ok entries={}", fetched.entries.len()),
                 Ok(None) => "ok none(no auth)".to_string(),
                 Err(e) => format!("ERR {e}"),
             };
@@ -1124,6 +1247,8 @@ mod tests {
             return;
         };
         let since = Local::now().date_naive() - chrono::Duration::days(7);
+        let end_ms = Local::now().timestamp_millis();
+        let start_ms = cursor_api_start_ms(Some(since), end_ms);
         let client = reqwest::blocking::Client::new();
         let mut samples: std::collections::BTreeMap<String, (usize, Value)> = Default::default();
         for page in 1..=5 {
@@ -1132,9 +1257,7 @@ mod tests {
                 .header("Content-Type", "application/json")
                 .header("Connect-Protocol-Version", "1")
                 .json(&build_cursor_usage_request_payload(
-                    &auth,
-                    page,
-                    Some(since),
+                    &auth, page, start_ms, end_ms,
                 ));
             req = apply_cursor_auth(req, &auth);
             let data: Value = req.send().unwrap().json().unwrap();
