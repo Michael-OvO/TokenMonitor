@@ -11,7 +11,7 @@ use crate::usage::parser::ParsedEntry;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Sessions listed per project; the rest still count toward the project total.
@@ -252,6 +252,12 @@ fn project_root(cwd: &str) -> PathBuf {
         return root;
     }
     let root = resolve_repo_root(Path::new(cwd)).unwrap_or_else(|| PathBuf::from(cwd));
+    // One spelling per directory, so a worktree and its main checkout compare
+    // equal. macOS rewrites `/var` to `/private/var`; Windows expands 8.3 names
+    // (`RUNNER~1` → `runneradmin`). A missing directory keeps the recorded text.
+    let root = std::fs::canonicalize(&root)
+        .map(|p| strip_verbatim(&p))
+        .unwrap_or(root);
     if let Ok(mut cache) = cache.lock() {
         cache.insert(cwd.to_string(), root.clone());
     }
@@ -270,16 +276,33 @@ fn resolve_repo_root(cwd: &Path) -> Option<PathBuf> {
             let text = std::fs::read_to_string(&dotgit).ok()?;
             let gitdir = dir.join(text.trim().strip_prefix("gitdir:")?.trim());
             let common = std::fs::read_to_string(gitdir.join("commondir"))
-                .map(|c| gitdir.join(c.trim()))
+                .map(|c| normalize_lexical(&gitdir.join(c.trim())))
                 .unwrap_or(gitdir);
-            let common = std::fs::canonicalize(&common).unwrap_or(common);
+            // `..` is collapsed in memory. A failed canonicalize would leave
+            // that `..` in place, and a path ending in `..` has no file name,
+            // so the worktree would not fold into the main repo.
             return match common.file_name() {
-                Some(name) if name == ".git" => common.parent().map(strip_verbatim),
+                Some(name) if name == ".git" => common.parent().map(Path::to_path_buf),
                 _ => Some(dir.to_path_buf()),
             };
         }
     }
     None
+}
+
+/// Collapse `.` and `..` without reading the filesystem.
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// `canonicalize` on Windows returns `\\?\C:\…`; show the plain form.
@@ -364,6 +387,70 @@ mod tests {
         assert!(a.subagent_cost > 0.0 && a.subagent_cost < a.cost);
         let b = p.sessions.iter().find(|s| s.key == "codex:b").unwrap();
         assert_eq!(b.title.as_deref(), Some("Codex task"));
+    }
+
+    /// Another spelling of the main checkout (symlink, or a Windows junction)
+    /// and a worktree whose `gitdir` is the canonical path are one project.
+    #[test]
+    fn worktree_folds_into_main_repo_seen_through_another_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("repo");
+        let via = dir.path().join("via");
+        let wt = dir.path().join("wt");
+        std::fs::create_dir_all(main.join(".git/worktrees/wt")).unwrap();
+        std::fs::create_dir_all(main.join("sub")).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(main.join(".git/worktrees/wt/commondir"), "../..\n").unwrap();
+        let gitdir =
+            strip_verbatim(&std::fs::canonicalize(main.join(".git/worktrees/wt")).unwrap());
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        link_dir(&main, &via);
+
+        let entries = vec![
+            entry(
+                "claude:direct:main",
+                AgentScope::Main,
+                &meta(&main.join("sub"), None),
+            ),
+            entry(
+                "claude:via:main",
+                AgentScope::Main,
+                &meta(&via.join("sub"), None),
+            ),
+            entry("codex:wt", AgentScope::Main, &meta(&wt, None)),
+        ];
+        let projects = aggregate_project_stats(&entries, &HashMap::new()).unwrap();
+        assert_eq!(
+            projects.len(),
+            1,
+            "symlink and worktree share the main repo"
+        );
+        assert_eq!(projects[0].name, "repo");
+        assert_eq!(projects[0].session_count, 3);
+    }
+
+    fn link_dir(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            // A directory symlink needs admin; a junction does not, and
+            // `canonicalize` still follows it to the real checkout.
+            let output = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "create junction: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
