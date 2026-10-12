@@ -6,6 +6,7 @@ export type PermissionSurfaceId =
   | "claude_otel"
   | "login_item"
   | "ssh_config"
+  | "codex_reset_watch"
   | "updates";
 
 export type PermissionTone = "ok" | "warn" | "neutral";
@@ -35,6 +36,7 @@ export interface PermissionPlatform {
 type PermissionSettings = Pick<
   Settings,
   "hasSeenWelcome" | "rateLimitsEnabled" | "statuslineInstalled" | "claudeOtelEnabled" | "launchAtLogin" | "sshHosts"
+  | "codexResetWatch"
 >;
 
 export function getPermissionSurfaces(
@@ -48,7 +50,7 @@ export function getPermissionSurfaces(
       status: settings.hasSeenWelcome ? "Enabled" : "After welcome",
       tone: settings.hasSeenWelcome ? "ok" : "neutral",
       why:
-        "Reads Claude Code and Codex session logs to calculate tokens, cost, models, and local activity.",
+        "Reads Claude Code and Codex session logs to calculate tokens, cost, models, and local activity. Groups sessions into projects by the git repository they ran in.",
       requestPolicy: "after_first_run_disclosure",
       requestCopy:
         "Reads files inside your home directory only — TokenMonitor never opens an OS-level permission prompt for these paths.",
@@ -56,6 +58,8 @@ export function getPermissionSurfaces(
         "~/.claude/projects",
         "~/.config/claude/projects",
         "~/.codex/sessions",
+        "~/.codex/session_index.jsonl (session titles)",
+        "<session folder>/.git (project grouping; git is never run)",
       ],
     },
     {
@@ -119,6 +123,18 @@ export function getPermissionSurfaces(
       requestCopy:
         "No SSH config is read for remote devices until hosts are configured.",
       paths: ["~/.ssh/config", "Include files referenced by ~/.ssh/config"],
+    },
+    {
+      id: "codex_reset_watch",
+      title: "Codex reset watch",
+      status: settings.codexResetWatch ? "Enabled" : "Off",
+      tone: settings.codexResetWatch ? "ok" : "neutral",
+      why:
+        "Asks codex-resets.com, a third-party community tracker, whether OpenAI may soon reset everyone's Codex limits, and shows its watch on the Codex card.",
+      requestPolicy: "explicit_toggle",
+      requestCopy:
+        "Off until you turn it on in Settings. At most one plain GET every 10 minutes while the app is open; it sends no account or usage data.",
+      paths: [],
     },
     {
       id: "updates",

@@ -49,6 +49,15 @@ pub fn codex_sessions_default() -> Option<PathBuf> {
     home().map(|h| h.join(".codex").join("sessions"))
 }
 
+/// Codex's thread-name index, for session titles in the project breakdown.
+/// Honors `$CODEX_HOME`.
+pub fn codex_session_index_file() -> Option<PathBuf> {
+    env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home().map(|h| h.join(".codex")))
+        .map(|dir| dir.join("session_index.jsonl"))
+}
+
 /// Default Kimi Code CLI session-log roots. The current CLI stores `wire.jsonl`
 /// files under `~/.kimi-code/sessions`; the legacy `kimi-cli` used
 /// `~/.kimi/sessions`. Both are returned so either install is picked up. May be
@@ -267,6 +276,15 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
             env_override: Some("CODEX_HOME"),
         });
     }
+    if let Some(p) = codex_session_index_file() {
+        out.push(AccessedPath {
+            purpose: "Codex thread names for session titles",
+            path: p,
+            env_override: Some("CODEX_HOME"),
+        });
+    }
+    // Not a fixed location: `stats::project` reads `.git` (and a worktree's
+    // `gitdir`/`commondir`) above each session's working directory.
     for p in kimi_sessions_defaults() {
         out.push(AccessedPath {
             purpose: "Kimi Code CLI session logs",

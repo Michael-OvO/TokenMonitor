@@ -688,6 +688,35 @@
             onChange={handlePeriodMode}
           />
         </div>
+        <div class="row border" title="Breakdown by project and the chart's P (by project) split">
+          <span class="label">Projects</span>
+          <ToggleSwitch
+            checked={current.showProjects}
+            onChange={(checked) => updateSetting("showProjects", checked)}
+          />
+        </div>
+        <div class="row border" title="Weekly limits pace against today's planned share instead of elapsed time">
+          <span class="label">Daily Plan</span>
+          <ToggleSwitch
+            checked={current.showDailyPlan}
+            onChange={(checked) => updateSetting("showDailyPlan", checked)}
+          />
+        </div>
+        {#if current.showDailyPlan}
+        <div class="row border" title="Most of a weekly limit one day's plan asks for (×0.75 on weekends)">
+          <span class="label">Daily Cap</span>
+          <SegmentedControl
+            options={[
+              { value: "15", label: "15%" },
+              { value: "25", label: "25%" },
+              { value: "40", label: "40%" },
+              { value: "100", label: "None" },
+            ]}
+            value={String(current.dailyQuotaCapPercent)}
+            onChange={(v) => updateSetting("dailyQuotaCapPercent", Number(v))}
+          />
+        </div>
+        {/if}
         <div class="row border">
           <span class="label">Currency</span>
           <select
@@ -877,6 +906,17 @@
             </SettingsDisclosure>
           </div>
         </SettingsDisclosure>
+        <div class="row border">
+          <span class="label">Codex Reset Watch</span>
+          <ToggleSwitch
+            checked={current.codexResetWatch}
+            onChange={(checked) => updateSetting("codexResetWatch", checked)}
+          />
+        </div>
+        <div class="hint reset-watch-hint">
+          Asks codex-resets.com, a third-party community tracker, every 10 min whether OpenAI may soon reset
+          everyone's Codex limits. A forecast, not an announcement; nothing about you is sent.
+        </div>
       </div>
     </div>
 
@@ -1248,6 +1288,7 @@
     font: 400 8.5px/1.35 system-ui, sans-serif;
     color: var(--t4);
   }
+  .reset-watch-hint { margin-top: 0; padding: 0 12px 8px; }
   .cursor-actions {
     display: flex;
     flex-wrap: wrap;

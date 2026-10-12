@@ -28,7 +28,8 @@
     "cursor_ide": "https://api2.cursor.sh",
     "openrouter_models": "https://openrouter.ai/api/v1/models",
     "litellm_prices": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
-    "frankfurter_latest": "https://api.frankfurter.dev/v1/latest?from=USD&to=EUR,GBP,JPY,CNY"
+    "frankfurter_latest": "https://api.frankfurter.dev/v1/latest?from=USD&to=EUR,GBP,JPY,CNY",
+    "codex_resets_status": "https://codex-resets.com/api/v1/status"
   },
   "ttls_secs": {
     "litellm_cache": 604800

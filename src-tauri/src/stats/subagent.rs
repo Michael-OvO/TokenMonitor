@@ -257,6 +257,7 @@ mod tests {
             unique_hash: None,
             session_key: session.to_string(),
             agent_scope: scope,
+            session_meta: None,
         }
     }
 

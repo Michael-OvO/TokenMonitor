@@ -71,6 +71,10 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     autoExportFolder: null,
     weekStart: "mon",
     rollingPeriods: false,
+    codexResetWatch: false,
+    dailyQuotaCapPercent: 25,
+    showProjects: true,
+    showDailyPlan: true,
     ...overrides,
   };
 }

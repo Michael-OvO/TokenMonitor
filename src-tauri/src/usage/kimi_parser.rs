@@ -279,6 +279,7 @@ pub(crate) fn parse_kimi_session_file(path: &Path) -> SessionParseResult {
             unique_hash: None,
             session_key: session_key.clone(),
             agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
         });
     }
 

@@ -130,6 +130,10 @@ describe("loadSettings", () => {
       autoExportFolder: null,
       weekStart: "mon",
       rollingPeriods: false,
+      codexResetWatch: false,
+      dailyQuotaCapPercent: 25,
+      showProjects: true,
+      showDailyPlan: true,
     });
     expect(get(settings)).toEqual(loaded);
     expect(mockSetCurrency).toHaveBeenCalledWith("EUR");
@@ -196,6 +200,10 @@ describe("loadSettings", () => {
       autoExportFolder: null,
       weekStart: "mon",
       rollingPeriods: false,
+      codexResetWatch: false,
+      dailyQuotaCapPercent: 25,
+      showProjects: true,
+      showDailyPlan: true,
     });
     expect(get(settings)).toEqual(fallback);
     expect(mockSetCurrency).toHaveBeenCalledWith("USD");

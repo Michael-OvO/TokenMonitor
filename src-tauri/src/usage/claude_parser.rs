@@ -33,6 +33,21 @@ struct ClaudeJsonlEntry {
     session_id: Option<String>,
     #[serde(rename = "agentId", default)]
     agent_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// `custom-title` (a /rename), `agent-name` and `ai-title` lines name the session.
+#[derive(Deserialize)]
+struct ClaudeTitleLine {
+    #[serde(rename = "type")]
+    entry_type: String,
+    #[serde(rename = "customTitle")]
+    custom_title: Option<String>,
+    #[serde(rename = "agentName")]
+    agent_name: Option<String>,
+    #[serde(rename = "aiTitle")]
+    ai_title: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -384,6 +399,9 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
     let mut completed_tool_ids = HashSet::new();
     let mut lines_read = 0;
     let mut parse_failures = 0_usize;
+    let mut cwd: Option<String> = None;
+    // custom-title, agent-name, ai-title: the first set one names the session.
+    let mut titles: [Option<String>; 3] = Default::default();
 
     for line in reader.lines() {
         lines_read += 1;
@@ -391,6 +409,21 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
             Ok(line) => line,
             Err(_) => continue,
         };
+
+        if line.contains("Title\"") || line.contains("\"agentName\"") {
+            if let Ok(t) = serde_json::from_str::<ClaudeTitleLine>(&line) {
+                let slot = match t.entry_type.as_str() {
+                    "custom-title" => Some((0, t.custom_title)),
+                    "agent-name" => Some((1, t.agent_name)),
+                    "ai-title" => Some((2, t.ai_title)),
+                    _ => None,
+                };
+                if let Some((i, Some(title))) = slot {
+                    titles[i] = Some(title).filter(|t| !t.trim().is_empty());
+                    continue;
+                }
+            }
+        }
 
         // Fast pre-filter: skip lines that can't contain assistant/tool_result data
         if !line.contains("\"assistant\"") && !line.contains("\"tool_result\"") {
@@ -404,6 +437,9 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                 continue;
             }
         };
+        if entry.cwd.is_some() {
+            cwd.clone_from(&entry.cwd);
+        }
         let ts = match chrono::DateTime::parse_from_rfc3339(&entry.timestamp) {
             Ok(ts) => ts.with_timezone(&Local),
             Err(_) => continue,
@@ -554,6 +590,7 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                         unique_hash,
                         session_key: session_key.clone(),
                         agent_scope,
+                        session_meta: None,
                     });
                 }
             }
@@ -644,6 +681,8 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
         );
     }
 
+    let [custom, agent, ai] = titles;
+    crate::stats::project::attach_session_meta(&mut entries, cwd, custom.or(agent).or(ai));
     (entries, change_events, lines_read, true)
 }
 
@@ -844,6 +883,7 @@ mod tests {
             unique_hash: Some(String::from("msg:req")),
             session_key: String::from("s"),
             agent_scope: scope,
+            session_meta: None,
         }
     }
 

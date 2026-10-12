@@ -122,6 +122,14 @@ export interface Settings {
    * The Usage (5h) window is independent.
    */
   rollingPeriods: boolean;
+  /** Ask codex-resets.com (third party) whether a Codex limit reset is expected. */
+  codexResetWatch: boolean;
+  /** Most of a weekly limit one day's plan asks for (percent; 100 = no cap). */
+  dailyQuotaCapPercent: number;
+  /** Projects in the breakdown and the chart's "by project" split. */
+  showProjects: boolean;
+  /** Weekly bars pace against today's plan (else against elapsed time). */
+  showDailyPlan: boolean;
 }
 
 export const SUPPORTED_WEEK_STARTS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
@@ -198,6 +206,10 @@ const DEFAULTS: Settings = {
   autoExportFolder: null,
   weekStart: "mon",
   rollingPeriods: false,
+  codexResetWatch: false,
+  dailyQuotaCapPercent: 25,
+  showProjects: true,
+  showDailyPlan: true,
 };
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
@@ -476,6 +488,15 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
     autoExportFolder: normalizeAutoExportFolder(saved?.autoExportFolder),
     weekStart: "mon",
     rollingPeriods: normalizeBoolean(saved?.rollingPeriods, DEFAULTS.rollingPeriods),
+    codexResetWatch: normalizeBoolean(saved?.codexResetWatch, DEFAULTS.codexResetWatch),
+    dailyQuotaCapPercent:
+      typeof saved?.dailyQuotaCapPercent === "number" &&
+      saved.dailyQuotaCapPercent > 0 &&
+      saved.dailyQuotaCapPercent <= 100
+        ? saved.dailyQuotaCapPercent
+        : DEFAULTS.dailyQuotaCapPercent,
+    showProjects: normalizeBoolean(saved?.showProjects, DEFAULTS.showProjects),
+    showDailyPlan: normalizeBoolean(saved?.showDailyPlan, DEFAULTS.showDailyPlan),
   };
 }
 

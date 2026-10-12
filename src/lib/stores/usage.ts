@@ -19,7 +19,7 @@ export const activeProvider = writable<UsageProvider>(DEFAULT_USAGE_PROVIDER);
 export const activePeriod = writable<UsagePeriod>("day");
 export const activeOffset = writable<number>(0);
 export const chartMode = writable<"bar" | "line" | "pie">("bar");
-export const chartSegmentMode = writable<"model" | "device">("model");
+export const chartSegmentMode = writable<"model" | "device" | "project">("model");
 export const chartMetric = writable<"cost" | "tokens">("cost");
 /** Whether the line chart draws its per-bucket total line. */
 export const chartShowTotal = writable(true);

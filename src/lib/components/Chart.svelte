@@ -42,19 +42,29 @@
     buckets: ChartBucket[];
     dataKey: string;
     deviceBuckets?: ChartBucket[] | null;
+    /** Null hides the "by project" option. */
+    projectBuckets?: ChartBucket[] | null;
   }
-  let { buckets, dataKey, deviceBuckets }: Props = $props();
+  let { buckets, dataKey, deviceBuckets, projectBuckets }: Props = $props();
+
+  // Project segments share the device palette; "No project" stays gray.
+  // (A fixed color: SVG fill attributes do not resolve CSS variables.)
+  function projectColor(key: string): string {
+    return key === "project:none" ? "#9a9a9a" : deviceColor(key);
+  }
 
   // Color function based on segment mode.
   let segmentColorFn = $derived(
     $chartSegmentMode === "device" && deviceBuckets
       ? deviceColor
-      : modelColor
+      : $chartSegmentMode === "project" && projectBuckets
+        ? projectColor
+        : modelColor
   );
 
-  // Auto-reset to "model" when device buckets disappear.
+  // Auto-reset to "model" when the selected split's buckets disappear.
   $effect(() => {
-    if (!deviceBuckets && $chartSegmentMode === "device") {
+    if ((!deviceBuckets && $chartSegmentMode === "device") || (!projectBuckets && $chartSegmentMode === "project")) {
       chartSegmentMode.set("model");
     }
   });
@@ -65,9 +75,21 @@
     return unsub;
   });
 
+  let segmentNoun = $derived(
+    $chartSegmentMode === "device" && deviceBuckets
+      ? "device"
+      : $chartSegmentMode === "project" && projectBuckets
+        ? "project"
+        : "model"
+  );
+
   // Select active buckets based on segment mode.
   let activeBuckets = $derived(
-    $chartSegmentMode === "device" && deviceBuckets ? deviceBuckets : buckets
+    $chartSegmentMode === "device" && deviceBuckets
+      ? deviceBuckets
+      : $chartSegmentMode === "project" && projectBuckets
+        ? projectBuckets
+        : buckets
   );
 
   // The chart plots either cost or tokens; everything below reads `val`.
@@ -83,9 +105,9 @@
   // is in the chosen metric.
   let filteredBuckets = $derived(
     activeBuckets.map((b) => {
-      const segs = $chartSegmentMode === "device"
-        ? b.segments
-        : b.segments.filter((s) => !hiddenModels.includes(s.model_key));
+      const segs = $chartSegmentMode === "model"
+        ? b.segments.filter((s) => !hiddenModels.includes(s.model_key))
+        : b.segments;
       return { ...b, segments: segs, total: segs.reduce((sum, s) => sum + val(s), 0) };
     })
   );
@@ -529,7 +551,7 @@
 >
   <div class="ch-top">
     <div class="ch-left">
-      <span class="ch-t">{byTokens ? "Tokens" : "Cost"} by {$chartSegmentMode === "device" ? "device" : "model"}</span>
+      <span class="ch-t">{byTokens ? "Tokens" : "Cost"} by {segmentNoun}</span>
       {#if $chartMode === "line" && hasTotalLine}
         <!-- Legend chip for the total line: labels it and toggles it -->
         <button
@@ -559,10 +581,15 @@
         <button type="button" class:on={!byTokens} aria-pressed={!byTokens} title="Show cost" onclick={() => chartMetric.set("cost")}>{currencySymbol()}</button>
         <button type="button" class:on={byTokens} aria-pressed={byTokens} title="Show tokens" onclick={() => chartMetric.set("tokens")}>T</button>
       </div>
-      {#if deviceBuckets}
+      {#if deviceBuckets || projectBuckets}
         <div class="mode-toggle seg-toggle">
           <button type="button" class:on={$chartSegmentMode === "model"} title="By model" onclick={() => { logger.info("chart", "Segment: model"); chartSegmentMode.set("model"); }}>M</button>
-          <button type="button" class:on={$chartSegmentMode === "device"} title="By device" onclick={() => { logger.info("chart", "Segment: device"); chartSegmentMode.set("device"); }}>D</button>
+          {#if deviceBuckets}
+            <button type="button" class:on={$chartSegmentMode === "device"} title="By device" onclick={() => { logger.info("chart", "Segment: device"); chartSegmentMode.set("device"); }}>D</button>
+          {/if}
+          {#if projectBuckets}
+            <button type="button" class:on={$chartSegmentMode === "project"} title="By project" onclick={() => { logger.info("chart", "Segment: project"); chartSegmentMode.set("project"); }}>P</button>
+          {/if}
         </div>
       {/if}
       <div class="mode-toggle">
@@ -663,7 +690,7 @@
           <div
             class="pie-wrap"
             role="group"
-            aria-label="Cost share by {$chartSegmentMode === "device" ? "device" : "model"}"
+            aria-label="Cost share by {segmentNoun}"
             onmouseleave={() => sliceHover.clear()}
           >
             {#if arcs.length === 0}

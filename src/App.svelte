@@ -1087,15 +1087,16 @@
               {/if}
             </div>
           {:else}
-            <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} />
+            <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} projectBuckets={$settings.showProjects ? data.project_chart_buckets : null} />
           {/if}
 
-          {#if (period !== "5h" && data.model_breakdown.length > 0) || data.subagent_stats || (data.device_breakdown && data.device_breakdown.length > 0)}
+          {#if (period !== "5h" && data.model_breakdown.length > 0) || data.subagent_stats || ($settings.showProjects && data.project_stats?.length) || (data.device_breakdown && data.device_breakdown.length > 0)}
             <div class="hr"></div>
             <Breakdown
               models={period !== "5h" ? data.model_breakdown : []}
               onAccordionToggle={(detail) => resizeOrch?.handleBreakdownAccordionToggle(detail)}
               subagentStats={data.subagent_stats}
+              projectStats={$settings.showProjects ? data.project_stats : null}
               deviceBreakdown={data.device_breakdown}
               onDeviceSelect={handleDeviceSelect}
               onShowAllDevices={() => { showDevices = true; }}

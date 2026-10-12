@@ -626,6 +626,7 @@ impl ArchiveManager {
                 unique_hash: None,
                 session_key: format!("{ARCHIVE_SESSION_PREFIX}{source_key}"),
                 agent_scope: crate::stats::subagent::AgentScope::Main,
+                session_meta: None,
             });
         }
 
@@ -1193,6 +1194,7 @@ mod tests {
             unique_hash: None,
             session_key: "test-session".to_string(),
             agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
         }
     }
 

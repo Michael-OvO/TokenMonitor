@@ -374,6 +374,7 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
     let mut parse_failures = 0_usize;
     let mut session_key = format!("codex-file:{}", path_to_string(path));
     let mut agent_scope = crate::stats::subagent::AgentScope::Main;
+    let mut cwd: Option<String> = None;
 
     for line in reader.lines() {
         lines_read += 1;
@@ -389,6 +390,17 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
                 continue;
             }
         };
+
+        if matches!(entry.entry_type.as_str(), "session_meta" | "turn_context") {
+            if let Some(dir) = entry
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("cwd"))
+                .and_then(Value::as_str)
+            {
+                cwd = Some(dir.to_string());
+            }
+        }
 
         if entry.entry_type == "session_meta" {
             if let Some(payload) = entry.payload.as_ref() {
@@ -596,6 +608,7 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
             unique_hash: None,
             session_key: session_key.clone(),
             agent_scope,
+            session_meta: None,
         });
         if entries.last().is_some_and(|entry| entry.model.is_empty()) {
             pending_entry_model_indices.push(entries.len() - 1);
@@ -622,6 +635,8 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
     }
 
     entries.sort_by_key(|a| a.timestamp);
+    // Titles live in `session_index.jsonl`, looked up when aggregating.
+    crate::stats::project::attach_session_meta(&mut entries, cwd, None);
 
     if parse_failures > 0 && entries.is_empty() && lines_read > 10 {
         tracing::warn!(

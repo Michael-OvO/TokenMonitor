@@ -40,6 +40,12 @@ pub struct UsagePayload {
     pub has_earlier_data: bool,
     pub change_stats: Option<ChangeStats>,
     pub subagent_stats: Option<crate::stats::subagent::SubagentStats>,
+    /// Claude/Codex cost by git project, each with its costliest sessions.
+    #[serde(default)]
+    pub project_stats: Option<Vec<crate::stats::project::ProjectUsage>>,
+    /// `chart_buckets` split by project (`project:<root>` segment keys).
+    #[serde(default)]
+    pub project_chart_buckets: Option<Vec<ChartBucket>>,
     pub device_breakdown: Option<Vec<DeviceSummary>>,
     pub device_chart_buckets: Option<Vec<ChartBucket>>,
     pub provider_detected: Option<bool>,
@@ -72,6 +78,8 @@ impl Default for UsagePayload {
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,

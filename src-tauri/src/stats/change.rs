@@ -665,6 +665,7 @@ mod tests {
             unique_hash: None,
             session_key: session_key.to_string(),
             agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
         }
     }
 

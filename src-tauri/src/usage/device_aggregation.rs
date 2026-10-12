@@ -1489,6 +1489,7 @@ mod tests {
                 unique_hash: None,
                 session_key: String::from("test"),
                 agent_scope: AgentScope::Main,
+                session_meta: None,
             },
             ParsedEntry {
                 timestamp: row_ts,
@@ -1502,6 +1503,7 @@ mod tests {
                 unique_hash: None,
                 session_key: String::from("test"),
                 agent_scope: AgentScope::Main,
+                session_meta: None,
             },
         ];
         let archived =
@@ -1594,6 +1596,7 @@ mod tests {
             unique_hash: None,
             session_key: String::from("test"),
             agent_scope: AgentScope::Main,
+            session_meta: None,
         }];
         let archived = archive_mgr.archive_completed_hours(
             &archived_rows,

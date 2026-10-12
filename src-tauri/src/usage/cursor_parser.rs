@@ -367,6 +367,7 @@ fn collect_cursor_entries_from_value(
                         unique_hash,
                         session_key: session_key.to_string(),
                         agent_scope: crate::stats::subagent::AgentScope::Main,
+                        session_meta: None,
                     });
                 }
             }
@@ -720,6 +721,7 @@ fn parsed_entry_from_cursor_event(
         unique_hash,
         session_key: session_key.to_string(),
         agent_scope: crate::stats::subagent::AgentScope::Main,
+        session_meta: None,
     })
 }
 
@@ -1182,6 +1184,7 @@ mod tests {
             unique_hash: None,
             session_key: "test".into(),
             agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
         };
         let entries = vec![entry(newer), entry(oldest)];
         let oldest_ms = oldest.timestamp_millis();

@@ -219,6 +219,7 @@ mod tests {
             unique_hash: None,
             session_key: "s1".into(),
             agent_scope: AgentScope::Main,
+            session_meta: None,
         }
     }
 

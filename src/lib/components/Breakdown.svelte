@@ -3,20 +3,48 @@
   import { modelColor, formatCost, formatModelCost, formatTokens, deviceColor, deviceDisplayNames } from "../utils/format.js";
   import { settings } from "../stores/settings.js";
   import { logger } from "../utils/logger.js";
-  import type { AccordionToggleDetail, DeviceSummary, ModelSummary, SubagentStats } from "../types/index.js";
+  import type { AccordionToggleDetail, DeviceSummary, ModelSummary, ProjectUsage, SessionUsage, SubagentStats } from "../types/index.js";
 
   const ACCORDION_TRANSITION_MS = 120;
   const MAX_VISIBLE_DEVICES = 5;
+  const MAX_VISIBLE_PROJECTS = 6;
 
   interface Props {
     models: ModelSummary[];
     onAccordionToggle?: (detail: AccordionToggleDetail) => void;
     subagentStats: SubagentStats | null;
+    projectStats?: ProjectUsage[] | null;
     deviceBreakdown?: DeviceSummary[] | null;
     onDeviceSelect?: (device: string) => void;
     onShowAllDevices?: () => void;
   }
-  let { models, onAccordionToggle, subagentStats, deviceBreakdown, onDeviceSelect, onShowAllDevices }: Props = $props();
+  let { models, onAccordionToggle, subagentStats, projectStats, deviceBreakdown, onDeviceSelect, onShowAllDevices }: Props = $props();
+
+  let projects = $derived(projectStats ?? []);
+  let visibleProjects = $derived(projects.slice(0, MAX_VISIBLE_PROJECTS));
+  let projectsTotalCost = $derived(projects.reduce((sum, p) => sum + p.cost, 0));
+  // One project open at a time, keyed by path ("" = no project).
+  let openProject = $state<string | null>(null);
+
+  function projectKey(p: ProjectUsage): string {
+    return p.path ?? "";
+  }
+
+  function sessionLabel(s: SessionUsage): string {
+    if (s.title) return s.title;
+    const id = s.key.split(":").pop() ?? s.key;
+    return `Untitled · ${id.slice(0, 8)}`;
+  }
+
+  function toggleProject(p: ProjectUsage) {
+    const key = projectKey(p);
+    const expanding = openProject !== key;
+    openProject = expanding ? key : null;
+    if (expanding) accordionStates = { ...accordionStates, devices: false };
+    void tick().then(() => {
+      onAccordionToggle?.({ durationMs: ACCORDION_TRANSITION_MS, expanding, scope: "projects" });
+    });
+  }
 
   let hiddenModels = $state<string[]>([]);
   $effect(() => {
@@ -76,6 +104,7 @@
       }
     }
     accordionStates = next;
+    if (expanding && scope === "devices") openProject = null;
     void tick().then(() => {
       onAccordionToggle?.({
         durationMs: ACCORDION_TRANSITION_MS,
@@ -180,6 +209,49 @@
           <div><span class="ch-scope">sub</span> <span class="ch-plus">+{subagentStats.subagents.added_lines.toLocaleString()}</span>/<span class="ch-minus">&minus;{subagentStats.subagents.removed_lines.toLocaleString()}</span></div>
         {/if}
       </div>
+    {/if}
+  {/if}
+
+  <!-- Projects section (Claude/Codex sessions grouped by git repository) -->
+  {#if visibleProjects.length > 0}
+    <div class="bd-sep">Projects</div>
+    {#each visibleProjects as project (projectKey(project))}
+      {@const open = openProject === projectKey(project)}
+      <button
+        class="agent-row"
+        class:open
+        onclick={() => toggleProject(project)}
+        title={project.path ?? "Sessions with no working directory"}
+      >
+        <span class="ind"><span class="ind-shape"></span></span>
+        <span class="agent-name proj-name">{project.path ? project.name : "No project"} <span class="agent-meta">· {project.session_count}</span></span>
+        <span class="agent-cost">{formatCost(project.cost)}</span>
+        <span class="agent-pct">{projectsTotalCost > 0 ? ((project.cost / projectsTotalCost) * 100).toFixed(0) : "—"}%</span>
+      </button>
+      {#if open}
+        <div class="sub-group">
+          <div class="sub-inner">
+            {#each project.sessions as s (s.key)}
+            <div class="sub-row">
+              <span class="sub-bar" style="background:var(--scope-main)"></span>
+              <div class="sub-info">
+                <div class="sub-name-row">
+                  <span class="sub-name" title={sessionLabel(s)}>{sessionLabel(s)}</span>
+                  <span class="sub-cost">{formatCost(s.cost)}</span>
+                </div>
+                <div class="sub-tokens">{formatTokens(s.tokens)} tokens{#if s.subagent_cost > 0 && s.cost > 0} · {((s.subagent_cost / s.cost) * 100).toFixed(0)}% subagents{/if}</div>
+              </div>
+            </div>
+            {/each}
+            {#if project.session_count > project.sessions.length}
+              <div class="sub-more">+{project.session_count - project.sessions.length} smaller sessions</div>
+            {/if}
+          </div>
+        </div>
+      {/if}
+    {/each}
+    {#if projects.length > MAX_VISIBLE_PROJECTS}
+      <div class="sub-more">+{projects.length - MAX_VISIBLE_PROJECTS} more projects</div>
     {/if}
   {/if}
 
@@ -334,6 +406,12 @@
     font: 400 7.5px/1 system-ui, sans-serif; color: var(--t4);
     margin-top: 2px; font-variant-numeric: tabular-nums;
     opacity: 0.8;
+  }
+
+  .proj-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sub-more {
+    padding: 4px 7px 4px 24px;
+    font: 400 8px/1.2 system-ui, sans-serif; color: var(--t4);
   }
 
   /* ── Change attribution ── */

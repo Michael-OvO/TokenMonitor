@@ -589,6 +589,70 @@ fn lock<T: Default>(cell: &'static OnceLock<Mutex<T>>) -> std::sync::MutexGuard<
         .unwrap_or_else(|p| p.into_inner())
 }
 
+/// A provider's meter readings taken at or after `since`: Codex's from its
+/// session logs, the others' from the samples file.
+fn meter_samples(parser: &UsageParser, provider: &str, since: DateTime<Utc>) -> Vec<Sample> {
+    match (provider, SAMPLES_FILE.get()) {
+        ("codex", _) => codex_logs(parser.codex_dir(), since)
+            .iter()
+            .flat_map(|log| log.samples.iter().filter(|s| s.t >= since).cloned())
+            .collect(),
+        (_, Some(path)) => read_samples(path)
+            .into_iter()
+            .filter(|s| s.p == provider && s.t >= since)
+            .collect(),
+        (_, None) => Vec::new(),
+    }
+}
+
+/// A meter's reading when a day's plan starts: the last one at or before
+/// `at` in the window resetting at `resets_at`, else the first one after
+/// it (no earlier reading of this window was kept).
+fn reading_at(
+    samples: &[Sample],
+    window_id: &str,
+    resets_at: DateTime<Utc>,
+    at: DateTime<Utc>,
+) -> Option<f64> {
+    let mut window: Vec<&Sample> = samples
+        .iter()
+        .filter(|s| s.w == window_id && s.r.is_some_and(|r| within_slack(r, resets_at)))
+        .collect();
+    window.sort_by_key(|s| s.t);
+    window
+        .iter()
+        .rev()
+        .find(|s| s.t <= at)
+        .or_else(|| window.first())
+        .map(|s| s.u)
+}
+
+/// The page's "used today" baseline for a weekly bar; see `reading_at`.
+#[tauri::command]
+pub async fn get_meter_reading_at(
+    provider: String,
+    window_id: String,
+    resets_at: String,
+    at: String,
+    state: State<'_, AppState>,
+) -> Result<Option<f64>, String> {
+    if !["claude", "codex", "cursor", "kimi"].contains(&provider.as_str()) {
+        return Err(format!("unknown provider {provider}"));
+    }
+    if !state.usage_access_enabled.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let resets_at = parse_utc(&resets_at).ok_or("invalid resets_at")?;
+    let at = parse_utc(&at).ok_or("invalid at")?;
+    let parser = state.parser.clone();
+    tokio::task::spawn_blocking(move || {
+        let samples = meter_samples(&parser, &provider, at - Duration::days(1));
+        reading_at(&samples, &window_id, resets_at, at)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// A provider's bars, from its entries and meter readings loaded once for
 /// all of them.
 fn compute(
@@ -608,18 +672,11 @@ fn compute(
         .chain(remote)
         .collect();
     entries.sort_by_key(|e| e.0);
-    let samples: Vec<Sample> = match (provider, SAMPLES_FILE.get()) {
-        // Cursor's first-party meter shares spend with its API pool; no clean stretches.
-        ("cursor", _) => Vec::new(),
-        ("codex", _) => codex_logs(parser.codex_dir(), lookback)
-            .iter()
-            .flat_map(|log| log.samples.iter().filter(|s| s.t >= lookback).cloned())
-            .collect(),
-        (_, Some(path)) => read_samples(path)
-            .into_iter()
-            .filter(|s| s.p == provider && s.t >= lookback)
-            .collect(),
-        (_, None) => Vec::new(),
+    // Cursor's first-party meter shares spend with its API pool; no clean stretches.
+    let samples = if provider == "cursor" {
+        Vec::new()
+    } else {
+        meter_samples(parser, provider, lookback)
     };
     bars.iter()
         .map(|(window_id, since)| {
@@ -933,6 +990,25 @@ mod tests {
             .collect();
         let got = untracked(&samples, &[], &[], "five_hour", at(0)).unwrap();
         assert!((got.points - 22.0).abs() < 1e-9, "{}", got.points);
+    }
+
+    #[test]
+    fn reading_at_takes_the_last_reading_before_else_the_first_after() {
+        let mut samples = vec![sample(1, 10.0), sample(3, 20.0), sample(5, 30.0)];
+        // Another window and another reset never count.
+        samples.push(Sample {
+            w: "seven_day".into(),
+            ..sample(2, 99.0)
+        });
+        samples.push(Sample {
+            r: Some(at(300)),
+            ..sample(4, 88.0)
+        });
+        let read = |w: &str, r: i64, t: i64| reading_at(&samples, w, at(r), at(t));
+        assert_eq!(read("five_hour", 100, 4), Some(20.0));
+        assert_eq!(read("five_hour", 100, 0), Some(10.0));
+        assert_eq!(read("seven_day", 100, 9), Some(99.0));
+        assert_eq!(read("five_hour", 200, 4), None);
     }
 
     #[test]

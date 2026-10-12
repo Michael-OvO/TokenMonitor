@@ -43,6 +43,8 @@ pub struct ParsedEntry {
     pub unique_hash: Option<String>,
     pub session_key: String,
     pub agent_scope: crate::stats::subagent::AgentScope,
+    /// Working directory and title of the session (Claude and Codex only).
+    pub session_meta: Option<Arc<crate::stats::project::SessionMeta>>,
 }
 
 impl ParsedEntry {
@@ -2721,6 +2723,8 @@ impl UsageParser {
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -2824,6 +2828,8 @@ impl UsageParser {
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -2940,6 +2946,8 @@ impl UsageParser {
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -3116,6 +3124,8 @@ impl UsageParser {
                     || loaded.entries.iter().any(|entry| entry.timestamp < start)),
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -3265,6 +3275,8 @@ impl UsageParser {
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -3309,6 +3321,7 @@ mod tests {
             unique_hash: None,
             session_key: String::from("test"),
             agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
         }
     }
 
@@ -3843,6 +3856,7 @@ mod tests {
             unique_hash: Some("remote-1".to_string()),
             session_key: "cursor-ide".to_string(),
             agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
         };
         parser.store_cursor_remote(vec![remote], Some(jun1));
 
@@ -5397,6 +5411,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_session_meta_reads_cwd_and_titles() {
+        let dir = TempDir::new().unwrap();
+        // A /rename (custom-title) beats the generated ai-title, even when it
+        // lands after the usage rows; a quoted title in content is not a title.
+        let claude = r#"{"type":"ai-title","aiTitle":"Generated","sessionId":"s1"}
+{"type":"assistant","cwd":"/work/repo","sessionId":"s1","timestamp":"2026-03-21T10:00:00+00:00","requestId":"r1","message":{"id":"m1","model":"claude-opus-4-6-20260301","content":[{"type":"text","text":"{\"type\":\"custom-title\",\"customTitle\":\"Fake\"}"}],"usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"custom-title","customTitle":"Renamed","sessionId":"s1"}"#;
+        write_file(&dir.path().join("claude.jsonl"), claude);
+        let (entries, _, _, _) = parse_claude_session_file(&dir.path().join("claude.jsonl"));
+        let meta = entries[0].session_meta.as_deref().unwrap();
+        assert_eq!(meta.cwd.as_deref(), Some("/work/repo"));
+        assert_eq!(meta.title.as_deref(), Some("Renamed"));
+
+        let codex = r#"{"type":"session_meta","payload":{"id":"t1","cwd":"/work/codex"}}
+{"type":"turn_context","payload":{"cwd":"/work/codex/sub","model":"gpt-5.4"}}
+{"type":"event_msg","timestamp":"2026-03-21T10:00:00+00:00","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":50}}}}"#;
+        write_file(&dir.path().join("codex.jsonl"), codex);
+        let (entries, _, _, _) = parse_codex_session_file(&dir.path().join("codex.jsonl"));
+        let meta = entries[0].session_meta.as_deref().unwrap();
+        assert_eq!(meta.cwd.as_deref(), Some("/work/codex/sub"));
+        assert_eq!(meta.title, None);
+    }
+
+    #[test]
     fn parse_claude_edit_tool_result_prefers_structured_patch_counts() {
         let dir = TempDir::new().unwrap();
         let content = r#"{"type":"assistant","timestamp":"2026-03-21T10:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/main.rs","old_string":"let a = 1;\nlet b = 2;","new_string":"let a = 1;\nlet b = 3;\nlet c = 4;"}}],"usage":{"input_tokens":100,"output_tokens":50}}}
@@ -6583,6 +6621,7 @@ mod cursor_remote_cache_tests {
             unique_hash: None,
             session_key: "test-cursor".to_string(),
             agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
         }
     }
 

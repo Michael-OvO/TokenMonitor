@@ -320,6 +320,7 @@ fn attach_local_stats(
     parser: &UsageParser,
     payload: &mut UsagePayload,
     provider: &str,
+    period: &str,
     bounds: &PeriodBounds,
 ) {
     let loaded = parser.load_entries_cached(provider, Some(bounds.start));
@@ -356,6 +357,18 @@ fn attach_local_stats(
         payload.cache_write_1h_tokens = entries.iter().map(|e| e.cache_creation_1h_tokens).sum();
         payload.web_search_requests = entries.iter().map(|e| e.web_search_requests).sum();
     }
+
+    let codex_titles = crate::paths::codex_session_index_file()
+        .map(|index| crate::stats::project::read_codex_titles(&index))
+        .unwrap_or_default();
+    payload.project_stats =
+        crate::stats::project::aggregate_project_stats(&session_entries, &codex_titles);
+    // Every row, archived hours included (as "No project"), so the bars sum
+    // to the same local total as the model chart.
+    payload.project_chart_buckets = payload
+        .project_stats
+        .is_some()
+        .then(|| crate::stats::project::project_chart_buckets(&entries, period));
 
     payload.subagent_stats = crate::stats::subagent::aggregate_subagent_stats(
         &session_entries,
@@ -569,7 +582,7 @@ fn get_provider_data_for_interval(
     // Cursor snapshot.
     let cursor_generation = parser.cursor_remote_generation();
     let mut payload = parser_payload_for_period(parser, provider, period, &bounds)?;
-    attach_local_stats(parser, &mut payload, provider, &bounds);
+    attach_local_stats(parser, &mut payload, provider, period, &bounds);
 
     parser.store_cache_at_cursor_generation(&cache_key, payload.clone(), cursor_generation);
 
@@ -953,7 +966,7 @@ pub(crate) async fn get_usage_data_inner(
             .await;
 
             // Aggregate stats once from the selected providers' entries.
-            attach_local_stats(parser, &mut merged, provider, &bounds);
+            attach_local_stats(parser, &mut merged, provider, period, &bounds);
 
             finalize_usage_payload(state, provider, period, offset, merged).await
         }
