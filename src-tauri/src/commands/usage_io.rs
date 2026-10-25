@@ -118,6 +118,8 @@ struct ExportRecordRef<'a> {
     mn: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     raw_model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    billed_cost: Option<f64>,
     #[serde(rename = "in")]
     input_tokens: u64,
     out: u64,
@@ -216,6 +218,8 @@ struct ImportRecord {
     mn: String,
     #[serde(default)]
     raw_model: Option<String>,
+    #[serde(default)]
+    billed_cost: Option<f64>,
     #[serde(rename = "in", default)]
     input_tokens: u64,
     #[serde(default)]
@@ -253,6 +257,7 @@ impl ImportRecord {
             mk: self.mk,
             mn: self.mn,
             raw_model: self.raw_model,
+            billed_cost: self.billed_cost.filter(|v| v.is_finite() && *v >= 0.0),
             input_tokens: self.input_tokens,
             out: self.out,
             c5: self.c5,
@@ -350,6 +355,9 @@ fn is_valid_source_key(key: &str) -> bool {
 /// normalized model key plus the original source ID when available. Rounded to
 /// micro-dollars to avoid float noise; 0.0 when pricing is unknown.
 fn bucket_cost_usd(r: &ArchivedHourly) -> f64 {
+    if let Some(cost) = r.billed_cost {
+        return cost;
+    }
     use crate::usage::pricing::{calculate_cost_for_key, provider_multiplier};
     let raw = calculate_cost_for_key(&r.mk, r.input_tokens, r.out, r.c5, r.c1, r.cr, r.ws)
         * provider_multiplier(r.raw_model.as_deref().unwrap_or(&r.mk));
@@ -366,6 +374,7 @@ fn export_record<'a>(r: &'a ArchivedHourly, provider: Option<&'a str>) -> Export
         mk: &r.mk,
         mn: &r.mn,
         raw_model: r.raw_model.as_deref(),
+        billed_cost: r.billed_cost,
         input_tokens: r.input_tokens,
         out: r.out,
         c5: r.c5,
@@ -1662,6 +1671,7 @@ mod tests {
             h: hour,
             mk: "sonnet-4-6".to_string(),
             mn: "Sonnet 4.6".to_string(),
+            billed_cost: None,
             raw_model: None,
             input_tokens: 100,
             out: 200,
@@ -1761,6 +1771,7 @@ mod tests {
     fn raw_model_round_trips_through_jsonl() {
         let mut rec = sample_record("claude", "2026-06-15", 10);
         rec.raw_model = Some("claude-sonnet-4-6-20260301".to_string());
+        rec.billed_cost = Some(1.23);
         let line = jsonl_line("local:claude", &rec);
 
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
@@ -1768,6 +1779,8 @@ mod tests {
 
         let (groups, skipped) = parse_import_payload(&line).unwrap();
         assert_eq!(skipped, 0);
+        assert_eq!(groups[0].1[0].billed_cost, Some(1.23));
+        assert_eq!(bucket_cost_usd(&groups[0].1[0]), 1.23);
         assert_eq!(
             groups[0].1[0].raw_model.as_deref(),
             Some("claude-sonnet-4-6-20260301")

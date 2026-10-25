@@ -84,13 +84,19 @@ fn normalize_rates(key: &str, entry: FallbackRates) -> Option<FallbackModelRates
     })
 }
 
+fn normalized_lookup_key(model_key: &str) -> Option<String> {
+    let key = model_key.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key)
+    }
+}
+
 /// Resolve a normalized model key against the static fallback table.
 pub fn lookup(model_key: &str) -> Option<FallbackModelRates> {
     let table = parsed_table();
-    let key = model_key.trim().to_ascii_lowercase();
-    if key.is_empty() {
-        return None;
-    }
+    let key = normalized_lookup_key(model_key)?;
 
     if let Some(rates) = table.models.get(&key) {
         return Some(*rates);
@@ -98,6 +104,14 @@ pub fn lookup(model_key: &str) -> Option<FallbackModelRates> {
 
     let resolved = table.aliases.get(&key)?;
     table.models.get(resolved).copied()
+}
+
+/// A row in `models`, not an alias. Used when a slug's trailing patch version
+/// (`muse-wonder-1.0`) should inherit its parent only if that parent is a
+/// real priced model.
+pub fn lookup_listed(model_key: &str) -> Option<FallbackModelRates> {
+    let key = normalized_lookup_key(model_key)?;
+    parsed_table().models.get(&key).copied()
 }
 
 #[cfg(test)]
@@ -144,6 +158,11 @@ mod tests {
         assert!(lookup("cursor-grok-4.6-xhigh-fast").is_some());
         assert!(lookup("cursor-grok-4.6-xhigh").is_some());
         assert!(lookup("gemini-2.5-pro").is_some());
+        assert!(lookup_listed("gemini-4-argon").is_some());
+        assert!(lookup_listed("muse-wonder").is_some());
+        assert!(lookup_listed("muse-spark-1.3").is_some());
+        assert!(lookup_listed("composer").is_none());
+        assert!(lookup("composer").is_some());
     }
 
     #[test]

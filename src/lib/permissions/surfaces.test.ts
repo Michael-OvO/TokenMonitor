@@ -111,7 +111,7 @@ describe("permission surfaces", () => {
   it("discloses the third-party reset watch and follows its toggle", () => {
     const off = permissionSurfaceById(getPermissionSurfaces(settings(), { macos: true }), "codex_reset_watch");
     expect(off?.status).toBe("Off");
-    expect(off?.why).toContain("codex-resets.com");
+    expect(off?.why).toContain("codex-reset.com");
     const on = getPermissionSurfaces(settings({ codexResetWatch: true }), { macos: true });
     expect(permissionSurfaceById(on, "codex_reset_watch")?.status).toBe("Enabled");
   });

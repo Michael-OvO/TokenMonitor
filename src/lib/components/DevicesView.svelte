@@ -196,7 +196,7 @@
               <div class="model-row">
                 <div class="model-dot" style:background={deviceColor(device.device)}></div>
                 <span class="model-name">{model.display_name}</span>
-                <span class="model-cost">{formatModelCost(model.cost, model.pricing_available)}</span>
+                <span class="model-cost">{formatModelCost(model.cost, model.pricing_available, model.model_key)}</span>
               </div>
             {/each}
           </div>

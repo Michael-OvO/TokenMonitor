@@ -231,9 +231,6 @@ pub(crate) fn build_device_summary_from_parsed(
     bounds: &PeriodBounds,
 ) -> DeviceSummary {
     use crate::models::normalize_model;
-    use crate::usage::pricing::{
-        calculate_cost_for_key, pricing_available_for_key, provider_multiplier,
-    };
     use std::collections::HashMap;
 
     let mut model_map: HashMap<String, (String, f64, u64, bool)> = HashMap::new();
@@ -244,16 +241,8 @@ pub(crate) fn build_device_summary_from_parsed(
         }
 
         let (display_name, model_key) = normalize_model(&entry.model);
-        let pricing_available = pricing_available_for_key(&model_key);
-        let cost = calculate_cost_for_key(
-            &model_key,
-            entry.input_tokens,
-            entry.output_tokens,
-            entry.cache_creation_5m_tokens,
-            entry.cache_creation_1h_tokens,
-            entry.cache_read_tokens,
-            0,
-        ) * provider_multiplier(&entry.model);
+        let pricing_available = entry.pricing_available();
+        let cost = entry.cost_usd();
         let tokens = entry.input_tokens
             + entry.output_tokens
             + entry.cache_creation_5m_tokens
@@ -295,9 +284,10 @@ pub(crate) fn build_device_summary_from_compact(
         }
 
         let (display_name, model_key) = normalize_model(&record.model);
-        let pricing_available = pricing_available_for_key(&model_key);
+        let pricing_key = crate::models::pricing_model_key(&record.billing_model());
+        let pricing_available = pricing_available_for_key(&pricing_key);
         let cost = calculate_cost_for_key(
-            &model_key,
+            &pricing_key,
             record.input_tokens,
             record.output_tokens,
             record.cache_5m,
@@ -342,16 +332,8 @@ pub(crate) fn build_device_summary_merged(
             continue;
         }
         let (display_name, model_key) = normalize_model(&entry.model);
-        let pricing_available = pricing_available_for_key(&model_key);
-        let cost = calculate_cost_for_key(
-            &model_key,
-            entry.input_tokens,
-            entry.output_tokens,
-            entry.cache_creation_5m_tokens,
-            entry.cache_creation_1h_tokens,
-            entry.cache_read_tokens,
-            0,
-        ) * provider_multiplier(&entry.model);
+        let pricing_available = entry.pricing_available();
+        let cost = entry.cost_usd();
         let tokens = entry.input_tokens
             + entry.output_tokens
             + entry.cache_creation_5m_tokens
@@ -370,9 +352,10 @@ pub(crate) fn build_device_summary_merged(
             continue;
         }
         let (display_name, model_key) = normalize_model(&record.model);
-        let pricing_available = pricing_available_for_key(&model_key);
+        let pricing_key = crate::models::pricing_model_key(&record.billing_model());
+        let pricing_available = pricing_available_for_key(&pricing_key);
         let cost = calculate_cost_for_key(
-            &model_key,
+            &pricing_key,
             record.input_tokens,
             record.output_tokens,
             record.cache_5m,
@@ -600,24 +583,32 @@ pub(crate) async fn included_remote_rows(
     let since = bounds.start;
     let cache_mgr = state.ssh_cache.read().await;
     let mgr = cache_mgr.as_ref();
-    let price = |model: &str, input, output, cache_5m, cache_1h, cache_read, ts| {
-        let (display_name, model_key) = crate::models::normalize_model(model);
-        let cost =
-            calculate_cost_for_key(&model_key, input, output, cache_5m, cache_1h, cache_read, 0)
-                * provider_multiplier(model);
-        RemoteRow {
-            ts,
-            pricing_available: pricing_available_for_key(&model_key),
-            display_name,
-            model_key,
-            cost,
-            input,
-            output,
-            cache_5m,
-            cache_1h,
-            cache_read,
-        }
-    };
+    let price =
+        |model: &str, input, output, cache_5m, cache_1h, cache_read, ts, billed: Option<f64>| {
+            let (display_name, model_key) = crate::models::normalize_model(model);
+            let pricing_key = crate::models::pricing_model_key(model);
+            let cost = calculate_cost_for_key(
+                &pricing_key,
+                input,
+                output,
+                cache_5m,
+                cache_1h,
+                cache_read,
+                0,
+            ) * provider_multiplier(model);
+            RemoteRow {
+                ts,
+                pricing_available: billed.is_some() || pricing_available_for_key(&pricing_key),
+                display_name,
+                model_key,
+                cost: billed.unwrap_or(cost),
+                input,
+                output,
+                cache_5m,
+                cache_1h,
+                cache_read,
+            }
+        };
 
     for dev in &agg_devices {
         // Only devices flagged "include in stats" contribute to the MAIN total.
@@ -649,6 +640,7 @@ pub(crate) async fn included_remote_rows(
                     entry.cache_creation_1h_tokens,
                     entry.cache_read_tokens,
                     entry.timestamp,
+                    entry.billed_cost,
                 ));
             }
         }
@@ -662,13 +654,14 @@ pub(crate) async fn included_remote_rows(
                 continue;
             }
             rows.push(price(
-                &record.model,
+                &record.billing_model(),
                 record.input_tokens,
                 record.output_tokens,
                 record.cache_5m,
                 record.cache_1h,
                 record.cache_read,
                 *local,
+                None,
             ));
         }
     }
@@ -820,7 +813,6 @@ pub(crate) async fn build_device_time_chart_buckets(
     period: &str,
     offset: i32,
 ) -> Option<Vec<ChartBucket>> {
-    use crate::models::normalize_model;
     use crate::usage::pricing::{calculate_cost_for_key, provider_multiplier};
     use std::collections::HashMap;
 
@@ -848,16 +840,7 @@ pub(crate) async fn build_device_time_chart_buckets(
             continue;
         }
         let bucket_key = bucket_key_for_local(&entry.timestamp, period);
-        let (_, model_key) = normalize_model(&entry.model);
-        let cost = calculate_cost_for_key(
-            &model_key,
-            entry.input_tokens,
-            entry.output_tokens,
-            entry.cache_creation_5m_tokens,
-            entry.cache_creation_1h_tokens,
-            entry.cache_read_tokens,
-            0,
-        ) * provider_multiplier(&entry.model);
+        let cost = entry.cost_usd();
         *device_cost_by_bucket
             .entry(bucket_key)
             .or_default()
@@ -892,16 +875,7 @@ pub(crate) async fn build_device_time_chart_buckets(
                         continue;
                     }
                     let bucket_key = bucket_key_for_local(&entry.timestamp, period);
-                    let (_, model_key) = normalize_model(&entry.model);
-                    let cost = calculate_cost_for_key(
-                        &model_key,
-                        entry.input_tokens,
-                        entry.output_tokens,
-                        entry.cache_creation_5m_tokens,
-                        entry.cache_creation_1h_tokens,
-                        entry.cache_read_tokens,
-                        0,
-                    ) * provider_multiplier(&entry.model);
+                    let cost = entry.cost_usd();
                     *device_cost_by_bucket
                         .entry(bucket_key)
                         .or_default()
@@ -920,9 +894,9 @@ pub(crate) async fn build_device_time_chart_buckets(
                 &archived_hours,
             ) {
                 let bucket_key = bucket_key_for_local(local, period);
-                let (_, model_key) = normalize_model(&record.model);
+                let pricing_key = crate::models::pricing_model_key(&record.billing_model());
                 let cost = calculate_cost_for_key(
-                    &model_key,
+                    &pricing_key,
                     record.input_tokens,
                     record.output_tokens,
                     record.cache_5m,
@@ -1113,6 +1087,7 @@ mod tests {
             h: 12,
             mk: "opus-4-6".into(),
             mn: "Opus 4.6".into(),
+            billed_cost: None,
             raw_model: None,
             input_tokens: 1,
             out: 2,
@@ -1486,6 +1461,7 @@ mod tests {
                 cache_creation_1h_tokens: 0,
                 cache_read_tokens: 0,
                 web_search_requests: 0,
+                billed_cost: None,
                 unique_hash: None,
                 session_key: String::from("test"),
                 agent_scope: AgentScope::Main,
@@ -1500,6 +1476,7 @@ mod tests {
                 cache_creation_1h_tokens: 0,
                 cache_read_tokens: 0,
                 web_search_requests: 0,
+                billed_cost: None,
                 unique_hash: None,
                 session_key: String::from("test"),
                 agent_scope: AgentScope::Main,
@@ -1593,6 +1570,7 @@ mod tests {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: String::from("test"),
             agent_scope: AgentScope::Main,
@@ -1613,6 +1591,7 @@ mod tests {
                 h: 8,
                 mk: String::from("opus"),
                 mn: String::from("Opus"),
+                billed_cost: None,
                 raw_model: None,
                 input_tokens: 10,
                 out: 10,

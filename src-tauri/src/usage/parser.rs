@@ -40,6 +40,8 @@ pub struct ParsedEntry {
     pub cache_creation_1h_tokens: u64,
     pub cache_read_tokens: u64,
     pub web_search_requests: u64,
+    /// Provider-reported USD amount; absent means estimate with the billing key.
+    pub billed_cost: Option<f64>,
     pub unique_hash: Option<String>,
     pub session_key: String,
     pub agent_scope: crate::stats::subagent::AgentScope,
@@ -48,9 +50,19 @@ pub struct ParsedEntry {
 }
 
 impl ParsedEntry {
-    /// List-price cost of this row in USD.
+    pub fn pricing_available(&self) -> bool {
+        self.billed_cost.is_some()
+            || crate::usage::pricing::pricing_available_for_key(&crate::models::pricing_model_key(
+                &self.model,
+            ))
+    }
+
+    /// Provider-reported cost, or a speed-specific estimate in USD.
     pub fn cost_usd(&self) -> f64 {
-        let model_key = crate::models::normalized_model_key(&self.model);
+        if let Some(cost) = self.billed_cost {
+            return cost;
+        }
+        let model_key = crate::models::pricing_model_key(&self.model);
         crate::usage::pricing::calculate_cost_for_key(
             &model_key,
             self.input_tokens,
@@ -760,15 +772,7 @@ struct SegmentAgg {
 /// (display_name, model_key, USD cost) of one entry.
 fn price_entry(e: &ParsedEntry) -> (String, String, f64) {
     let (name, key) = normalize_model(&e.model);
-    let cost = crate::usage::pricing::calculate_cost_for_key(
-        &key,
-        e.input_tokens,
-        e.output_tokens,
-        e.cache_creation_5m_tokens,
-        e.cache_creation_1h_tokens,
-        e.cache_read_tokens,
-        e.web_search_requests,
-    ) * crate::usage::pricing::provider_multiplier(&e.model);
+    let cost = e.cost_usd();
     (name, key, cost)
 }
 
@@ -776,7 +780,7 @@ fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, SegmentAgg> {
     let mut map: HashMap<String, SegmentAgg> = HashMap::new();
     for e in entries {
         let (name, key, cost) = price_entry(e);
-        let pricing_available = crate::usage::pricing::pricing_available_for_key(&key);
+        let pricing_available = e.pricing_available();
         let entry = map.entry(key).or_insert(SegmentAgg {
             display_name: name,
             cost: 0.0,
@@ -3291,6 +3295,47 @@ impl UsageParser {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archived_cursor_opus_5_5_fast_is_priced_in_the_main_model() {
+        // Token counts from the affected historical Cursor hourly bucket.
+        let mut fast = test_entry("claude-opus-5-5-high-fast", 23);
+        fast.input_tokens = 347;
+        fast.output_tokens = 90_537;
+        fast.cache_creation_1h_tokens = 517_117;
+        fast.cache_read_tokens = 6_370_676;
+        assert!((fast.cost_usd() - 11.3436964).abs() < 1e-9);
+        let standard = test_entry("claude-opus-5-5", 23);
+        let rows = build_segment_map(&[&fast, &standard]);
+        assert_eq!(rows.len(), 1);
+        let row = &rows["opus-5-5"];
+        assert!(row.pricing_available);
+        assert!((row.cost - fast.cost_usd() - standard.cost_usd()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn speed_usage_merges_without_repricing() {
+        let regular = test_entry("grok-4.7", 10);
+        let fast = test_entry("cursor-grok-4.7-high-fast", 10);
+        assert!(fast.cost_usd() > regular.cost_usd());
+        let mut billed = fast.clone();
+        billed.billed_cost = Some(7.25);
+        let map = build_segment_map(&[&regular, &fast, &billed]);
+        assert_eq!(map.len(), 1);
+        let row = &map["grok-4.7"];
+        assert_eq!(row.tokens, 450);
+        assert!((row.cost - regular.cost_usd() - fast.cost_usd() - 7.25).abs() < 1e-9);
+        let unlisted_fast = test_entry("gpt-5.4-fast", 10);
+        assert!(unlisted_fast.pricing_available());
+        assert_eq!(
+            unlisted_fast.cost_usd(),
+            test_entry("gpt-5.4", 10).cost_usd()
+        );
+        assert!(
+            build_segment_map(&[&test_entry("gpt-5.4", 10), &unlisted_fast])["gpt-5.4"]
+                .pricing_available
+        );
+    }
+
     use super::*;
     use crate::usage::codex_parser::*;
     use crate::usage::cursor_parser::*;
@@ -3318,6 +3363,7 @@ mod tests {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: String::from("test"),
             agent_scope: crate::stats::subagent::AgentScope::Main,
@@ -3853,6 +3899,7 @@ mod tests {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: Some("remote-1".to_string()),
             session_key: "cursor-ide".to_string(),
             agent_scope: crate::stats::subagent::AgentScope::Main,
@@ -6618,6 +6665,7 @@ mod cursor_remote_cache_tests {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: "test-cursor".to_string(),
             agent_scope: crate::stats::subagent::AgentScope::Main,

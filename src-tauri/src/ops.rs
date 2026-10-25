@@ -29,7 +29,7 @@ struct Urls {
     openrouter_models: String,
     litellm_prices: String,
     frankfurter_latest: String,
-    codex_resets_status: String,
+    codex_reset_forecast: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,8 +114,8 @@ pub fn frankfurter_latest_url() -> &'static str {
 }
 
 /// Third-party community tracker of OpenAI's unscheduled Codex limit resets.
-pub fn codex_resets_status_url() -> &'static str {
-    ops().urls.codex_resets_status.as_str()
+pub fn codex_reset_forecast_url() -> &'static str {
+    ops().urls.codex_reset_forecast.as_str()
 }
 
 pub fn litellm_cache_ttl_secs() -> u64 {

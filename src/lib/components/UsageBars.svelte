@@ -15,9 +15,10 @@
   import type { CreditsInfo, PlanBudget, ProviderRateLimits, RateLimitWindow, ResetWatch } from "../types/index.js";
   import { settings } from "../stores/settings.js";
   import { invoke } from "@tauri-apps/api/core";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { untrack } from "svelte";
   import { budgetAsks, budgetRange, untrackedLabel, untrackedTitle, windowSpan, windowStart, type BudgetAsk } from "../views/planBudget.js";
-  import { planToday, startOfLocalDay, type DailyPlan } from "../views/dailyQuota.js";
+  import { activeResetForecast, planToday, startOfLocalDay, type DailyPlan } from "../views/dailyQuota.js";
   import { popoverVisible } from "../visibility.js";
   import ResetTimeline from "./ResetTimeline.svelte";
 
@@ -46,16 +47,21 @@
     return () => { cancelled = true; };
   });
 
-  // Opt-in third-party reset watch, Codex only. Re-asked on each new reading;
-  // the backend answers from a 10-minute cache.
   let resetWatch = $state<ResetWatch | null>(null);
+  let currentResetWatch = $derived.by(() => {
+    void refreshTick;
+    return rateLimits.provider === "codex" && $settings.codexResetWatch
+      ? activeResetForecast(resetWatch, new Date()) : null;
+  });
   $effect(() => {
     const ask = rateLimits.provider === "codex" && $settings.codexResetWatch;
     void rateLimits.fetchedAt;
+    void refreshTick;
     if (!ask) {
       resetWatch = null;
       return;
     }
+    if (!$popoverVisible) return;
     let cancelled = false;
     invoke<ResetWatch | null>("get_codex_reset_watch")
       .then((w) => { if (!cancelled) resetWatch = w; })
@@ -64,9 +70,8 @@
   });
 
   function resetWatchTitle(w: ResetWatch): string {
-    const chance = w.resetChancePercent != null ? ` (~${w.resetChancePercent}%)` : "";
-    const until = new Date(w.expiresAt).toLocaleString();
-    return `codex-resets.com expects OpenAI may reset Codex limits soon${chance}. Community forecast, not an announcement. Watch ends ${until}.`;
+    const observed = new Date(w.observedAt).toLocaleString();
+    return `Community reset forecast: ${w.resetChance24hPercent}% within 24h, ${w.resetChance48hPercent}% within 48h of ${observed}. Confidence: ${w.confidence}. An estimate, not an announcement. Daily recommendations account for this forecast; unavailable or expired forecasts use the normal plan.`;
   }
 
   function budgetFor(w: RateLimitWindow): PlanBudget | undefined {
@@ -183,7 +188,7 @@
       resetsAt: new Date(w.resetsAt),
       anchor: a.anchor,
       capPercent: $settings.dailyQuotaCapPercent,
-      resetRiskPercent: rateLimits.provider === "codex" ? resetWatch?.resetChancePercent ?? 0 : 0,
+      resetForecast: currentResetWatch,
     });
   }
 
@@ -281,9 +286,10 @@
     </div>
   {/if}
 
-  {#if resetWatch}
-    <div class="ub-watch" class:strong={resetWatch.level === "strong"} title={resetWatchTitle(resetWatch)}>
-      Reset watch · {resetWatch.level}{#if resetWatch.resetChancePercent != null} · ~{resetWatch.resetChancePercent}%{/if}
+  {#if currentResetWatch}
+    <div class="ub-watch" title={resetWatchTitle(currentResetWatch)}>
+      <span>Reset · 24h {currentResetWatch.resetChance24hPercent}% · 48h {currentResetWatch.resetChance48hPercent}% · {currentResetWatch.confidence}</span>
+      <a href="https://codex-reset.com/" onclick={(event) => { event.preventDefault(); void openUrl("https://codex-reset.com/").catch(() => {}); }}>Data: codex-reset.com</a>
     </div>
   {/if}
 
@@ -295,7 +301,8 @@
       {@const pace = plan ? "" : paceLabel(w, hours)}
       {@const tickAt = plan ? Math.min(w.utilization - plan.usedTodayPercent + plan.targetPercent, 100) : 0}
       {@const eta = etaToLimit(w, hours)}
-      <div class="ub-row">
+      {@const details = [budget, budget ? budgetTitle(w) : "", plan ? planTitle(plan) : "", eta, resetsIn(w.resetsAt)].filter(Boolean).join("\n")}
+      <div class="ub-row" title={details}>
         <div class="ub-head">
           <span class="ub-label">{w.label}</span>
           <div class="ub-head-right">
@@ -308,7 +315,7 @@
             <span class="ub-val" class:stale={rateLimits.stale}>{utilizationLabel(w.utilization)}</span>
           </div>
         </div>
-        <div class="ub-track" title={plan ? planTitle(plan) : undefined}>
+        <div class="ub-track">
           <div
             class="ub-fill"
             style="width: {Math.min(w.utilization, 100)}%; background: {utilizationColor(w.utilization)}; opacity: {utilizationFillOpacity(w.utilization)}; --bar-delay: {i * 0.09 + 0.04}s;"
@@ -324,7 +331,6 @@
           <div
             class="ub-sub"
             class:ub-sub-end={tickAt < 50}
-            title={[eta, resetsIn(w.resetsAt), budget, planTitle(plan)].filter(Boolean).join(" · ")}
           >
             <span class="ub-plan-label" style="left: {Math.min(Math.max(tickAt, 10), 90)}%">Recommended</span>
             {#if eta}
@@ -342,7 +348,7 @@
             {resetsIn(w.resetsAt)}
           {/if}
           {#if budget}
-            <span title={budgetTitle(w)}>· {budget}</span>
+            <span>· {budget}</span>
           {/if}
         </div>
         {#if untrackedLabel(budgetFor(w))}
@@ -426,16 +432,22 @@
     border-radius: 3px;
   }
   .ub-watch {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
     align-self: flex-start;
+    max-width: 100%;
+    white-space: nowrap;
     margin-bottom: 4px;
-    font: 500 8.5px/1 system-ui, sans-serif;
+    font: 500 8.5px/1.4 system-ui, sans-serif;
     color: var(--t2);
     background: var(--surface-2);
     padding: 3px 6px;
     border-radius: 3px;
     cursor: help;
   }
-  .ub-watch.strong { color: var(--ch-plus, var(--t1)); }
+  .ub-watch span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .ub-watch a { flex-shrink: 0; color: inherit; }
   .ub-row {
     display: flex;
     flex-direction: column;

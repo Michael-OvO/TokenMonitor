@@ -529,16 +529,8 @@ pub async fn get_single_device_usage(
                 continue;
             }
             let (display_name, model_key) = crate::models::normalize_model(&entry.model);
-            let pricing_available = pricing_available_for_key(&model_key);
-            let cost = calculate_cost_for_key(
-                &model_key,
-                entry.input_tokens,
-                entry.output_tokens,
-                entry.cache_creation_5m_tokens,
-                entry.cache_creation_1h_tokens,
-                entry.cache_read_tokens,
-                0,
-            ) * provider_multiplier(&entry.model);
+            let pricing_available = entry.pricing_available();
+            let cost = entry.cost_usd();
             let tokens = entry.input_tokens + entry.output_tokens;
             let agg = model_map
                 .entry(model_key.clone())
@@ -578,16 +570,8 @@ pub async fn get_single_device_usage(
                     continue;
                 }
                 let (display_name, model_key) = crate::models::normalize_model(&entry.model);
-                let pricing_available = pricing_available_for_key(&model_key);
-                let cost = calculate_cost_for_key(
-                    &model_key,
-                    entry.input_tokens,
-                    entry.output_tokens,
-                    entry.cache_creation_5m_tokens,
-                    entry.cache_creation_1h_tokens,
-                    entry.cache_read_tokens,
-                    0,
-                ) * provider_multiplier(&entry.model);
+                let pricing_available = entry.pricing_available();
+                let cost = entry.cost_usd();
                 let tokens = entry.input_tokens + entry.output_tokens;
                 let agg = model_map
                     .entry(model_key.clone())
@@ -624,9 +608,10 @@ pub async fn get_single_device_usage(
                 &archived_hours,
             ) {
                 let (display_name, model_key) = crate::models::normalize_model(&record.model);
-                let pricing_available = pricing_available_for_key(&model_key);
+                let pricing_key = crate::models::pricing_model_key(&record.billing_model());
+                let pricing_available = pricing_available_for_key(&pricing_key);
                 let cost = calculate_cost_for_key(
-                    &model_key,
+                    &pricing_key,
                     record.input_tokens,
                     record.output_tokens,
                     record.cache_5m,

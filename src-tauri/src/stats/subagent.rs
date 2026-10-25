@@ -108,8 +108,7 @@ impl ScopeSummaryBuilder {
     }
 
     fn add_entry(&mut self, entry: &crate::usage::parser::ParsedEntry) {
-        let model_key = crate::models::normalized_model_key(&entry.model);
-        let pricing_available = crate::usage::pricing::pricing_available_for_key(&model_key);
+        let pricing_available = entry.pricing_available();
         let entry_cost = entry.cost_usd();
         self.cost += entry_cost;
         self.input_tokens += entry.input_tokens;
@@ -254,6 +253,7 @@ mod tests {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: session.to_string(),
             agent_scope: scope,

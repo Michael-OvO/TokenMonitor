@@ -82,6 +82,18 @@ describe("formatCreditAmount", () => {
 });
 
 describe("formatModelCost", () => {
+  it("shows the known default amount without an unavailable-price suffix", () => {
+    expect(formatModelCost(0.25909125, false, "default")).toBe("$0.26");
+    expect(formatModelCost(0, false, "default")).toBe("N/A");
+    expect(formatModelCost(0.25909125, false, "other")).toBe("$0.26 + N/A");
+  });
+
+  it("preserves the priced subtotal when a merged model has unpriced usage", () => {
+    expect(formatModelCost(7763.2065842, false)).toBe("$7763.21 + N/A");
+    setCurrency("EUR");
+    expect(formatModelCost(10, false)).toBe("€9.20 + N/A");
+  });
+
   it("returns N/A when model pricing is unavailable", () => {
     expect(formatModelCost(0, false)).toBe("N/A");
   });

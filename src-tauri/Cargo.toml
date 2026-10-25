@@ -84,3 +84,12 @@ keyring = { version = "3", default-features = false, features = ["apple-native"]
 filetime = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+
+# Keep fast rebuilds and full debugging for our code. Dependency backtraces
+# retain file/line information without their bulky type/variable debug data.
+# The test profile inherits these settings; release builds are unchanged.
+[profile.dev]
+incremental = true
+
+[profile.dev.package."*"]
+debug = "line-tables-only"

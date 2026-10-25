@@ -1,6 +1,8 @@
 {
-  "_notes": "USD per 1M tokens. Edit this file when providers update pricing, then bump PRICING_VERSION in pricing.rs. Keys must match normalized model_key values from usage logs.",
+  "_notes": "USD per 1M tokens. Edit this file when providers update pricing, then bump PRICING_VERSION in pricing.rs. Keys are normalized model ids. Reasoning effort (low/medium/high/xhigh/minimal, plus max on Gemini and Muse) is stripped before lookup, and a trailing N.N patch inherits its parent when that parent is a listed model (muse-wonder-1.0 → muse-wonder). Do not add an alias per effort level.",
   "_sources": {
+    "doubao_seed_code": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json (2026-10-25: volcengine/doubao-seed-2-0-code-preview-260215; user confirmed doubao-seed-code alias and base-band estimate, input 0.46/output 2.30 USD per 1M tokens. Historical hourly sums cannot recover request tiers. Cache rates are absent upstream, so estimate cache reads/writes at input price.)",
+    "opus_5_5": "https://cursor.com/docs/models/claude-opus-5-5 ; https://platform.claude.com/docs/en/build-with-claude/fast-mode (verified 2026-10-22; cache_write_1h follows the app's Claude Code /cost convention and Cursor's single cache-write tier)",
     "cursor_composer_auto": "https://cursor.com/docs/models",
     "deepseek": "https://api-docs.deepseek.com/quick_start/pricing",
     "grok": "https://docs.x.ai/developers/pricing",
@@ -9,7 +11,9 @@
     "grok_4_6_cursor": "https://cursor.com/docs/models/grok-4-6",
     "grok_4_7_cursor": "https://cursor.com/docs/models/grok-4-7",
     "perplexity": "https://docs.perplexity.ai/docs/getting-started/pricing",
-    "gemini": "https://cursor.com/docs/models (Cursor API pool rates)"
+    "gemini": "https://cursor.com/docs/models-and-pricing (Cursor API pool rates)",
+    "gemini_4_argon": "https://cursor.com/docs/models/gemini-4-argon",
+    "muse": "https://cursor.com/docs/models-and-pricing"
   },
   "aliases": {
     "composer": "composer-2.5",
@@ -61,6 +65,27 @@
     "pplx-sonar": "sonar"
   },
   "models": {
+    "doubao-seed-2-0-code-preview-260215": {
+      "input": 0.46,
+      "output": 2.3,
+      "cache_write_5m": 0.46,
+      "cache_write_1h": 0.46,
+      "cache_read": 0.46
+    },
+    "opus-5-5": {
+      "input": 4.0,
+      "output": 20.0,
+      "cache_write_5m": 5.0,
+      "cache_write_1h": 5.0,
+      "cache_read": 0.2
+    },
+    "opus-5-5-fast": {
+      "input": 8.0,
+      "output": 40.0,
+      "cache_write_5m": 10.0,
+      "cache_write_1h": 10.0,
+      "cache_read": 0.4
+    },
     "auto": {
       "input": 1.25,
       "output": 6.0,
@@ -172,6 +197,25 @@
       "input": 1.5,
       "output": 9.0,
       "cache_read": 0.15
+    },
+    "gemini-4-argon": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.1
+    },
+    "muse-spark-1.3": {
+      "input": 1.25,
+      "output": 4.25,
+      "cache_read": 0.15,
+      "cache_write_5m": 0,
+      "cache_write_1h": 0
+    },
+    "muse-wonder": {
+      "input": 4.0,
+      "output": 20.0,
+      "cache_read": 0.2,
+      "cache_write_5m": 0,
+      "cache_write_1h": 0
     },
     "kimi-k2.5": {
       "input": 0.6,

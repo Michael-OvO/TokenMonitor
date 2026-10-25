@@ -660,7 +660,7 @@
               <div class="detail-row">
                 <span class="detail-dot" style="background:{segmentColorFn(seg.model_key)}"></span>
                 <span class="detail-name">{segDisplayName(seg.model_key, seg.model)}</span>
-                <span class="detail-cost">{byTokens ? formatTokens(seg.tokens) : formatModelCost(seg.cost, seg.pricing_available)}</span>
+                <span class="detail-cost">{byTokens ? formatTokens(seg.tokens) : formatModelCost(seg.cost, seg.pricing_available, seg.model_key)}</span>
               </div>
             {/each}
           </div>

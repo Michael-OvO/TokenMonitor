@@ -151,7 +151,7 @@
             <div class="sub-info">
               <div class="sub-name-row">
                 <span class="sub-name">{m.display_name}</span>
-                <span class="sub-cost">{formatModelCost(m.cost, m.pricing_available)}</span>
+                <span class="sub-cost">{formatModelCost(m.cost, m.pricing_available, m.model_key)}</span>
               </div>
               <div class="sub-tokens">{formatTokens(m.input_tokens)} in · {formatTokens(m.output_tokens)} out{#if m.cache_read_tokens > 0} · {formatTokens(m.cache_read_tokens)} cache{/if}</div>
             </div>
@@ -189,7 +189,7 @@
             <div class="sub-info">
               <div class="sub-name-row">
                 <span class="sub-name">{m.display_name}</span>
-                <span class="sub-cost">{formatModelCost(m.cost, m.pricing_available)}</span>
+                <span class="sub-cost">{formatModelCost(m.cost, m.pricing_available, m.model_key)}</span>
               </div>
               <div class="sub-tokens">{formatTokens(m.input_tokens)} in · {formatTokens(m.output_tokens)} out{#if m.cache_read_tokens > 0} · {formatTokens(m.cache_read_tokens)} cache{/if}</div>
             </div>
@@ -262,7 +262,7 @@
       <div class="model-row">
         <span class="model-bar" style="background:{modelColor(row.model_key)}"></span>
         <span class="model-name">{row.display_name}</span>
-        <span class="model-cost">{formatModelCost(row.cost, row.pricing_available)}</span>
+        <span class="model-cost">{formatModelCost(row.cost, row.pricing_available, row.model_key)}</span>
         <span class="model-tokens">{formatTokens(row.tokens)}</span>
       </div>
     {/each}

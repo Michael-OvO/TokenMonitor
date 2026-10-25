@@ -662,6 +662,7 @@ mod tests {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: session_key.to_string(),
             agent_scope: crate::stats::subagent::AgentScope::Main,

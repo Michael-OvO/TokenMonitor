@@ -364,6 +364,7 @@ fn collect_cursor_entries_from_value(
                         cache_creation_1h_tokens: cache_write,
                         cache_read_tokens: cache_read,
                         web_search_requests: 0,
+                        billed_cost: None,
                         unique_hash,
                         session_key: session_key.to_string(),
                         agent_scope: crate::stats::subagent::AgentScope::Main,
@@ -692,7 +693,18 @@ fn parsed_entry_from_cursor_event(
     let output = parse_u64_value(usage.and_then(|u| u.get("outputTokens")));
     let cache_read = parse_u64_value(usage.and_then(|u| u.get("cacheReadTokens")));
     let cache_write = parse_u64_value(usage.and_then(|u| u.get("cacheWriteTokens")));
-    if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
+    let billed_cost = usage
+        .and_then(|u| u.get("totalCents"))
+        .or_else(|| map.get("totalCents"))
+        .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse::<f64>().ok()))
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .map(|cents| cents / 100.0);
+    if input == 0
+        && output == 0
+        && cache_read == 0
+        && cache_write == 0
+        && billed_cost.unwrap_or(0.0) == 0.0
+    {
         return None;
     }
 
@@ -718,6 +730,7 @@ fn parsed_entry_from_cursor_event(
         cache_creation_1h_tokens: cache_write,
         cache_read_tokens: cache_read,
         web_search_requests: 0,
+        billed_cost,
         unique_hash,
         session_key: session_key.to_string(),
         agent_scope: crate::stats::subagent::AgentScope::Main,
@@ -1070,6 +1083,18 @@ pub(crate) fn fetch_cursor_remote_entries(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cursor_reported_cost_overrides_tokens_including_zero() {
+        for cents in [0.0, 123.45] {
+            let event = serde_json::json!({"model":"grok-4.7-fast", "tokenUsage":{"inputTokens":1000,"totalCents":cents}});
+            let entry =
+                parsed_entry_from_cursor_event(event.as_object().unwrap(), "cursor:test", None)
+                    .unwrap();
+            assert_eq!(entry.cost_usd(), cents / 100.0);
+            assert!(entry.pricing_available());
+        }
+    }
+
     use super::*;
 
     /// The launch prime reads the stored secret in the background; a set
@@ -1181,6 +1206,7 @@ mod tests {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: "test".into(),
             agent_scope: crate::stats::subagent::AgentScope::Main,

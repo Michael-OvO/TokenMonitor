@@ -130,10 +130,10 @@ export function getPermissionSurfaces(
       status: settings.codexResetWatch ? "Enabled" : "Off",
       tone: settings.codexResetWatch ? "ok" : "neutral",
       why:
-        "Asks codex-resets.com, a third-party community tracker, whether OpenAI may soon reset everyone's Codex limits, and shows its watch on the Codex card.",
+        "Reads codex-reset.com's third-party 24h/48h reset forecast, shows its probabilities and source, and adjusts Codex daily recommendations. Unavailable or expired forecasts use the normal plan.",
       requestPolicy: "explicit_toggle",
       requestCopy:
-        "Off until you turn it on in Settings. At most one plain GET every 10 minutes while the app is open; it sends no account or usage data.",
+        "Off until you turn it on in Settings. At most one GET every 10 minutes while the popover is shown; identifies TokenMonitor but sends no account or usage data.",
       paths: [],
     },
     {

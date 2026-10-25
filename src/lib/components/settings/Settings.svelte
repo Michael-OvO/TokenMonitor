@@ -914,8 +914,9 @@
           />
         </div>
         <div class="hint reset-watch-hint">
-          Asks codex-resets.com, a third-party community tracker, every 10 min whether OpenAI may soon reset
-          everyone's Codex limits. A forecast, not an announcement; nothing about you is sent.
+          Uses codex-reset.com's 24h/48h reset forecast to adjust Codex daily recommendations.
+          Checks at most every 10 min while shown; unavailable or expired forecasts use the normal plan.
+          Community estimates, not announcements; no usage or account data is sent.
         </div>
       </div>
     </div>

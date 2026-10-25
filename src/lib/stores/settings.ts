@@ -122,7 +122,6 @@ export interface Settings {
    * The Usage (5h) window is independent.
    */
   rollingPeriods: boolean;
-  /** Ask codex-resets.com (third party) whether a Codex limit reset is expected. */
   codexResetWatch: boolean;
   /** Most of a weekly limit one day's plan asks for (percent; 100 = no cap). */
   dailyQuotaCapPercent: number;

@@ -122,6 +122,22 @@ fn value_as_non_empty_string(value: Option<&Value>) -> Option<String> {
 }
 
 fn extract_codex_model(value: &Value) -> Option<String> {
+    let model = extract_codex_base_model(value)?;
+    let tier = value
+        .get("service_tier")
+        .or_else(|| value.pointer("/info/service_tier"))
+        .and_then(Value::as_str);
+    match tier {
+        Some(speed @ ("fast" | "priority"))
+            if !model.ends_with("-fast") && !model.ends_with("-priority") =>
+        {
+            Some(format!("{model}-{speed}"))
+        }
+        _ => Some(model),
+    }
+}
+
+fn extract_codex_base_model(value: &Value) -> Option<String> {
     if let Some(info) = value.get("info") {
         if let Some(model) = value_as_non_empty_string(info.get("model")) {
             return Some(model);
@@ -577,7 +593,20 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
             Err(_) => continue,
         };
 
-        let extracted_model = extract_codex_model(payload);
+        let extracted_model = extract_codex_model(payload).map(|model| {
+            if payload.get("service_tier").is_none()
+                && payload.pointer("/info/service_tier").is_none()
+            {
+                if let Some(current) = current_model.as_ref() {
+                    if crate::models::normalized_model_key(current)
+                        == crate::models::normalized_model_key(&model)
+                    {
+                        return current.clone();
+                    }
+                }
+            }
+            model
+        });
         if let Some(model) = extracted_model.as_ref() {
             current_model = Some(model.clone());
             assign_pending_codex_models(
@@ -605,6 +634,7 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> SessionParseResult {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: raw_usage.cached_input_tokens,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: session_key.clone(),
             agent_scope,
@@ -712,6 +742,36 @@ pub fn read_codex_entries(sessions_dir: &Path, since: Option<NaiveDate>) -> Vec<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn codex_meter_keeps_turn_speed_until_next_turn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("speed.jsonl");
+        let mut lines = Vec::new();
+        for tier in ["priority", "default"] {
+            lines.push(serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5.4","service_tier":tier}}).to_string());
+            lines.push(serde_json::json!({"type":"event_msg","timestamp":"2026-10-22T10:00:00Z","payload":{"type":"token_count","info":{"model":"gpt-5.4","last_token_usage":{"input_tokens":100,"output_tokens":20}}}}).to_string());
+        }
+        fs::write(&path, lines.join("\n")).unwrap();
+        let entries = parse_codex_session_file(&path).0;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].model, "gpt-5.4-priority");
+        assert_eq!(entries[1].model, "gpt-5.4");
+    }
+
+    #[test]
+    fn codex_priority_is_kept_for_billing() {
+        assert_eq!(
+            extract_codex_model(&serde_json::json!({"model":"gpt-5.4", "service_tier":"priority"}))
+                .as_deref(),
+            Some("gpt-5.4-priority")
+        );
+        assert_eq!(
+            extract_codex_model(&serde_json::json!({"model":"gpt-5.4", "service_tier":"default"}))
+                .as_deref(),
+            Some("gpt-5.4")
+        );
+    }
+
     use super::*;
 
     fn parse_patch_changes(patch: &str) -> Vec<ParsedChangeEvent> {

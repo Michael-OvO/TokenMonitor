@@ -75,8 +75,11 @@ export function formatCostRange(lowUsd: number, highUsd: number): string {
   return lo === hi ? `${symbol}${lo}` : `${symbol}${lo}–${hi}`;
 }
 
-export function formatModelCost(value: number, pricingAvailable: boolean | undefined): string {
-  if (pricingAvailable === false) return "N/A";
+export function formatModelCost(value: number, pricingAvailable: boolean | undefined, modelKey?: string): string {
+  // The generic Cursor label reports only its known amount.
+  if (modelKey === "default" && value > 0) return formatCost(value);
+  // A merged model can have both priced usage and an unpriced speed variant.
+  if (pricingAvailable === false) return value > 0 ? `${formatCost(value)} + N/A` : "N/A";
   if (value === 0) return "Free";
   return formatCost(value);
 }

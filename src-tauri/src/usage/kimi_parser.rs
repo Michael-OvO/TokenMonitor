@@ -276,6 +276,7 @@ pub(crate) fn parse_kimi_session_file(path: &Path) -> SessionParseResult {
             cache_creation_1h_tokens: 0,
             cache_read_tokens,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: session_key.clone(),
             agent_scope: crate::stats::subagent::AgentScope::Main,

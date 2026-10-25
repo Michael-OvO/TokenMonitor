@@ -746,17 +746,14 @@ pub(crate) async fn archive_ssh_device_usage(state: &AppState) {
                 };
                 Some(usage::parser::ParsedEntry {
                     timestamp: *local,
-                    model: if r.speed.as_deref() == Some("fast") {
-                        format!("{}-fast", r.model)
-                    } else {
-                        r.model.clone()
-                    },
+                    model: r.billing_model(),
                     input_tokens: r.input_tokens,
                     output_tokens: r.output_tokens,
                     cache_creation_5m_tokens: r.cache_5m,
                     cache_creation_1h_tokens: r.cache_1h,
                     cache_read_tokens: r.cache_read,
                     web_search_requests: 0,
+                    billed_cost: None,
                     unique_hash: None,
                     session_key: format!("ssh:{alias}"),
                     agent_scope: crate::stats::subagent::AgentScope::Main,

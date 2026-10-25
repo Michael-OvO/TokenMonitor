@@ -259,10 +259,10 @@ export interface ProviderRateLimits {
   fetchedAt: string;
 }
 
-/** codex-resets.com's watch that OpenAI may reset Codex limits (third party). */
 export interface ResetWatch {
-  level: "elevated" | "strong";
-  resetChancePercent: number | null;
+  resetChance24hPercent: number;
+  resetChance48hPercent: number;
+  confidence: string;
   observedAt: string;
   expiresAt: string;
 }

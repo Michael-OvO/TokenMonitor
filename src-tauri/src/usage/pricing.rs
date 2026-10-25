@@ -222,33 +222,92 @@ fn get_rates_for_key(model: &str) -> Option<ModelRates> {
     rates
 }
 
-/// Look up pricing for an already-lowercase model key.
-///
-/// Checks dynamic LiteLLM/OpenRouter pricing first, then `pricing_fallback.json`,
-/// then inline hardcoded rates.
-fn lookup_rates_for_key(model: &str) -> Option<ModelRates> {
-    // Effort slugs and display names ("Grok 4.7 High") share grok-4.7.
-    let canonical = if model.to_ascii_lowercase().contains("grok") {
-        crate::models::normalized_model_key(model)
-    } else {
-        model.to_string()
-    };
-    let model = canonical.as_str();
+fn rates_from_fallback(r: crate::usage::pricing_fallback::FallbackModelRates) -> ModelRates {
+    ModelRates {
+        input: r.input,
+        output: r.output,
+        cache_write_5m: r.cache_write_5m,
+        cache_write_1h: r.cache_write_1h,
+        cache_read: r.cache_read,
+    }
+}
 
-    // Dynamic pricing from LiteLLM + OpenRouter (refreshed on startup, cached 7d).
+/// Dynamic table, then the static table including aliases.
+fn table_rates(model: &str) -> Option<ModelRates> {
     if let Some(rates) = lookup_dynamic(model) {
         return Some(rates);
     }
+    crate::usage::pricing_fallback::lookup(model).map(rates_from_fallback)
+}
 
-    // Static table in pricing_fallback.json (offline, easy to edit).
-    if let Some(r) = crate::usage::pricing_fallback::lookup(model) {
-        return Some(ModelRates {
-            input: r.input,
-            output: r.output,
-            cache_write_5m: r.cache_write_5m,
-            cache_write_1h: r.cache_write_1h,
-            cache_read: r.cache_read,
-        });
+/// Dynamic table, then a static row that is itself a model. Aliases are
+/// skipped so a trailing patch (`composer-9.9` → `composer`) cannot inherit
+/// a differently priced target.
+fn listed_model_rates(model: &str) -> Option<ModelRates> {
+    if let Some(rates) = lookup_dynamic(model) {
+        return Some(rates);
+    }
+    crate::usage::pricing_fallback::lookup_listed(model).map(rates_from_fallback)
+}
+
+/// `muse-wonder-1.0` → `muse-wonder` when the price table has no `1.0` row.
+/// Only a single trailing `N.N` token, so `opus-4-6` and `gpt-5.4` stay put
+/// (`6` is not dotted; `5.4` is only dropped when `gpt` itself is listed).
+fn trailing_dotted_version_parent(key: &str) -> Option<String> {
+    let (parent, last) = key.rsplit_once('-')?;
+    if parent.is_empty() || !is_dotted_version(last) {
+        return None;
+    }
+    Some(parent.to_string())
+}
+
+fn is_dotted_version(token: &str) -> bool {
+    let mut parts = token.split('.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    let Some(minor) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && !major.is_empty()
+        && !minor.is_empty()
+        && major.bytes().all(|b| b.is_ascii_digit())
+        && minor.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Dynamic LiteLLM/OpenRouter rates, then `pricing_fallback.json`, then the
+/// inline hardcoded rates. The key is normalized first, so effort suffixes
+/// and display names share the listed model.
+fn lookup_rates_for_key(model: &str) -> Option<ModelRates> {
+    // One id for "Grok 4.7 High", "gemini-4-argon-medium", and the raw slug.
+    // Effort is already gone; `fast` is still part of the key.
+    let canonical = crate::models::pricing_model_key(model);
+    let model = canonical.as_str();
+
+    if let Some(rates) = table_rates(model) {
+        return Some(rates);
+    }
+    // Keep dedicated speed rates when known; otherwise Fast uses the base model.
+    if model.split('-').any(|t| matches!(t, "fast" | "priority")) {
+        return match model {
+            "opus-4-6-fast" => Some(claude_rates(30.0, 150.0)),
+            _ if model.split('-').any(|t| t == "fast") => {
+                let base = model
+                    .split('-')
+                    .filter(|t| *t != "fast")
+                    .collect::<Vec<_>>()
+                    .join("-");
+                get_rates_for_key(&base)
+            }
+            _ => None,
+        };
+    }
+    // Cursor's slug can carry a patch the price catalog omits (`muse-wonder-1.0`).
+    if let Some(parent) = trailing_dotted_version_parent(model) {
+        if let Some(rates) = listed_model_rates(&parent) {
+            return Some(rates);
+        }
     }
 
     // ── Hardcoded fallback (always available) ───────────────────────────────
@@ -445,6 +504,16 @@ fn get_fallback_rates(model: &str) -> Option<ModelRates> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn doubao_archive_uses_confirmed_base_band_offline() {
+        // Real 2026-05-09 hourly bucket; hourly sums cannot select a request tier.
+        for model in ["doubao-seed-code", "doubao-seed-2-0-code-preview-260215"] {
+            assert!(pricing_available_for_key(model));
+            let amount = calculate_cost_for_key(model, 487_603, 2_916, 0, 0, 118_096, 0);
+            assert!((amount - 0.28532834).abs() < 1e-9);
+        }
+    }
+
     const M: u64 = 1_000_000;
 
     fn cost(model: &str, input: u64, output: u64) -> f64 {
@@ -580,6 +649,37 @@ mod tests {
     }
 
     #[test]
+    fn opus_5_5_fast_uses_official_rates_for_all_aliases() {
+        for model in [
+            "opus-5-5-fast",
+            "claude-opus-5-5-fast",
+            "claude-opus-5-5-high-fast",
+            "cursor-claude-opus-5-5-high-fast",
+        ] {
+            assert!(pricing_available_for_key(model), "{model}");
+            assert!(approx_eq(cost(model, M, M), 48.0));
+            assert!(approx_eq(calculate_cost(model, 0, 0, M, 0, 0, 0), 10.0));
+            assert!(approx_eq(calculate_cost(model, 0, 0, 0, M, 0, 0), 10.0));
+            assert!(approx_eq(calculate_cost(model, 0, 0, 0, 0, M, 0), 0.4));
+        }
+        assert!(approx_eq(cost("claude-opus-5-5", M, M), 24.0));
+    }
+
+    #[test]
+    fn unlisted_fast_uses_standard_rates_when_available() {
+        for base in ["composer-2.5", "gpt-5.4", "claude-opus-99-9"] {
+            let fast = format!("{base}-fast");
+            assert!(pricing_available_for_key(&fast));
+            assert!(approx_eq(
+                calculate_cost(&fast, M, M, M, M, M, 0),
+                calculate_cost(base, M, M, M, M, M, 0),
+            ));
+        }
+        assert!(!pricing_available_for_key("unlisted-model-fast"));
+        assert!(!pricing_available_for_key("composer-2.5-priority"));
+    }
+
+    #[test]
     fn opus_4_6_fast_uses_6x_pricing() {
         // Fast mode: $30/$150 → (30+150)/M = $180/M
         assert!(approx_eq(cost("claude-opus-4-6-fast", M, M), 180.00));
@@ -704,6 +804,39 @@ mod tests {
         assert!(pricing_available_for_key("composer-2.5"));
         assert!(approx_eq(cost("gemini-2.5-pro", M, M), 14.0));
         assert!(approx_eq(cost("composer-2.5", M, M), 3.0));
+    }
+
+    #[test]
+    fn effort_and_patch_versions_use_the_listed_model() {
+        // Gemini 4 Argon: $2 + $10. Effort is not a different rate.
+        assert!(pricing_available_for_key("gemini-4-argon-medium"));
+        assert!(pricing_available_for_key("gemini-4-argon"));
+        assert!(approx_eq(cost("gemini-4-argon-high", M, M), 12.0));
+        assert!(approx_eq(cost("Gemini 4 Argon Medium", M, M), 12.0));
+        assert!(approx_eq(
+            calculate_cost("gemini-4-argon-minimal", 0, 0, 0, 0, M, 0),
+            0.1
+        ));
+        // Muse Wonder is listed as muse-wonder; Cursor logs muse-wonder-1.0-high.
+        assert!(pricing_available_for_key("muse-wonder-1.0-high"));
+        assert!(approx_eq(cost("muse-wonder-1.0-medium", M, M), 24.0));
+        assert!(approx_eq(cost("muse-wonder-1.0-max", M, M), 24.0));
+        assert!(approx_eq(
+            calculate_cost("muse-wonder-1.0-high", 0, 0, M, 0, M, 0),
+            0.2
+        ));
+        // Muse Spark 1.3 is its own row, so the patch is not dropped.
+        assert!(approx_eq(cost("muse-spark-1.3-high", M, M), 5.5));
+        // A missing patch must not inherit an alias (`composer` → composer-2.5).
+        assert!(!pricing_available_for_key("composer-9.9"));
+        assert!(approx_eq(cost("composer-9.9", M, M), 0.0));
+        // Effort collapses onto the base rate; `max` stays a distinct Codex model.
+        assert!(approx_eq(cost("gpt-5-high", M, M), cost("gpt-5", M, M)));
+        assert!(pricing_available_for_key("gpt-5.1-codex-max"));
+        assert_eq!(
+            crate::models::pricing_model_key("gpt-5.1-codex-max"),
+            "gpt-5.1-codex-max"
+        );
     }
 
     #[test]

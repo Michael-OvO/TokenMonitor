@@ -105,7 +105,7 @@
               <div class="model-row">
                 <div class="model-bar" style:background={modelColor(model.model_key)}></div>
                 <span class="model-name">{model.display_name}</span>
-                <span class="model-cost">{formatModelCost(model.cost, model.pricing_available)}</span>
+                <span class="model-cost">{formatModelCost(model.cost, model.pricing_available, model.model_key)}</span>
                 <span class="model-tokens">{formatTokens(model.tokens)}</span>
               </div>
             {/each}
