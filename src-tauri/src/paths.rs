@@ -175,6 +175,32 @@ pub fn cursor_global_state_vscdb_default() -> Option<PathBuf> {
     }
 }
 
+/// Default Cursor `Local State` path, which holds the DPAPI/Keychain-wrapped
+/// `os_crypt.encrypted_key` used to decrypt the at-rest IDE access token.
+pub fn cursor_local_state_default() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        home().map(|h| {
+            h.join("Library")
+                .join("Application Support")
+                .join("Cursor")
+                .join("Local State")
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        env::var("APPDATA")
+            .ok()
+            .map(|appdata| PathBuf::from(appdata).join("Cursor").join("Local State"))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        home().map(|h| h.join(".config").join("Cursor").join("Local State"))
+    }
+}
+
 /// `~/.ssh/config` — read only when SSH remote devices are configured.
 pub fn ssh_config() -> Option<PathBuf> {
     home().map(|h| h.join(".ssh").join("config"))
@@ -283,6 +309,13 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
     if let Some(p) = cursor_global_state_vscdb_default() {
         out.push(AccessedPath {
             purpose: "Cursor IDE global auth/session state DB",
+            path: p,
+            env_override: Some("CURSOR_USER_DIR"),
+        });
+    }
+    if let Some(p) = cursor_local_state_default() {
+        out.push(AccessedPath {
+            purpose: "Cursor IDE key store for decrypting the at-rest access token",
             path: p,
             env_override: Some("CURSOR_USER_DIR"),
         });

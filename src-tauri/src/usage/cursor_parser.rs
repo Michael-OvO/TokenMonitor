@@ -577,7 +577,10 @@ pub(crate) fn read_cursor_ide_access_token() -> Option<String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     read_unless_unchanged(&mut last, path, stamp, |path| {
-        read_cursor_state_value_from_sqlite3(path, CURSOR_IDE_ACCESS_TOKEN_KEY)
+        // Cursor now wraps the token with Electron safeStorage; unwrap it (a
+        // bare JWT from older builds passes straight through).
+        let raw = read_cursor_state_value_from_sqlite3(path, CURSOR_IDE_ACCESS_TOKEN_KEY)?;
+        Ok(raw.and_then(|value| super::cursor_safe_storage::decrypt_cursor_token(&value)))
     })
 }
 

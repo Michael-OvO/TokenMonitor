@@ -30,6 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 rayon = "1"
 url = "2.5.8"
+base64 = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
@@ -55,12 +56,16 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
     "Win32_Graphics_Dwm",
     "Win32_Security",
+    # DPAPI (CryptUnprotectData) unwraps Cursor's os_crypt key from Local State.
+    "Win32_Security_Cryptography",
     # Single-instance guard: map the lock port to its owning PID via
     # GetExtendedTcpTable when a foreign process holds it.
     "Win32_NetworkManagement_IpHelper",
 ] }
 # Cross-platform secret storage on Windows Credential Manager (CredRead/Write).
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
+# Cursor stores its IDE token as Chromium os_crypt v10 (AES-256-GCM on Windows).
+aes-gcm = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -79,6 +84,14 @@ objc2-app-kit = { version = "0.3.2", features = [
 ] }
 security-framework = "3"
 keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+# Cursor's os_crypt v10 is AES-128-CBC on macOS/Linux, keyed by PBKDF2-SHA1 over
+# an OS-held password (macOS Keychain / Linux libsecret, else the "peanuts" default).
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha1 = "0.10"
 
 [dev-dependencies]
 filetime = "0.2"
