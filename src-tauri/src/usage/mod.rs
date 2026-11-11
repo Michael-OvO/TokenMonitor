@@ -5,6 +5,7 @@ pub mod claude_otel_setup;
 pub mod claude_parser;
 pub mod codex_parser;
 pub mod cursor_parser;
+pub mod cursor_safe_storage;
 pub mod device_aggregation;
 pub mod exchange_rates;
 pub mod integrations;
