@@ -1,8 +1,10 @@
+mod antigravity;
 mod claude;
 mod claude_cli;
 mod codex;
 mod codex_cli;
 mod cursor;
+mod gemini;
 mod http;
 mod kimi;
 
@@ -125,10 +127,12 @@ fn fetch_claude_from_statusline() -> Option<ProviderRateLimits> {
     })
 }
 
+use antigravity::fetch_antigravity_rate_limits;
 use claude::fetch_claude_rate_limits;
 use codex::{codex_log_reading, extract_codex_rate_limits};
 use codex_cli::fetch_codex_rate_limits_via_cli;
 use cursor::fetch_cursor_rate_limits;
+use gemini::fetch_gemini_rate_limits;
 use http::{
     mark_rate_limits_stale, merge_provider_rate_limits, provider_cooldown_is_active,
     provider_rate_limit_error,
@@ -141,6 +145,9 @@ use kimi::fetch_kimi_rate_limits;
 const CLAUDE_MIN_REFETCH_SECS: i64 = 300;
 const CODEX_MIN_REFETCH_SECS: i64 = 300;
 const KIMI_MIN_REFETCH_SECS: i64 = 300;
+const GEMINI_MIN_REFETCH_SECS: i64 = 300;
+/// A loopback call to the running app, so cheap enough for every minute.
+const ANTIGRAVITY_MIN_REFETCH_SECS: i64 = 60;
 /// Cursor's probe is an HTTPS round trip (plus a `sqlite3` spawn to re-read
 /// the IDE's token when its state DB changed), and until it had this gate it
 /// ran on every statusline event, several times a minute while Claude Code works.
@@ -301,6 +308,8 @@ pub struct RateLimitSelection {
     codex: bool,
     cursor: bool,
     kimi: bool,
+    gemini: bool,
+    antigravity: bool,
 }
 
 impl RateLimitSelection {
@@ -313,6 +322,8 @@ impl RateLimitSelection {
                 UsageIntegrationId::Codex => selection.codex = true,
                 UsageIntegrationId::Cursor => selection.cursor = true,
                 UsageIntegrationId::Kimi => selection.kimi = true,
+                UsageIntegrationId::Gemini => selection.gemini = true,
+                UsageIntegrationId::Antigravity => selection.antigravity = true,
             }
         }
         selection
@@ -332,6 +343,14 @@ impl RateLimitSelection {
 
     pub fn includes_kimi(self) -> bool {
         self.kimi
+    }
+
+    pub fn includes_gemini(self) -> bool {
+        self.gemini
+    }
+
+    pub fn includes_antigravity(self) -> bool {
+        self.antigravity
     }
 }
 
@@ -485,6 +504,14 @@ pub fn merge_rate_limits(
         kimi: merge_provider_rate_limits(
             fresh.kimi,
             cached.and_then(|payload| payload.kimi.clone()),
+        ),
+        gemini: merge_provider_rate_limits(
+            fresh.gemini,
+            cached.and_then(|payload| payload.gemini.clone()),
+        ),
+        antigravity: merge_provider_rate_limits(
+            fresh.antigravity,
+            cached.and_then(|payload| payload.antigravity.clone()),
         ),
     }
 }
@@ -737,6 +764,75 @@ pub async fn fetch_selected_rate_limits_until(
         (result, provider_t0.elapsed())
     };
 
+    let cached_gemini = cached.and_then(|payload| payload.gemini.clone());
+    let gemini_future =
+        async {
+            let provider_t0 = std::time::Instant::now();
+            let result = async {
+            if !selection.gemini {
+                return cached_gemini;
+            }
+
+            let now = Utc::now();
+            if is_fresh(cached_gemini.as_ref(), GEMINI_MIN_REFETCH_SECS, now, retry_errors) {
+                return cached_gemini;
+            }
+            if let Some(rate_limits) = cached_gemini.clone() {
+                if provider_cooldown_is_active(&rate_limits, now) {
+                    return Some(mark_rate_limits_stale(rate_limits));
+                }
+            }
+
+            match fetch_gemini_rate_limits().await {
+                Ok(rate_limits) => Some(rate_limits),
+                Err(error) => {
+                    if error.message == gemini::NOT_SIGNED_IN {
+                        tracing::debug!("Gemini: {}", error.message);
+                    } else {
+                        tracing::warn!(error = %error.message, "Gemini rate-limit fetch failed");
+                    }
+                    Some(provider_rate_limit_error("gemini", error))
+                }
+            }
+        }
+        .await;
+            (result, provider_t0.elapsed())
+        };
+
+    let cached_antigravity = cached.and_then(|payload| payload.antigravity.clone());
+    let antigravity_future = async {
+        let provider_t0 = std::time::Instant::now();
+        let result = async {
+            if !selection.antigravity {
+                return cached_antigravity;
+            }
+
+            let now = Utc::now();
+            if is_fresh(cached_antigravity.as_ref(), ANTIGRAVITY_MIN_REFETCH_SECS, now, retry_errors) {
+                return cached_antigravity;
+            }
+            if let Some(rate_limits) = cached_antigravity.clone() {
+                if provider_cooldown_is_active(&rate_limits, now) {
+                    return Some(mark_rate_limits_stale(rate_limits));
+                }
+            }
+
+            match fetch_antigravity_rate_limits().await {
+                Ok(rate_limits) => Some(rate_limits),
+                Err(error) => {
+                    if error.message == antigravity::NOT_RUNNING {
+                        tracing::debug!("Antigravity: {}", error.message);
+                    } else {
+                        tracing::warn!(error = %error.message, "Antigravity rate-limit fetch failed");
+                    }
+                    Some(provider_rate_limit_error("antigravity", error))
+                }
+            }
+        }
+        .await;
+        (result, provider_t0.elapsed())
+    };
+
     let past_deadline = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
     let kept = |cached: Option<ProviderRateLimits>| (cached, std::time::Duration::ZERO);
     let (claude, claude_took) = if past_deadline() {
@@ -759,14 +855,26 @@ pub async fn fetch_selected_rate_limits_until(
     } else {
         kimi_future.await
     };
+    let (gemini, gemini_took) = if past_deadline() {
+        kept(cached.and_then(|payload| payload.gemini.clone()))
+    } else {
+        gemini_future.await
+    };
+    let (antigravity, antigravity_took) = if past_deadline() {
+        kept(cached.and_then(|payload| payload.antigravity.clone()))
+    } else {
+        antigravity_future.await
+    };
     tracing::debug!(
-        "[PROFILE] rate-limits: selection={selection:?} claude={claude_took:?} codex={codex_took:?} cursor={cursor_took:?} kimi={kimi_took:?}"
+        "[PROFILE] rate-limits: selection={selection:?} claude={claude_took:?} codex={codex_took:?} cursor={cursor_took:?} kimi={kimi_took:?} gemini={gemini_took:?} antigravity={antigravity_took:?}"
     );
     RateLimitsPayload {
         claude,
         codex,
         cursor,
         kimi,
+        gemini,
+        antigravity,
     }
 }
 
@@ -1087,6 +1195,8 @@ mod tests {
             codex: reading("codex"),
             cursor: reading("cursor"),
             kimi: reading("kimi"),
+            gemini: None,
+            antigravity: None,
         };
         let every = RateLimitSelection::enabled(&[
             UsageIntegrationId::Claude,

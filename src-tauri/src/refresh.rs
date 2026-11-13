@@ -1359,7 +1359,13 @@ mod tests {
     /// Count this machine's own Cursor and Kimi logs as scanned for an
     /// archive whose horizon is `at`.
     fn skip_other_sources(archive: &ArchiveManager, at: DateTime<Local>) {
-        for source in ["local:codex", "local:cursor", "local:kimi"] {
+        for source in [
+            "local:codex",
+            "local:cursor",
+            "local:kimi",
+            "local:gemini",
+            "local:antigravity",
+        ] {
             archive.should_scan(source, at.date_naive(), at.hour() as u8, 0);
         }
     }

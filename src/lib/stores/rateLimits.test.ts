@@ -130,6 +130,8 @@ describe("hydrateRateLimits", () => {
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
 
     const { hydrateRateLimits, rateLimitsData, rateLimitsMonitorState, rateLimitsRequestState } =
@@ -144,6 +146,8 @@ describe("hydrateRateLimits", () => {
       }),
       cursor: null,
       kimi: null,
+      gemini: null,
+      antigravity: null,
     });
     expect(get(rateLimitsMonitorState).claude.lastSuccessAt).toBe("2026-03-17T12:00:00.000Z");
     expect(get(rateLimitsRequestState).deferredUntil).toBe("2026-03-17T12:05:00.000Z");
@@ -176,6 +180,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
 
     const request = deferred<RateLimitsPayload>();
@@ -229,6 +235,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
 
     const request = deferred<RateLimitsPayload>();
@@ -315,6 +323,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
 
     mockInvoke.mockResolvedValueOnce(
@@ -371,6 +381,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
 
     mockInvoke.mockResolvedValueOnce(
@@ -448,6 +460,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
 
     mockInvoke.mockImplementation(async (_cmd: string, args: Record<string, string>) => {
@@ -514,6 +528,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": codexStore,
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
 
     mockInvoke.mockRejectedValueOnce(new Error("backend unavailable"));
@@ -538,6 +554,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": makeStore(),
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
     mockInvoke.mockResolvedValue(makePayload({ codex: null }));
 
@@ -562,6 +580,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": makeStore(),
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
     const plainRead = deferred<RateLimitsPayload>();
     mockInvoke.mockReturnValueOnce(plainRead.promise);
@@ -595,6 +615,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": makeStore(),
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
     const probe = deferred<RateLimitsPayload>();
     mockInvoke.mockReturnValueOnce(probe.promise);
@@ -620,6 +642,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": makeStore(),
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
     const reading = makePayload({ codex: null });
     const newer = makePayload({
@@ -655,6 +679,8 @@ describe("fetchRateLimits", () => {
       "rate-limits-codex.json": makeStore(),
       "rate-limits-cursor.json": makeStore(),
       "rate-limits-kimi.json": makeStore(),
+      "rate-limits-gemini.json": makeStore(),
+      "rate-limits-antigravity.json": makeStore(),
     });
     mockInvoke.mockResolvedValue(makePayload({ codex: null }));
 

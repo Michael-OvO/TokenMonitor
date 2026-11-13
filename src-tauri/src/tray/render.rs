@@ -65,6 +65,19 @@ const KIMI_COLOR: Color = Color {
     b: 212,
     a: 255,
 };
+// Google blue and green, matching `--accent` for these providers in app.css.
+const GEMINI_COLOR: Color = Color {
+    r: 66,
+    g: 133,
+    b: 244,
+    a: 255,
+};
+const ANTIGRAVITY_COLOR: Color = Color {
+    r: 52,
+    g: 168,
+    b: 83,
+    a: 255,
+};
 
 const BADGE_COLOR: Color = Color {
     r: 232,
@@ -163,6 +176,8 @@ fn selected_bars(
     codex_util: Option<f64>,
     cursor_util: Option<f64>,
     kimi_util: Option<f64>,
+    gemini_util: Option<f64>,
+    antigravity_util: Option<f64>,
 ) -> Vec<(Option<f64>, &'static Color)> {
     let providers: Vec<&str> = match config.bar_display {
         BarDisplay::Off => vec![],
@@ -177,6 +192,8 @@ fn selected_bars(
             "codex" => Some((codex_util, &CODEX_COLOR)),
             "cursor" => Some((cursor_util, &CURSOR_COLOR)),
             "kimi" => Some((kimi_util, &KIMI_COLOR)),
+            "gemini" => Some((gemini_util, &GEMINI_COLOR)),
+            "antigravity" => Some((antigravity_util, &ANTIGRAVITY_COLOR)),
             _ => None,
         })
         .collect()
@@ -217,11 +234,21 @@ pub fn render_tray_icon(
     codex_util: Option<f64>,
     cursor_util: Option<f64>,
     kimi_util: Option<f64>,
+    gemini_util: Option<f64>,
+    antigravity_util: Option<f64>,
     dark_bar: bool,
     update_available: bool,
 ) -> (Vec<u8>, u32, u32, bool) {
     // If bars are off, or we have no utilization data yet, return original icon for template mode
-    let bars = selected_bars(config, claude_util, codex_util, cursor_util, kimi_util);
+    let bars = selected_bars(
+        config,
+        claude_util,
+        codex_util,
+        cursor_util,
+        kimi_util,
+        gemini_util,
+        antigravity_util,
+    );
     if bars.is_empty() || !has_utilization(&bars) {
         if update_available {
             let mut buf = render_icon_only(base_icon, dark_bar);
@@ -448,6 +475,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             true,
             false,
         );
@@ -467,6 +496,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             true,
             false,
         );
@@ -482,6 +513,8 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(70.0),
             Some(30.0),
+            None,
+            None,
             None,
             None,
             true,
@@ -508,6 +541,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             true,
             false,
         );
@@ -522,7 +557,15 @@ mod tests {
         let mut config = make_config(BarDisplay::Custom);
         config.bar_providers = vec!["cursor".into(), "claude".into(), "codex".into()];
 
-        let bars = selected_bars(&config, Some(10.0), Some(20.0), Some(30.0), None);
+        let bars = selected_bars(
+            &config,
+            Some(10.0),
+            Some(20.0),
+            Some(30.0),
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(bars.len(), 3);
         assert_eq!(bars[0].0, Some(30.0));
@@ -539,6 +582,8 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(50.0),
             Some(50.0),
+            None,
+            None,
             None,
             None,
             true,
@@ -561,6 +606,8 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(50.0),
             Some(50.0),
+            None,
+            None,
             None,
             None,
             false,
@@ -592,6 +639,8 @@ mod tests {
             Some(50.0),
             None,
             None,
+            None,
+            None,
             true,
             false,
         );
@@ -600,6 +649,8 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(50.0),
             Some(50.0),
+            None,
+            None,
             None,
             None,
             true,
@@ -619,12 +670,16 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             true,
             false,
         );
         let (with, _, _, tmpl_w) = render_tray_icon(
             &icon,
             &make_config(BarDisplay::Off),
+            None,
+            None,
             None,
             None,
             None,

@@ -8,7 +8,7 @@ import {
 
 export { ALL_USAGE_PROVIDER_ID } from "./types/index.js";
 
-export type UsageProviderLogoKind = "all" | "claude" | "codex" | "cursor" | "kimi" | "generic";
+export type UsageProviderLogoKind = "all" | "claude" | "codex" | "cursor" | "kimi" | "gemini" | "antigravity" | "generic";
 type UsageProviderBrandColor = readonly [red: number, green: number, blue: number];
 type RateLimitUtilizationLabelFormat = "percent" | "percent_used";
 
@@ -143,6 +143,41 @@ const USAGE_INTEGRATION_DEFINITIONS: UsageProviderDefinition[] = [
         "failed to parse kimi credentials",
         "empty access token",
       ],
+    },
+  },
+  {
+    id: "gemini",
+    label: "Gemini",
+    title: "Gemini CLI",
+    logoKind: "gemini",
+    brandColor: [66, 133, 244],
+    supportsRateLimits: true,
+    rateLimits: {
+      cacheFile: "rate-limits-gemini.json",
+      minFetchIntervalMs: 300_000,
+      // Windows are one per model id (busiest first); there is no fixed
+      // primary, so the first window is used.
+      primaryWindowId: "primary",
+      utilizationLabelFormat: "percent_used",
+      idleSummary: "No Gemini quota data available. Make sure Gemini CLI is signed in with Google on this machine.",
+      missingMetadataErrors: ["gemini cli is not signed in", "sign-in has expired"],
+    },
+  },
+  {
+    id: "antigravity",
+    label: "Antigravity",
+    title: "Antigravity",
+    logoKind: "antigravity",
+    brandColor: [52, 168, 83],
+    supportsRateLimits: true,
+    rateLimits: {
+      cacheFile: "rate-limits-antigravity.json",
+      minFetchIntervalMs: 60_000,
+      // One window per model family (busiest first); the first is primary.
+      primaryWindowId: "primary",
+      utilizationLabelFormat: "percent_used",
+      idleSummary: "No Antigravity quota data available. Quotas are read from the running Antigravity app.",
+      missingMetadataErrors: ["antigravity is not running"],
     },
   },
 ];

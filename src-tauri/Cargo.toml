@@ -20,6 +20,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["process", "fs", "time"] }
 dirs = "6"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
+rusqlite = { version = "0.32", features = ["bundled"] }
 tauri-plugin-store = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"

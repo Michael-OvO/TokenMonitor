@@ -1,3 +1,4 @@
+pub mod antigravity_parser;
 pub mod archive;
 pub mod cache_warmup;
 pub mod claude_otel;
@@ -8,6 +9,7 @@ pub mod cursor_parser;
 pub mod cursor_safe_storage;
 pub mod device_aggregation;
 pub mod exchange_rates;
+pub mod gemini_parser;
 pub mod integrations;
 pub mod kimi_parser;
 pub mod litellm;

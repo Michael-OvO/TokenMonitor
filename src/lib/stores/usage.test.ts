@@ -723,13 +723,13 @@ describe("All-tab scope", () => {
     const { fetchData } = await loadUsageModule();
     await fetchData("all", "day", 0);
     expect(mockInvoke).toHaveBeenCalledWith("get_usage_data", {
-      provider: "claude+cursor+kimi",
+      provider: "claude+cursor+kimi+gemini+antigravity",
       period: "day",
       offset: 0,
     });
 
     // Re-enabling the tab is a different scope, so it must hit IPC again
-    // rather than reuse the claude+cursor+kimi cache entry.
+    // rather than reuse the claude+cursor+kimi+gemini+antigravity cache entry.
     const restored = { ...tabs, codex: { ...tabs.codex, enabled: true } };
     settings.update((current) => ({ ...current, headerTabs: restored }));
     await fetchData("all", "day", 0);
@@ -764,7 +764,7 @@ describe("subset scope cache invalidation", () => {
       await loadUsageModule();
 
     // Warm entry for the All tab's scope is served synchronously.
-    seedUsageCache("claude+cursor+kimi", "day", 0, makePayload({ total_cost: 9 }));
+    seedUsageCache("claude+cursor+kimi+gemini+antigravity", "day", 0, makePayload({ total_cost: 9 }));
     mockInvoke.mockReturnValueOnce(deferred<UsagePayload>().promise);
     void fetchData("all", "day", 0);
     expect(get(usageData)?.total_cost).toBe(9);

@@ -330,7 +330,9 @@ fn is_valid_source_key(key: &str) -> bool {
         Some(("local", "claude"))
         | Some(("local", "codex"))
         | Some(("local", "cursor"))
-        | Some(("local", "kimi")) => true,
+        | Some(("local", "kimi"))
+        | Some(("local", "gemini"))
+        | Some(("local", "antigravity")) => true,
         Some(("device", alias)) => {
             !alias.is_empty()
                 && alias.len() <= 64
@@ -394,13 +396,14 @@ fn export_record<'a>(r: &'a ArchivedHourly, provider: Option<&'a str>) -> Export
 /// to "claude".
 fn provider_label(record: &ArchivedHourly) -> &str {
     match record.p.as_str() {
-        p @ ("claude" | "codex" | "cursor" | "kimi") => p,
+        p @ ("claude" | "codex" | "cursor" | "kimi" | "gemini" | "antigravity") => p,
         _ => {
             use crate::models::{detect_model_family, ModelFamily};
             match detect_model_family(record.raw_model.as_deref().unwrap_or(&record.mk)) {
                 ModelFamily::OpenAI => "codex",
                 ModelFamily::Cursor => "cursor",
                 ModelFamily::Moonshot => "kimi",
+                ModelFamily::Google => "gemini",
                 _ => "claude",
             }
         }
@@ -1693,6 +1696,7 @@ mod tests {
         assert!(is_valid_source_key("local:codex"));
         assert!(is_valid_source_key("local:cursor"));
         assert!(is_valid_source_key("local:kimi"));
+        assert!(is_valid_source_key("local:antigravity"));
         assert!(is_valid_source_key("device:my-server"));
         assert!(is_valid_source_key("device:laptop_2.local"));
     }
@@ -2103,7 +2107,13 @@ mod tests {
         st.parser.set_listings_frozen(true);
         let archive = ArchiveManager::new(dir);
         let now = chrono::Local::now();
-        for source in ["local:codex", "local:cursor", "local:kimi"] {
+        for source in [
+            "local:codex",
+            "local:cursor",
+            "local:kimi",
+            "local:gemini",
+            "local:antigravity",
+        ] {
             archive.should_scan(source, now.date_naive(), now.hour() as u8, 0);
         }
         st.parser.set_archive(archive);

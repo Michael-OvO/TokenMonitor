@@ -633,6 +633,11 @@ pub(crate) fn archive_local_usage(state: &AppState, horizon: chrono::DateTime<ch
         ("codex", usage::integrations::UsageIntegrationId::Codex),
         ("cursor", usage::integrations::UsageIntegrationId::Cursor),
         ("kimi", usage::integrations::UsageIntegrationId::Kimi),
+        ("gemini", usage::integrations::UsageIntegrationId::Gemini),
+        (
+            "antigravity",
+            usage::integrations::UsageIntegrationId::Antigravity,
+        ),
     ] {
         let source_key = format!("local:{provider}");
 

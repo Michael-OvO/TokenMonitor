@@ -77,6 +77,8 @@ pub(crate) struct TrayUtilization {
     pub(crate) codex: Option<f64>,
     pub(crate) cursor: Option<f64>,
     pub(crate) kimi: Option<f64>,
+    pub(crate) gemini: Option<f64>,
+    pub(crate) antigravity: Option<f64>,
 }
 
 impl TrayUtilization {
@@ -85,6 +87,8 @@ impl TrayUtilization {
             || self.codex.is_some()
             || self.cursor.is_some()
             || self.kimi.is_some()
+            || self.gemini.is_some()
+            || self.antigravity.is_some()
     }
 }
 
@@ -97,6 +101,8 @@ pub struct StatusWidgetSummary {
     pub codex_util: Option<f64>,
     pub cursor_util: Option<f64>,
     pub kimi_util: Option<f64>,
+    pub gemini_util: Option<f64>,
+    pub antigravity_util: Option<f64>,
     pub title: String,
     /// `total_cost` already rendered in the user's currency. The float ball is
     /// a separate webview that never loads the settings store, so it cannot
@@ -107,7 +113,8 @@ pub struct StatusWidgetSummary {
 /// Rate-limit providers in display order, mirroring the frontend's
 /// `RATE_LIMIT_PROVIDER_ORDER`. Used when the user has not narrowed the
 /// selection, so a newly supported provider shows up by default.
-const RATE_LIMIT_PROVIDER_ORDER: &[&str] = &["claude", "codex", "cursor", "kimi"];
+const RATE_LIMIT_PROVIDER_ORDER: &[&str] =
+    &["claude", "codex", "cursor", "kimi", "gemini", "antigravity"];
 
 /// Menu-bar title for a provider, matching `getUsageProviderTitle` on the
 /// frontend so the settings preview and the real tray agree.
@@ -257,6 +264,14 @@ pub(crate) fn tray_utilization_from_rate_limits(
             "kimi",
             payload.and_then(|rate_limits| rate_limits.kimi.as_ref()),
         ),
+        gemini: primary_window_utilization(
+            "gemini",
+            payload.and_then(|rate_limits| rate_limits.gemini.as_ref()),
+        ),
+        antigravity: primary_window_utilization(
+            "antigravity",
+            payload.and_then(|rate_limits| rate_limits.antigravity.as_ref()),
+        ),
     }
 }
 
@@ -266,6 +281,8 @@ fn merge_tray_utilization(current: TrayUtilization, patch: TrayUtilization) -> T
         codex: patch.codex.or(current.codex),
         cursor: patch.cursor.or(current.cursor),
         kimi: patch.kimi.or(current.kimi),
+        gemini: patch.gemini.or(current.gemini),
+        antigravity: patch.antigravity.or(current.antigravity),
     }
 }
 
@@ -488,6 +505,8 @@ fn apply_tray_presentation_on_main_thread(
                 utilization.codex,
                 utilization.cursor,
                 utilization.kimi,
+                utilization.gemini,
+                utilization.antigravity,
                 dark_bar,
                 update_available,
             );
@@ -598,6 +617,8 @@ pub async fn set_tray_config(
                 codex: codex_util,
                 cursor: None,
                 kimi: None,
+                gemini: None,
+                antigravity: None,
             },
         )
         .await
@@ -704,6 +725,8 @@ async fn status_widget_summary(state: &AppState) -> StatusWidgetSummary {
         codex_util: utilization.codex,
         cursor_util: utilization.cursor,
         kimi_util: utilization.kimi,
+        gemini_util: utilization.gemini,
+        antigravity_util: utilization.antigravity,
     }
 }
 
@@ -797,6 +820,8 @@ mod tests {
             codex,
             cursor,
             kimi: None,
+            gemini: None,
+            antigravity: None,
         }
     }
 
@@ -942,6 +967,8 @@ mod tests {
             codex: Some(35.0),
             cursor: None,
             kimi: None,
+            gemini: None,
+            antigravity: None,
         };
 
         assert_eq!(
@@ -957,12 +984,16 @@ mod tests {
             codex: Some(35.0),
             cursor: None,
             kimi: None,
+            gemini: None,
+            antigravity: None,
         };
         let patch = TrayUtilization {
             claude: None,
             codex: Some(41.0),
             cursor: None,
             kimi: None,
+            gemini: None,
+            antigravity: None,
         };
 
         assert_eq!(
@@ -972,6 +1003,8 @@ mod tests {
                 codex: Some(41.0),
                 cursor: None,
                 kimi: None,
+                gemini: None,
+                antigravity: None,
             }
         );
     }
@@ -1015,6 +1048,8 @@ mod tests {
             }),
             cursor: None,
             kimi: None,
+            gemini: None,
+            antigravity: None,
         };
 
         assert_eq!(
@@ -1024,6 +1059,8 @@ mod tests {
                 codex: Some(35.0),
                 cursor: None,
                 kimi: None,
+                gemini: None,
+                antigravity: None,
             }
         );
     }
@@ -1060,6 +1097,8 @@ mod tests {
                 codex: None,
                 cursor: None,
                 kimi: None,
+                gemini: None,
+                antigravity: None,
             }
         ));
         assert!(should_update_tray_icon(
@@ -1191,7 +1230,7 @@ mod tests {
     #[test]
     fn parse_enabled_integrations_validates_and_dedupes() {
         assert!(parse_enabled_integrations(&[]).is_err());
-        assert!(parse_enabled_integrations(&["gemini".to_string()]).is_err());
+        assert!(parse_enabled_integrations(&["copilot".to_string()]).is_err());
         assert_eq!(
             parse_enabled_integrations(&[
                 "codex".to_string(),

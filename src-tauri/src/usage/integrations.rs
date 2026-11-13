@@ -10,13 +10,17 @@ pub enum UsageIntegrationId {
     Codex,
     Cursor,
     Kimi,
+    Gemini,
+    Antigravity,
 }
 
-const ALL_USAGE_INTEGRATIONS: [UsageIntegrationId; 4] = [
+const ALL_USAGE_INTEGRATIONS: [UsageIntegrationId; 6] = [
     UsageIntegrationId::Claude,
     UsageIntegrationId::Codex,
     UsageIntegrationId::Cursor,
     UsageIntegrationId::Kimi,
+    UsageIntegrationId::Gemini,
+    UsageIntegrationId::Antigravity,
 ];
 
 impl UsageIntegrationId {
@@ -26,6 +30,8 @@ impl UsageIntegrationId {
             Self::Codex => "codex",
             Self::Cursor => "cursor",
             Self::Kimi => "kimi",
+            Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -35,6 +41,8 @@ impl UsageIntegrationId {
             Self::Codex => "Codex CLI",
             Self::Cursor => "Cursor IDE",
             Self::Kimi => "Kimi Code",
+            Self::Gemini => "Gemini CLI",
+            Self::Antigravity => "Antigravity",
         }
     }
 
@@ -44,6 +52,8 @@ impl UsageIntegrationId {
             "codex" => Some(Self::Codex),
             "cursor" => Some(Self::Cursor),
             "kimi" => Some(Self::Kimi),
+            "gemini" => Some(Self::Gemini),
+            "antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -54,6 +64,10 @@ impl UsageIntegrationId {
             Self::Codex => vec![detect_codex_sessions_dir()],
             Self::Cursor => detect_cursor_workspace_storage_dirs(),
             Self::Kimi => detect_kimi_sessions_dirs(),
+            Self::Gemini => crate::paths::gemini_sessions_default()
+                .into_iter()
+                .collect(),
+            Self::Antigravity => crate::paths::antigravity_conversation_defaults(),
         }
     }
 }
@@ -207,7 +221,10 @@ pub fn remote_record_matches_provider(provider: &str, model: &str) -> bool {
         let matches = match id {
             UsageIntegrationId::Claude => family == ModelFamily::Anthropic,
             UsageIntegrationId::Codex => family == ModelFamily::OpenAI,
-            UsageIntegrationId::Cursor | UsageIntegrationId::Kimi => false,
+            UsageIntegrationId::Cursor
+            | UsageIntegrationId::Kimi
+            | UsageIntegrationId::Gemini
+            | UsageIntegrationId::Antigravity => false,
         };
         if matches {
             return true;
@@ -223,7 +240,9 @@ fn integration_matches_model(id: UsageIntegrationId, model: &str) -> bool {
         UsageIntegrationId::Claude => detect_model_family(model) == ModelFamily::Anthropic,
         UsageIntegrationId::Codex => detect_model_family(model) == ModelFamily::OpenAI,
         UsageIntegrationId::Kimi => detect_model_family(model) == ModelFamily::Moonshot,
-        UsageIntegrationId::Cursor => true,
+        UsageIntegrationId::Gemini => detect_model_family(model) == ModelFamily::Google,
+        // Antigravity serves Gemini, Claude and GPT models, like Cursor.
+        UsageIntegrationId::Cursor | UsageIntegrationId::Antigravity => true,
     }
 }
 
@@ -467,7 +486,7 @@ mod tests {
 
     #[test]
     fn usage_integration_selection_rejects_unknown_values() {
-        assert_eq!(UsageIntegrationSelection::parse("gemini"), None);
+        assert_eq!(UsageIntegrationSelection::parse("copilot"), None);
     }
 
     #[test]
@@ -486,7 +505,7 @@ mod tests {
         );
         // Every integration spelled out is just `all`.
         assert_eq!(
-            UsageIntegrationSelection::parse("kimi+cursor+codex+claude"),
+            UsageIntegrationSelection::parse("antigravity+gemini+kimi+cursor+codex+claude"),
             Some(UsageIntegrationSelection::All)
         );
     }
@@ -495,7 +514,7 @@ mod tests {
     fn usage_integration_selection_rejects_malformed_subsets() {
         assert_eq!(UsageIntegrationSelection::parse(""), None);
         assert_eq!(UsageIntegrationSelection::parse("claude+"), None);
-        assert_eq!(UsageIntegrationSelection::parse("claude+gemini"), None);
+        assert_eq!(UsageIntegrationSelection::parse("claude+copilot"), None);
         assert_eq!(UsageIntegrationSelection::parse("claude+all"), None);
     }
 
@@ -562,7 +581,14 @@ mod tests {
             UsageIntegrationSelection::Single(Codex)
         );
         assert_eq!(
-            UsageIntegrationSelection::from_ids(&[Kimi, Cursor, Codex, Claude]),
+            UsageIntegrationSelection::from_ids(&[
+                Kimi,
+                Cursor,
+                Codex,
+                Claude,
+                Gemini,
+                Antigravity
+            ]),
             UsageIntegrationSelection::All
         );
         assert_eq!(
@@ -605,8 +631,19 @@ mod tests {
         assert!(!remote_record_matches_provider("claude", "gpt-5-codex"));
         assert!(remote_record_matches_provider("codex", "gpt-5-codex"));
         // Unknown scopes pass through like provider_matches_model.
-        assert!(remote_record_matches_provider("gemini", "gpt-5-codex"));
+        assert!(remote_record_matches_provider("copilot", "gpt-5-codex"));
         // Local rows keep Cursor's pass-through (unchanged behaviour).
         assert!(provider_matches_model("claude+cursor+kimi", "gpt-5-codex"));
+    }
+
+    #[test]
+    fn gemini_and_antigravity_tabs() {
+        assert!(provider_matches_model("gemini", "gemini-2.5-pro"));
+        assert!(!provider_matches_model("gemini", "claude-sonnet-4-5"));
+        assert!(provider_matches_model("antigravity", "claude-sonnet-4-5"));
+        assert!(!remote_record_matches_provider(
+            "gemini+antigravity",
+            "claude-sonnet-4-5"
+        ));
     }
 }

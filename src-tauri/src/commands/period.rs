@@ -400,6 +400,8 @@ mod tests {
             codex: None,
             cursor: None,
             kimi: None,
+            gemini: None,
+            antigravity: None,
         }
     }
 

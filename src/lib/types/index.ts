@@ -295,6 +295,8 @@ export interface StatusWidgetSummary {
   codexUtil: number | null;
   cursorUtil: number | null;
   kimiUtil: number | null;
+  geminiUtil: number | null;
+  antigravityUtil: number | null;
   title: string;
   /**
    * `totalCost` already rendered in the user's currency by the backend. The

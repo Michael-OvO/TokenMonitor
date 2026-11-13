@@ -53,29 +53,29 @@ describe("usage scope for the All tab", () => {
   });
 
   it("joins the enabled integrations in canonical order", () => {
-    expect(usageScopeForAll(tabsWithDisabled(["codex"]))).toBe("claude+cursor+kimi");
-    expect(enabledIntegrationIds(tabsWithDisabled(["cursor", "codex"]))).toEqual(["claude", "kimi"]);
+    expect(usageScopeForAll(tabsWithDisabled(["codex"]))).toBe("claude+cursor+kimi+gemini+antigravity");
+    expect(enabledIntegrationIds(tabsWithDisabled(["cursor", "codex"]))).toEqual(["claude", "kimi", "gemini", "antigravity"]);
   });
 
   it("treats no enabled integration as every integration", () => {
-    const none = tabsWithDisabled(["claude", "codex", "cursor", "kimi"]);
+    const none = tabsWithDisabled(["claude", "codex", "cursor", "kimi", "gemini", "antigravity"]);
     expect(enabledIntegrationIds(none)).toEqual([]);
-    expect(effectiveIntegrationIds(none)).toEqual(["claude", "codex", "cursor", "kimi"]);
+    expect(effectiveIntegrationIds(none)).toEqual(["claude", "codex", "cursor", "kimi", "gemini", "antigravity"]);
     expect(usageScopeForAll(none)).toBe("all");
-    expect(effectiveIntegrationIds(tabsWithDisabled(["codex"]))).toEqual(["claude", "cursor", "kimi"]);
+    expect(effectiveIntegrationIds(tabsWithDisabled(["codex"]))).toEqual(["claude", "cursor", "kimi", "gemini", "antigravity"]);
   });
 
   it("collapses to the single id when only one integration is enabled", () => {
-    expect(usageScopeForAll(tabsWithDisabled(["claude", "codex", "cursor"]))).toBe("kimi");
+    expect(usageScopeForAll(tabsWithDisabled(["claude", "codex", "cursor", "gemini", "antigravity"]))).toBe("kimi");
   });
 
   it("only rewrites the All provider", () => {
     expect(resolveUsageScope("codex", tabsWithDisabled(["codex"]))).toBe("codex");
-    expect(resolveUsageScope("all", tabsWithDisabled(["codex"]))).toBe("claude+cursor+kimi");
+    expect(resolveUsageScope("all", tabsWithDisabled(["codex"]))).toBe("claude+cursor+kimi+gemini+antigravity");
   });
 
   it("expands a scope string back into its providers", () => {
-    expect(usageScopeProviders("all")).toEqual(["claude", "codex", "cursor", "kimi"]);
+    expect(usageScopeProviders("all")).toEqual(["claude", "codex", "cursor", "kimi", "gemini", "antigravity"]);
     expect(usageScopeProviders("claude+kimi")).toEqual(["claude", "kimi"]);
     expect(usageScopeProviders("codex")).toEqual(["codex"]);
   });

@@ -71,6 +71,45 @@ pub fn kimi_sessions_defaults() -> Vec<PathBuf> {
     roots
 }
 
+/// Gemini CLI data home: `~/.gemini`, or `$GEMINI_CLI_HOME/.gemini` like the
+/// CLI itself. Antigravity keeps its data under the same directory.
+pub fn gemini_home() -> Option<PathBuf> {
+    env::var_os("GEMINI_CLI_HOME")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .or_else(home)
+        .map(|h| h.join(".gemini"))
+}
+
+/// Gemini CLI chat logs: `tmp/<project>/chats/session-*.json[l]`.
+pub fn gemini_sessions_default() -> Option<PathBuf> {
+    gemini_home().map(|h| h.join("tmp"))
+}
+
+/// Gemini CLI OAuth token file, read to call the quota API.
+pub fn gemini_oauth_creds_file() -> Option<PathBuf> {
+    gemini_home().map(|h| h.join("oauth_creds.json"))
+}
+
+/// Antigravity conversation databases (`<uuid>.db`), for the standalone app
+/// and the IDE flavor.
+pub fn antigravity_conversation_defaults() -> Vec<PathBuf> {
+    gemini_home()
+        .map(|h| {
+            vec![
+                h.join("antigravity").join("conversations"),
+                h.join("antigravity-ide").join("conversations"),
+            ]
+        })
+        .unwrap_or_default()
+}
+
+/// Where a running Antigravity writes `hub_*.json` (its local server's port
+/// and CSRF token), read to ask it for the model quotas.
+pub fn antigravity_daemon_dir() -> Option<PathBuf> {
+    gemini_home().map(|h| h.join("antigravity").join("daemon"))
+}
+
 /// Kimi Code CLI credential file (`credentials/kimi-code.json` under the data
 /// home), read to call the rate-limit usage API. Honors `$KIMI_DATA_DIR`
 /// (comma-separated, matching the sessions-dir override): the first entry
@@ -323,6 +362,34 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
             purpose: "Kimi Code CLI credentials for rate-limit reads",
             path: p,
             env_override: Some("KIMI_DATA_DIR"),
+        });
+    }
+    if let Some(p) = gemini_sessions_default() {
+        out.push(AccessedPath {
+            purpose: "Gemini CLI session logs",
+            path: p,
+            env_override: Some("GEMINI_CLI_HOME"),
+        });
+    }
+    if let Some(p) = gemini_oauth_creds_file() {
+        out.push(AccessedPath {
+            purpose: "Gemini CLI credentials for quota reads",
+            path: p,
+            env_override: Some("GEMINI_CLI_HOME"),
+        });
+    }
+    for p in antigravity_conversation_defaults() {
+        out.push(AccessedPath {
+            purpose: "Antigravity conversation databases",
+            path: p,
+            env_override: Some("GEMINI_CLI_HOME"),
+        });
+    }
+    if let Some(p) = antigravity_daemon_dir() {
+        out.push(AccessedPath {
+            purpose: "Antigravity local server address for quota reads",
+            path: p,
+            env_override: Some("GEMINI_CLI_HOME"),
         });
     }
     if let Some(p) = cursor_workspace_storage_default() {

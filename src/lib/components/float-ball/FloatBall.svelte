@@ -48,6 +48,8 @@
     codexUtil: null,
     cursorUtil: null,
     kimiUtil: null,
+    geminiUtil: null,
+    antigravityUtil: null,
     title: "$0.00",
     costText: "$0",
   });
@@ -97,13 +99,15 @@
   };
 
 
-  const FALLBACK_PROVIDERS: RateLimitProviderId[] = ["claude", "codex", "cursor", "kimi"];
+  const FALLBACK_PROVIDERS: RateLimitProviderId[] = ["claude", "codex", "cursor", "kimi", "gemini", "antigravity"];
 
   const PROVIDER_META: Record<string, { label: string; shortLabel: string; color: string }> = {
     claude: { label: "Claude", shortLabel: "CL", color: "#d79b64" },
     codex: { label: "Codex", shortLabel: "CX", color: "#72aefc" },
     cursor: { label: "Cursor", shortLabel: "CR", color: "#5c6ac4" },
     kimi: { label: "Kimi", shortLabel: "KI", color: "#8b6fd4" },
+    gemini: { label: "Gemini", shortLabel: "GM", color: "#4285f4" },
+    antigravity: { label: "Antigravity", shortLabel: "AG", color: "#34a853" },
   };
 
   function providerUtil(provider: RateLimitProviderId): number | null {
@@ -111,6 +115,8 @@
     if (provider === "codex") return summary.codexUtil;
     if (provider === "cursor") return summary.cursorUtil;
     if (provider === "kimi") return summary.kimiUtil;
+    if (provider === "gemini") return summary.geminiUtil;
+    if (provider === "antigravity") return summary.antigravityUtil;
     return null;
   }
 

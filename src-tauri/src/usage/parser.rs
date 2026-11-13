@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
+use super::antigravity_parser::parse_antigravity_conversation;
 #[cfg(test)]
 use super::claude_parser::read_claude_entries;
 use super::claude_parser::{
@@ -24,6 +25,7 @@ use super::claude_parser::{
 };
 use super::codex_parser::parse_codex_session_file;
 use super::cursor_parser::{cursor_last_warning, parse_cursor_session_file, set_cursor_warning};
+use super::gemini_parser::parse_gemini_session_file;
 use super::kimi_parser::parse_kimi_session_file;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -218,6 +220,8 @@ enum ProviderFileKind {
     Codex,
     Cursor,
     Kimi,
+    Gemini,
+    Antigravity,
 }
 
 impl ProviderFileKind {
@@ -227,6 +231,8 @@ impl ProviderFileKind {
             Self::Codex => parse_codex_session_file(path),
             Self::Cursor => parse_cursor_session_file(path),
             Self::Kimi => parse_kimi_session_file(path),
+            Self::Gemini => parse_gemini_session_file(path),
+            Self::Antigravity => parse_antigravity_conversation(path),
         }
     }
 
@@ -241,6 +247,16 @@ impl ProviderFileKind {
                         .and_then(Path::file_name)
                         .is_some_and(|name| name == "chatSessions")
             }
+            // `tmp/<project>/chats/session-*.json` (`.jsonl` in newer CLIs).
+            Self::Gemini => {
+                path.extension()
+                    .is_some_and(|e| e == "json" || e == "jsonl")
+                    && path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .is_some_and(|name| name == "chats")
+            }
+            Self::Antigravity => path.extension().is_some_and(|e| e == "db"),
             _ => path.extension().is_some_and(|e| e == "jsonl"),
         }
     }
@@ -263,6 +279,8 @@ impl UsageIntegrationConfig {
             UsageIntegrationId::Codex => ProviderFileKind::Codex,
             UsageIntegrationId::Cursor => ProviderFileKind::Cursor,
             UsageIntegrationId::Kimi => ProviderFileKind::Kimi,
+            UsageIntegrationId::Gemini => ProviderFileKind::Gemini,
+            UsageIntegrationId::Antigravity => ProviderFileKind::Antigravity,
         }
     }
 
@@ -277,6 +295,10 @@ impl UsageIntegrationConfig {
             UsageIntegrationId::Cursor => "workspace-chat-json+token-field-probe+cursor-remote-api",
             UsageIntegrationId::Kimi => {
                 "recursive-jsonl-glob+root-file-list-cache+parsed-file-cache+turn-scoped"
+            }
+            UsageIntegrationId::Gemini => "chat-json+root-file-list-cache+parsed-file-cache",
+            UsageIntegrationId::Antigravity => {
+                "conversation-sqlite+root-file-list-cache+parsed-file-cache"
             }
         }
     }
@@ -460,10 +482,24 @@ fn scan_jsonl_tree(dir: &Path, kind: ProviderFileKind) -> (Vec<PathBuf>, Vec<Dir
 
 fn file_stamp(path: &Path) -> Option<FileStamp> {
     let metadata = fs::metadata(path).ok()?;
-    Some(FileStamp {
+    let mut stamp = FileStamp {
         modified: metadata.modified().ok()?,
         len: metadata.len(),
-    })
+    };
+    // An SQLite database in WAL mode (Antigravity) takes new rows in its
+    // `-wal` sibling first, leaving the `.db` itself untouched until the
+    // next checkpoint.
+    if path.extension().is_some_and(|e| e == "db") {
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        if let Ok(wal) = fs::metadata(wal) {
+            stamp.len += wal.len();
+            if let Ok(modified) = wal.modified() {
+                stamp.modified = stamp.modified.max(modified);
+            }
+        }
+    }
+    Some(stamp)
 }
 
 /// Sweep one root's listing: stat its files, every one when `full`, else
@@ -1142,6 +1178,14 @@ fn default_usage_integration_configs() -> Vec<UsageIntegrationConfig> {
             UsageIntegrationId::Kimi,
             UsageIntegrationId::Kimi.detect_roots(),
         ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Gemini,
+            UsageIntegrationId::Gemini.detect_roots(),
+        ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Antigravity,
+            UsageIntegrationId::Antigravity.detect_roots(),
+        ),
     ]
 }
 
@@ -1166,6 +1210,14 @@ fn usage_integration_configs_with_overrides(
         UsageIntegrationConfig::new(
             UsageIntegrationId::Kimi,
             UsageIntegrationId::Kimi.detect_roots(),
+        ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Gemini,
+            UsageIntegrationId::Gemini.detect_roots(),
+        ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Antigravity,
+            UsageIntegrationId::Antigravity.detect_roots(),
         ),
     ]
 }
@@ -2514,6 +2566,12 @@ impl UsageParser {
             UsageIntegrationId::Kimi => {
                 let (entries, change_events, report) = self.load_kimi_entries_with_debug(since);
                 (entries, change_events, vec![report])
+            }
+            UsageIntegrationId::Gemini | UsageIntegrationId::Antigravity => {
+                let config = self
+                    .integration_config(integration_id)
+                    .expect("integration should be configured");
+                self.load_integration_entries_with_debug(config, since)
             }
         };
 
