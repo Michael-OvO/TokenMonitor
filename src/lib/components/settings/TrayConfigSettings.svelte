@@ -62,12 +62,19 @@
   let previewBarProviders = $derived(current.trayConfig.barProviders ?? []);
   let previewFloatBallBarProviders = $derived(current.trayConfig.floatBallBarProviders ?? []);
 
-  let verbosePercentagePreview = $derived.by(() => {
-    const providers = previewBarProviders.length ? previewBarProviders : RATE_LIMIT_PROVIDER_ORDER;
-    return providers
+  // Both format previews show the same two providers so the options stay
+  // comparable and short enough to sit side by side.
+  let formatPreviewProviders = $derived(
+    (previewBarProviders.length ? previewBarProviders : RATE_LIMIT_PROVIDER_ORDER).slice(0, 2),
+  );
+  let compactPercentagePreview = $derived(
+    formatPreviewProviders.map((provider) => previewUtilization(provider)).join(" · "),
+  );
+  let verbosePercentagePreview = $derived(
+    formatPreviewProviders
       .map((provider) => `${getUsageProviderTitle(provider)} ${previewUtilization(provider)}%`)
-      .join(" ");
-  });
+      .join(" "),
+  );
 
   function previewUtilization(provider: RateLimitProviderId): number {
     return PREVIEW_RATE_LIMITS[provider]?.windows[0]?.utilization ?? 0;
@@ -281,7 +288,7 @@
         <span class="label">Format</span>
         <SegmentedControl
           options={[
-            { value: "compact", label: "72 · 35" },
+            { value: "compact", label: compactPercentagePreview },
             { value: "verbose", label: verbosePercentagePreview },
           ]}
           value={current.trayConfig.percentageFormat}

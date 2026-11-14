@@ -842,7 +842,7 @@
             if (otelExpanded) refreshOtelStatus();
           }}
         >
-          <span class="label"><ProviderLogo kind="claude" size={13} class="cursor-icon" />Headless Claude Code</span>
+          <span class="label label-nowrap"><ProviderLogo kind="claude" size={13} class="cursor-icon" />Headless Claude Code</span>
           <div class="collapsible-right">
             <span class="status status-{otelView.tone}">
               <span class="status-dot"></span>{otelView.label}
@@ -1288,6 +1288,11 @@
     min-width: 0;
     font: 400 10px/1 system-ui, sans-serif;
     color: var(--t1);
+  }
+
+  .label-nowrap {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
 
   .label :global(svg.cursor-icon) {

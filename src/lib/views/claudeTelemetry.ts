@@ -37,7 +37,7 @@ export function telemetryStatusView(
   if (setup.state === "conflict") return { label: "Conflict", tone: "amber" };
   if (setup.state === "off") return { label: "Off", tone: "neutral" };
   return {
-    label: status.lastEventAt ? `On · last request ${ago(status.lastEventAt, now)}` : "On",
+    label: status.lastEventAt ? `On · ${ago(status.lastEventAt, now)}` : "On",
     tone: "ok",
   };
 }
