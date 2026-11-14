@@ -17,6 +17,7 @@
   import { untrack } from "svelte";
   import { budgetAsks, budgetRange, untrackedLabel, untrackedTitle, windowSpan, type BudgetAsk } from "../views/planBudget.js";
   import { popoverVisible } from "../visibility.js";
+  import { settings } from "../stores/settings.js";
   import ResetTimeline from "./ResetTimeline.svelte";
 
   interface Props {
@@ -239,7 +240,7 @@
           {/if}
         </div>
         {#if untrackedLabel(budgetFor(w))}
-          <div class="ub-untracked" title={untrackedTitle(rateLimits.provider, budgetFor(w))}>
+          <div class="ub-untracked" title={untrackedTitle(rateLimits.provider, budgetFor(w), $settings.claudeOtelEnabled)}>
             {untrackedLabel(budgetFor(w))}
           </div>
         {/if}

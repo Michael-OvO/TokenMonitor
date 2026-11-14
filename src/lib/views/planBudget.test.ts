@@ -109,4 +109,9 @@ describe("untrackedLabel / untrackedTitle", () => {
     expect(t).toContain("Settings → Integrations → Headless Claude Code");
     expect(untrackedTitle("codex", b({ points: 42, share: 0.4 }))).not.toContain("Headless Claude Code");
   });
+  it("drops the Claude setting hint once headless capture is on", () => {
+    const t = untrackedTitle("claude", b({ points: 42, share: 0.4 }), true);
+    expect(t).toContain("42 points");
+    expect(t).not.toContain("Headless Claude Code");
+  });
 });

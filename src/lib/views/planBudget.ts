@@ -111,11 +111,13 @@ export function untrackedLabel(b?: PlanBudget): string {
   return u ? `~${Math.round(u.share * 100)}% of this window isn't in local logs` : "";
 }
 
-export function untrackedTitle(provider: string, b?: PlanBudget): string {
+/** `headlessCaptureOn`: the Headless Claude Code setting is already on, so
+ * the hint pointing at it is dropped. */
+export function untrackedTitle(provider: string, b?: PlanBudget, headlessCaptureOn = false): string {
   const u = b?.untracked;
   if (!u) return "";
-  const fix = provider === "claude"
+  const fix = provider === "claude" && !headlessCaptureOn
     ? " To record claude -p runs, use Settings → Integrations → Headless Claude Code."
     : "";
-  return `The meter rose about ${Math.round(u.points)} points more than this machine's recorded spend explains. Likely causes: runs that write no session log, other computers, or cloud sessions.${fix}`;
+  return `The meter rose about ${Math.round(u.points)} points more than recorded spend explains. Likely causes: runs that write no session log, other computers, or cloud sessions.${fix}`;
 }
