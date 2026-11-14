@@ -323,6 +323,31 @@ fn window_scope(window_id: &str) -> Option<&'static str> {
         .find(|family| *family == suffix)
 }
 
+/// A fall this large that the next reading does not recover from is a reset
+/// inside the window (e.g. a usage-limit reset that keeps the reset time).
+const METER_RESET_DROP: f64 = 20.0;
+
+/// Points the meter rose across `readings`, and when that stretch began.
+/// Only new highs count, so a reading that dips and recovers adds nothing; a
+/// lasting fall of `METER_RESET_DROP` or more starts the count over.
+fn meter_rise(readings: &[&Sample]) -> Option<(f64, DateTime<Utc>)> {
+    let first = readings.first()?;
+    let (mut high, mut rise, mut from) = (first.u, 0.0, first.t);
+    for (i, s) in readings.iter().enumerate().skip(1) {
+        if s.u > high {
+            rise += s.u - high;
+            high = s.u;
+        } else if s.u <= high - METER_RESET_DROP
+            && readings
+                .get(i + 1)
+                .is_none_or(|next| next.u <= high - METER_RESET_DROP)
+        {
+            (high, rise, from) = (s.u, 0.0, s.t);
+        }
+    }
+    Some((rise, from))
+}
+
 /// How far the current window's meter rose beyond what tracked spend
 /// explains, using each model's cheapest learned $/point (most generous to
 /// local spend, so it under-reports rather than raises false alarms).
@@ -338,11 +363,11 @@ fn untracked(
         .iter()
         .filter(|s| s.t >= since && same_window(s, last))
         .collect();
-    let observed: f64 = current.windows(2).map(|p| (p[1].u - p[0].u).max(0.0)).sum();
+    let (observed, from) = meter_rise(&current)?;
     if observed < UNTRACKED_MIN_POINTS {
         return None;
     }
-    let (from, to) = (current.first()?.t, last.t);
+    let to = last.t;
     let scope = window_scope(window_id);
     let mut by_key: HashMap<&str, f64> = HashMap::new();
     for (t, _, key, usd) in entries {
@@ -861,6 +886,53 @@ mod tests {
     fn untracked_ignores_small_rises() {
         let samples = vec![sample(0, 0.0), sample(1, 8.0)];
         assert!(untracked(&samples, &[], &[], "five_hour", at(0)).is_none());
+    }
+
+    #[test]
+    fn untracked_starts_over_after_a_mid_window_reset() {
+        // The meter climbed to 100, was reset to 0 with the same reset time
+        // (a usage-limit reset), then rose to 8 with no spend.
+        let us = [0.0, 50.0, 100.0, 100.0, 0.0, 0.0, 7.0, 8.0];
+        let samples: Vec<Sample> = us
+            .iter()
+            .enumerate()
+            .map(|(h, u)| sample(h as i64, *u))
+            .collect();
+        assert!(untracked(&samples, &[], &[], "seven_day", at(0)).is_none());
+    }
+
+    #[test]
+    fn untracked_counts_spend_only_after_the_reset() {
+        let us = [0.0, 100.0, 0.0, 20.0, 40.0];
+        let samples: Vec<Sample> = us
+            .iter()
+            .enumerate()
+            .map(|(h, u)| sample(h as i64, *u))
+            .collect();
+        // $50 before the reset would explain 50 points; after it, nothing.
+        let entries = vec![spend(0, "opus", 50.0)];
+        let got = untracked(
+            &samples,
+            &entries,
+            &[budget_for("opus", 100.0)],
+            "seven_day",
+            at(0),
+        )
+        .unwrap();
+        assert!((got.points - 40.0).abs() < 1e-9, "{}", got.points);
+    }
+
+    #[test]
+    fn untracked_ignores_readings_that_dip_and_recover() {
+        // 60 → 31 → 61 and 7 → 0 → 8 style flicker must not count twice.
+        let us = [0.0, 10.0, 20.0, 5.0, 21.0, 12.0, 22.0];
+        let samples: Vec<Sample> = us
+            .iter()
+            .enumerate()
+            .map(|(h, u)| sample(h as i64, *u))
+            .collect();
+        let got = untracked(&samples, &[], &[], "five_hour", at(0)).unwrap();
+        assert!((got.points - 22.0).abs() < 1e-9, "{}", got.points);
     }
 
     #[test]
