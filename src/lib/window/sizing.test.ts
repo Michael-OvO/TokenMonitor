@@ -15,6 +15,10 @@ import {
   SCROLL_THRESHOLD_CAP,
   resolveFixedWindowHeight,
   FIXED_HEIGHT_CAP,
+  DEFAULT_DISPLAY_SCALE,
+  resolveAutoDisplayScale,
+  resolveDisplayScale,
+  SUPPORTED_DISPLAY_SCALES,
 } from "./sizing.js";
 
 describe("measureTargetWindowHeight", () => {
@@ -150,5 +154,61 @@ describe("resolveFixedWindowHeight", () => {
     expect(resolveFixedWindowHeight(1440, 1)).toBe(FIXED_HEIGHT_CAP);
     // 1000 / 1 = 1000 * 0.392 = 392 → below cap
     expect(resolveFixedWindowHeight(1000, 1)).toBe(392);
+  });
+});
+
+describe("resolveAutoDisplayScale", () => {
+  it.each([
+    [1440, 900, 1, 1],
+    [1512, 982, 1, 1],
+    [3024, 1964, 2, 1],
+    [1920, 1080, 1, 1.1],
+    [2560, 1440, 1, 1.45],
+    [3840, 2160, 1, 1.5],
+    [3840, 2160, 2, 1.1],
+    [5120, 1440, 1, 1.45],
+  ])("%ix%i @%ix → %f", (w, h, sf, expected) => {
+    expect(resolveAutoDisplayScale(w, h, sf)).toBe(expected);
+  });
+
+  it("never scales below 1", () => {
+    expect(resolveAutoDisplayScale(1024, 640, 1)).toBe(1);
+  });
+
+  it.each([
+    [0, 1000, 1],
+    [1000, NaN, 1],
+    [1000, 1000, 0],
+    [1000, 1000, -2],
+    [Infinity, 1000, 1],
+  ])("returns 1 for invalid input %s,%s,%s", (w, h, sf) => {
+    expect(resolveAutoDisplayScale(w, h, sf)).toBe(1);
+  });
+});
+
+describe("resolveDisplayScale", () => {
+  const big = { size: { width: 3840, height: 2160 }, scaleFactor: 1 };
+
+  it("uses the monitor for auto", () => {
+    expect(resolveDisplayScale("auto", big)).toBe(1.5);
+  });
+
+  it("returns 1 for auto without a monitor", () => {
+    expect(resolveDisplayScale("auto", null)).toBe(1);
+  });
+
+  it.each([
+    ["1", 1],
+    ["1.15", 1.15],
+    ["1.3", 1.3],
+    ["1.5", 1.5],
+  ] as const)("passes fixed override %s through regardless of monitor", (setting, expected) => {
+    expect(resolveDisplayScale(setting, big)).toBe(expected);
+    expect(resolveDisplayScale(setting, null)).toBe(expected);
+  });
+
+  it("defaults to auto", () => {
+    expect(DEFAULT_DISPLAY_SCALE).toBe("auto");
+    expect(SUPPORTED_DISPLAY_SCALES).toEqual(["auto", "1", "1.15", "1.3", "1.5"]);
   });
 });
