@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createResizeOrchestrator } from "./resizeOrchestrator.js";
+import {
+  createResizeOrchestrator,
+  type ResizeOrchestratorDeps,
+} from "./resizeOrchestrator.js";
 import { WINDOW_WIDTH } from "./sizing.js";
 
 type Deferred<T> = {
@@ -75,6 +78,9 @@ function createTestOrchestrator(options?: {
   popEl?: HTMLDivElement | null;
   footerEl?: HTMLElement | null;
   scrollPaneEl?: HTMLElement | null;
+  currentMonitor?: ResizeOrchestratorDeps["currentMonitor"];
+  getDisplayScaleSetting?: ResizeOrchestratorDeps["getDisplayScaleSetting"];
+  setZoom?: ResizeOrchestratorDeps["setZoom"];
 }) {
   return createResizeOrchestrator({
     getPopEl: () => options?.popEl ?? null,
@@ -82,7 +88,9 @@ function createTestOrchestrator(options?: {
     getScrollPaneEl: () => options?.scrollPaneEl ?? null,
     invoke: options?.invoke ?? (() => Promise.resolve()),
     onScrollLockChange: () => {},
-    currentMonitor: async () => null,
+    currentMonitor: options?.currentMonitor ?? (async () => null),
+    getDisplayScaleSetting: options?.getDisplayScaleSetting,
+    setZoom: options?.setZoom,
     logDebug: () => {},
     formatDebugError: () => ({ message: "test" }),
   });
@@ -483,5 +491,108 @@ describe("createResizeOrchestrator", () => {
     expect(() => runNextFrame(32)).toThrow("No queued animation frame to run");
 
     orchestrator.destroy();
+  });
+});
+
+describe("display scale", () => {
+  const fourK = {
+    size: { width: 3840, height: 2160 },
+    workArea: { size: { height: 2100 } },
+    scaleFactor: 1,
+  };
+
+  it("zooms the webview and multiplies the native size request", async () => {
+    installWindowStub(320);
+    installRafStub();
+    const popEl = createPopEl(420);
+    const invoke = vi.fn<(cmd: string, args: Record<string, unknown>) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const setZoom = vi.fn<(z: number) => Promise<void>>().mockResolvedValue(undefined);
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: popEl.element,
+      currentMonitor: async () => fourK,
+      getDisplayScaleSetting: () => "auto",
+      setZoom,
+    });
+
+    await orchestrator.refreshWindowMetrics();
+
+    expect(setZoom).toHaveBeenCalledWith(1.5);
+    expect(orchestrator.getDisplayScale()).toBe(1.5);
+    expect(invoke).toHaveBeenLastCalledWith("set_window_size_and_align", {
+      width: Math.round(WINDOW_WIDTH * 1.5),
+      height: 630,
+    });
+  });
+
+  it("does not call setZoom again when the scale is unchanged", async () => {
+    installWindowStub(320);
+    installRafStub();
+    const setZoom = vi.fn<(z: number) => Promise<void>>().mockResolvedValue(undefined);
+    const orchestrator = createTestOrchestrator({
+      popEl: createPopEl(420).element,
+      currentMonitor: async () => fourK,
+      getDisplayScaleSetting: () => "auto",
+      setZoom,
+    });
+
+    await orchestrator.refreshWindowMetrics();
+    await orchestrator.refreshWindowMetrics();
+
+    expect(setZoom).toHaveBeenCalledTimes(1);
+  });
+
+  it("honours a fixed override and converts monitor caps to CSS px", async () => {
+    installWindowStub(320);
+    installRafStub();
+    const orchestrator = createTestOrchestrator({
+      popEl: createPopEl(420).element,
+      currentMonitor: async () => ({
+        size: { width: 1512, height: 982 },
+        workArea: { size: { height: 950 } },
+        scaleFactor: 1,
+      }),
+      getDisplayScaleSetting: () => "1.3",
+      setZoom: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await orchestrator.refreshWindowMetrics();
+
+    expect(orchestrator.getDisplayScale()).toBe(1.3);
+    // floor(950 * 0.75 / 1.3) = 548, under the 560 cap
+    expect(orchestrator.getScrollThresholdH()).toBe(548);
+    // floor(950 / 1.3) - 24 = 706
+    expect(orchestrator.getMaxWindowH()).toBe(706);
+  });
+
+  it("keeps the previous scale when setZoom rejects", async () => {
+    installWindowStub(320);
+    installRafStub();
+    const invoke = vi.fn<(cmd: string, args: Record<string, unknown>) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: createPopEl(420).element,
+      currentMonitor: async () => fourK,
+      getDisplayScaleSetting: () => "auto",
+      setZoom: vi.fn().mockRejectedValue(new Error("denied")),
+    });
+
+    await orchestrator.refreshWindowMetrics();
+
+    expect(orchestrator.getDisplayScale()).toBe(1);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("stays at 1 without a setZoom dep (existing behaviour)", async () => {
+    installWindowStub(320);
+    installRafStub();
+    const orchestrator = createTestOrchestrator({
+      currentMonitor: async () => fourK,
+      getDisplayScaleSetting: () => "auto",
+    });
+    await orchestrator.refreshWindowMetrics();
+    expect(orchestrator.getDisplayScale()).toBe(1);
   });
 });

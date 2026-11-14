@@ -13,6 +13,8 @@ import {
   resolveMonitorMaxWindowHeight,
   resolveFixedWindowHeight,
   resolveScrollThresholdHeight,
+  resolveDisplayScale,
+  type DisplayScaleSetting,
 } from "./sizing.js";
 
 /** Which edge of the native window stays put when its height changes. */
@@ -33,6 +35,10 @@ export interface ResizeOrchestratorDeps {
     workArea: { size: { height: number } };
     scaleFactor: number;
   } | null>;
+  /** Current display-scale setting; omitted means "auto". */
+  getDisplayScaleSetting?: () => DisplayScaleSetting;
+  /** Apply the native webview zoom. Omitted means the popover never zooms. */
+  setZoom?: (zoom: number) => Promise<void>;
   logDebug: (event: string, data: Record<string, unknown>) => void;
   formatDebugError: (error: unknown) => { message: string };
   /** Reported whenever a setSize request succeeds; lets callers persist the last applied height. */
@@ -72,6 +78,7 @@ export interface ResizeOrchestrator {
   getScrollThresholdH: () => number;
   getIsScrollLocked: () => boolean;
   getFixedWindowH: () => number;
+  getDisplayScale: () => number;
 }
 
 export function createResizeOrchestrator(
@@ -117,6 +124,9 @@ export function createResizeOrchestrator(
   // to avoid a visible pop-out after content arrives.
   let initialContentReady = false;
   let fixedWindowH = 0;
+  // Native webview zoom currently applied. All heights in this closure are CSS
+  // px; only the set_window_size_and_align request is multiplied by this.
+  let displayScale = 1;
   // ── Internal helpers ──
 
   function clearPendingResize(): void {
@@ -144,31 +154,51 @@ export function createResizeOrchestrator(
     isWindowHeightAnimating = false;
   }
 
+  async function applyDisplayScale(nextScale: number): Promise<boolean> {
+    if (nextScale === displayScale || !deps.setZoom) return false;
+    try {
+      await deps.setZoom(nextScale);
+      deps.logDebug("resize:display-scale", { from: displayScale, to: nextScale });
+      displayScale = nextScale;
+      return true;
+    } catch (error) {
+      deps.logDebug("resize:set-zoom-rejected", {
+        nextScale,
+        error: deps.formatDebugError(error),
+      });
+      return false;
+    }
+  }
+
   async function refreshWindowMetrics(): Promise<void> {
     try {
       const monitor = await deps.currentMonitor();
       if (!monitor) return;
 
-      fixedWindowH = resolveFixedWindowHeight(
-        monitor.size.width,
-        monitor.scaleFactor,
+      const scaleChanged = await applyDisplayScale(
+        resolveDisplayScale(deps.getDisplayScaleSetting?.() ?? "auto", monitor),
       );
+      // Monitor sizes are physical px; dividing by scaleFactor·zoom yields CSS px.
+      const cssScaleFactor = monitor.scaleFactor * displayScale;
 
-      maxWindowH = resolveMonitorMaxWindowHeight(
-        monitor.workArea.size.height,
-        monitor.scaleFactor,
-      );
-      scrollThresholdH = resolveScrollThresholdHeight(
-        monitor.workArea.size.height,
-        monitor.scaleFactor,
-      );
+      fixedWindowH = resolveFixedWindowHeight(monitor.size.width, cssScaleFactor);
+      maxWindowH = resolveMonitorMaxWindowHeight(monitor.workArea.size.height, cssScaleFactor);
+      scrollThresholdH = resolveScrollThresholdHeight(monitor.workArea.size.height, cssScaleFactor);
       deps.logDebug("resize:monitor-metrics", {
         workAreaHeight: monitor.workArea.size.height,
         scaleFactor: monitor.scaleFactor,
+        displayScale,
         maxWindowH,
         scrollThresholdH,
         fixedWindowH,
       });
+
+      // The content's CSS height is unchanged by a zoom change, so hysteresis
+      // would skip it; push the new native size once.
+      if (scaleChanged) {
+        const measurement = measureWindowHeight("display-scale");
+        if (measurement) forceApplyWindowHeight(measurement.nextHeight, "display-scale");
+      }
     } catch {
       maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
       scrollThresholdH = DEFAULT_MAX_WINDOW_HEIGHT;
@@ -251,8 +281,8 @@ export function createResizeOrchestrator(
 
     deps
       .invoke("set_window_size_and_align", {
-        width: WINDOW_WIDTH,
-        height: request.height,
+        width: Math.round(WINDOW_WIDTH * displayScale),
+        height: Math.round(request.height * displayScale),
       })
       .then(() => {
         // When the OS clamps below the request, re-align hysteresis to the
@@ -776,5 +806,6 @@ export function createResizeOrchestrator(
     getScrollThresholdH: () => scrollThresholdH,
     getIsScrollLocked: () => isScrollLocked,
     getFixedWindowH: () => fixedWindowH,
+    getDisplayScale: () => displayScale,
   };
 }
