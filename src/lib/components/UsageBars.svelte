@@ -15,7 +15,7 @@
   import type { CreditsInfo, PlanBudget, ProviderRateLimits, RateLimitWindow } from "../types/index.js";
   import { invoke } from "@tauri-apps/api/core";
   import { untrack } from "svelte";
-  import { budgetAsks, budgetRange, windowSpan, type BudgetAsk } from "../views/planBudget.js";
+  import { budgetAsks, budgetRange, untrackedLabel, untrackedTitle, windowSpan, type BudgetAsk } from "../views/planBudget.js";
   import { popoverVisible } from "../visibility.js";
   import ResetTimeline from "./ResetTimeline.svelte";
 
@@ -238,6 +238,11 @@
             <span title={budgetTitle(w)}>· {budget}</span>
           {/if}
         </div>
+        {#if untrackedLabel(budgetFor(w))}
+          <div class="ub-untracked" title={untrackedTitle(rateLimits.provider, budgetFor(w))}>
+            {untrackedLabel(budgetFor(w))}
+          </div>
+        {/if}
       </div>
     {/each}
   {:else}
@@ -374,6 +379,11 @@
   .ub-sub {
     font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
+  }
+  .ub-untracked {
+    margin-top: 2px;
+    font: 400 9px/1.3 system-ui, sans-serif;
+    color: #E8A060;
   }
   .ub-eta {
     font-weight: 500;

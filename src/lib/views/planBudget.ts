@@ -105,3 +105,17 @@ export function budgetRange(
     (own / (u - 0.5)) * 100 * (1 + MODEL_MIX),
   ];
 }
+
+export function untrackedLabel(b?: PlanBudget): string {
+  const u = b?.untracked;
+  return u ? `~${Math.round(u.share * 100)}% of this window isn't in local logs` : "";
+}
+
+export function untrackedTitle(provider: string, b?: PlanBudget): string {
+  const u = b?.untracked;
+  if (!u) return "";
+  const fix = provider === "claude"
+    ? " To record claude -p runs, use Settings → Integrations → Headless Claude Code."
+    : "";
+  return `The meter rose about ${Math.round(u.points)} points more than this machine's recorded spend explains. Likely causes: runs that write no session log, other computers, or cloud sessions.${fix}`;
+}

@@ -190,6 +190,8 @@ export interface PlanBudget {
   spend: number;
   /** Per-model budget for a full window, learned from single-model stretches. */
   models: { model: string; usd: number; lowUsd: number; highUsd: number }[];
+  /** Meter rise this window that tracked spend does not explain. */
+  untracked?: { points: number; share: number } | null;
 }
 
 export interface ExtraUsageInfo {
