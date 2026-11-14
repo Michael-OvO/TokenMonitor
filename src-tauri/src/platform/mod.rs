@@ -14,6 +14,19 @@ pub mod linux;
 
 // ── Cross-platform window helpers ────────────────────────────────────────────
 
+/// Left edge for a window resized from `current_width` to `new_width` that
+/// keeps its horizontal center, so a popover placed under the tray icon stays
+/// centered on it when the display zoom changes its width. An unchanged width
+/// returns `current_x` untouched, so ordinary height-only resizes keep their
+/// left edge exactly. Callers still clamp the result to the work area.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub fn centered_resize_x(current_x: f64, current_width: f64, new_width: f64) -> f64 {
+    if new_width == current_width {
+        return current_x;
+    }
+    current_x - (new_width - current_width) / 2.0
+}
+
 use tauri::WebviewWindow;
 
 /// Clamp the window position so it stays fully within the monitor work area.
@@ -77,5 +90,26 @@ pub fn clamp_window_to_work_area(window: &WebviewWindow) {
     // Only move if position actually changed
     if x != outer_pos.x || y != outer_pos.y {
         let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::centered_resize_x;
+
+    #[test]
+    fn centered_resize_x_unchanged_width_keeps_left_edge() {
+        assert_eq!(centered_resize_x(1234.5, 340.0, 340.0), 1234.5);
+    }
+
+    #[test]
+    fn centered_resize_x_wider_shifts_left_by_half_the_growth() {
+        // 340 -> 510 (zoom 1.5): grows by 170, so the left edge moves 85 left.
+        assert_eq!(centered_resize_x(1000.0, 340.0, 510.0), 915.0);
+    }
+
+    #[test]
+    fn centered_resize_x_narrower_shifts_right_by_half_the_shrink() {
+        assert_eq!(centered_resize_x(915.0, 510.0, 340.0), 1000.0);
     }
 }

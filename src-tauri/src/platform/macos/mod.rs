@@ -102,7 +102,7 @@ pub fn set_size_keeping_anchor(window: &tauri::WebviewWindow, width: f64, height
     };
     let new_content = NSRect::new(
         NSPoint::new(
-            content.origin.x,
+            crate::platform::centered_resize_x(content.origin.x, content.size.width, width),
             anchored_origin_y(content.origin.y, content.size.height, height, anchor),
         ),
         NSSize::new(width, height),

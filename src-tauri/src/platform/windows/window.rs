@@ -115,7 +115,17 @@ fn anchored_resize_origin(
     height: i32,
     anchor: AnchorCorner,
 ) -> (i32, i32) {
-    let mut target_x = current_rect.left;
+    let current_width = current_rect.right - current_rect.left;
+    let mut target_x = if width == current_width {
+        current_rect.left
+    } else {
+        crate::platform::centered_resize_x(
+            current_rect.left as f64,
+            current_width as f64,
+            width as f64,
+        )
+        .round() as i32
+    };
     if target_x + width > work.right {
         target_x = work.right - width;
     }
@@ -438,6 +448,17 @@ mod tests {
         let (_, target_y) = anchored_resize_origin(work, current, 340, 420, AnchorCorner::TopRight);
 
         assert_eq!(target_y, 80);
+    }
+
+    #[test]
+    fn anchored_resize_wider_keeps_horizontal_center() {
+        let work = rect(0, 0, 1200, 900);
+        let current = rect(100, 500, 440, 820);
+
+        let (target_x, _) =
+            anchored_resize_origin(work, current, 510, 320, AnchorCorner::BottomRight);
+
+        assert_eq!(target_x, 100 - 85);
     }
 
     #[test]
