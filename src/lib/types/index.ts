@@ -362,6 +362,12 @@ export interface RateLimitProviderMonitorState extends RateLimitRequestState {
 
 export type RateLimitsMonitorState = Record<RateLimitProviderId, RateLimitProviderMonitorState>;
 
+/** Mirrors `usage::claude_otel_setup::OtelSetupState`. */
+export type ClaudeOtelSetupState =
+  | { state: "on" }
+  | { state: "off" }
+  | { state: "conflict"; key: string; value: string };
+
 /** Mirrors `usage::claude_otel::ClaudeOtelStatus` (Rust). */
 export interface ClaudeOtelStatus {
   port: number;

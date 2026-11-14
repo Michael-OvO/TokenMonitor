@@ -79,6 +79,7 @@ export interface Settings {
    * without re-probing the filesystem.
    */
   statuslineInstalled: boolean;
+  claudeOtelEnabled: boolean;
   /**
    * Plan tier used when computing rolling-window utilization percentages.
    * `Custom` lets the user paste their own per-window budgets when the
@@ -180,6 +181,7 @@ const DEFAULTS: Settings = {
   hasSeenWelcome: false,
   lastOnboardedVersion: null,
   statuslineInstalled: false,
+  claudeOtelEnabled: false,
   claudePlanTier: "Pro",
   claudePlanCustomFiveHourTokens: null,
   claudePlanCustomWeeklyTokens: null,
@@ -444,6 +446,7 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
     hasSeenWelcome: normalizeBoolean(saved?.hasSeenWelcome, DEFAULTS.hasSeenWelcome),
     lastOnboardedVersion: normalizeOnboardedVersion(saved?.lastOnboardedVersion),
     statuslineInstalled: normalizeBoolean(saved?.statuslineInstalled, DEFAULTS.statuslineInstalled),
+    claudeOtelEnabled: normalizeBoolean(saved?.claudeOtelEnabled, DEFAULTS.claudeOtelEnabled),
     claudePlanTier: normalizeStringChoice(
       saved?.claudePlanTier,
       SUPPORTED_CLAUDE_PLAN_TIERS,

@@ -38,8 +38,13 @@
   import CacheWarmupSettings from "./CacheWarmupSettings.svelte";
   import PermissionDisclosure from "../PermissionDisclosure.svelte";
   import ProviderLogo from "../ProviderLogo.svelte";
-  import type { ClaudeOtelStatus } from "../../types/index.js";
-  import { telemetryEnvSnippet, telemetryStatusView } from "../../views/claudeTelemetry.js";
+  import type { ClaudeOtelSetupState, ClaudeOtelStatus } from "../../types/index.js";
+  import {
+    telemetryAction,
+    telemetryConflictMessage,
+    telemetryEnvSnippet,
+    telemetryStatusView,
+  } from "../../views/claudeTelemetry.js";
 
   interface Props {
     onBack: () => void;
@@ -79,9 +84,15 @@
   let cursorAuthMessage = $state<string | null>(null);
   let cursorExpanded = $state(false);
   let otelStatus = $state<ClaudeOtelStatus | null>(null);
+  let otelSetup = $state<ClaudeOtelSetupState | null>(null);
   let otelExpanded = $state(false);
+  let otelScriptsExpanded = $state(false);
+  let otelBusy = $state(false);
+  let otelError = $state<string | null>(null);
   let otelCopied = $state(false);
-  let otelView = $derived(telemetryStatusView(otelStatus));
+  let otelView = $derived(telemetryStatusView(otelSetup, otelStatus));
+  let otelActionLabel = $derived(telemetryAction(otelSetup));
+  let otelConflict = $derived(telemetryConflictMessage(otelSetup));
   let otelSnippet = $derived(telemetryEnvSnippet(otelStatus?.port ?? 53218));
   let privacyExpanded = $state(false);
   let cursorRetrying = $state(false);
@@ -207,10 +218,29 @@
 
   async function refreshOtelStatus() {
     try {
-      otelStatus = await invoke<ClaudeOtelStatus>("get_claude_otel_status");
+      [otelStatus, otelSetup] = await Promise.all([
+        invoke<ClaudeOtelStatus>("get_claude_otel_status"),
+        invoke<ClaudeOtelSetupState>("check_claude_otel"),
+      ]);
+      if (otelSetup) updateSetting("claudeOtelEnabled", otelSetup.state === "on");
     } catch (e) {
-      otelStatus = null;
-      logger.debug("settings", `get_claude_otel_status failed: ${e}`);
+      logger.debug("settings", `claude otel status failed: ${e}`);
+    }
+  }
+
+  async function toggleOtel() {
+    if (!otelSetup || otelBusy) return;
+    otelBusy = true;
+    otelError = null;
+    try {
+      otelSetup = await invoke<ClaudeOtelSetupState>(
+        otelSetup.state === "on" ? "disable_claude_otel" : "enable_claude_otel",
+      );
+      updateSetting("claudeOtelEnabled", otelSetup.state === "on");
+    } catch (e) {
+      otelError = String(e);
+    } finally {
+      otelBusy = false;
     }
   }
 
@@ -824,27 +854,32 @@
         <SettingsDisclosure open={otelExpanded}>
           <div class="cursor-section">
             <div class="hint" style="margin-top: 0;">
-              <code>claude -p --no-session-persistence</code> writes no session log, so its spend is
-              invisible here. Add these lines to your shell profile (e.g. <code>~/.zshrc</code>) and
-              Claude Code reports every request to TokenMonitor over local OpenTelemetry. Requests
+              Records <code>claude -p --no-session-persistence</code> runs, which write no session log.
+              Turning this on adds four OpenTelemetry variables to the <code>env</code> of Claude's
+              <code>settings.json</code> (backed up first); turning it off removes them. Requests
               made while TokenMonitor is closed are not recorded.
             </div>
-            <pre class="otel-snippet">{otelSnippet}</pre>
-            <div class="cursor-actions">
-              <button type="button" class="secondary-btn" onclick={copyOtelSnippet}>
-                {otelCopied ? "Copied" : "Copy"}
-              </button>
-              <button type="button" class="secondary-btn" onclick={refreshOtelStatus}>Refresh</button>
-            </div>
-            {#if otelStatus}
-              <div class="hint">
-                {#if otelStatus.listening}
-                  Listening on 127.0.0.1:{otelStatus.port} · {otelStatus.eventsReceived} request{otelStatus.eventsReceived === 1 ? "" : "s"} since launch
-                {:else}
-                  Not listening on port {otelStatus.port}{otelStatus.bindError ? `: ${otelStatus.bindError}` : ""}
-                {/if}
-              </div>
+            {#if otelConflict}<div class="cursor-message">{otelConflict}</div>{/if}
+            {#if otelStatus && !otelStatus.listening}
+              <div class="cursor-message">Port {otelStatus.port} is in use{otelStatus.bindError ? `: ${otelStatus.bindError}` : ""}.</div>
             {/if}
+            {#if otelError}<div class="cursor-message">{otelError}</div>{/if}
+            <div class="cursor-actions" style="margin-top: 6px;">
+              {#if otelActionLabel}
+                <button type="button" class="secondary-btn" disabled={otelBusy || !otelStatus?.listening} onclick={toggleOtel}>{otelActionLabel}</button>
+              {/if}
+              <button type="button" class="secondary-btn" onclick={() => (otelScriptsExpanded = !otelScriptsExpanded)}>
+                Scripts that isolate settings
+              </button>
+            </div>
+            <SettingsDisclosure open={otelScriptsExpanded}>
+              <div class="hint">
+                Runs started with <code>--setting-sources ""</code> ignore <code>settings.json</code>.
+                Pass these variables to their child processes instead:
+              </div>
+              <pre class="otel-snippet">{otelSnippet}</pre>
+              <button type="button" class="secondary-btn" onclick={copyOtelSnippet}>{otelCopied ? "Copied" : "Copy"}</button>
+            </SettingsDisclosure>
           </div>
         </SettingsDisclosure>
       </div>
