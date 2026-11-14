@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v0.19.2 — 设置页两处排版修复
+
+### 修复
+- **托盘「Format」选项折行**：「verbose」选项的预览会列出全部提供方（如「Claude Code 72% Codex 35% Cursor IDE 58% Kimi Code 24%」），远宽于这一行，选项被挤到第二行；「compact」却只显示两个数字，两者对不上。现在两个预览都只取前两个提供方（「72 · 35」/「Claude Code 72% Codex 35%」），并排显示在同一行
+- **「Headless Claude Code」名称折行**：状态文字过长，把名称挤成两行。状态改为「On · just now」「On · 3m ago」，名称不再换行
+
 ## v0.19.1 — 修复未入账用量提示误报
 
 ### 修复
