@@ -59,7 +59,9 @@ docs/                    DEVELOPMENT.md, tutorial.md, testing/ procedures
 Data flow: local JSONL logs → Rust parsers + pricing → in-memory/disk caches → Tauri IPC → Svelte stores → UI.
 Headless `claude -p --no-session-persistence` runs leave no log; Claude Code's OTel `api_request` events
 sent to `127.0.0.1:53218` (`usage/claude_otel.rs`) are stored as Claude-shaped lines in `<app data>/claude-otel/`,
-an extra Claude log root, deduped against session logs by request id.
+an extra Claude log root, deduped against session logs by request id. It is turned on from Settings, which adds
+the env keys to Claude's settings.json (`usage/claude_otel_setup.rs`); `plan_budget` flags meter rise local spend
+can't explain (`PlanBudget.untracked`).
 Claude rate limits prefer a fresh statusline event, then Claude Code's own last usage response
 (`cachedUsageUtilization` in `~/.claude.json`, newer than our reading and under 285 s old), then the CLI probe
 `claude -p /usage --no-session-persistence --safe-mode` (CLIs that reject those flags get the old fixed-session
