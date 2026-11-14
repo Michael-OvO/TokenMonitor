@@ -158,6 +158,55 @@ Rules that keep this working:
 `backend.log` has one `[PROFILE] cycle` line per cycle and one `[PROFILE] slot` line
 per slot job.
 
+### Headless Claude Code usage (local OpenTelemetry)
+
+`claude -p --no-session-persistence` writes no session log, so the JSONL parser
+cannot see it, yet it draws down the plan's limits. `usage/claude_otel.rs` listens on
+`127.0.0.1:53218` (owner instance only) for Claude Code's OTLP/HTTP **JSON** export,
+keeps the usage fields of each `api_request` event (model, token counts with the
+5m/1h cache split, request id, session id, timestamp; no prompt, account or e-mail
+data) and appends them as Claude-shaped `assistant` lines to
+`<app data>/claude-otel/claude-otel-YYYY-MM-DD.jsonl`
+(`paths::claude_otel_ledger_dir`). That directory is an extra Claude log root, so the
+normal parser, pricing, archive and plan budgets apply. `upsert_claude_entry` dedupes
+on the request id: a request also present in a session log counts once, and the log
+wins. Metrics and traces posts are answered and dropped; protobuf or compressed
+bodies get a 415.
+
+Users turn it on from Settings → Integrations → Headless Claude Code.
+`usage/claude_otel_setup.rs` adds four keys to the `env` object of Claude Code's
+`settings.json` (`statusline::claude_settings::settings_path`, which honours the first
+`$CLAUDE_CONFIG_DIR` entry), after a one-time backup to `settings.json.tokenmonitor.bak`:
+
+```
+CLAUDE_CODE_ENABLE_TELEMETRY=1
+OTEL_LOGS_EXPORTER=otlp
+OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:53218
+```
+
+A key that already holds a different value is a conflict: nothing is written, and the
+row says which key the user's own collector uses. The keys we added are recorded in
+`<app data>/claude-otel-setup.json` (`paths::claude_otel_setup_file`); turning it off
+removes only those, and only while they still hold our value, so a telemetry key the
+user had set before stays. Runs started with `--setting-sources ""` ignore
+`settings.json`; the row's collapsed "Scripts that isolate settings" note gives the
+four variables for the launching script to pass to its children. With the app closed,
+a `claude -p` run was measured silent (exit 0, no stderr,
+~0.1 s slower); interactive sessions were not measured.
+
+Requests made while the app is closed are not recorded.
+
+**Untracked usage.** `plan_budget::untracked` compares, for the current instance of a
+rate-limit window, the meter's rise (sum of positive steps between readings) with the
+rise the window's priced spend explains at each model's cheapest learned $/point
+(`low_usd`). Model-specific weekly windows count only that family's spend. It reports
+`PlanBudget.untracked { points, share }` when the gap is at least 10 points and 30% of
+the rise, and stays silent while models without a learned budget hold more than 10% of
+the spend. `UsageBars` shows it as an amber "~N% of this window isn't in local logs"
+line; for Claude the tooltip names the Headless Claude Code setting while it is off.
+Untracked usage also lowers the learned $/point, so the signal under-reports.
+
 ### Claude usage-limit resets (investigated, not implemented)
 
 claude.ai's usage settings show a "Resets" card, e.g. a promotional grant that refills

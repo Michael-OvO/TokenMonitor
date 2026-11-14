@@ -29,6 +29,7 @@
 //!   doesn't ship `rate_limits` (very old CC builds)
 //! - `install`: writes scripts + patches `~/.claude/settings.json`
 
+pub mod claude_settings;
 pub mod install;
 pub mod scripts;
 pub mod source;

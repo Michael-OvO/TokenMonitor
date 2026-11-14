@@ -3,6 +3,7 @@ import type { Settings } from "../stores/settings.js";
 export type PermissionSurfaceId =
   | "usage_logs"
   | "claude_statusline"
+  | "claude_otel"
   | "login_item"
   | "ssh_config"
   | "updates";
@@ -33,7 +34,7 @@ export interface PermissionPlatform {
 
 type PermissionSettings = Pick<
   Settings,
-  "hasSeenWelcome" | "rateLimitsEnabled" | "statuslineInstalled" | "launchAtLogin" | "sshHosts"
+  "hasSeenWelcome" | "rateLimitsEnabled" | "statuslineInstalled" | "claudeOtelEnabled" | "launchAtLogin" | "sshHosts"
 >;
 
 export function getPermissionSurfaces(
@@ -78,6 +79,21 @@ export function getPermissionSurfaces(
       paths: [
         "~/.claude/settings.json (statusLine entry)",
         "<app-data>/statusline/events.jsonl",
+      ],
+    },
+    {
+      id: "claude_otel",
+      title: "Headless Claude Code",
+      status: settings.claudeOtelEnabled ? "On" : "Off",
+      tone: settings.claudeOtelEnabled ? "ok" : "neutral",
+      why:
+        "Records claude -p runs that write no session log. Claude Code sends each request's model and token counts to TokenMonitor on 127.0.0.1; prompts and account details are not stored.",
+      requestPolicy: "explicit_toggle",
+      requestCopy:
+        "Turn on in Settings → Integrations. Adds four OpenTelemetry variables to the env of ~/.claude/settings.json (backed up first); turning it off removes them.",
+      paths: [
+        "~/.claude/settings.json (env entries)",
+        "<app-data>/claude-otel/*.jsonl",
       ],
     },
     {

@@ -268,6 +268,10 @@ pub fn run() {
             // launch attempt. No-op when the guard is bypassed or not held.
             single_instance::spawn_accept_loop(app.handle().clone());
 
+            // Local OTLP endpoint for Claude Code `api_request` events, so headless
+            // `claude -p --no-session-persistence` calls (no session log) are priced.
+            usage::claude_otel::spawn();
+
             // Build tray menu (right-click on macOS/Windows, any click on Linux).
             let show = MenuItemBuilder::with_id("show", "Show TokenMonitor").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit TokenMonitor").build(app)?;
@@ -495,6 +499,10 @@ pub fn run() {
             commands::calendar::get_monthly_usage,
             commands::usage_query::get_known_models,
             plan_budget::get_plan_budget,
+            usage::claude_otel::get_claude_otel_status,
+            usage::claude_otel_setup::enable_claude_otel,
+            usage::claude_otel_setup::disable_claude_otel,
+            usage::claude_otel_setup::check_claude_otel,
             commands::config::get_last_usage_debug,
             commands::config::set_dock_icon_visible,
             commands::config::suppress_next_auto_hide,

@@ -657,6 +657,29 @@ pub(crate) enum ClaudeDedupeAction {
     Skipped,
 }
 
+/// Prefix of the `message.id` that `usage::claude_otel` writes for requests it
+/// received over OpenTelemetry; their unique hash is `otel:<request id>`.
+pub(crate) const OTEL_MESSAGE_ID: &str = "otel";
+
+/// `(request id, from the OTel ledger)` for a Claude unique hash: session
+/// logs hash as `<message id>:<request id>`, the OTel ledger as
+/// `otel:<request id>`. Neither id contains a colon.
+fn claude_request_of(unique_hash: &str) -> Option<(&str, bool)> {
+    let (head, request_id) = unique_hash.rsplit_once(':')?;
+    if request_id.is_empty() {
+        return None;
+    }
+    Some((request_id, head == OTEL_MESSAGE_ID))
+}
+
+fn is_otel_entry(entry: &ParsedEntry) -> bool {
+    entry
+        .unique_hash
+        .as_deref()
+        .and_then(claude_request_of)
+        .is_some_and(|(_, otel)| otel)
+}
+
 pub(crate) fn upsert_claude_entry(
     entries: &mut Vec<ParsedEntry>,
     processed_hashes: &mut HashMap<String, usize>,
@@ -666,6 +689,24 @@ pub(crate) fn upsert_claude_entry(
         entries.push(entry);
         return ClaudeDedupeAction::Inserted;
     };
+
+    // A request logged by a Claude Code session and also received over OTel
+    // must count once. Requests are indexed under `req:<id>` in the same map;
+    // the session log wins whichever of the two arrives first.
+    let request_key = claude_request_of(&unique_hash).map(|(id, otel)| (format!("req:{id}"), otel));
+    if let Some((key, otel)) = &request_key {
+        if let Some(existing_idx) = processed_hashes.get(key).copied() {
+            match (*otel, is_otel_entry(&entries[existing_idx])) {
+                (true, false) => return ClaudeDedupeAction::Skipped,
+                (false, true) => {
+                    entries[existing_idx] = entry;
+                    processed_hashes.insert(unique_hash, existing_idx);
+                    return ClaudeDedupeAction::Replaced(existing_idx);
+                }
+                _ => {}
+            }
+        }
+    }
 
     if let Some(existing_idx) = processed_hashes.get(&unique_hash).copied() {
         if should_prefer_claude_entry(&entry, &entries[existing_idx]) {
@@ -678,6 +719,9 @@ pub(crate) fn upsert_claude_entry(
         let idx = entries.len();
         entries.push(entry);
         processed_hashes.insert(unique_hash, idx);
+        if let Some((key, _)) = request_key {
+            processed_hashes.entry(key).or_insert(idx);
+        }
         ClaudeDedupeAction::Inserted
     }
 }
@@ -814,6 +858,59 @@ mod tests {
         assert!(
             !should_prefer_claude_entry(&sub, &main),
             "Subagent must not replace Main on an output tie"
+        );
+    }
+
+    fn hashed(hash: &str, output: u64) -> ParsedEntry {
+        ParsedEntry {
+            unique_hash: Some(hash.to_string()),
+            ..entry(output, AgentScope::Main)
+        }
+    }
+
+    fn upsert_all(list: Vec<ParsedEntry>) -> Vec<ParsedEntry> {
+        let mut entries = Vec::new();
+        let mut hashes = HashMap::new();
+        for e in list {
+            let _ = upsert_claude_entry(&mut entries, &mut hashes, e);
+        }
+        entries
+    }
+
+    #[test]
+    fn otel_request_already_in_a_session_log_is_skipped() {
+        let out = upsert_all(vec![hashed("msg_1:req_A", 50), hashed("otel:req_A", 50)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].unique_hash.as_deref(), Some("msg_1:req_A"));
+    }
+
+    #[test]
+    fn session_log_replaces_an_earlier_otel_copy() {
+        let out = upsert_all(vec![
+            hashed("otel:req_A", 50),
+            hashed("msg_1:req_A", 40),
+            hashed("otel:req_A", 60), // a re-sent OTel copy still loses to the log
+            hashed("msg_1:req_A", 45), // later streamed line of the same message
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].unique_hash.as_deref(), Some("msg_1:req_A"));
+        assert_eq!(out[0].output_tokens, 45);
+    }
+
+    #[test]
+    fn otel_only_and_distinct_requests_all_count() {
+        let out = upsert_all(vec![
+            hashed("otel:req_A", 1),
+            hashed("otel:req_A", 1), // duplicate delivery
+            hashed("otel:req_B", 2),
+            hashed("msg_1:req_C", 3),
+            hashed("msg_no_request", 4),
+        ]);
+        let mut hashes: Vec<_> = out.iter().map(|e| e.unique_hash.clone().unwrap()).collect();
+        hashes.sort();
+        assert_eq!(
+            hashes,
+            ["msg_1:req_C", "msg_no_request", "otel:req_A", "otel:req_B"]
         );
     }
 

@@ -1,5 +1,5 @@
 #[cfg_attr(not(test), allow(dead_code))]
-pub const PRICING_VERSION: &str = "2026-09-21";
+pub const PRICING_VERSION: &str = "2026-11-14";
 
 use crate::models::{detect_model_family, ModelFamily};
 use crate::usage::litellm::DynamicModelRates;
@@ -354,7 +354,19 @@ fn lookup_rates_for_key(model: &str) -> Option<ModelRates> {
 fn get_fallback_rates(model: &str) -> Option<ModelRates> {
     match detect_model_family(model) {
         ModelFamily::Anthropic => {
-            if model.contains("fable") || model.contains("mythos") {
+            if model.contains("fable-5-2") || model.contains("mythos-5-2") {
+                // Fable / Mythos 5.2: $8 / $40, cache reads $0.20 (0.025x input,
+                // not the usual 0.1x); writes at the standard 1.25x / 2x.
+                // Fast mode is $16 / $80. LiteLLM had no row for it (2026-11).
+                let fast = if model.contains("fast") { 2.0 } else { 1.0 };
+                Some(ModelRates {
+                    input: 8.00 * fast,
+                    output: 40.00 * fast,
+                    cache_write_5m: 10.00 * fast,
+                    cache_write_1h: 16.00 * fast,
+                    cache_read: 0.20 * fast,
+                })
+            } else if model.contains("fable") || model.contains("mythos") {
                 Some(claude_api_rates(10.00, 50.00))
             } else if model.contains("opus") {
                 if model.contains("fast") {
@@ -439,6 +451,18 @@ mod tests {
     #[test]
     fn fable_5_pricing() {
         assert!(approx_eq(cost("claude-fable-5", M, M), 60.00));
+    }
+
+    #[test]
+    fn fable_5_2_pricing_matches_official_rates() {
+        assert!(approx_eq(cost("claude-fable-5-2", M, M), 48.00));
+        assert!(approx_eq(cost("claude-mythos-5-2", M, M), 48.00));
+        // 5m write $10 + 1h write $16, cache read $0.20.
+        assert!(approx_eq(cost_cache_5m("claude-fable-5-2", M, M), 10.20));
+        assert!(approx_eq(cost_cache_1h("claude-fable-5-2", M, M), 16.20));
+        assert!(approx_eq(cost("claude-fable-5-2-fast", M, M), 96.00));
+        // Earlier Fable versions keep their $10 / $50 rates.
+        assert!(approx_eq(cost("claude-fable-5-1", M, M), 60.00));
     }
 
     #[test]
@@ -715,7 +739,7 @@ mod tests {
 
     #[test]
     fn pricing_version_is_set() {
-        assert_eq!(PRICING_VERSION, "2026-09-21");
+        assert_eq!(PRICING_VERSION, "2026-11-14");
     }
 
     #[test]

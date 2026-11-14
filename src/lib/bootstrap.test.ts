@@ -61,6 +61,7 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     hasSeenWelcome: true,
     lastOnboardedVersion: "0.12.0",
     statuslineInstalled: false,
+    claudeOtelEnabled: false,
     claudePlanTier: "Pro",
     claudePlanCustomFiveHourTokens: null,
     claudePlanCustomWeeklyTokens: null,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { ProviderRateLimits, RateLimitWindow } from "../types/index.js";
+import type { PlanBudget, ProviderRateLimits, RateLimitWindow } from "../types/index.js";
 import { formatCostRange } from "../utils/format.js";
-import { budgetAsks, budgetRange, needsSpend, windowSpan, windowStart } from "./planBudget.js";
+import { budgetAsks, budgetRange, needsSpend, untrackedLabel, untrackedTitle, windowSpan, windowStart } from "./planBudget.js";
 
 const win = (windowId: string, utilization: number, extra: Partial<RateLimitWindow> = {}): RateLimitWindow => ({
   windowId,
@@ -93,5 +93,25 @@ describe("formatCostRange", () => {
     expect(formatCostRange(1834, 2260)).toBe("$1,800–2,300");
     expect(formatCostRange(183, 187)).toBe("$180–190");
     expect(formatCostRange(20, 20)).toBe("$20");
+  });
+});
+
+describe("untrackedLabel / untrackedTitle", () => {
+  const b = (untracked: PlanBudget["untracked"]): PlanBudget => ({ spend: 1, models: [], untracked });
+  it("shows the share only when flagged", () => {
+    expect(untrackedLabel(undefined)).toBe("");
+    expect(untrackedLabel(b(null))).toBe("");
+    expect(untrackedLabel(b({ points: 42, share: 0.414 }))).toBe("~41% of this window isn't in local logs");
+  });
+  it("explains causes, with the Claude setting for Claude", () => {
+    const t = untrackedTitle("claude", b({ points: 42, share: 0.4 }));
+    expect(t).toContain("42 points");
+    expect(t).toContain("Settings → Integrations → Headless Claude Code");
+    expect(untrackedTitle("codex", b({ points: 42, share: 0.4 }))).not.toContain("Headless Claude Code");
+  });
+  it("drops the Claude setting hint once headless capture is on", () => {
+    const t = untrackedTitle("claude", b({ points: 42, share: 0.4 }), true);
+    expect(t).toContain("42 points");
+    expect(t).not.toContain("Headless Claude Code");
   });
 });

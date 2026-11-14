@@ -20,8 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use super::claude_settings;
 use super::scripts;
 
 /// Result reported back to the frontend after `install_statusline`. Errors
@@ -51,50 +52,6 @@ pub enum InstalledState {
     /// settings.json points at our script, but the script file is missing.
     /// The user probably wiped `~/.tokenmonitor/`; reinstall will re-create.
     ScriptMissing,
-}
-
-/// Resolve `~/.claude/settings.json`. Honors `$CLAUDE_CONFIG_DIR` (single
-/// path, comma form not supported here — we'd write into the first dir, but
-/// the read path varies, and we'd rather refuse than guess wrong).
-fn claude_settings_path() -> Option<PathBuf> {
-    if let Ok(raw) = std::env::var("CLAUDE_CONFIG_DIR") {
-        let first = raw.split(',').map(str::trim).find(|p| !p.is_empty())?;
-        return Some(PathBuf::from(first).join("settings.json"));
-    }
-    dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
-}
-
-fn load_settings(path: &Path) -> io::Result<Map<String, Value>> {
-    if !path.exists() {
-        return Ok(Map::new());
-    }
-    let raw = fs::read_to_string(path)?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(Map::new());
-    }
-    let value: Value =
-        serde_json::from_str(trimmed).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    match value {
-        Value::Object(map) => Ok(map),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "settings.json root is not an object",
-        )),
-    }
-}
-
-fn save_settings(path: &Path, settings: &Map<String, Value>) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let serialized = serde_json::to_string_pretty(&Value::Object(settings.clone()))
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    // Write to a sibling temp + rename so a crash mid-write can't leave the
-    // user with a corrupt settings file (CC reads it on startup).
-    let tmp = path.with_extension("json.tokenmonitor.tmp");
-    fs::write(&tmp, serialized)?;
-    fs::rename(&tmp, path)
 }
 
 fn extract_status_line_command(settings: &Map<String, Value>) -> Option<String> {
@@ -136,9 +93,9 @@ pub fn install() -> Result<InstallOutcome, String> {
     fs::write(&script_path, body).map_err(|e| format!("write script: {e}"))?;
     make_executable(&script_path).map_err(|e| format!("chmod script: {e}"))?;
 
-    let settings_path = claude_settings_path()
+    let settings_path = claude_settings::settings_path()
         .ok_or_else(|| "Could not resolve ~/.claude/settings.json".to_string())?;
-    let mut settings = load_settings(&settings_path)
+    let mut settings = claude_settings::load(&settings_path)
         .map_err(|e| format!("read {}: {e}", settings_path.display()))?;
 
     let our_command = scripts::settings_command(script_path.to_string_lossy().as_ref());
@@ -147,22 +104,15 @@ pub fn install() -> Result<InstallOutcome, String> {
         return Ok(InstallOutcome::AlreadyInstalled);
     }
 
-    // One-shot backup the first time we touch the file. We never overwrite
-    // an existing backup — the user might have been mid-edit when they hit
-    // re-install and we'd rather keep their oldest known-good copy.
-    if settings_path.exists() {
-        let backup = settings_path.with_extension("json.tokenmonitor.bak");
-        if !backup.exists() {
-            let _ = fs::copy(&settings_path, &backup);
-        }
-    }
+    // One-shot backup; an existing backup is never overwritten.
+    claude_settings::backup_once(&settings_path);
 
     settings.insert(
         "statusLine".to_string(),
         json!({ "type": "command", "command": our_command }),
     );
 
-    save_settings(&settings_path, &settings)
+    claude_settings::save(&settings_path, &settings)
         .map_err(|e| format!("write {}: {e}", settings_path.display()))?;
 
     Ok(InstallOutcome::Installed {
@@ -174,13 +124,14 @@ pub fn install() -> Result<InstallOutcome, String> {
 /// disk — easier to reinstall and harmless if abandoned.
 pub fn uninstall() -> Result<(), String> {
     let script_path = super::script_path();
-    let settings_path = claude_settings_path()
+    let settings_path = claude_settings::settings_path()
         .ok_or_else(|| "Could not resolve ~/.claude/settings.json".to_string())?;
 
     if !settings_path.exists() {
         return Ok(());
     }
-    let mut settings = load_settings(&settings_path).map_err(|e| format!("read settings: {e}"))?;
+    let mut settings =
+        claude_settings::load(&settings_path).map_err(|e| format!("read settings: {e}"))?;
 
     let our_command = scripts::settings_command(script_path.to_string_lossy().as_ref());
     let current = extract_status_line_command(&settings);
@@ -189,7 +140,8 @@ pub fn uninstall() -> Result<(), String> {
     // user installed something else, leave it alone — they own that key.
     if current.as_deref() == Some(our_command.as_str()) {
         settings.remove("statusLine");
-        save_settings(&settings_path, &settings).map_err(|e| format!("write settings: {e}"))?;
+        claude_settings::save(&settings_path, &settings)
+            .map_err(|e| format!("write settings: {e}"))?;
     }
 
     Ok(())
@@ -199,10 +151,10 @@ pub fn uninstall() -> Result<(), String> {
 /// CTA without trying to flip anything.
 pub fn check() -> InstalledState {
     let script_path = super::script_path();
-    let Some(settings_path) = claude_settings_path() else {
+    let Some(settings_path) = claude_settings::settings_path() else {
         return InstalledState::NotInstalled;
     };
-    let Ok(settings) = load_settings(&settings_path) else {
+    let Ok(settings) = claude_settings::load(&settings_path) else {
         return InstalledState::NotInstalled;
     };
     let our_command = scripts::settings_command(script_path.to_string_lossy().as_ref());

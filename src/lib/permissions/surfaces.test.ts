@@ -41,6 +41,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     hasSeenWelcome: false,
     lastOnboardedVersion: null,
     statuslineInstalled: false,
+    claudeOtelEnabled: false,
     claudePlanTier: "Pro",
     claudePlanCustomFiveHourTokens: null,
     claudePlanCustomWeeklyTokens: null,
@@ -87,6 +88,11 @@ describe("permission surfaces", () => {
 
     expect(statusline?.status).toBe("Installed");
     expect(statusline?.tone).toBe("ok");
+  });
+
+  it("marks headless Claude Code capture as On once enabled", () => {
+    const surfaces = getPermissionSurfaces(settings({ claudeOtelEnabled: true }), { macos: true });
+    expect(permissionSurfaceById(surfaces, "claude_otel")?.status).toBe("On");
   });
 
   it("documents update checks as banner-only with no notification prompt", () => {

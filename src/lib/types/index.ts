@@ -190,6 +190,8 @@ export interface PlanBudget {
   spend: number;
   /** Per-model budget for a full window, learned from single-model stretches. */
   models: { model: string; usd: number; lowUsd: number; highUsd: number }[];
+  /** Meter rise this window that tracked spend does not explain. */
+  untracked?: { points: number; share: number } | null;
 }
 
 export interface ExtraUsageInfo {
@@ -361,3 +363,19 @@ export interface RateLimitProviderMonitorState extends RateLimitRequestState {
 }
 
 export type RateLimitsMonitorState = Record<RateLimitProviderId, RateLimitProviderMonitorState>;
+
+/** Mirrors `usage::claude_otel_setup::OtelSetupState`. */
+export type ClaudeOtelSetupState =
+  | { state: "on" }
+  | { state: "off" }
+  | { state: "conflict"; key: string; value: string };
+
+/** Mirrors `usage::claude_otel::ClaudeOtelStatus` (Rust). */
+export interface ClaudeOtelStatus {
+  port: number;
+  listening: boolean;
+  bindError: string | null;
+  eventsReceived: number;
+  lastEventAt: string | null;
+  ledgerDir: string | null;
+}

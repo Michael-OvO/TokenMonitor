@@ -284,6 +284,28 @@ fn normalize_cursor_workspace_storage_dir(path: PathBuf) -> PathBuf {
     path.join("workspaceStorage")
 }
 
+/// TokenMonitor's own OTel ledger of Claude Code requests (see
+/// `usage::claude_otel`). Kept out of unit tests so they never read the
+/// developer's real ledger.
+fn claude_otel_root() -> Option<PathBuf> {
+    #[cfg(not(test))]
+    {
+        crate::paths::claude_otel_ledger_dir()
+    }
+    #[cfg(test)]
+    {
+        None
+    }
+}
+
+fn with_claude_otel_root(mut roots: Vec<PathBuf>, otel: Option<PathBuf>) -> Vec<PathBuf> {
+    if let Some(dir) = otel {
+        tracing::debug!(path = %dir.display(), "Claude root (OTel ledger)");
+        roots.push(dir);
+    }
+    roots
+}
+
 fn detect_claude_project_dirs() -> Vec<PathBuf> {
     if let Ok(raw) = env::var("CLAUDE_CONFIG_DIR") {
         let explicit = raw
@@ -298,11 +320,14 @@ fn detect_claude_project_dirs() -> Vec<PathBuf> {
             for p in &explicit {
                 tracing::debug!(path = %p.display(), "Claude root (from CLAUDE_CONFIG_DIR)");
             }
-            return dedupe_paths(explicit);
+            return dedupe_paths(with_claude_otel_root(explicit, claude_otel_root()));
         }
     }
 
-    let roots = crate::paths::claude_project_roots_default();
+    let roots = with_claude_otel_root(
+        crate::paths::claude_project_roots_default(),
+        claude_otel_root(),
+    );
     if roots.is_empty() {
         tracing::warn!("Could not determine home directory for Claude projects");
     }

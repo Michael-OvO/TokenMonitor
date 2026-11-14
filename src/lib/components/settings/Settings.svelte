@@ -38,6 +38,13 @@
   import CacheWarmupSettings from "./CacheWarmupSettings.svelte";
   import PermissionDisclosure from "../PermissionDisclosure.svelte";
   import ProviderLogo from "../ProviderLogo.svelte";
+  import type { ClaudeOtelSetupState, ClaudeOtelStatus } from "../../types/index.js";
+  import {
+    telemetryAction,
+    telemetryConflictMessage,
+    telemetryEnvSnippet,
+    telemetryStatusView,
+  } from "../../views/claudeTelemetry.js";
 
   interface Props {
     onBack: () => void;
@@ -76,6 +83,17 @@
   let cursorAuthStatus = $state<CursorAuthStatus | null>(null);
   let cursorAuthMessage = $state<string | null>(null);
   let cursorExpanded = $state(false);
+  let otelStatus = $state<ClaudeOtelStatus | null>(null);
+  let otelSetup = $state<ClaudeOtelSetupState | null>(null);
+  let otelExpanded = $state(false);
+  let otelScriptsExpanded = $state(false);
+  let otelBusy = $state(false);
+  let otelError = $state<string | null>(null);
+  let otelCopied = $state(false);
+  let otelView = $derived(telemetryStatusView(otelSetup, otelStatus));
+  let otelActionLabel = $derived(telemetryAction(otelSetup));
+  let otelConflict = $derived(telemetryConflictMessage(otelSetup));
+  let otelSnippet = $derived(telemetryEnvSnippet(otelStatus?.port ?? 53218));
   let privacyExpanded = $state(false);
   let cursorRetrying = $state(false);
   let cursorRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -148,6 +166,7 @@
   onMount(() => {
     getVersion().then((v) => { appVersion = v; }).catch((e) => logger.debug("settings", `getVersion failed: ${e}`));
     refreshCursorAuthStatus();
+    refreshOtelStatus();
     isEnabled()
       .then((enabled) => {
         if (enabled !== current.launchAtLogin) {
@@ -195,6 +214,45 @@
   function cursorStatusTone(status: CursorAuthStatus | null): UpdateStatus["tone"] {
     if (!status?.configured) return "warn";
     return status.lastWarning ? "amber" : "ok";
+  }
+
+  async function refreshOtelStatus() {
+    try {
+      [otelStatus, otelSetup] = await Promise.all([
+        invoke<ClaudeOtelStatus>("get_claude_otel_status"),
+        invoke<ClaudeOtelSetupState>("check_claude_otel"),
+      ]);
+      otelError = null;
+      if (otelSetup) updateSetting("claudeOtelEnabled", otelSetup.state === "on");
+    } catch (e) {
+      logger.debug("settings", `claude otel status failed: ${e}`);
+    }
+  }
+
+  async function toggleOtel() {
+    if (!otelSetup || otelBusy) return;
+    otelBusy = true;
+    otelError = null;
+    try {
+      otelSetup = await invoke<ClaudeOtelSetupState>(
+        otelSetup.state === "on" ? "disable_claude_otel" : "enable_claude_otel",
+      );
+      updateSetting("claudeOtelEnabled", otelSetup.state === "on");
+    } catch (e) {
+      otelError = String(e);
+    } finally {
+      otelBusy = false;
+    }
+  }
+
+  async function copyOtelSnippet() {
+    try {
+      await navigator.clipboard.writeText(otelSnippet);
+      otelCopied = true;
+      setTimeout(() => (otelCopied = false), 1500);
+    } catch (e) {
+      logger.debug("settings", `clipboard write failed: ${e}`);
+    }
   }
 
   async function refreshCursorAuthStatus() {
@@ -775,6 +833,56 @@
             {/if}
           </div>
         </SettingsDisclosure>
+        <button
+          class="row collapsible-toggle"
+          type="button"
+          aria-expanded={otelExpanded}
+          onclick={() => {
+            otelExpanded = !otelExpanded;
+            if (otelExpanded) refreshOtelStatus();
+          }}
+        >
+          <span class="label"><ProviderLogo kind="claude" size={13} class="cursor-icon" />Headless Claude Code</span>
+          <div class="collapsible-right">
+            <span class="status status-{otelView.tone}">
+              <span class="status-dot"></span>{otelView.label}
+            </span>
+            <svg class="collapsible-chevron" class:open={otelExpanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </div>
+        </button>
+        <SettingsDisclosure open={otelExpanded}>
+          <div class="cursor-section">
+            <div class="hint" style="margin-top: 0;">
+              Records <code>claude -p --no-session-persistence</code> runs, which write no session log.
+              Turning this on adds four OpenTelemetry variables to the <code>env</code> of Claude's
+              <code>settings.json</code> (backed up first); turning it off removes them. Requests
+              made while TokenMonitor is closed are not recorded.
+            </div>
+            {#if otelConflict}<div class="cursor-message">{otelConflict}</div>{/if}
+            {#if otelStatus && !otelStatus.listening}
+              <div class="cursor-message">Port {otelStatus.port} is in use{otelStatus.bindError ? `: ${otelStatus.bindError}` : ""}.</div>
+            {/if}
+            {#if otelError}<div class="cursor-message">{otelError}</div>{/if}
+            <div class="cursor-actions" style="margin-top: 6px;">
+              {#if otelActionLabel}
+                <button type="button" class="secondary-btn" disabled={otelBusy || (otelActionLabel === "Turn on" && !otelStatus?.listening)} onclick={toggleOtel}>{otelActionLabel}</button>
+              {/if}
+              <button type="button" class="secondary-btn" onclick={() => (otelScriptsExpanded = !otelScriptsExpanded)}>
+                Scripts that isolate settings
+              </button>
+            </div>
+            <SettingsDisclosure open={otelScriptsExpanded}>
+              <div class="hint">
+                Runs started with <code>--setting-sources ""</code> ignore <code>settings.json</code>.
+                Pass these variables to their child processes instead:
+              </div>
+              <pre class="otel-snippet">{otelSnippet}</pre>
+              <button type="button" class="secondary-btn" onclick={copyOtelSnippet}>{otelCopied ? "Copied" : "Copy"}</button>
+            </SettingsDisclosure>
+          </div>
+        </SettingsDisclosure>
       </div>
     </div>
 
@@ -1150,6 +1258,18 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
+  }
+  .otel-snippet {
+    margin: 6px 0;
+    padding: 6px 7px;
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    font: 400 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--t2);
+    white-space: pre-wrap;
+    word-break: break-all;
+    user-select: text;
   }
   .cursor-message {
     margin-top: 6px;
