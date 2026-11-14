@@ -134,3 +134,45 @@ export function resolveFixedWindowHeight(
   const logicalWidth = monitorPhysicalWidth / scaleFactor;
   return Math.min(cap, Math.floor(logicalWidth * ratio));
 }
+
+// ── Display scale (popover zoom by monitor size) ──
+
+/** Logical screen size that renders at 100%: a 14" MacBook Pro at default scaling. */
+export const DISPLAY_SCALE_BASE_WIDTH = 1512;
+export const DISPLAY_SCALE_BASE_HEIGHT = 982;
+export const DISPLAY_SCALE_MAX = 1.5;
+/** Auto scale is rounded to 1/20 (5%) steps so tiny monitor differences don't change it. */
+const DISPLAY_SCALE_STEPS_PER_UNIT = 20;
+
+export const SUPPORTED_DISPLAY_SCALES = ["auto", "1", "1.15", "1.3", "1.5"] as const;
+export type DisplayScaleSetting = (typeof SUPPORTED_DISPLAY_SCALES)[number];
+export const DEFAULT_DISPLAY_SCALE: DisplayScaleSetting = "auto";
+
+export function resolveAutoDisplayScale(
+  physicalWidth: number,
+  physicalHeight: number,
+  scaleFactor: number,
+): number {
+  if (
+    !Number.isFinite(physicalWidth) || physicalWidth <= 0 ||
+    !Number.isFinite(physicalHeight) || physicalHeight <= 0 ||
+    !Number.isFinite(scaleFactor) || scaleFactor <= 0
+  ) {
+    return 1;
+  }
+  const ratio = Math.min(
+    physicalWidth / scaleFactor / DISPLAY_SCALE_BASE_WIDTH,
+    physicalHeight / scaleFactor / DISPLAY_SCALE_BASE_HEIGHT,
+  );
+  const stepped = Math.round(ratio * DISPLAY_SCALE_STEPS_PER_UNIT) / DISPLAY_SCALE_STEPS_PER_UNIT;
+  return Math.min(DISPLAY_SCALE_MAX, Math.max(1, stepped));
+}
+
+export function resolveDisplayScale(
+  setting: DisplayScaleSetting,
+  monitor: { size: { width: number; height: number }; scaleFactor: number } | null,
+): number {
+  if (setting !== "auto") return Number(setting);
+  if (!monitor) return 1;
+  return resolveAutoDisplayScale(monitor.size.width, monitor.size.height, monitor.scaleFactor);
+}

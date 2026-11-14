@@ -5,6 +5,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { logger } from "./lib/utils/logger.js";
   import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import {
     activeProvider,
     activePeriod,
@@ -553,6 +554,7 @@
       }, 400);
     };
 
+    let settingsLoaded = false;
     resizeOrch = createResizeOrchestrator({
       getPopEl: () => popEl,
       getScrollPaneEl: () => scrollPaneEl,
@@ -564,6 +566,10 @@
       logDebug: logResizeDebug,
       formatDebugError,
       onHeightApplied: persistWindowHeight,
+      // Null until saved settings load, so the first zoom uses the saved
+      // Display Size instead of flashing the auto zoom.
+      getDisplayScaleSetting: () => (settingsLoaded ? get(settings).displayScale : null),
+      setZoom: (zoom) => getCurrentWebview().setZoom(zoom),
     });
 
     const applyMonitorMetricsToView = () => {
@@ -571,6 +577,29 @@
       const rawThreshold = resizeOrch?.getScrollThresholdH() ?? DEFAULT_MAX_WINDOW_HEIGHT;
       scrollThresholdH = fixedH > 0 ? Math.min(rawThreshold, fixedH) : rawThreshold;
     };
+
+    // Re-resolve the display scale (monitor or setting may have changed). A
+    // changed scale re-zooms the webview and resizes the window inside
+    // refreshWindowMetrics.
+    async function refreshDisplayScale(source: string) {
+      if (!resizeOrch) return;
+      try {
+        await resizeOrch.refreshWindowMetrics();
+        if (!cancelled) applyMonitorMetricsToView();
+      } catch (error) {
+        logResizeDebug("resize:display-scale-refresh-failed", {
+          source,
+          error: formatDebugError(error),
+        });
+      }
+    }
+
+    let lastDisplayScaleSetting = get(settings).displayScale;
+    const unsubDisplayScale = settings.subscribe((s) => {
+      if (s.displayScale === lastDisplayScaleSetting) return;
+      lastDisplayScaleSetting = s.displayScale;
+      void refreshDisplayScale("display-scale-setting");
+    });
 
     async function recalibrateWindowGeometry(source: string) {
       if (!resizeOrch) return;
@@ -630,6 +659,9 @@
         popoverVisible.set(true);
         void syncNativeWindowSurface().catch((e) => logger.debug("appearance", `syncNativeWindowSurface failed: ${e}`));
         scheduleWindowGeometryRecalibration("window-focus", 0);
+        // Windows recalibrates above; elsewhere re-check the display scale so
+        // a popover opened on another monitor picks up that monitor's size.
+        if (!isWindows()) void refreshDisplayScale("window-focus");
         syncSizeAndVerify("window-focus");
         // With the refresh interval Off, a look at older data refreshes it.
         invoke("refresh_on_focus").catch(() => {});
@@ -709,6 +741,9 @@
         // Settings load failed — continue with defaults
         logResizeDebug("app:settings-load-failed", {});
       }
+      settingsLoaded = true;
+      await refreshDisplayScale("settings-loaded");
+      if (cancelled) return;
 
       // Restore the window to its last-known height before the chart renders.
       // In fixed-height mode, don't restore persisted height — content will
@@ -718,9 +753,10 @@
         const restoredHeight = await getLastWindowHeight();
         if (!cancelled && restoredHeight) {
           try {
+            const zoom = resizeOrch!.getDisplayScale();
             await invoke("set_window_size_and_align", {
-              width: WINDOW_WIDTH,
-              height: restoredHeight,
+              width: Math.round(WINDOW_WIDTH * zoom),
+              height: Math.round(restoredHeight * zoom),
             });
             persistedWindowHeight = restoredHeight;
             logResizeDebug("app:window-height-restored", { height: restoredHeight });
@@ -860,6 +896,7 @@
       window.removeEventListener("chart-hover", onChartHover);
       resizeOrch?.destroy();
       resizeOrch = null;
+      unsubDisplayScale();
       cleanupListeners();
     };
   });

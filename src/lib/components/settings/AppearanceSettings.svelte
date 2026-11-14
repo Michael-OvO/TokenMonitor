@@ -14,8 +14,22 @@
   } from "../../window/appearance.js";
   import { isMacOS, isWindows } from "../../utils/platform.js";
   import { logger } from "../../utils/logger.js";
+  import type { DisplayScaleSetting } from "../../window/sizing.js";
   import SegmentedControl from "../SegmentedControl.svelte";
   import ToggleSwitch from "../ToggleSwitch.svelte";
+
+  const DISPLAY_SCALE_OPTIONS: { value: DisplayScaleSetting; label: string }[] = [
+    { value: "auto", label: "Auto" },
+    { value: "1", label: "100%" },
+    { value: "1.15", label: "115%" },
+    { value: "1.3", label: "130%" },
+    { value: "1.5", label: "150%" },
+  ];
+
+  function handleDisplayScale(val: string) {
+    logger.info("settings", `Display size: ${val}`);
+    updateSetting("displayScale", val as DisplayScaleSetting);
+  }
 
   let current = $derived($settings as SettingsType);
 
@@ -66,6 +80,14 @@
         ]}
         value={current.theme}
         onChange={handleTheme}
+      />
+    </div>
+    <div class="row border">
+      <span class="label">Display Size</span>
+      <SegmentedControl
+        options={DISPLAY_SCALE_OPTIONS}
+        value={current.displayScale}
+        onChange={handleDisplayScale}
       />
     </div>
     <div class="row border">
