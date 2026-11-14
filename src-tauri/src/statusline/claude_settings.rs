@@ -6,9 +6,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Resolve `~/.claude/settings.json`. Honors `$CLAUDE_CONFIG_DIR` (single
-/// path, comma form not supported here — we'd write into the first dir, but
-/// the read path varies, and we'd rather refuse than guess wrong).
+/// `~/.claude/settings.json`, or `settings.json` in the first
+/// `$CLAUDE_CONFIG_DIR` entry.
 pub fn settings_path() -> Option<PathBuf> {
     if let Ok(raw) = std::env::var("CLAUDE_CONFIG_DIR") {
         let first = raw.split(',').map(str::trim).find(|p| !p.is_empty())?;
@@ -17,6 +16,8 @@ pub fn settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
 }
 
+/// Missing or empty file → `{}`. Invalid JSON or a non-object root is an
+/// error, so callers refuse to write rather than clobber the user's file.
 pub fn load(path: &Path) -> io::Result<Map<String, Value>> {
     if !path.exists() {
         return Ok(Map::new());
@@ -37,6 +38,7 @@ pub fn load(path: &Path) -> io::Result<Map<String, Value>> {
     }
 }
 
+/// Pretty JSON through a sibling temp file + rename.
 pub fn save(path: &Path, settings: &Map<String, Value>) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
