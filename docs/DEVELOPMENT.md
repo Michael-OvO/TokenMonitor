@@ -191,8 +191,9 @@ row says which key the user's own collector uses. The keys we added are recorded
 removes only those, and only while they still hold our value, so a telemetry key the
 user had set before stays. Runs started with `--setting-sources ""` ignore
 `settings.json`; the row's collapsed "Scripts that isolate settings" note gives the
-four variables for the launching script to pass to its children. With the app closed
-Claude Code's exporter fails silently (no stderr, no measurable slowdown).
+four variables for the launching script to pass to its children. With the app closed,
+a `claude -p` run was measured silent (exit 0, no stderr,
+~0.1 s slower); interactive sessions were not measured.
 
 Requests made while the app is closed are not recorded.
 
