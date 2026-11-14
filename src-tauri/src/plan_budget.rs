@@ -78,6 +78,9 @@ struct Sample {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelBudget {
+    /// Model key matching priced entries; the UI uses `model` (display name).
+    #[serde(skip)]
+    pub key: String,
     pub model: String,
     pub usd: f64,
     pub low_usd: f64,
@@ -92,6 +95,8 @@ pub struct PlanBudget {
     pub spend: f64,
     /// Budget per model with enough single-model stretches, cheapest first.
     pub models: Vec<ModelBudget>,
+    /// Meter rise this window that tracked spend does not explain.
+    pub untracked: Option<Untracked>,
 }
 
 pub fn init(app_data: &Path) {
@@ -274,8 +279,8 @@ fn calibrate(
     }
 
     let mut out: Vec<ModelBudget> = acc
-        .into_values()
-        .filter_map(|(model, a)| {
+        .into_iter()
+        .filter_map(|(key, (model, a))| {
             // Meters report whole percents, so each run is off by up to a
             // point at its ends; independent runs add up like a random walk.
             let err = f64::from(a.runs).sqrt();
@@ -283,6 +288,7 @@ fn calibrate(
                 return None;
             }
             Some(ModelBudget {
+                key,
                 model,
                 usd: 100.0 * a.spend / a.points,
                 low_usd: 100.0 * a.spend / (a.points + err),
@@ -292,6 +298,74 @@ fn calibrate(
         .collect();
     out.sort_by(|x, y| x.usd.total_cmp(&y.usd));
     out
+}
+
+const UNTRACKED_MIN_POINTS: f64 = 10.0;
+const UNTRACKED_MIN_SHARE: f64 = 0.3;
+/// Spend on models without a learned budget beyond this share makes the
+/// estimate unknowable.
+const UNKNOWN_SPEND_SHARE: f64 = 0.1;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Untracked {
+    /// Meter points this window that local spend does not explain.
+    pub points: f64,
+    /// `points` as a share of the window's observed rise.
+    pub share: f64,
+}
+
+/// `seven_day_fable` and friends meter one model family; others meter all.
+fn window_scope(window_id: &str) -> Option<&'static str> {
+    let suffix = window_id.strip_prefix("seven_day_")?;
+    ["fable", "mythos", "opus", "sonnet", "haiku"]
+        .into_iter()
+        .find(|family| *family == suffix)
+}
+
+/// How far the current window's meter rose beyond what tracked spend
+/// explains, using each model's cheapest learned $/point (most generous to
+/// local spend, so it under-reports rather than raises false alarms).
+fn untracked(
+    samples: &[Sample],
+    entries: &[Priced],
+    models: &[ModelBudget],
+    window_id: &str,
+    since: DateTime<Utc>,
+) -> Option<Untracked> {
+    let last = samples.last()?;
+    let current: Vec<&Sample> = samples
+        .iter()
+        .filter(|s| s.t >= since && same_window(s, last))
+        .collect();
+    let observed: f64 = current.windows(2).map(|p| (p[1].u - p[0].u).max(0.0)).sum();
+    if observed < UNTRACKED_MIN_POINTS {
+        return None;
+    }
+    let (from, to) = (current.first()?.t, last.t);
+    let scope = window_scope(window_id);
+    let mut by_key: HashMap<&str, f64> = HashMap::new();
+    for (t, _, key, usd) in entries {
+        if *t >= from && *t < to && scope.is_none_or(|f| key.contains(f)) {
+            *by_key.entry(key.as_str()).or_default() += usd;
+        }
+    }
+    let total: f64 = by_key.values().sum();
+    let mut explained = 0.0;
+    let mut unknown = 0.0;
+    for (key, usd) in &by_key {
+        match models.iter().find(|m| m.key == *key && m.low_usd > 0.0) {
+            Some(m) => explained += usd / (m.low_usd / 100.0),
+            None => unknown += usd,
+        }
+    }
+    if total > 0.0 && unknown / total > UNKNOWN_SPEND_SHARE {
+        return None;
+    }
+    let points = observed - explained;
+    let share = points / observed;
+    (points >= UNTRACKED_MIN_POINTS && share >= UNTRACKED_MIN_SHARE)
+        .then_some(Untracked { points, share })
 }
 
 /// The published result for a bar's current window, computed right away when
@@ -530,9 +604,12 @@ fn compute(
                 .cloned()
                 .collect();
             window.sort_by_key(|s| s.t);
+            let models = calibrate(&window, &entries);
+            let untracked = untracked(&window, &entries, &models, window_id, *since);
             PlanBudget {
                 spend: entries.iter().filter(|e| e.0 >= *since).map(|e| e.3).sum(),
-                models: calibrate(&window, &entries),
+                models,
+                untracked,
             }
         })
         .collect()
@@ -702,6 +779,90 @@ mod tests {
         )
     }
 
+    fn budget_for(key: &str, usd: f64) -> ModelBudget {
+        ModelBudget {
+            key: key.into(),
+            model: key.into(),
+            usd,
+            low_usd: usd,
+            high_usd: usd,
+        }
+    }
+
+    #[test]
+    fn untracked_flags_points_local_spend_cannot_explain() {
+        let samples: Vec<Sample> = (0..7).map(|h| sample(h, h as f64 * 10.0)).collect();
+        let entries: Vec<_> = (0..6).map(|h| spend(h, "opus", 1.0)).collect();
+        let got = untracked(
+            &samples,
+            &entries,
+            &[budget_for("opus", 100.0)],
+            "five_hour",
+            at(0),
+        )
+        .unwrap();
+        assert!((got.points - 54.0).abs() < 1e-9);
+        assert!((got.share - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn untracked_is_quiet_when_spend_explains_the_meter() {
+        let samples: Vec<Sample> = (0..7).map(|h| sample(h, h as f64 * 10.0)).collect();
+        let entries: Vec<_> = (0..6).map(|h| spend(h, "opus", 9.0)).collect();
+        assert!(untracked(
+            &samples,
+            &entries,
+            &[budget_for("opus", 100.0)],
+            "five_hour",
+            at(0)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn untracked_needs_budgets_for_most_of_the_spend() {
+        let samples: Vec<Sample> = (0..7).map(|h| sample(h, h as f64 * 10.0)).collect();
+        let entries: Vec<_> = (0..6).map(|h| spend(h, "sonnet", 1.0)).collect();
+        assert!(untracked(
+            &samples,
+            &entries,
+            &[budget_for("opus", 100.0)],
+            "five_hour",
+            at(0)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn untracked_counts_only_the_current_window_and_scoped_model() {
+        let mut samples: Vec<Sample> = (0..3)
+            .map(|h| Sample {
+                r: Some(at(-50)),
+                ..sample(h, h as f64 * 40.0)
+            })
+            .collect();
+        samples.extend((3..6).map(|h| sample(h, (h - 3) as f64 * 10.0)));
+        let entries: Vec<_> = (3..6).map(|h| spend(h, "opus-5-5", 50.0)).collect();
+        let got = untracked(
+            &samples,
+            &entries,
+            &[budget_for("fable-5-2", 100.0)],
+            "seven_day_fable",
+            at(0),
+        )
+        .unwrap();
+        assert!(
+            (got.points - 20.0).abs() < 1e-9,
+            "opus spend does not move the fable meter"
+        );
+    }
+
+    #[test]
+    fn untracked_ignores_small_rises() {
+        let samples = vec![sample(0, 0.0), sample(1, 8.0)];
+        assert!(untracked(&samples, &[], &[], "five_hour", at(0)).is_none());
+    }
+
     #[test]
     fn learns_each_models_dollars_per_point() {
         // Opus: $3 per 5 points → $60 per window. Sonnet: $5 per 5 → $100.
@@ -846,6 +1007,7 @@ mod tests {
         PlanBudget {
             spend,
             models: Vec::new(),
+            untracked: None,
         }
     }
 
