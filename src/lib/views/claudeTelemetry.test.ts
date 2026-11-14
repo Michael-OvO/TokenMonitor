@@ -38,7 +38,7 @@ describe("telemetryStatusView", () => {
 
   it("shows the newest request when on", () => {
     expect(telemetryStatusView(on, status(), now)).toEqual({ label: "On", tone: "ok" });
-    expect(telemetryStatusView(on, status({ lastEventAt: "2026-11-14T07:55:00Z" }), now).label).toBe("On · last request 5m ago");
+    expect(telemetryStatusView(on, status({ lastEventAt: "2026-11-14T07:55:00Z" }), now).label).toBe("On · 5m ago");
   });
 });
 
