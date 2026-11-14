@@ -35,8 +35,10 @@ export interface ResizeOrchestratorDeps {
     workArea: { size: { height: number } };
     scaleFactor: number;
   } | null>;
-  /** Current display-scale setting; omitted means "auto". */
-  getDisplayScaleSetting?: () => DisplayScaleSetting;
+  /** Current display-scale setting; omitted means "auto". Returning null
+   * means the setting is not known yet (saved settings still loading): the
+   * current zoom is kept. */
+  getDisplayScaleSetting?: () => DisplayScaleSetting | null;
   /** Apply the native webview zoom. Omitted means the popover never zooms. */
   setZoom?: (zoom: number) => Promise<void>;
   logDebug: (event: string, data: Record<string, unknown>) => void;
@@ -170,14 +172,28 @@ export function createResizeOrchestrator(
     }
   }
 
+  // The content's CSS height is unchanged by a zoom change, so hysteresis
+  // would skip it; push the new native size once.
+  function forceApplyDisplayScaleHeight(): void {
+    const measurement = measureWindowHeight("display-scale");
+    if (measurement) forceApplyWindowHeight(measurement.nextHeight, "display-scale");
+  }
+
   async function refreshWindowMetrics(): Promise<void> {
     try {
       const monitor = await deps.currentMonitor();
-      if (!monitor) return;
+      const setting = deps.getDisplayScaleSetting ? deps.getDisplayScaleSetting() : "auto";
+      // A fixed override needs no monitor, so apply it even when
+      // currentMonitor() comes back null (intermittent on Windows). Auto
+      // without a monitor, or a setting not loaded yet, keeps the current zoom.
+      const scaleChanged = setting === null || (setting === "auto" && !monitor)
+        ? false
+        : await applyDisplayScale(resolveDisplayScale(setting, monitor));
+      if (!monitor) {
+        if (scaleChanged) forceApplyDisplayScaleHeight();
+        return;
+      }
 
-      const scaleChanged = await applyDisplayScale(
-        resolveDisplayScale(deps.getDisplayScaleSetting?.() ?? "auto", monitor),
-      );
       // Monitor sizes are physical px; dividing by scaleFactor·zoom yields CSS px.
       const cssScaleFactor = monitor.scaleFactor * displayScale;
 
@@ -193,12 +209,7 @@ export function createResizeOrchestrator(
         fixedWindowH,
       });
 
-      // The content's CSS height is unchanged by a zoom change, so hysteresis
-      // would skip it; push the new native size once.
-      if (scaleChanged) {
-        const measurement = measureWindowHeight("display-scale");
-        if (measurement) forceApplyWindowHeight(measurement.nextHeight, "display-scale");
-      }
+      if (scaleChanged) forceApplyDisplayScaleHeight();
     } catch {
       maxWindowH = DEFAULT_MAX_WINDOW_HEIGHT;
       scrollThresholdH = DEFAULT_MAX_WINDOW_HEIGHT;

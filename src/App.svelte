@@ -554,6 +554,7 @@
       }, 400);
     };
 
+    let settingsLoaded = false;
     resizeOrch = createResizeOrchestrator({
       getPopEl: () => popEl,
       getScrollPaneEl: () => scrollPaneEl,
@@ -565,7 +566,9 @@
       logDebug: logResizeDebug,
       formatDebugError,
       onHeightApplied: persistWindowHeight,
-      getDisplayScaleSetting: () => get(settings).displayScale,
+      // Null until saved settings load, so the first zoom uses the saved
+      // Display Size instead of flashing the auto zoom.
+      getDisplayScaleSetting: () => (settingsLoaded ? get(settings).displayScale : null),
       setZoom: (zoom) => getCurrentWebview().setZoom(zoom),
     });
 
@@ -738,6 +741,9 @@
         // Settings load failed — continue with defaults
         logResizeDebug("app:settings-load-failed", {});
       }
+      settingsLoaded = true;
+      await refreshDisplayScale("settings-loaded");
+      if (cancelled) return;
 
       // Restore the window to its last-known height before the chart renders.
       // In fixed-height mode, don't restore persisted height — content will

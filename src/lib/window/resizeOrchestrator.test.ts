@@ -526,6 +526,91 @@ describe("display scale", () => {
     });
   });
 
+  it("force-applies the zoomed size even when the content height is unchanged", async () => {
+    installWindowStub(320);
+    installRafStub();
+    // Content equals innerHeight, so only the display-scale force-apply can
+    // produce the native resize.
+    const invoke = vi.fn<(cmd: string, args: Record<string, unknown>) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: createPopEl(320).element,
+      currentMonitor: async () => fourK,
+      getDisplayScaleSetting: () => "auto",
+      setZoom: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await orchestrator.refreshWindowMetrics();
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("set_window_size_and_align", {
+      width: 510,
+      height: 480,
+    });
+  });
+
+  it("applies a fixed override when no monitor is available", async () => {
+    installWindowStub(320);
+    installRafStub();
+    const invoke = vi.fn<(cmd: string, args: Record<string, unknown>) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const setZoom = vi.fn<(z: number) => Promise<void>>().mockResolvedValue(undefined);
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: createPopEl(320).element,
+      currentMonitor: async () => null,
+      getDisplayScaleSetting: () => "1.3",
+      setZoom,
+    });
+
+    await orchestrator.refreshWindowMetrics();
+
+    expect(setZoom).toHaveBeenCalledWith(1.3);
+    expect(orchestrator.getDisplayScale()).toBe(1.3);
+    expect(invoke).toHaveBeenCalledWith("set_window_size_and_align", {
+      width: Math.round(WINDOW_WIDTH * 1.3),
+      height: Math.round(320 * 1.3),
+    });
+  });
+
+  it("keeps the previous auto zoom when the monitor is unavailable", async () => {
+    installWindowStub(320);
+    installRafStub();
+    let monitor: typeof fourK | null = fourK;
+    const setZoom = vi.fn<(z: number) => Promise<void>>().mockResolvedValue(undefined);
+    const orchestrator = createTestOrchestrator({
+      popEl: createPopEl(320).element,
+      currentMonitor: async () => monitor,
+      getDisplayScaleSetting: () => "auto",
+      setZoom,
+    });
+
+    await orchestrator.refreshWindowMetrics();
+    monitor = null;
+    await orchestrator.refreshWindowMetrics();
+
+    expect(setZoom).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getDisplayScale()).toBe(1.5);
+  });
+
+  it("keeps the current zoom while the setting is not loaded yet", async () => {
+    installWindowStub(320);
+    installRafStub();
+    const setZoom = vi.fn<(z: number) => Promise<void>>().mockResolvedValue(undefined);
+    const orchestrator = createTestOrchestrator({
+      popEl: createPopEl(320).element,
+      currentMonitor: async () => fourK,
+      getDisplayScaleSetting: () => null,
+      setZoom,
+    });
+
+    await orchestrator.refreshWindowMetrics();
+
+    expect(setZoom).not.toHaveBeenCalled();
+    expect(orchestrator.getDisplayScale()).toBe(1);
+  });
+
   it("does not call setZoom again when the scale is unchanged", async () => {
     installWindowStub(320);
     installRafStub();
