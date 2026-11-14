@@ -12,15 +12,13 @@
 //! pipeline. A request that a session log also records is counted once
 //! (`claude_parser::upsert_claude_entry` dedupes on the request id).
 //!
-//! Enable in the shell that starts Claude Code (settings-file `env` is skipped
-//! by `--setting-sources ""`):
+//! Turned on from Settings → Integrations → Headless Claude Code
+//! (`usage/claude_otel_setup.rs`), which adds the four OTel variables to Claude
+//! Code's `settings.json`. Scripts that pass `--setting-sources ""` skip that
+//! file and must pass the four variables themselves.
 //!
-//! ```sh
-//! export CLAUDE_CODE_ENABLE_TELEMETRY=1
-//! export OTEL_LOGS_EXPORTER=otlp
-//! export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
-//! export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:53218
-//! ```
+//! Requests carrying an `Origin` header, or a `Host` other than
+//! `127.0.0.1:<port>` / `localhost:<port>`, are refused with 403.
 //!
 //! The server is a deliberately small HTTP/1.1 reader on `std::net` (no new
 //! dependencies): Content-Length or chunked bodies, keep-alive, bounded sizes
@@ -137,6 +135,8 @@ struct Request {
     content_type: String,
     content_encoding: String,
     keep_alive: bool,
+    host: String,
+    has_origin: bool,
     body: Vec<u8>,
 }
 
@@ -183,6 +183,8 @@ fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, u16> {
     let mut content_type = String::new();
     let mut content_encoding = String::new();
     let mut keep_alive = version != "HTTP/1.0";
+    let mut host = String::new();
+    let mut has_origin = false;
     loop {
         line.clear();
         let n = reader.read_line(&mut line).map_err(|_| 400u16)?;
@@ -206,6 +208,8 @@ fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, u16> {
             "transfer-encoding" => chunked = value.to_ascii_lowercase().contains("chunked"),
             "content-type" => content_type = value.to_ascii_lowercase(),
             "content-encoding" => content_encoding = value.to_ascii_lowercase(),
+            "host" => host = value.to_ascii_lowercase(),
+            "origin" => has_origin = true,
             "connection" => {
                 let v = value.to_ascii_lowercase();
                 if v.contains("close") {
@@ -235,6 +239,8 @@ fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, u16> {
         content_type,
         content_encoding,
         keep_alive,
+        host,
+        has_origin,
         body,
     }))
 }
@@ -257,7 +263,11 @@ fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, u16> {
                 }
             }
         }
-        if body.len() + size > MAX_BODY_BYTES {
+        if body
+            .len()
+            .checked_add(size)
+            .is_none_or(|n| n > MAX_BODY_BYTES)
+        {
             return Err(413);
         }
         let start = body.len();
@@ -277,6 +287,7 @@ fn write_response(
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
@@ -293,7 +304,19 @@ fn write_response(
     w.flush()
 }
 
+/// A browser page (DNS rebinding, cross-origin fetch) must not be able to post
+/// fake usage: browsers always send `Origin` on cross-origin POSTs, and a
+/// rebound name arrives in `Host`. Claude Code's exporter sends neither.
+fn request_allowed(req: &Request) -> bool {
+    !req.has_origin
+        && (req.host == format!("127.0.0.1:{OTEL_PORT}")
+            || req.host == format!("localhost:{OTEL_PORT}"))
+}
+
 fn handle(req: &Request, dir: &Path) -> (u16, String) {
+    if !request_allowed(req) {
+        return (403, "{}".into());
+    }
     if req.method != "POST" {
         return (405, "{}".into());
     }
@@ -446,11 +469,11 @@ fn ledger_record(record: &Value, attrs: &serde_json::Map<String, Value>) -> Opti
         "input_tokens": as_u64(attrs, "input_tokens"),
         "output_tokens": as_u64(attrs, "output_tokens"),
         "cache_read_input_tokens": as_u64(attrs, "cache_read_tokens"),
-        "cache_creation_input_tokens": cache_creation.max(five_m + one_h),
+        "cache_creation_input_tokens": cache_creation.max(five_m.saturating_add(one_h)),
     });
     // Without a 5m/1h split the parser files all cache writes under 1h,
     // matching how it reads session logs that lack the breakdown.
-    if five_m + one_h > 0 {
+    if five_m.saturating_add(one_h) > 0 {
         usage["cache_creation"] = json!({
             "ephemeral_5m_input_tokens": five_m,
             "ephemeral_1h_input_tokens": one_h,
@@ -661,6 +684,8 @@ mod tests {
             content_type: ct.into(),
             content_encoding: enc.into(),
             keep_alive: true,
+            host: format!("127.0.0.1:{OTEL_PORT}"),
+            has_origin: false,
             body: body.as_bytes().to_vec(),
         };
         assert_eq!(
@@ -717,6 +742,57 @@ mod tests {
     }
 
     #[test]
+    fn rejects_browser_origin_and_foreign_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = api_request_payload().to_string();
+        let raw = |extra: &str| {
+            format!(
+                "POST /v1/logs HTTP/1.1\r\n{extra}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let run = |extra: &str| handle(&http(&raw(extra)), dir.path()).0;
+        assert_eq!(
+            run("Host: 127.0.0.1:53218\r\nOrigin: http://evil.example\r\n"),
+            403
+        );
+        assert_eq!(run("Host: evil.example:53218\r\n"), 403);
+        assert_eq!(run(""), 403);
+        assert_eq!(run("Host: 127.0.0.1:53218\r\n"), 200);
+        assert_eq!(run("Host: LocalHost:53218\r\n"), 200);
+        let written = fs::read_to_string(dir.path().join("claude-otel-2026-11-14.jsonl")).unwrap();
+        assert_eq!(
+            written.lines().count(),
+            2,
+            "rejected requests write nothing"
+        );
+    }
+
+    #[test]
+    fn huge_cache_creation_counts_saturate() {
+        let payload = json!({"resourceLogs": [{"scopeLogs": [{"logRecords": [{
+            "timeUnixNano": "1794641535124000000",
+            "attributes": [
+                kv("event.name", json!({"stringValue": "api_request"})),
+                kv("model", json!({"stringValue": "m"})),
+                kv("request_id", json!({"stringValue": "r"})),
+                kv("cache_creation_5m_tokens", json!({"stringValue": "18446744073709551615"})),
+                kv("cache_creation_1h_tokens", json!({"stringValue": "18446744073709551615"}))
+            ]
+        }]}]}]});
+        assert_eq!(api_request_records(&payload).len(), 1);
+    }
+
+    #[test]
+    fn chunk_size_overflow_is_rejected() {
+        let req = "POST /v1/logs HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\nffffffffffffffff\r\n";
+        assert_eq!(
+            read_request(&mut Cursor::new(req.as_bytes().to_vec())).unwrap_err(),
+            413
+        );
+    }
+
+    #[test]
     fn serves_keep_alive_requests_over_a_real_socket() {
         let dir = tempfile::tempdir().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -733,7 +809,7 @@ mod tests {
             let conn = if close { "close" } else { "keep-alive" };
             write!(
                 client,
-                "POST /v1/logs HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nConnection: {conn}\r\nContent-Length: {}\r\n\r\n{body}",
+                "POST /v1/logs HTTP/1.1\r\nHost: 127.0.0.1:53218\r\nContent-Type: application/json\r\nConnection: {conn}\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             )
             .unwrap();

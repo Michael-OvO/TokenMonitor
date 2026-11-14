@@ -4,8 +4,9 @@ export type TelemetryTone = "ok" | "amber" | "warn" | "neutral";
 
 /**
  * Shell lines that point Claude Code's OpenTelemetry export at TokenMonitor.
- * They belong in the shell profile: headless runs started with
- * `--setting-sources ""` ignore the `env` block of Claude settings files.
+ * For scripts that isolate settings: runs started with
+ * `--setting-sources ""` ignore the `env` block of Claude settings files, so
+ * such a launcher must pass these variables itself.
  */
 export function telemetryEnvSnippet(port: number): string {
   return [

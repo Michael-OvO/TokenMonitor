@@ -102,15 +102,17 @@ pub(crate) fn install_at(
     if added.is_empty() {
         return Ok(OtelSetupState::On);
     }
-    claude_settings::backup_once(settings_path);
-    claude_settings::save(settings_path, &settings)
-        .map_err(|e| format!("write {}: {e}", settings_path.display()))?;
     for key in added {
         if !record.added.contains(&key) {
             record.added.push(key);
         }
     }
+    // Record first: a failed settings write then leaves a harmless record,
+    // never keys we cannot later attribute to ourselves.
     write_record(record_path, &record)?;
+    claude_settings::backup_once(settings_path);
+    claude_settings::save(settings_path, &settings)
+        .map_err(|e| format!("write {}: {e}", settings_path.display()))?;
     Ok(OtelSetupState::On)
 }
 
@@ -118,17 +120,35 @@ pub(crate) fn uninstall_at(
     settings_path: &Path,
     record_path: &Path,
 ) -> Result<OtelSetupState, String> {
-    let record = read_record(record_path);
+    let parsed = fs::read_to_string(record_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<SetupRecord>(&raw).ok());
+    let record_known = parsed.is_some();
+    let record = parsed.unwrap_or_default();
     let mut settings = claude_settings::load(settings_path)
         .map_err(|e| format!("read {}: {e}", settings_path.display()))?;
     let mut changed = false;
+    let mut stuck: Vec<&str> = Vec::new();
     if let Some(env) = settings.get_mut("env").and_then(Value::as_object_mut) {
         for (key, want) in wanted() {
             let ours = record.added.iter().any(|k| k == key);
-            if ours && env.get(key).and_then(Value::as_str) == Some(want.as_str()) {
+            let exact = env.get(key).and_then(Value::as_str) == Some(want.as_str());
+            if ours && exact {
                 env.remove(key);
                 changed = true;
+            } else if exact && !record_known {
+                stuck.push(key);
             }
+        }
+        // Without a readable record we cannot tell our keys from the user's:
+        // leave settings.json untouched and say what remains.
+        if !stuck.is_empty() {
+            return Err(format!(
+                "Could not tell which settings.json entries TokenMonitor added (its setup record is missing). \
+                 These keys are still set in {}: {}. Remove them by hand to turn capture off.",
+                settings_path.display(),
+                stuck.join(", ")
+            ));
         }
         if env.is_empty() {
             settings.remove("env");
@@ -295,6 +315,27 @@ mod tests {
         uninstall_at(&s2, &r2).unwrap();
         assert!(claude_settings::load(&s2).unwrap().get("env").is_none());
         assert_eq!(check_at(&s2), OtelSetupState::Off);
+    }
+
+    #[test]
+    fn install_records_added_keys() {
+        let (_d, s, r) = files();
+        install_at(&s, &r).unwrap();
+        let record = read_record(&r);
+        assert_eq!(record.added.len(), 4);
+        assert!(record.added.contains(&"OTEL_LOGS_EXPORTER".to_string()));
+    }
+
+    #[test]
+    fn uninstall_without_record_errors_naming_keys_and_changes_nothing() {
+        let (_d, s, r) = files();
+        install_at(&s, &r).unwrap();
+        std::fs::remove_file(&r).unwrap();
+        let before = std::fs::read_to_string(&s).unwrap();
+        let err = uninstall_at(&s, &r).unwrap_err();
+        assert!(err.contains("OTEL_LOGS_EXPORTER"), "{err}");
+        assert!(err.contains("by hand"), "{err}");
+        assert_eq!(std::fs::read_to_string(&s).unwrap(), before);
     }
 
     #[test]

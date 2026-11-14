@@ -222,6 +222,7 @@
         invoke<ClaudeOtelStatus>("get_claude_otel_status"),
         invoke<ClaudeOtelSetupState>("check_claude_otel"),
       ]);
+      otelError = null;
       if (otelSetup) updateSetting("claudeOtelEnabled", otelSetup.state === "on");
     } catch (e) {
       logger.debug("settings", `claude otel status failed: ${e}`);
@@ -866,7 +867,7 @@
             {#if otelError}<div class="cursor-message">{otelError}</div>{/if}
             <div class="cursor-actions" style="margin-top: 6px;">
               {#if otelActionLabel}
-                <button type="button" class="secondary-btn" disabled={otelBusy || !otelStatus?.listening} onclick={toggleOtel}>{otelActionLabel}</button>
+                <button type="button" class="secondary-btn" disabled={otelBusy || (otelActionLabel === "Turn on" && !otelStatus?.listening)} onclick={toggleOtel}>{otelActionLabel}</button>
               {/if}
               <button type="button" class="secondary-btn" onclick={() => (otelScriptsExpanded = !otelScriptsExpanded)}>
                 Scripts that isolate settings
