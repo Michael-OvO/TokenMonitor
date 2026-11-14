@@ -226,6 +226,12 @@ pub fn claude_otel_ledger_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(APP_IDENTIFIER).join("claude-otel"))
 }
 
+/// Which OTel env keys TokenMonitor itself added to Claude's settings, so
+/// turning capture off never removes a key the user had set before.
+pub fn claude_otel_setup_file() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join(APP_IDENTIFIER).join("claude-otel-setup.json"))
+}
+
 /// Must match `identifier` in `tauri.conf.json` (checked by a test).
 pub const APP_IDENTIFIER: &str = "com.tokenmonitor.app";
 
