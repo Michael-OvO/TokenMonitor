@@ -158,6 +158,32 @@ Rules that keep this working:
 `backend.log` has one `[PROFILE] cycle` line per cycle and one `[PROFILE] slot` line
 per slot job.
 
+### Headless Claude Code usage (local OpenTelemetry)
+
+`claude -p --no-session-persistence` writes no session log, so the JSONL parser
+cannot see it, yet it draws down the plan's limits. `usage/claude_otel.rs` listens on
+`127.0.0.1:53218` (owner instance only) for Claude Code's OTLP/HTTP **JSON** export,
+keeps the usage fields of each `api_request` event (model, token counts with the
+5m/1h cache split, request id, session id, timestamp; no prompt, account or e-mail
+data) and appends them as Claude-shaped `assistant` lines to
+`<app data>/claude-otel/claude-otel-YYYY-MM-DD.jsonl`
+(`paths::claude_otel_ledger_dir`). That directory is an extra Claude log root, so the
+normal parser, pricing, archive and plan budgets apply. `upsert_claude_entry` dedupes
+on the request id: a request also present in a session log counts once, and the log
+wins. Metrics and traces posts are answered and dropped; protobuf or compressed
+bodies get a 415. Users enable it in their shell profile (Settings → Integrations →
+Headless Claude Code shows the lines): headless runs started with
+`--setting-sources ""` ignore the `env` block of Claude settings files.
+
+```sh
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:53218
+```
+
+Requests made while the app is closed are not recorded.
+
 ### Claude usage-limit resets (investigated, not implemented)
 
 claude.ai's usage settings show a "Resets" card, e.g. a promotional grant that refills

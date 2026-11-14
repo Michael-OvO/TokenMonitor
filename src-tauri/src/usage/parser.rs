@@ -4654,6 +4654,50 @@ mod tests {
     }
 
     #[test]
+    fn otel_ledger_counts_headless_requests_once_alongside_session_logs() {
+        let sessions = TempDir::new().unwrap();
+        let otel = TempDir::new().unwrap();
+        fs::create_dir_all(sessions.path().join("proj")).unwrap();
+        // Interactive request req_A is in the session log AND arrived over OTel.
+        write_file(
+            &sessions.path().join("proj").join("s1.jsonl"),
+            r#"{"type":"assistant","timestamp":"2026-03-15T12:00:00Z","requestId":"req_A","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}"#,
+        );
+        let otel_line = |req: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-03-15T12:00:01Z","sessionId":"x","requestId":"{req}","isSidechain":false,"message":{{"id":"otel","model":"claude-opus-5-5","usage":{{"input_tokens":1000000,"output_tokens":0}}}}}}"#
+            )
+        };
+        // req_B is headless (no session log); req_A is a duplicate of the log.
+        write_file(
+            &otel.path().join("claude-otel-2026-03-15.jsonl"),
+            &[otel_line("req_A"), otel_line("req_B"), otel_line("req_B")].join("\n"),
+        );
+        let parser = UsageParser::with_claude_dirs(vec![
+            sessions.path().to_path_buf(),
+            otel.path().to_path_buf(),
+        ]);
+        let payload = parser.get_daily("claude", "20260301");
+        // Two distinct 1M-input Opus requests at $5/M input.
+        assert_eq!(payload.input_tokens, 2_000_000);
+        assert!(
+            (payload.total_cost - 10.0).abs() < 1e-9,
+            "{}",
+            payload.total_cost
+        );
+
+        // Order of roots must not matter.
+        let parser = UsageParser::with_claude_dirs(vec![
+            otel.path().to_path_buf(),
+            sessions.path().to_path_buf(),
+        ]);
+        assert_eq!(
+            parser.get_daily("claude", "20260301").input_tokens,
+            2_000_000
+        );
+    }
+
+    #[test]
     fn content_append_keeps_listing_and_reparses_only_changed_file() {
         let dir = TempDir::new().unwrap();
         let a = dir.path().join("a.jsonl");

@@ -38,6 +38,8 @@
   import CacheWarmupSettings from "./CacheWarmupSettings.svelte";
   import PermissionDisclosure from "../PermissionDisclosure.svelte";
   import ProviderLogo from "../ProviderLogo.svelte";
+  import type { ClaudeOtelStatus } from "../../types/index.js";
+  import { telemetryEnvSnippet, telemetryStatusView } from "../../views/claudeTelemetry.js";
 
   interface Props {
     onBack: () => void;
@@ -76,6 +78,11 @@
   let cursorAuthStatus = $state<CursorAuthStatus | null>(null);
   let cursorAuthMessage = $state<string | null>(null);
   let cursorExpanded = $state(false);
+  let otelStatus = $state<ClaudeOtelStatus | null>(null);
+  let otelExpanded = $state(false);
+  let otelCopied = $state(false);
+  let otelView = $derived(telemetryStatusView(otelStatus));
+  let otelSnippet = $derived(telemetryEnvSnippet(otelStatus?.port ?? 53218));
   let privacyExpanded = $state(false);
   let cursorRetrying = $state(false);
   let cursorRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -148,6 +155,7 @@
   onMount(() => {
     getVersion().then((v) => { appVersion = v; }).catch((e) => logger.debug("settings", `getVersion failed: ${e}`));
     refreshCursorAuthStatus();
+    refreshOtelStatus();
     isEnabled()
       .then((enabled) => {
         if (enabled !== current.launchAtLogin) {
@@ -195,6 +203,25 @@
   function cursorStatusTone(status: CursorAuthStatus | null): UpdateStatus["tone"] {
     if (!status?.configured) return "warn";
     return status.lastWarning ? "amber" : "ok";
+  }
+
+  async function refreshOtelStatus() {
+    try {
+      otelStatus = await invoke<ClaudeOtelStatus>("get_claude_otel_status");
+    } catch (e) {
+      otelStatus = null;
+      logger.debug("settings", `get_claude_otel_status failed: ${e}`);
+    }
+  }
+
+  async function copyOtelSnippet() {
+    try {
+      await navigator.clipboard.writeText(otelSnippet);
+      otelCopied = true;
+      setTimeout(() => (otelCopied = false), 1500);
+    } catch (e) {
+      logger.debug("settings", `clipboard write failed: ${e}`);
+    }
   }
 
   async function refreshCursorAuthStatus() {
@@ -775,6 +802,51 @@
             {/if}
           </div>
         </SettingsDisclosure>
+        <button
+          class="row collapsible-toggle"
+          type="button"
+          aria-expanded={otelExpanded}
+          onclick={() => {
+            otelExpanded = !otelExpanded;
+            if (otelExpanded) refreshOtelStatus();
+          }}
+        >
+          <span class="label"><ProviderLogo kind="claude" size={13} class="cursor-icon" />Headless Claude Code</span>
+          <div class="collapsible-right">
+            <span class="status status-{otelView.tone}">
+              <span class="status-dot"></span>{otelView.label}
+            </span>
+            <svg class="collapsible-chevron" class:open={otelExpanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </div>
+        </button>
+        <SettingsDisclosure open={otelExpanded}>
+          <div class="cursor-section">
+            <div class="hint" style="margin-top: 0;">
+              <code>claude -p --no-session-persistence</code> writes no session log, so its spend is
+              invisible here. Add these lines to your shell profile (e.g. <code>~/.zshrc</code>) and
+              Claude Code reports every request to TokenMonitor over local OpenTelemetry. Requests
+              made while TokenMonitor is closed are not recorded.
+            </div>
+            <pre class="otel-snippet">{otelSnippet}</pre>
+            <div class="cursor-actions">
+              <button type="button" class="secondary-btn" onclick={copyOtelSnippet}>
+                {otelCopied ? "Copied" : "Copy"}
+              </button>
+              <button type="button" class="secondary-btn" onclick={refreshOtelStatus}>Refresh</button>
+            </div>
+            {#if otelStatus}
+              <div class="hint">
+                {#if otelStatus.listening}
+                  Listening on 127.0.0.1:{otelStatus.port} · {otelStatus.eventsReceived} request{otelStatus.eventsReceived === 1 ? "" : "s"} since launch
+                {:else}
+                  Not listening on port {otelStatus.port}{otelStatus.bindError ? `: ${otelStatus.bindError}` : ""}
+                {/if}
+              </div>
+            {/if}
+          </div>
+        </SettingsDisclosure>
       </div>
     </div>
 
@@ -1150,6 +1222,18 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
+  }
+  .otel-snippet {
+    margin: 6px 0;
+    padding: 6px 7px;
+    background: var(--surface-hover);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    font: 400 9px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--t2);
+    white-space: pre-wrap;
+    word-break: break-all;
+    user-select: text;
   }
   .cursor-message {
     margin-top: 6px;

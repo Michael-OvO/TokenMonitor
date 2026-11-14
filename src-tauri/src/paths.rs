@@ -216,6 +216,19 @@ pub fn claude_global_config_file() -> Option<PathBuf> {
     }
 }
 
+/// TokenMonitor's own ledger of Claude Code API requests received over the
+/// local OpenTelemetry endpoint (`usage::claude_otel`). Lives in the app data
+/// directory — Tauri resolves `app_data_dir()` to `dirs::data_dir()/<identifier>`
+/// on every platform — and is read back as an extra Claude log root, so headless
+/// `claude -p --no-session-persistence` calls, which write no session log, are
+/// still priced.
+pub fn claude_otel_ledger_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join(APP_IDENTIFIER).join("claude-otel"))
+}
+
+/// Must match `identifier` in `tauri.conf.json` (checked by a test).
+pub const APP_IDENTIFIER: &str = "com.tokenmonitor.app";
+
 /// Enumerate every path the app *may* read, for audit and UI display.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn accessed_paths() -> Vec<AccessedPath> {
@@ -232,6 +245,13 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
             purpose: "Claude Code's cached usage and organization id for rate limits",
             path: p,
             env_override: Some("CLAUDE_CONFIG_DIR"),
+        });
+    }
+    if let Some(p) = claude_otel_ledger_dir() {
+        out.push(AccessedPath {
+            purpose: "Claude Code API requests received over local OpenTelemetry",
+            path: p,
+            env_override: None,
         });
     }
     if let Some(p) = codex_sessions_default() {
@@ -298,6 +318,14 @@ mod tests {
         assert!(set.iter().any(|p| p.contains("Cursor IDE")));
         assert!(set.iter().any(|p| p.contains("Kimi")));
         assert!(set.iter().any(|p| p.contains("SSH")));
+        assert!(set.iter().any(|p| p.contains("OpenTelemetry")));
+    }
+
+    #[test]
+    fn app_identifier_matches_tauri_conf() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], APP_IDENTIFIER);
     }
 
     #[test]
