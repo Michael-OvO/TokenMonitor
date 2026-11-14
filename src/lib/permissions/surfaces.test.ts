@@ -31,6 +31,7 @@ function settings(overrides: Partial<Settings> = {}): Settings {
       costPrecision: "full",
     },
     glassEffect: false,
+    displayScale: "auto",
     floatBall: false,
     sshHosts: [],
     remoteDeviceIncludes: [],

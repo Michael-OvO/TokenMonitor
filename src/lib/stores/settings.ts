@@ -23,6 +23,11 @@ import type {
   UsageProvider,
 } from "../types/index.js";
 import { CURRENT_ONBOARDING_VERSION, compareSemver } from "../changelog.js";
+import {
+  DEFAULT_DISPLAY_SCALE,
+  SUPPORTED_DISPLAY_SCALES,
+  type DisplayScaleSetting,
+} from "../window/sizing.js";
 import { setCurrency } from "../utils/format.js";
 import { logger } from "../utils/logger.js";
 import { isLinux } from "../utils/platform.js";
@@ -42,6 +47,8 @@ export interface Settings {
   brandTheming: boolean;
   trayConfig: TrayConfig;
   glassEffect: boolean;
+  /** Popover zoom: "auto" scales with the monitor's logical size; a number string fixes it. */
+  displayScale: DisplayScaleSetting;
   floatBall: boolean;
   sshHosts: SshHostConfig[];
   remoteDeviceIncludes: RemoteDeviceIncludeConfig[];
@@ -171,6 +178,7 @@ const DEFAULTS: Settings = {
     costPrecision: 'full',
   },
   glassEffect: false,
+  displayScale: DEFAULT_DISPLAY_SCALE,
   floatBall: false,
   sshHosts: [],
   remoteDeviceIncludes: [],
@@ -436,6 +444,11 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
     brandTheming: normalizeBoolean(saved?.brandTheming, DEFAULTS.brandTheming),
     trayConfig: normalizeTrayConfig(saved?.trayConfig),
     glassEffect: normalizeBoolean(saved?.glassEffect, DEFAULTS.glassEffect),
+    displayScale: normalizeStringChoice(
+      saved?.displayScale,
+      SUPPORTED_DISPLAY_SCALES,
+      DEFAULTS.displayScale,
+    ),
     floatBall: normalizeBoolean(saved?.floatBall, DEFAULTS.floatBall),
     sshHosts: normalizeSshHosts(saved?.sshHosts),
     remoteDeviceIncludes: normalizeRemoteDeviceIncludes(saved?.remoteDeviceIncludes),

@@ -107,6 +107,7 @@ describe("loadSettings", () => {
         costPrecision: 'full',
       },
       glassEffect: false,
+      displayScale: "auto",
       floatBall: false,
       sshHosts: [],
       remoteDeviceIncludes: [],
@@ -173,6 +174,7 @@ describe("loadSettings", () => {
         costPrecision: 'full',
       },
       glassEffect: false,
+      displayScale: "auto",
       floatBall: false,
       sshHosts: [],
       remoteDeviceIncludes: [],
@@ -205,6 +207,29 @@ describe("loadSettings", () => {
     const { loadSettings, settings } = await loadSettingsModule();
     await loadSettings();
     expect(get(settings).showDockIcon).toBe(false);
+  });
+
+  it("defaults displayScale to auto when nothing is saved", async () => {
+    mockLoad.mockResolvedValueOnce(makePersistedStore({}));
+    const { loadSettings } = await loadSettingsModule();
+    const loaded = await loadSettings();
+    expect(loaded.displayScale).toBe("auto");
+  });
+
+  it("keeps a saved displayScale override", async () => {
+    mockLoad.mockResolvedValueOnce(makePersistedStore({ displayScale: "1.3" }));
+    const { loadSettings } = await loadSettingsModule();
+    const loaded = await loadSettings();
+    expect(loaded.displayScale).toBe("1.3");
+  });
+
+  it("falls back to auto for an invalid saved displayScale", async () => {
+    mockLoad.mockResolvedValueOnce(
+      makePersistedStore({ displayScale: 2 as unknown as Settings["displayScale"] }),
+    );
+    const { loadSettings } = await loadSettingsModule();
+    const loaded = await loadSettings();
+    expect(loaded.displayScale).toBe("auto");
   });
 
   it("normalizes ssh host include_in_stats flags", async () => {
