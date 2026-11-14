@@ -15,6 +15,7 @@
     "core:window:allow-set-effects",
     "core:window:allow-set-theme",
     "core:window:allow-set-background-color",
+    "core:webview:allow-set-webview-zoom",
     "positioner:default",
     "store:default",
     "autostart:default",
