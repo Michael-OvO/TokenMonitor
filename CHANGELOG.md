@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## v0.19.0 — 记录无头 Claude Code 用量与未入账用量提示
+
+### 新增
+- **无头 Claude Code 用量**：`claude -p --no-session-persistence`（以及关闭持久化的 SDK 运行）不写会话日志，此前完全看不到，却照样消耗套餐限额。应用现在在 `127.0.0.1:53218` 接收 Claude Code 的 OpenTelemetry（OTLP/HTTP JSON）导出，只保留每个 `api_request` 事件的用量字段（模型、token 数含 5m/1h 缓存写入、请求 ID、会话 ID、时间，不含提示词、账号或邮箱），写入应用数据目录的 `claude-otel/`，作为额外的 Claude 日志目录参与定价、归档与套餐预算。同一请求若也出现在会话日志中只计一次，以会话日志为准。带 `Origin` 头或 `Host` 不是本机回环地址的请求一律拒绝，网页无法借 DNS rebinding 写入虚假花费（`usage/claude_otel.rs`）
+- **一键开启**：Settings → Integrations → Headless Claude Code 新增开关与状态（On · 最近一次请求 X 分钟前 / Off / Conflict / Port busy）。开启时向 Claude Code 的 `settings.json`（或第一个 `$CLAUDE_CONFIG_DIR`）的 `env` 写入四个变量，首次写入前备份为 `settings.json.tokenmonitor.bak`；某个变量已被设为其他值（你自己的收集器）时不做任何修改并提示是哪一个；关闭时只删除由本应用添加、且值仍未被改动的变量。使用 `--setting-sources ""` 的脚本会忽略 `settings.json`，折叠的「Scripts that isolate settings」说明给出需要传给子进程的四个变量。隐私说明列表新增对应条目（`usage/claude_otel_setup.rs`）
+- **未入账用量提示**：限额条下方新增琥珀色提示，如「~41% of this window isn't in local logs」。在当前窗口内，限额上涨的点数超出已记录花费按各模型最便宜的每点价格所能解释的点数至少 10 个点、且占上涨的 30% 以上时显示；按模型的每周窗口只计该模型的花费，没有学到预算的模型占花费超过 10% 时不提示。悬停说明可能的来源（不写日志的运行、其他电脑、云端会话），Claude 在未开启上述开关时会指向该设置（`plan_budget::untracked`）
+
+### 修复
+- **Fable / Mythos 5.2 后备价格**：改为官方价格，输入 $8 / 输出 $40 / 缓存读取 $0.20 每百万 token（缓存写入 1.25x/2x，fast 模式翻倍）；此前在 LiteLLM 没有该模型时按 $10/$50、缓存读取 $1.00 计价，偏高
+
 ## v0.18.0 — 折线图总量线、玻璃边缘与更顺滑的滚动
 
 ### 新增
