@@ -137,9 +137,13 @@ export function resolveFixedWindowHeight(
 
 // ── Display scale (popover zoom by monitor size) ──
 
-/** Logical screen size that renders at 100%: a 14" MacBook Pro at default scaling. */
-export const DISPLAY_SCALE_BASE_WIDTH = 1512;
-export const DISPLAY_SCALE_BASE_HEIGHT = 982;
+/**
+ * Logical screen size that renders at 100%: a 1080p desktop screen. Every laptop
+ * at its default scaling (MacBook Pro 16" is 1728 x 1117) stays at 100%; only
+ * larger desktop monitors scale up.
+ */
+export const DISPLAY_SCALE_BASE_WIDTH = 1920;
+export const DISPLAY_SCALE_BASE_HEIGHT = 1080;
 export const DISPLAY_SCALE_MAX = 1.5;
 /** Auto scale is rounded to 1/20 (5%) steps so tiny monitor differences don't change it. */
 const DISPLAY_SCALE_STEPS_PER_UNIT = 20;
