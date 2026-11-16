@@ -7,6 +7,11 @@
   let exiting = $state(false);
   let started = $state(false);
 
+  // About 700 ms in all, entrance then exit: the splash no longer holds a
+  // ready dashboard back for its full wink-and-morph animation.
+  const MIN_VISIBLE_MS = 450;
+  const EXIT_MS = 250;
+
   onMount(() => {
     let timer: ReturnType<typeof setTimeout>;
     let fallbackTimer: ReturnType<typeof setTimeout>;
@@ -50,7 +55,7 @@
 
     function begin() {
       started = true;
-      timer = setTimeout(() => { minTimePassed = true; }, 2900);
+      timer = setTimeout(() => { minTimePassed = true; }, MIN_VISIBLE_MS);
     }
 
     init();
@@ -66,7 +71,7 @@
   $effect(() => {
     if (ready && minTimePassed && !exiting) {
       exiting = true;
-      setTimeout(() => onComplete(), 500);
+      setTimeout(() => onComplete(), EXIT_MS);
     }
   });
 </script>
@@ -208,7 +213,7 @@
     color: var(--t2);
     letter-spacing: 0.5px;
     opacity: 0;
-    animation: nameIn 0.4s ease-out 0.70s both;
+    animation: nameIn 0.3s ease-out 0.15s both;
   }
 
   /* ── Shared keyframes ── */
@@ -225,7 +230,7 @@
     animation-play-state: paused;
   }
   .exiting .splash-inner {
-    animation: exitAnim 0.45s cubic-bezier(0.2, 0, 0.4, 1) both;
+    animation: exitAnim 0.25s cubic-bezier(0.2, 0, 0.4, 1) both;
   }
   @keyframes exitAnim {
     to { opacity: 0; transform: scale(0.88); }
