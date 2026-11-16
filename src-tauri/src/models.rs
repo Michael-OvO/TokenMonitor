@@ -688,7 +688,15 @@ fn normalize_model_uncached(raw: &str) -> (String, String) {
     if raw.to_ascii_lowercase().contains("grok") {
         return normalize_grok_model(raw);
     }
-    let trimmed = raw.trim();
+    // Antigravity logs internal ids. Its own label for the orchestrator is
+    // "Orchestrator (Argon)"; `-tiered` is the same model on another quota.
+    // Done here, not in the parser, so archived hours are repaired too.
+    // ponytail: one hardcoded id; read the label (gen_metadata field 21) if
+    // more orchestrators appear.
+    let trimmed = match raw.trim() {
+        "gemini-pro-orchestrator-g1-pro" => "gemini-4-argon",
+        other => other.strip_suffix("-tiered").unwrap_or(other),
+    };
     let stripped = trimmed
         .get(..7)
         .filter(|p| p.eq_ignore_ascii_case("cursor-"))
@@ -998,6 +1006,18 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn antigravity_internal_ids_map_to_public_models() {
+        assert_eq!(
+            normalize_model("gemini-pro-orchestrator-g1-pro"),
+            normalize_model("gemini-4-argon")
+        );
+        assert_eq!(
+            pricing_model_key("gemini-3.8-flash-tiered"),
+            pricing_model_key("gemini-3.8-flash")
+        );
+    }
 
     #[test]
     fn cursor_display_name_drops_prefix_and_dashes() {
