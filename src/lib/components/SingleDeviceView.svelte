@@ -1,5 +1,14 @@
+<script lang="ts" module>
+  import { createViewCache } from "../utils/viewCache.js";
+  import type { UsagePayload as DevicePayload } from "../types/index.js";
+
+  /** One device's views seen this session, by device/provider/period/offset. */
+  const deviceCache = createViewCache<DevicePayload>();
+</script>
+
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { loadThroughViewCache } from "../utils/viewCache.js";
   import { formatCost, formatModelCost, formatTokens, modelColor, formatDeviceName } from "../utils/format.js";
   import { activePeriod, activeOffset, activeProvider } from "../stores/usage.js";
   import type { UsagePayload } from "../types/index.js";
@@ -19,21 +28,22 @@
   let period = $derived($activePeriod);
   let offset = $derived($activeOffset);
 
+  // A view seen before paints at once and refreshes behind it.
   async function fetchDeviceUsage() {
-    loading = true;
     error = null;
-    try {
-      data = await invoke<UsagePayload>("get_single_device_usage", {
-        device,
-        provider,
-        period,
-        offset,
-      });
-    } catch (e) {
-      error = String(e);
-      data = null;
-    }
-    loading = false;
+    await loadThroughViewCache(
+      deviceCache,
+      JSON.stringify([device, provider, period, offset]),
+      () => invoke<UsagePayload>("get_single_device_usage", { device, provider, period, offset }),
+      {
+        apply: (value) => { data = value; },
+        setLoading: (value) => { loading = value; },
+        onError: (e) => {
+          error = String(e);
+          data = null;
+        },
+      },
+    );
   }
 
   // Fetch on mount and re-fetch when provider/period/offset changes.

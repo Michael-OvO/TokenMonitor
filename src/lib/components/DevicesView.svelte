@@ -1,5 +1,16 @@
+<script lang="ts" module>
+  import { createViewCache } from "../utils/viewCache.js";
+  import type { DeviceUsagePayload as DevicesPayload } from "../types/index.js";
+
+  /** Device lists seen this session, by scope/period/offset. */
+  const devicesCache = createViewCache<DevicesPayload>();
+</script>
+
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { loadThroughViewCache } from "../utils/viewCache.js";
+  import { resolveUsageScope } from "../providerMetadata.js";
+  import { settings } from "../stores/settings.js";
   import { formatCost, formatModelCost, formatTimeAgo, deviceColor, deviceDisplayNames } from "../utils/format.js";
   import { activePeriod, activeOffset, activeProvider } from "../stores/usage.js";
   import type { DeviceUsagePayload, DeviceSummary } from "../types/index.js";
@@ -19,6 +30,7 @@
   let provider = $derived($activeProvider);
   let period = $derived($activePeriod);
   let offset = $derived($activeOffset);
+  let headerTabs = $derived($settings.headerTabs);
 
   /** Format a raw UTC offset like "+0800" or "-0500" into "UTC+8" or "UTC-5". */
   function formatTzOffset(raw: string): string {
@@ -39,20 +51,24 @@
     unknown: "#6b7280",
   };
 
+  // A view seen before paints at once and refreshes behind it. The All tab
+  // asks for its Header Tabs scope, like the main view.
   async function fetchDeviceData() {
-    loading = true;
+    const scope = resolveUsageScope(provider, headerTabs);
     error = null;
-    try {
-      data = await invoke<DeviceUsagePayload>("get_device_usage", {
-        provider,
-        period,
-        offset,
-      });
-    } catch (e) {
-      error = String(e);
-      data = null;
-    }
-    loading = false;
+    await loadThroughViewCache(
+      devicesCache,
+      `${scope}:${period}:${offset}`,
+      () => invoke<DeviceUsagePayload>("get_device_usage", { provider: scope, period, offset }),
+      {
+        apply: (value) => { data = value; },
+        setLoading: (value) => { loading = value; },
+        onError: (e) => {
+          error = String(e);
+          data = null;
+        },
+      },
+    );
   }
 
   // Fetch on mount and refetch when provider/period/offset changes.
