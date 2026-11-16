@@ -1,4 +1,4 @@
-use super::usage_query::get_provider_data;
+use super::usage_query::get_provider_totals;
 use super::AppState;
 use crate::models::*;
 use crate::usage::integrations::UsageIntegrationId;
@@ -299,7 +299,7 @@ fn current_daily_total_cost(state: &AppState) -> f64 {
     enabled_integrations(state)
         .iter()
         .map(|integration_id| {
-            get_provider_data(&state.parser, integration_id.as_str(), "day", 0)
+            get_provider_totals(&state.parser, integration_id.as_str(), "day", 0)
                 .map(|payload| payload.total_cost)
                 .unwrap_or(0.0)
         })
@@ -1281,9 +1281,10 @@ mod tests {
         ));
 
         let everything = current_daily_total_cost(&state);
-        let claude_only = get_provider_data(&state.parser, "claude", "day", 0)
-            .unwrap()
-            .total_cost;
+        let claude_only =
+            crate::commands::usage_query::get_provider_data(&state.parser, "claude", "day", 0)
+                .unwrap()
+                .total_cost;
         assert!(claude_only > 0.0, "fixture must produce Claude cost today");
         assert!(everything > claude_only, "fixture must include Codex cost");
 

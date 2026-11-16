@@ -293,13 +293,31 @@ fn parser_payload_for_period(
     period: &str,
     bounds: &PeriodBounds,
 ) -> Result<UsagePayload, String> {
+    parser_payload_for_period_with(parser, provider, period, bounds, true)
+}
+
+/// [`parser_payload_for_period`]; without `check_earlier`, the payload's
+/// `has_earlier_data` is left `false` (it can cost a parse of every log).
+fn parser_payload_for_period_with(
+    parser: &UsageParser,
+    provider: &str,
+    period: &str,
+    bounds: &PeriodBounds,
+    check_earlier: bool,
+) -> Result<UsagePayload, String> {
     if !matches!(period, "5h" | "day" | "week" | "month" | "year") {
         return Err(format!("Unknown period: {period}"));
     }
     let mut payload = if period == "5h" {
         parser.get_time_range(provider, bounds.range_start, bounds.range_end)
     } else {
-        parser.get_period_range(provider, bounds.range_start, bounds.range_end, period)
+        parser.get_period_range_with(
+            provider,
+            bounds.range_start,
+            bounds.range_end,
+            period,
+            check_earlier,
+        )
     };
     payload.period_label = bounds.period_label.clone();
 
@@ -559,6 +577,31 @@ pub(crate) fn get_provider_data(
     offset: i32,
 ) -> Result<UsagePayload, String> {
     get_provider_data_for_interval(parser, provider, period, offset, 0, None)
+}
+
+/// A provider's totals and chart alone, for a caller that shows neither
+/// `has_earlier_data` nor the local stats (the tray cost, the calendar): the
+/// full payload when one is cached, else a payload computed without them and
+/// cached under its own key, never the `full:` one a view would trust.
+pub(crate) fn get_provider_totals(
+    parser: &UsageParser,
+    provider: &str,
+    period: &str,
+    offset: i32,
+) -> Result<UsagePayload, String> {
+    let bounds = resolve_period_bounds_with_reset(period, offset, None)?;
+    let full_key = full_usage_cache_key_with_reset(provider, period, offset, 0, None);
+    let totals_key = format!("totals:{full_key}");
+    for key in [&full_key, &totals_key] {
+        if let Some(mut cached) = parser.check_cache(key) {
+            rebase_burn_rate(&mut cached, bounds.range_start);
+            return Ok(cached);
+        }
+    }
+    let cursor_generation = parser.cursor_remote_generation();
+    let payload = parser_payload_for_period_with(parser, provider, period, &bounds, false)?;
+    parser.store_cache_at_cursor_generation(&totals_key, payload.clone(), cursor_generation);
+    Ok(payload)
 }
 
 fn get_provider_data_for_interval(
@@ -1829,6 +1872,50 @@ mod tests {
             second.from_cache,
             "second request should hit the full cache"
         );
+    }
+
+    #[test]
+    fn provider_totals_skip_the_extras_and_never_fill_the_full_key() {
+        let dir = TempDir::new().unwrap();
+        let ts = Local::now()
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap()
+            .to_rfc3339();
+        let line = |ts: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{ts}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":1000,"output_tokens":500}},"stop_reason":"end_turn"}}}}"#,
+            )
+        };
+        write_file(&dir.path().join("session.jsonl"), &line(&ts));
+        write_file(
+            &dir.path().join("older.jsonl"),
+            &line("2026-01-05T12:00:00+00:00"),
+        );
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+
+        let totals = get_provider_totals(&parser, "claude", "day", 0).unwrap();
+        assert!(
+            totals.total_cost > 0.0,
+            "guard: the fixture has usage today"
+        );
+        assert!(!totals.has_earlier_data, "not computed for the totals");
+        assert!(totals.change_stats.is_none(), "no local stats");
+        assert!(
+            get_provider_totals(&parser, "claude", "day", 0)
+                .unwrap()
+                .from_cache
+        );
+
+        let full = get_provider_data(&parser, "claude", "day", 0).unwrap();
+        assert!(
+            !full.from_cache,
+            "the totals did not stand in for the full payload"
+        );
+        assert!(full.has_earlier_data);
+        assert!((full.total_cost - totals.total_cost).abs() < 1e-9);
     }
 
     #[test]

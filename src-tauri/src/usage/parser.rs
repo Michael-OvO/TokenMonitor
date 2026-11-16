@@ -2588,9 +2588,53 @@ impl UsageParser {
 
     // ── has_entries_before: check if data exists before a given date ──
 
+    /// Answered from the cached earliest date when there is one; else a
+    /// listed file last written before `before_date` answers `true` without
+    /// a parse (its lines are dated before it). Only when no file is that old
+    /// does it parse for the earliest date.
     pub fn has_entries_before(&self, provider: &str, before_date: NaiveDate) -> bool {
-        self.provider_earliest_date(provider)
-            .is_some_and(|earliest| earliest < before_date)
+        let cached = self
+            .earliest_date_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(provider).copied());
+        let earliest = match cached {
+            Some(earliest) => earliest,
+            None if self.has_file_written_before(provider, before_date) => return true,
+            None => self.provider_earliest_date(provider),
+        };
+        earliest.is_some_and(|earliest| earliest < before_date)
+    }
+
+    /// Whether a listed, non-empty log of `provider` was last written before
+    /// `before_date` began. A file that holds no usage line answers `true`
+    /// too; that only offers paging back to an empty period.
+    fn has_file_written_before(&self, provider: &str, before_date: NaiveDate) -> bool {
+        let Some(cutoff) = before_date
+            .and_hms_opt(0, 0, 0)
+            .and_then(|midnight| midnight.and_local_timezone(Local).earliest())
+            .map(SystemTime::from)
+        else {
+            return false;
+        };
+        let Some(selection) = UsageIntegrationSelection::parse(provider) else {
+            return false;
+        };
+        selection
+            .integration_ids()
+            .iter()
+            .filter_map(|&id| self.integration_config(id))
+            .any(|config| {
+                let kind = config.file_kind();
+                config.roots.iter().any(|root_dir| {
+                    let (_, stamps, _) = self.cached_jsonl_files(root_dir, kind);
+                    stamps.is_some_and(|stamps| {
+                        stamps
+                            .iter()
+                            .any(|file| file.stamp.len > 0 && file.stamp.modified < cutoff)
+                    })
+                })
+            })
     }
 
     /// Earliest entry date across all of a provider's data, cached per epoch.
@@ -3057,6 +3101,19 @@ impl UsageParser {
         end: DateTime<Local>,
         period: &str,
     ) -> UsagePayload {
+        self.get_period_range_with(provider, start, end, period, true)
+    }
+
+    /// [`Self::get_period_range`]; without `check_earlier`, `has_earlier_data`
+    /// is left `false` for a caller that never shows it.
+    pub(crate) fn get_period_range_with(
+        &self,
+        provider: &str,
+        start: DateTime<Local>,
+        end: DateTime<Local>,
+        period: &str,
+        check_earlier: bool,
+    ) -> UsagePayload {
         use super::device_aggregation::{bucket_key_for_local, bucket_label_for_key};
         let loaded = self.load_entries_cached(provider, Some(start.date_naive()));
         let entries: Vec<&ParsedEntry> = loaded
@@ -3181,7 +3238,8 @@ impl UsageParser {
             usage_source: UsageSource::Parser,
             usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
-            has_earlier_data: period != "5h"
+            has_earlier_data: check_earlier
+                && period != "5h"
                 && (self.has_entries_before(provider, start.date_naive())
                     || loaded.entries.iter().any(|entry| entry.timestamp < start)),
             change_stats: None,
@@ -4685,6 +4743,47 @@ mod tests {
         // And the answer is still correct.
         assert!(parser.has_entries_before("claude", NaiveDate::from_ymd_opt(2026, 4, 1).unwrap()));
         assert!(!parser.has_entries_before("claude", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
+    }
+
+    #[test]
+    fn a_log_written_before_the_period_answers_without_a_parse() {
+        let dir = TempDir::new().unwrap();
+        let old = dir.path().join("old.jsonl");
+        // Unparseable on purpose: only its mtime can say it is earlier.
+        write_file(&old, "not json");
+        let set_mtime = |path: &Path, date: NaiveDate| {
+            let at = date
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+                .and_local_timezone(Local);
+            filetime::set_file_mtime(
+                path,
+                filetime::FileTime::from_system_time(at.unwrap().into()),
+            )
+            .unwrap();
+        };
+        set_mtime(&old, march(1));
+        let empty = dir.path().join("empty.jsonl");
+        write_file(&empty, "");
+        set_mtime(&empty, march(1));
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+
+        assert!(parser.has_entries_before("claude", march(10)));
+        assert!(
+            !parser
+                .earliest_date_cache
+                .lock()
+                .unwrap()
+                .contains_key("claude"),
+            "answered from the listing, nothing parsed"
+        );
+        // Not older than the day itself: the parse decides, and finds nothing.
+        assert!(!parser.has_entries_before("claude", march(1)));
+        assert!(parser
+            .earliest_date_cache
+            .lock()
+            .unwrap()
+            .contains_key("claude"));
     }
 
     /// One Claude request logged at noon UTC on `day` of March 2026.
