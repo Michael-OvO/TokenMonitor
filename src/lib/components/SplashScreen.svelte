@@ -8,7 +8,9 @@
   let started = $state(false);
 
   // About 700 ms in all, entrance then exit: the splash no longer holds a
-  // ready dashboard back for its full wink-and-morph animation.
+  // ready dashboard back for its full wink-and-morph animation. The CSS
+  // entrance settles by ~350 ms, before the earliest exit; the wink and morph
+  // only play while a slow load keeps the splash up.
   const MIN_VISIBLE_MS = 450;
   const EXIT_MS = 250;
 
@@ -136,7 +138,7 @@
   .face-wrap {
     opacity: 0;
     transform: scale(0.5);
-    animation: wrapIn 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) 0.05s both;
+    animation: wrapIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) 0s both;
   }
   @keyframes wrapIn {
     to { opacity: 1; transform: scale(1); }
@@ -144,7 +146,7 @@
 
   /* ── Organic idle motion — irregular drift/tilt ── */
   .face-alive {
-    animation: alive 3s ease-in-out 0.50s infinite;
+    animation: alive 3s ease-in-out 0.35s infinite;
   }
   @keyframes alive {
     0%   { transform: translate(0, 0) rotate(0deg); }
@@ -163,18 +165,18 @@
 
   .halo {
     opacity: 0;
-    animation: fadeIn 0.5s ease-out 0.15s both;
+    animation: fadeIn 0.3s ease-out 0.05s both;
   }
 
   /* ── Eyes entrance ── */
   .eye-left {
     opacity: 0;
-    animation: fadeIn 0.2s ease-out 0.25s both;
+    animation: fadeIn 0.15s ease-out 0.15s both;
   }
 
   .eye-right-group {
     opacity: 0;
-    animation: fadeIn 0.2s ease-out 0.30s both;
+    animation: fadeIn 0.15s ease-out 0.18s both;
   }
 
   /* ── Wink: crossfade dot ↔ < chevron ── */
@@ -213,7 +215,7 @@
     color: var(--t2);
     letter-spacing: 0.5px;
     opacity: 0;
-    animation: nameIn 0.3s ease-out 0.15s both;
+    animation: nameIn 0.25s ease-out 0.1s both;
   }
 
   /* ── Shared keyframes ── */

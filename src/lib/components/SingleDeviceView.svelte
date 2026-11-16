@@ -11,6 +11,8 @@
   import { loadThroughViewCache } from "../utils/viewCache.js";
   import { formatCost, formatModelCost, formatTokens, modelColor, formatDeviceName } from "../utils/format.js";
   import { activePeriod, activeOffset, activeProvider } from "../stores/usage.js";
+  import { resolveUsageScope } from "../providerMetadata.js";
+  import { settings } from "../stores/settings.js";
   import type { UsagePayload } from "../types/index.js";
   import Chart from "./Chart.svelte";
 
@@ -25,6 +27,9 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let provider = $derived($activeProvider);
+  // The All tab asks for its Header Tabs scope, like DevicesView. A primitive,
+  // so an unrelated settings save does not refetch.
+  let scope = $derived(resolveUsageScope(provider, $settings.headerTabs));
   let period = $derived($activePeriod);
   let offset = $derived($activeOffset);
 
@@ -33,8 +38,8 @@
     error = null;
     await loadThroughViewCache(
       deviceCache,
-      JSON.stringify([device, provider, period, offset]),
-      () => invoke<UsagePayload>("get_single_device_usage", { device, provider, period, offset }),
+      JSON.stringify([device, scope, period, offset]),
+      () => invoke<UsagePayload>("get_single_device_usage", { device, provider: scope, period, offset }),
       {
         apply: (value) => { data = value; },
         setLoading: (value) => { loading = value; },
@@ -49,7 +54,7 @@
   // Fetch on mount and re-fetch when provider/period/offset changes.
   // In Svelte 5, $effect runs immediately on mount, so onMount is not needed.
   $effect(() => {
-    void provider;
+    void scope;
     void period;
     void offset;
     fetchDeviceUsage();

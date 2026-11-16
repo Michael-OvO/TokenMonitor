@@ -70,6 +70,23 @@ describe("loadThroughViewCache", () => {
     expect(cache.peek("march")).toBe("march data");
   });
 
+  it("does not let an older response for the same key overwrite a newer one", async () => {
+    const cache = createViewCache<string>();
+    const { state, view } = makeView();
+    const slow = deferred<string>();
+    const fast = deferred<string>();
+
+    const first = loadThroughViewCache(cache, "k", () => slow.promise, view);
+    const second = loadThroughViewCache(cache, "k", () => fast.promise, view);
+    fast.resolve("newer");
+    await second;
+    slow.resolve("older");
+    await first;
+
+    expect(state.value).toBe("newer");
+    expect(cache.peek("k")).toBe("newer");
+  });
+
   it("keeps a cached value when the refetch fails; reports the error on a miss", async () => {
     const cache = createViewCache<string>();
     cache.store("hit", "kept");

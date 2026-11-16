@@ -8,14 +8,17 @@
 export interface ViewCache<T> {
   peek(key: string): T | undefined;
   store(key: string, value: T): void;
-  /** Start a request; only the latest one is current. */
-  begin(): number;
+  /** Start a request (for `key`); only the latest one is current. */
+  begin(key?: string): number;
   isCurrent(request: number): boolean;
+  /** True when no later request was started for the same key. */
+  isLatestFor(key: string, request: number): boolean;
   clear(): void;
 }
 
 export function createViewCache<T>(maxEntries = 24): ViewCache<T> {
   const entries = new Map<string, T>();
+  const latestByKey = new Map<string, number>();
   let latest = 0;
   return {
     peek: (key) => entries.get(key),
@@ -27,8 +30,13 @@ export function createViewCache<T>(maxEntries = 24): ViewCache<T> {
         entries.delete(oldest);
       }
     },
-    begin: () => ++latest,
+    begin(key) {
+      latest += 1;
+      if (key !== undefined) latestByKey.set(key, latest);
+      return latest;
+    },
     isCurrent: (request) => request === latest,
+    isLatestFor: (key, request) => (latestByKey.get(key) ?? request) <= request,
     clear: () => entries.clear(),
   };
 }
@@ -49,7 +57,7 @@ export async function loadThroughViewCache<T>(
     onError: (error: unknown) => void;
   },
 ): Promise<void> {
-  const request = cache.begin();
+  const request = cache.begin(key);
   const cached = cache.peek(key);
   if (cached !== undefined) {
     view.apply(cached);
@@ -59,7 +67,8 @@ export async function loadThroughViewCache<T>(
   }
   try {
     const fresh = await fetch();
-    cache.store(key, fresh);
+    // A slower, older response for this key must not overwrite a newer one.
+    if (cache.isLatestFor(key, request)) cache.store(key, fresh);
     if (cache.isCurrent(request)) view.apply(fresh);
   } catch (error) {
     if (cache.isCurrent(request) && cached === undefined) view.onError(error);

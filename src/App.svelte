@@ -258,8 +258,10 @@
   $effect(() => {
     const payload = data;
     if (!appReady || !payload || payload.from_cache || loading || placeholderLoading || refreshError) return;
-    const s = $settings;
+    // Settings are read untracked: only a new payload triggers a write, so a
+    // settings edit never re-saves the old payload under the new key.
     untrack(() => {
+      const s = $settings;
       if (!isDefaultView(provider, period, offset, s)) return;
       void writeUsageSnapshot(usageSnapshotKey(provider, period, s), period, payload);
     });

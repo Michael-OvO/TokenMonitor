@@ -12,6 +12,7 @@
   let availableModels = $state<KnownModel[]>([]);
   let modelsLoaded = $state(false);
   let modelsLoading = $state(false);
+  let modelsFailed = $state(false);
   let modelsExpanded = $state(false);
 
   // The known-model list reads the whole local history on a cold backend
@@ -19,18 +20,21 @@
   function loadModels() {
     if (modelsLoaded || modelsLoading) return;
     modelsLoading = true;
+    modelsFailed = false;
     invoke<KnownModel[]>("get_known_models", { provider: "all" })
       .then((models) => {
         availableModels = [...models].sort((a, b) =>
           a.display_name.localeCompare(b.display_name, undefined, { sensitivity: "base" })
         );
+        modelsLoaded = true;
       })
       .catch((error) => {
+        // Not marked loaded: the next expand retries.
         console.error("Failed to load known models:", error);
+        modelsFailed = true;
       })
       .finally(() => {
         modelsLoading = false;
-        modelsLoaded = true;
       });
   }
 
@@ -71,7 +75,9 @@
     </div>
   </button>
   <SettingsDisclosure open={modelsExpanded}>
-    {#if !modelsLoaded}
+    {#if modelsFailed}
+      <div class="model-empty">Couldn't load models. Collapse and expand to retry.</div>
+    {:else if !modelsLoaded}
       <div class="model-grid" aria-busy="true" aria-label="Loading models">
         {#each Array(4) as _, i (i)}
           <div class="model-cell skeleton-cell">

@@ -30,7 +30,9 @@
   let provider = $derived($activeProvider);
   let period = $derived($activePeriod);
   let offset = $derived($activeOffset);
-  let headerTabs = $derived($settings.headerTabs);
+  // A primitive scope string: an unrelated settings save (which rebuilds the
+  // settings object) leaves it equal, so it does not refetch.
+  let scope = $derived(resolveUsageScope(provider, $settings.headerTabs));
 
   /** Format a raw UTC offset like "+0800" or "-0500" into "UTC+8" or "UTC-5". */
   function formatTzOffset(raw: string): string {
@@ -54,7 +56,6 @@
   // A view seen before paints at once and refreshes behind it. The All tab
   // asks for its Header Tabs scope, like the main view.
   async function fetchDeviceData() {
-    const scope = resolveUsageScope(provider, headerTabs);
     error = null;
     await loadThroughViewCache(
       devicesCache,
@@ -71,10 +72,10 @@
     );
   }
 
-  // Fetch on mount and refetch when provider/period/offset changes.
+  // Fetch on mount and refetch when scope/period/offset changes.
   // In Svelte 5, $effect runs immediately on mount, so onMount is not needed.
   $effect(() => {
-    void provider;
+    void scope;
     void period;
     void offset;
     fetchDeviceData();
