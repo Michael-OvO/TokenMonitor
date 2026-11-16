@@ -178,10 +178,12 @@
     deviceUsageLoading = true;
     deviceUsageError = null;
     try {
+      // This page drops the local row: skip the local year scan with it.
       deviceUsage = await invoke<DeviceUsagePayload>("get_device_usage", {
         provider: "all",
         period: "year",
         offset: 0,
+        includeLocal: false,
       });
     } catch (e) {
       deviceUsage = null;
