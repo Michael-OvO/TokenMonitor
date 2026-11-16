@@ -87,7 +87,7 @@ are persisted to the usage archive so history survives log deletion. Models miss
 table (`usage/pricing.rs`, bump `PRICING_VERSION` when editing) resolve via LiteLLM/OpenRouter with 24h TTL.
 
 Refresh: `refresh.rs` owns all periodic work. Each refresh (launch, then every aligned interval tick) runs its
-I/O first (Cursor today, rate-limit probes one provider at a time), then one sample (the only log sweep and
+I/O first (Cursor today, rate-limit probes: Claude then Codex in turn, the HTTP-only providers beside them), then one sample (the only log sweep and
 cache invalidation; it stats the files written within a week, and every file hourly, after user actions and
 after a popover show; an append drops only the views it can reach), computes the tray cost and open view
 behind the `AppState.compute` FIFO gate (one heavy CPU job at a time), and publishes once; only it and the

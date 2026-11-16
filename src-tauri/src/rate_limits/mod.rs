@@ -516,11 +516,41 @@ pub fn merge_rate_limits(
     }
 }
 
-/// Probe the selected providers one at a time, so their CLI children never
-/// run side by side. Once `deadline` has passed, the providers not reached
-/// yet keep their cached value; a probe already under way is never cut short.
+/// Probe the selected providers: Claude then Codex, one at a time so their
+/// CLI children never run side by side, and the HTTP-only providers beside
+/// them. Once `deadline` has passed, the providers not started yet keep their
+/// cached value; a probe already under way is cut short only past
+/// [`PROVIDER_PROBE_CAP`] (a hang), keeping its cached value too.
 /// `retry_errors` is for an explicit user retry: a provider whose last probe
 /// failed is probed again at once, while a good reading keeps its floor.
+/// Longer than any one probe's own timeouts added up (a 30 s CLI run, then
+/// 15 s HTTP fallbacks), so it only ends a probe that hangs.
+const PROVIDER_PROBE_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run one provider's `probe` unless `deadline` has passed, within
+/// [`PROVIDER_PROBE_CAP`]; a probe not run or cut short keeps `cached`.
+/// Dropping a cut probe kills its CLI child (`kill_on_drop`); its blocking
+/// file reads finish on their own.
+async fn probe_within(
+    probe: impl std::future::Future<Output = (Option<ProviderRateLimits>, std::time::Duration)>,
+    cached: Option<ProviderRateLimits>,
+    deadline: Option<std::time::Instant>,
+    provider: &str,
+) -> (Option<ProviderRateLimits>, std::time::Duration) {
+    if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+        return (cached, std::time::Duration::ZERO);
+    }
+    match tokio::time::timeout(PROVIDER_PROBE_CAP, probe).await {
+        Ok(probed) => probed,
+        Err(_) => {
+            tracing::warn!(
+                "{provider} rate-limit probe exceeded {PROVIDER_PROBE_CAP:?}; kept cached"
+            );
+            (cached, PROVIDER_PROBE_CAP)
+        }
+    }
+}
+
 pub async fn fetch_selected_rate_limits_until(
     codex_dir: &Path,
     selection: RateLimitSelection,
@@ -833,38 +863,58 @@ pub async fn fetch_selected_rate_limits_until(
         (result, provider_t0.elapsed())
     };
 
-    let past_deadline = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
-    let kept = |cached: Option<ProviderRateLimits>| (cached, std::time::Duration::ZERO);
-    let (claude, claude_took) = if past_deadline() {
-        kept(cached.and_then(|payload| payload.claude.clone()))
-    } else {
-        claude_future.await
+    // Claude and Codex may spawn their CLIs, so they take their turns one
+    // after the other; the HTTP-only probes run beside them.
+    let cli_probes = async {
+        let claude = probe_within(
+            claude_future,
+            cached.and_then(|payload| payload.claude.clone()),
+            deadline,
+            "claude",
+        )
+        .await;
+        let codex = probe_within(
+            codex_future,
+            cached.and_then(|payload| payload.codex.clone()),
+            deadline,
+            "codex",
+        )
+        .await;
+        (claude, codex)
     };
-    let (codex, codex_took) = if past_deadline() {
-        kept(cached.and_then(|payload| payload.codex.clone()))
-    } else {
-        codex_future.await
-    };
-    let (cursor, cursor_took) = if past_deadline() {
-        kept(cached.and_then(|payload| payload.cursor.clone()))
-    } else {
-        cursor_future.await
-    };
-    let (kimi, kimi_took) = if past_deadline() {
-        kept(cached.and_then(|payload| payload.kimi.clone()))
-    } else {
-        kimi_future.await
-    };
-    let (gemini, gemini_took) = if past_deadline() {
-        kept(cached.and_then(|payload| payload.gemini.clone()))
-    } else {
-        gemini_future.await
-    };
-    let (antigravity, antigravity_took) = if past_deadline() {
-        kept(cached.and_then(|payload| payload.antigravity.clone()))
-    } else {
-        antigravity_future.await
-    };
+    let (
+        ((claude, claude_took), (codex, codex_took)),
+        (cursor, cursor_took),
+        (kimi, kimi_took),
+        (gemini, gemini_took),
+        (antigravity, antigravity_took),
+    ) = tokio::join!(
+        cli_probes,
+        probe_within(
+            cursor_future,
+            cached.and_then(|payload| payload.cursor.clone()),
+            deadline,
+            "cursor",
+        ),
+        probe_within(
+            kimi_future,
+            cached.and_then(|payload| payload.kimi.clone()),
+            deadline,
+            "kimi",
+        ),
+        probe_within(
+            gemini_future,
+            cached.and_then(|payload| payload.gemini.clone()),
+            deadline,
+            "gemini",
+        ),
+        probe_within(
+            antigravity_future,
+            cached.and_then(|payload| payload.antigravity.clone()),
+            deadline,
+            "antigravity",
+        ),
+    );
     tracing::debug!(
         "[PROFILE] rate-limits: selection={selection:?} claude={claude_took:?} codex={codex_took:?} cursor={cursor_took:?} kimi={kimi_took:?} gemini={gemini_took:?} antigravity={antigravity_took:?}"
     );
@@ -1178,6 +1228,42 @@ mod tests {
             is_fresh(Some(&good), 300, now, true),
             "a good reading keeps its floor on a retry too"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_runs_only_before_the_deadline_and_within_the_cap() {
+        let cached = Some(make_provider_with_windows("2026-09-23T11:00:00Z", vec![]));
+        let fresh = Some(make_provider_with_windows("2026-09-23T12:00:00Z", vec![]));
+        let fetched =
+            |probe: &Option<ProviderRateLimits>| probe.as_ref().map(|p| p.fetched_at.clone());
+
+        let done = fresh.clone();
+        let (got, _) = probe_within(
+            async move { (done, std::time::Duration::from_millis(5)) },
+            cached.clone(),
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+            "test",
+        )
+        .await;
+        assert_eq!(fetched(&got), fetched(&fresh), "a timely probe's result");
+
+        let (got, took) = probe_within(
+            async { panic!("a probe past the deadline never starts") },
+            cached.clone(),
+            Some(std::time::Instant::now()),
+            "test",
+        )
+        .await;
+        assert_eq!(fetched(&got), fetched(&cached));
+        assert_eq!(took, std::time::Duration::ZERO);
+
+        let (got, took) = probe_within(std::future::pending(), cached.clone(), None, "test").await;
+        assert_eq!(
+            fetched(&got),
+            fetched(&cached),
+            "a hung probe keeps the cache"
+        );
+        assert_eq!(took, PROVIDER_PROBE_CAP);
     }
 
     #[tokio::test]

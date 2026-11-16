@@ -449,8 +449,9 @@ async fn refresh_cursor_today(state: &AppState) -> bool {
     fetch_cursor_remote_now(state, since).await != CursorFetch::Unchanged
 }
 
-/// Probe the enabled providers' rate limits one at a time, until the probe
-/// budget runs out, and store the merged result. Emits nothing: the publish
+/// Probe the enabled providers' rate limits (the CLI ones in turn, the HTTP
+/// ones beside them), starting none once the probe budget has run out, and
+/// store the merged result. Emits nothing: the publish
 /// shows it.
 async fn refresh_rate_limits(state: &AppState) {
     if !state.usage_access_enabled() || !state.rate_limits_enabled.load(Ordering::SeqCst) {
