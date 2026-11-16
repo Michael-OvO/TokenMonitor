@@ -986,7 +986,7 @@ pub struct UsageParser {
     /// Each provider's models seen in its local entries, with the
     /// [`UsageParser::data_version`] they were read at. Dropped with the
     /// payloads, so a sample that found a change recomputes them.
-    known_models: Mutex<HashMap<String, (u64, Arc<[crate::models::KnownModel]>)>>,
+    known_models: Mutex<HashMap<String, (u64, KnownModels)>>,
     /// When set, only the sweep ([`UsageParser::sweep`]) revalidates the
     /// session-file listings; queries reuse them as built.
     listings_frozen: AtomicBool,
@@ -1015,6 +1015,9 @@ fn entries_cache_key(provider: &str, since: Option<NaiveDate>, with_archive: boo
         since.map(|d| d.to_string()).unwrap_or_default()
     )
 }
+
+/// A provider's known models, first seen first.
+type KnownModels = Arc<[crate::models::KnownModel]>;
 
 /// Cached result of a background Cursor remote API fetch.
 ///
@@ -1605,22 +1608,13 @@ impl UsageParser {
 
     /// `provider`'s known local models, if read while its entries were at
     /// `version` (see [`Self::data_version`]) and not dropped since.
-    pub(crate) fn known_models_at(
-        &self,
-        provider: &str,
-        version: u64,
-    ) -> Option<Arc<[crate::models::KnownModel]>> {
+    pub(crate) fn known_models_at(&self, provider: &str, version: u64) -> Option<KnownModels> {
         let cache = self.known_models.lock().ok()?;
         let (at, models) = cache.get(provider)?;
         (*at == version).then(|| models.clone())
     }
 
-    pub(crate) fn store_known_models(
-        &self,
-        provider: &str,
-        version: u64,
-        models: Arc<[crate::models::KnownModel]>,
-    ) {
+    pub(crate) fn store_known_models(&self, provider: &str, version: u64, models: KnownModels) {
         if let Ok(mut c) = self.known_models.lock() {
             c.insert(provider.to_string(), (version, models));
         }

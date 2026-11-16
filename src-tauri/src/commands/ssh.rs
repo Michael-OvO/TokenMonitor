@@ -359,7 +359,7 @@ async fn device_usage(
     }
     let _gate = state.compute.lock().await;
 
-    let bounds = period_bounds_for(&state, &provider, &period, offset).await?;
+    let bounds = period_bounds_for(state, &provider, &period, offset).await?;
     let since = bounds.start;
 
     let period_label = format_day_label(since);

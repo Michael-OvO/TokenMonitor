@@ -571,6 +571,7 @@ fn get_provider_chart_data(
     parser_payload_for_period(parser, provider, period, &bounds)
 }
 
+#[cfg(test)]
 pub(crate) fn get_provider_data(
     parser: &UsageParser,
     provider: &str,
