@@ -242,13 +242,16 @@ export function clearUsageCacheForProviders(providers: Iterable<UsageProvider>) 
   );
 }
 
+/** Seed the frontend cache for a tab's view, so the next `fetchData` of it
+ * paints `data` at once and refreshes behind it. Keyed like `fetchData`
+ * (the All tab resolves to its Header Tabs scope). */
 export function seedUsageCache(
   provider: UsageProvider,
   period: UsagePeriod,
   offset: number,
   data: UsagePayload,
 ) {
-  cachePayload(cacheKey(provider, period, offset), data);
+  cachePayload(cacheKey(backendScope(provider), period, offset), data);
 }
 
 async function logUsageReadDebug(

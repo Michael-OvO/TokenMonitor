@@ -19,8 +19,15 @@
     warmCache,
     warmAllPeriods,
     warmStartupViews,
+    seedUsageCache,
     usageRefreshError,
   } from "./lib/stores/usage.js";
+  import {
+    isDefaultView,
+    readUsageSnapshot,
+    usageSnapshotKey,
+    writeUsageSnapshot,
+  } from "./lib/stores/usageSnapshot.js";
   import {
     ALL_USAGE_PROVIDER_ID,
     DEFAULT_USAGE_PROVIDER,
@@ -244,6 +251,20 @@
     return () => { unsub1(); unsub2(); unsubRefreshErr(); unsubProvider(); unsubPeriod(); unsubPL(); unsub3(); unsub4(); unsub5(); };
   });
 
+  // Keep the default view's latest computed payload on disk for the next
+  // launch (see loadInitialData). Only a settled, freshly computed payload:
+  // never the loading placeholder, a failed fetch's empty payload, or a
+  // payload that itself came from a cache.
+  $effect(() => {
+    const payload = data;
+    if (!appReady || !payload || payload.from_cache || loading || placeholderLoading || refreshError) return;
+    const s = $settings;
+    untrack(() => {
+      if (!isDefaultView(provider, period, offset, s)) return;
+      void writeUsageSnapshot(usageSnapshotKey(provider, period, s), period, payload);
+    });
+  });
+
   // Apply/remove data-provider attribute reactively
   $effect(() => {
     applyProvider(provider, brandTheming);
@@ -309,6 +330,14 @@
         .catch((e) => logger.debug("rateLimits", `initial rate-limit load failed: ${e}`))
         .then(() => syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)))
         .catch((e) => logger.debug("tray", `syncTrayConfig failed: ${e}`));
+
+      // Paint the default view's last payload from the previous session
+      // (labelled "cached") while its first compute runs behind it.
+      const saved = get(settings);
+      if (isDefaultView(provider, period, offset, saved)) {
+        const snapshot = await readUsageSnapshot(usageSnapshotKey(provider, period, saved));
+        if (snapshot) seedUsageCache(provider, period, offset, snapshot);
+      }
 
       await fetchData(provider, period, offset);
       logResizeDebug("app:data-ready", { provider, period, offset });

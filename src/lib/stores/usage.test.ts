@@ -776,6 +776,28 @@ describe("All-tab scope", () => {
   });
 });
 
+describe("seedUsageCache", () => {
+  it("seeds the All tab under its Header Tabs scope, so its fetch paints the seed", async () => {
+    const { settings } = await import("./settings.js");
+    const { createDefaultHeaderTabs } = await import("../providerMetadata.js");
+    const tabs = createDefaultHeaderTabs();
+    tabs.codex = { ...tabs.codex, enabled: false };
+    settings.update((current) => ({ ...current, headerTabs: tabs }));
+    const { fetchData, seedUsageCache, usageData, isLoading } = await loadUsageModule();
+
+    seedUsageCache("all", "day", 0, makePayload({ total_cost: 7, from_cache: true }));
+    const fresh = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(fresh.promise);
+    void fetchData("all", "day", 0);
+    expect(get(usageData)?.total_cost).toBe(7);
+    expect(get(isLoading)).toBe(false);
+
+    fresh.resolve(makePayload({ total_cost: 8 }));
+    await vi.waitFor(() => expect(get(usageData)?.total_cost).toBe(8));
+    expect(get(usageData)?.from_cache).toBe(false);
+  });
+});
+
 describe("subset scope cache invalidation", () => {
   it("drops a subset entry when one of its providers is cleared", async () => {
     const { settings } = await import("./settings.js");
