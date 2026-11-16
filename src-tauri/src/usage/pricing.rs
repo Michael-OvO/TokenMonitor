@@ -292,6 +292,8 @@ fn lookup_rates_for_key(model: &str) -> Option<ModelRates> {
     if model.split('-').any(|t| matches!(t, "fast" | "priority")) {
         return match model {
             "opus-4-6-fast" => Some(claude_rates(30.0, 150.0)),
+            // Upstream: Fable / Mythos 5.2 Fast is 2x, priced in the fallback.
+            "fable-5-2-fast" | "mythos-5-2-fast" => get_fallback_rates(model),
             _ if model.split('-').any(|t| t == "fast") => {
                 let base = model
                     .split('-')

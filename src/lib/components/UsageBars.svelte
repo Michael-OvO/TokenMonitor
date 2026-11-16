@@ -351,6 +351,7 @@
             <span>· {budget}</span>
           {/if}
         </div>
+        {/if}
         {#if untrackedLabel(budgetFor(w))}
           <div class="ub-untracked" title={untrackedTitle(rateLimits.provider, budgetFor(w), $settings.claudeOtelEnabled)}>
             {untrackedLabel(budgetFor(w))}

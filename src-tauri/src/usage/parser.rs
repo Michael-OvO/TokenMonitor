@@ -4893,10 +4893,10 @@ mod tests {
             otel.path().to_path_buf(),
         ]);
         let payload = parser.get_daily("claude", "20260301");
-        // Two distinct 1M-input Opus requests at $5/M input.
+        // Two distinct 1M-input Opus requests at $4/M input.
         assert_eq!(payload.input_tokens, 2_000_000);
         assert!(
-            (payload.total_cost - 10.0).abs() < 1e-9,
+            (payload.total_cost - 8.0).abs() < 1e-9,
             "{}",
             payload.total_cost
         );
