@@ -24,8 +24,10 @@ struct ClaudeJsonlEntry {
     timestamp: String,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
+    /// Kept as raw text: it often carries whole files (`originalFile`), and
+    /// it is read only for a result that completes a pending Edit/Write.
     #[serde(rename = "toolUseResult")]
-    tool_use_result: Option<serde_json::Value>,
+    tool_use_result: Option<Box<serde_json::value::RawValue>>,
     message: Option<ClaudeJsonlMessage>,
     #[serde(rename = "isSidechain", default)]
     is_sidechain: Option<bool>,
@@ -472,65 +474,61 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                 for (block_index, block) in msg.content.iter().enumerate() {
                     let pending = match block {
                         ClaudeContentBlock::ToolUse { id, name, input } if name == "Edit" => {
-                            serde_json::from_value::<EditToolInput>(input.clone())
-                                .ok()
-                                .and_then(|edit| {
-                                    if is_provider_internal_path(&edit.file_path) {
-                                        return None;
-                                    }
-                                    let replacement_counts =
-                                        count_replacement_lines(&edit.old_string, &edit.new_string);
-                                    Some((
-                                        id.clone(),
-                                        PendingClaudeTool {
-                                            model_key: model_key.clone(),
-                                            timestamp: ts,
-                                            path: edit.file_path.clone(),
-                                            kind: ChangeEventKind::PatchEdit,
-                                            fallback_added_lines: replacement_counts.0,
-                                            fallback_removed_lines: replacement_counts.1,
-                                            confirmed_text_counts: Some(replacement_counts),
-                                            dedupe_key: create_claude_tool_dedupe_key(
-                                                unique_hash.as_ref(),
-                                                id.as_ref(),
-                                                block_index,
-                                            ),
-                                            agent_scope,
-                                            session_key: session_key.clone(),
-                                        },
-                                    ))
-                                })
+                            EditToolInput::deserialize(input).ok().and_then(|edit| {
+                                if is_provider_internal_path(&edit.file_path) {
+                                    return None;
+                                }
+                                let replacement_counts =
+                                    count_replacement_lines(&edit.old_string, &edit.new_string);
+                                Some((
+                                    id.clone(),
+                                    PendingClaudeTool {
+                                        model_key: model_key.clone(),
+                                        timestamp: ts,
+                                        path: edit.file_path.clone(),
+                                        kind: ChangeEventKind::PatchEdit,
+                                        fallback_added_lines: replacement_counts.0,
+                                        fallback_removed_lines: replacement_counts.1,
+                                        confirmed_text_counts: Some(replacement_counts),
+                                        dedupe_key: create_claude_tool_dedupe_key(
+                                            unique_hash.as_ref(),
+                                            id.as_ref(),
+                                            block_index,
+                                        ),
+                                        agent_scope,
+                                        session_key: session_key.clone(),
+                                    },
+                                ))
+                            })
                         }
                         ClaudeContentBlock::ToolUse { id, name, input } if name == "Write" => {
-                            serde_json::from_value::<WriteToolInput>(input.clone())
-                                .ok()
-                                .and_then(|write| {
-                                    if is_provider_internal_path(&write.file_path) {
-                                        return None;
-                                    }
-                                    Some((
-                                        id.clone(),
-                                        PendingClaudeTool {
-                                            model_key: model_key.clone(),
-                                            timestamp: ts,
-                                            path: write.file_path.clone(),
-                                            kind: ChangeEventKind::FullWrite,
-                                            fallback_added_lines: 0,
-                                            fallback_removed_lines: 0,
-                                            confirmed_text_counts: write
-                                                .content
-                                                .as_deref()
-                                                .map(|content| (count_lines(content), 0)),
-                                            dedupe_key: create_claude_tool_dedupe_key(
-                                                unique_hash.as_ref(),
-                                                id.as_ref(),
-                                                block_index,
-                                            ),
-                                            agent_scope,
-                                            session_key: session_key.clone(),
-                                        },
-                                    ))
-                                })
+                            WriteToolInput::deserialize(input).ok().and_then(|write| {
+                                if is_provider_internal_path(&write.file_path) {
+                                    return None;
+                                }
+                                Some((
+                                    id.clone(),
+                                    PendingClaudeTool {
+                                        model_key: model_key.clone(),
+                                        timestamp: ts,
+                                        path: write.file_path.clone(),
+                                        kind: ChangeEventKind::FullWrite,
+                                        fallback_added_lines: 0,
+                                        fallback_removed_lines: 0,
+                                        confirmed_text_counts: write
+                                            .content
+                                            .as_deref()
+                                            .map(|content| (count_lines(content), 0)),
+                                        dedupe_key: create_claude_tool_dedupe_key(
+                                            unique_hash.as_ref(),
+                                            id.as_ref(),
+                                            block_index,
+                                        ),
+                                        agent_scope,
+                                        session_key: session_key.clone(),
+                                    },
+                                ))
+                            })
                         }
                         _ => None,
                     };
@@ -599,9 +597,8 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                 let Some(msg) = entry.message.as_ref() else {
                     continue;
                 };
-                let tool_result = entry.tool_use_result.as_ref().and_then(|value| {
-                    serde_json::from_value::<ClaudeToolUseResult>(value.clone()).ok()
-                });
+                // Read on the first result that completes a pending tool.
+                let mut tool_result: Option<Option<ClaudeToolUseResult>> = None;
 
                 for block in &msg.content {
                     let ClaudeContentBlock::ToolResult {
@@ -622,6 +619,11 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> ClaudeParseResult {
                     if *is_error == Some(true) {
                         continue;
                     }
+                    let tool_result = tool_result.get_or_insert_with(|| {
+                        entry.tool_use_result.as_ref().and_then(|raw| {
+                            serde_json::from_str::<ClaudeToolUseResult>(raw.get()).ok()
+                        })
+                    });
 
                     let path = tool_result
                         .as_ref()
@@ -867,6 +869,36 @@ pub(crate) fn test_is_provider_internal_path(path: &str) -> bool {
 mod tests {
     use super::*;
     use chrono::{Local, TimeZone};
+
+    fn parse_lines(lines: &[&str]) -> ClaudeParseResult {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, lines.join("\n")).unwrap();
+        parse_claude_session_file(&path)
+    }
+
+    const EDIT_LINE: &str = r#"{"type":"assistant","cwd":"/a","timestamp":"2026-03-21T10:00:00+00:00","requestId":"req_1","message":{"id":"msg_1","model":"claude-opus-4-6-20260301","role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"src/main.rs","old_string":"a","new_string":"b\nc"}}],"usage":{"input_tokens":100,"output_tokens":50}}}"#;
+
+    #[test]
+    fn a_tool_result_line_moves_the_working_directory() {
+        let read_result = r#"{"type":"user","cwd":"/b","timestamp":"2026-03-21T10:00:01+00:00","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_read","content":"file text"}]},"toolUseResult":{"file":{"content":"file text"}}}"#;
+        let (entries, changes, _, _) = parse_lines(&[EDIT_LINE, read_result]);
+        assert_eq!(entries.len(), 1);
+        let meta = entries[0].session_meta.as_deref().unwrap();
+        assert_eq!(meta.cwd.as_deref(), Some("/b"));
+        // The Edit stays pending: its fallback counts.
+        assert_eq!(changes.len(), 1);
+        assert_eq!((changes[0].added_lines, changes[0].removed_lines), (2, 1));
+    }
+
+    #[test]
+    fn a_result_beside_an_unrelated_one_still_completes_its_edit() {
+        let results = r#"{"type":"user","timestamp":"2026-03-21T10:00:01+00:00","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_other","content":"x"},{"type":"tool_result","tool_use_id":"tu_1","content":"Applied"}]},"toolUseResult":{"filePath":"src/real.rs","structuredPatch":[{"lines":["@@","+x","+y","+z"]}]}}"#;
+        let (_, changes, _, _) = parse_lines(&[EDIT_LINE, results]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "src/real.rs");
+        assert_eq!((changes[0].added_lines, changes[0].removed_lines), (3, 0));
+    }
 
     fn entry(output: u64, scope: AgentScope) -> ParsedEntry {
         ParsedEntry {
