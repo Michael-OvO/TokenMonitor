@@ -326,13 +326,33 @@ fn apply_manual_sync(
 /// `"cursor"`). Local entries and remote records are filtered by model family
 /// so the per-device totals match the header tab's scope. Remote devices are
 /// hidden entirely for providers that don't produce remote logs (e.g.
-/// `cursor`).
+/// `cursor`). `include_local: false` (default `true`) leaves the local
+/// device out, and with it the scan of the local logs over the period, for a
+/// caller that shows only the remote rows.
 #[tauri::command]
 pub async fn get_device_usage(
     provider: String,
     period: String,
     offset: i32,
+    include_local: Option<bool>,
     state: State<'_, AppState>,
+) -> Result<DeviceUsagePayload, String> {
+    device_usage(
+        &state,
+        provider,
+        period,
+        offset,
+        include_local.unwrap_or(true),
+    )
+    .await
+}
+
+async fn device_usage(
+    state: &AppState,
+    provider: String,
+    period: String,
+    offset: i32,
+    include_local: bool,
 ) -> Result<DeviceUsagePayload, String> {
     if UsageIntegrationSelection::parse(&provider).is_none() {
         return Err(format!("Invalid provider: {provider}"));
@@ -348,7 +368,7 @@ pub async fn get_device_usage(
     // 1. Local device usage — filtered by the selected provider tab.
     let mut devices = Vec::new();
     let mut total_cost = 0.0;
-    if state.usage_access_enabled() {
+    if include_local && state.usage_access_enabled() {
         let local = parser.load_entries_cached(&provider, Some(since));
         let mut local_summary = build_device_summary_from_parsed("Local", &local.entries, &bounds);
         local_summary.is_local = true;
@@ -711,6 +731,38 @@ mod tests {
     use super::*;
     use crate::usage::ssh_remote::SshCacheManager;
     use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn device_usage_leaves_the_local_device_out_on_request() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ts = chrono::Local::now().to_rfc3339();
+        std::fs::write(
+            dir.path().join("session.jsonl"),
+            format!(
+                r#"{{"type":"assistant","timestamp":"{ts}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":1000,"output_tokens":500}},"stop_reason":"end_turn"}}}}"#
+            ),
+        )
+        .unwrap();
+        let mut state = AppState::new();
+        state.parser = std::sync::Arc::new(crate::usage::parser::UsageParser::with_claude_dir(
+            dir.path().to_path_buf(),
+        ));
+        state.usage_access_enabled.store(true, Ordering::SeqCst);
+
+        let with = device_usage(&state, "claude".into(), "day".into(), 0, true)
+            .await
+            .unwrap();
+        assert!(with
+            .devices
+            .iter()
+            .any(|d| d.is_local && d.total_cost > 0.0));
+
+        let without = device_usage(&state, "claude".into(), "day".into(), 0, false)
+            .await
+            .unwrap();
+        assert!(without.devices.iter().all(|d| !d.is_local));
+        assert_eq!(without.total_cost, 0.0);
+    }
 
     #[tokio::test]
     async fn a_manual_sync_requests_a_refresh_and_keeps_the_views_until_it() {

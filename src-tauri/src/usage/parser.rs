@@ -983,6 +983,10 @@ pub struct UsageParser {
     file_earliest_dates: Mutex<HashMap<String, FileEarliestDates>>,
     /// How long a payload cache entry lives; see [`payload_ttl_for`].
     payload_ttl_secs: AtomicU64,
+    /// Each provider's models seen in its local entries, with the
+    /// [`UsageParser::data_version`] they were read at. Dropped with the
+    /// payloads, so a sample that found a change recomputes them.
+    known_models: Mutex<HashMap<String, (u64, Arc<[crate::models::KnownModel]>)>>,
     /// When set, only the sweep ([`UsageParser::sweep`]) revalidates the
     /// session-file listings; queries reuse them as built.
     listings_frozen: AtomicBool,
@@ -1239,6 +1243,7 @@ impl UsageParser {
             earliest_date_cache: Mutex::new(HashMap::new()),
             file_earliest_dates: Mutex::new(HashMap::new()),
             payload_ttl_secs: AtomicU64::new(CACHE_TTL_SECS),
+            known_models: Mutex::new(HashMap::new()),
             listings_frozen: AtomicBool::new(false),
             log_changes: Mutex::new(HashMap::new()),
         }
@@ -1588,7 +1593,37 @@ impl UsageParser {
         if let Ok(mut c) = self.cache.lock() {
             c.clear();
         }
+        self.clear_known_models();
         self.clear_entries_cache();
+    }
+
+    fn clear_known_models(&self) {
+        if let Ok(mut c) = self.known_models.lock() {
+            c.clear();
+        }
+    }
+
+    /// `provider`'s known local models, if read while its entries were at
+    /// `version` (see [`Self::data_version`]) and not dropped since.
+    pub(crate) fn known_models_at(
+        &self,
+        provider: &str,
+        version: u64,
+    ) -> Option<Arc<[crate::models::KnownModel]>> {
+        let cache = self.known_models.lock().ok()?;
+        let (at, models) = cache.get(provider)?;
+        (*at == version).then(|| models.clone())
+    }
+
+    pub(crate) fn store_known_models(
+        &self,
+        provider: &str,
+        version: u64,
+        models: Arc<[crate::models::KnownModel]>,
+    ) {
+        if let Ok(mut c) = self.known_models.lock() {
+            c.insert(provider.to_string(), (version, models));
+        }
     }
 
     /// [`Self::clear_payload_cache`] of only the payloads `stale` picks by key.
@@ -1596,6 +1631,7 @@ impl UsageParser {
         if let Ok(mut c) = self.cache.lock() {
             c.retain(|key, _| !stale(key));
         }
+        self.clear_known_models();
         self.clear_entries_cache();
     }
 

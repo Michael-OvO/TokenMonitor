@@ -18,6 +18,7 @@ use chrono::{NaiveDate, Timelike};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 
 // Tied to PRICING_VERSION so a rates bump invalidates persisted usage payloads.
@@ -751,6 +752,25 @@ pub(crate) fn load_change_events_for_period(
     change_events
 }
 
+/// The models in `provider`'s local entries over all time, first seen
+/// first. A full load of every log, so it is kept until the next sample that
+/// finds a change (or any payload clear).
+fn local_known_models(parser: &UsageParser, provider: &str) -> Arc<[KnownModel]> {
+    let version = parser.data_version(provider);
+    if let Some(models) = parser.known_models_at(provider, version) {
+        return models;
+    }
+    let (entries, _, _) = parser.load_entries(provider, None);
+    let mut models = BTreeMap::<String, KnownModel>::new();
+    for entry in entries {
+        let model = crate::models::known_model_from_raw(&entry.model);
+        models.entry(model.model_key.clone()).or_insert(model);
+    }
+    let models: Arc<[KnownModel]> = models.into_values().collect();
+    parser.store_known_models(provider, version, models.clone());
+    models
+}
+
 #[tauri::command]
 pub async fn get_known_models(
     provider: String,
@@ -762,11 +782,11 @@ pub async fn get_known_models(
     }
     let _gate = state.compute.lock().await;
 
-    let (entries, _, _) = state.parser.load_entries(&provider, None);
     let mut models = BTreeMap::<String, KnownModel>::new();
-    for entry in entries {
-        let model = crate::models::known_model_from_raw(&entry.model);
-        models.entry(model.model_key.clone()).or_insert(model);
+    for model in local_known_models(&state.parser, &provider).iter() {
+        models
+            .entry(model.model_key.clone())
+            .or_insert_with(|| model.clone());
     }
 
     // Also include models discovered from SSH remote caches.
@@ -1872,6 +1892,46 @@ mod tests {
             second.from_cache,
             "second request should hit the full cache"
         );
+    }
+
+    #[test]
+    fn known_models_are_kept_until_a_sweep_finds_a_change() {
+        let dir = TempDir::new().unwrap();
+        let line = |model: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-03-05T12:00:00+00:00","message":{{"model":"{model}","usage":{{"input_tokens":1,"output_tokens":1}},"stop_reason":"end_turn"}}}}"#,
+            )
+        };
+        write_file(
+            &dir.path().join("a.jsonl"),
+            &line("claude-sonnet-4-6-20260301"),
+        );
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let keys = |models: &[KnownModel]| {
+            models
+                .iter()
+                .map(|m| m.model_key.clone())
+                .collect::<Vec<_>>()
+        };
+        let first = local_known_models(&parser, "claude");
+        assert_eq!(first.len(), 1);
+
+        // Not seen until a sweep finds the change: the list is reused.
+        write_file(
+            &dir.path().join("a.jsonl"),
+            &format!(
+                "{}
+{}",
+                line("claude-sonnet-4-6-20260301"),
+                line("claude-opus-4-6-20260301")
+            ),
+        );
+        let again = local_known_models(&parser, "claude");
+        assert!(Arc::ptr_eq(&first, &again), "served from the cache");
+
+        assert!(parser.invalidate_if_changed(), "guard: the sweep sees it");
+        let after = local_known_models(&parser, "claude");
+        assert_eq!(after.len(), 2, "recomputed: {:?}", keys(&after));
     }
 
     #[test]
