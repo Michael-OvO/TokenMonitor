@@ -830,13 +830,16 @@
       // Silent background refresh — the backend just recomputed. Clearing
       // the cache + cold-fetching here re-showed the loading spinner over
       // live data every ~120s; keep the view and swap in fresh numbers.
-      // While the popover is hidden, a publish refetches every 5 min at most
-      // (the view is a memory hit by then), so a show paints recent numbers at
-      // the right height; the rest wait for the next show.
+      // While the popover is hidden, a 5h/day view refetches on a publish
+      // every 5 min at most (the backend keeps those warm, so it is a memory
+      // hit), so a show paints recent numbers at the right height. Longer
+      // views are not kept warm while hidden: a refetch would compute them
+      // under the backend's compute gate for nobody, so they wait for the
+      // next show, which paints the cached payload and swaps in the refetch.
       viewRefresh = refreshWhenVisible(() => {
         fetchData(provider, period, offset, { silent: true });
         if (period === "5h") fetchRateLimits(backendScope(provider));
-      }, 5 * 60_000);
+      }, () => (period === "5h" || period === "day" ? 5 * 60_000 : Infinity));
       unlisten = await listen("data-updated", () => {
         logResizeDebug("app:data-updated-event", {
           provider,
