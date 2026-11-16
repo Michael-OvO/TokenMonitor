@@ -300,16 +300,19 @@
     if (initialDataLoad) return initialDataLoad;
 
     initialDataLoad = (async () => {
+      // The rate limits load beside the first view, and the tray sync after
+      // them; neither holds the dashboard back (they paint their own parts).
+      const rateLimitsLoad = period === "5h"
+        ? fetchRateLimits(backendScope(provider))
+        : hydrateRateLimits();
+      void rateLimitsLoad
+        .catch((e) => logger.debug("rateLimits", `initial rate-limit load failed: ${e}`))
+        .then(() => syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)))
+        .catch((e) => logger.debug("tray", `syncTrayConfig failed: ${e}`));
+
       await fetchData(provider, period, offset);
       logResizeDebug("app:data-ready", { provider, period, offset });
 
-      if (period === "5h") {
-        await fetchRateLimits(backendScope(provider));
-      } else {
-        await hydrateRateLimits();
-      }
-
-      await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch((e) => logger.debug("tray", `syncTrayConfig failed: ${e}`));
       warmStartupViews([provider, ...getAdjacentWarmProviders(provider)], { provider, period });
     })();
 
@@ -766,16 +769,20 @@
         }
       }
 
+      // The anchor edge is a cheap IPC: ask for it beside the first view.
+      const anchorEdge = isWindows()
+        ? invoke<string>("get_window_anchor_edge").catch(() => null)
+        : null;
       if (get(settings).hasSeenWelcome) {
         await loadInitialData();
         if (cancelled) return;
       }
-      if (isWindows()) {
-        try {
-          const edge = await invoke<string>("get_window_anchor_edge");
+      if (anchorEdge) {
+        const edge = await anchorEdge;
+        if (edge) {
           document.documentElement.setAttribute("data-anchor", edge);
           resizeOrch?.setAnchorEdge(edge === "bottom" ? "bottom" : "top");
-        } catch { /* non-critical */ }
+        }
       } else {
         // The macOS tray popover and the Linux top-right window shrink from
         // the bottom, so shrinks never need to wait for the pointer to leave.
