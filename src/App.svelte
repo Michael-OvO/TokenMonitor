@@ -18,6 +18,7 @@
     notePublish,
     warmCache,
     warmAllPeriods,
+    warmStartupViews,
     usageRefreshError,
   } from "./lib/stores/usage.js";
   import {
@@ -309,10 +310,7 @@
       }
 
       await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch((e) => logger.debug("tray", `syncTrayConfig failed: ${e}`));
-      warmAllPeriods(provider, period);
-      for (const warmProvider of getAdjacentWarmProviders(provider)) {
-        warmAllPeriods(warmProvider);
-      }
+      warmStartupViews([provider, ...getAdjacentWarmProviders(provider)], { provider, period });
     })();
 
     return initialDataLoad;

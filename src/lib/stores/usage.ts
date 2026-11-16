@@ -494,3 +494,26 @@ export function warmAllPeriods(provider: UsageProvider, skipPeriod?: UsagePeriod
     if (p !== skipPeriod) warmCache(provider, p);
   }
 }
+
+/**
+ * Launch warm-up for several tabs, cheapest first: 5h for every tab, then
+ * day, then week, then month, with the All tab last within each period, so
+ * its month (the costliest, seconds on a large history) runs last and a
+ * click never queues behind it early. Skips the view already being shown;
+ * never `year`.
+ */
+export function warmStartupViews(
+  providers: readonly UsageProvider[],
+  skip?: { provider: UsageProvider; period: UsagePeriod },
+) {
+  const ordered = [
+    ...providers.filter((p) => p !== ALL_USAGE_PROVIDER_ID),
+    ...providers.filter((p) => p === ALL_USAGE_PROVIDER_ID),
+  ];
+  for (const period of WARM_PERIODS) {
+    for (const provider of ordered) {
+      if (skip && provider === skip.provider && period === skip.period) continue;
+      warmCache(provider, period);
+    }
+  }
+}

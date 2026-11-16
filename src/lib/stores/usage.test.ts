@@ -711,6 +711,29 @@ describe("warmAllPeriods", () => {
   });
 });
 
+describe("warmStartupViews", () => {
+  it("warms 5h then day across tabs, the All tab last in each period, its month last of all", async () => {
+    const { warmStartupViews } = await loadUsageModule();
+    mockInvoke.mockResolvedValue(makePayload());
+
+    warmStartupViews(["all", "claude", "codex"], { provider: "all", period: "day" });
+
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledTimes(11);
+    });
+    const order = mockInvoke.mock.calls.map(([, args]) => {
+      const { provider, period } = args as { provider: string; period: string };
+      return `${provider}/${period}`;
+    });
+    expect(order).toEqual([
+      "claude/5h", "codex/5h", "all/5h",
+      "claude/day", "codex/day",
+      "claude/week", "codex/week", "all/week",
+      "claude/month", "codex/month", "all/month",
+    ]);
+  });
+});
+
 describe("All-tab scope", () => {
   it("requests and caches the enabled integrations instead of `all`", async () => {
     mockInvoke.mockResolvedValue(makePayload());
