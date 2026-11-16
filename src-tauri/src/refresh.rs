@@ -585,7 +585,10 @@ fn put<T>(slot: &Mutex<Option<T>>, value: T) {
 }
 
 /// Recompute the view the popover last asked for, so its re-read after the
-/// publish is a hit. A failure is logged; the cycle goes on.
+/// publish is a hit. A failure is logged; the cycle goes on. While the
+/// popover is hidden only the cheap 5h/day views are kept warm: a long view
+/// (a year can take seconds) would hold the compute gate every cycle for a
+/// payload nobody sees; it recomputes when the popover asks for it again.
 async fn refresh_active_view(app: Option<&AppHandle>, state: &AppState) {
     let view = state
         .refresh
@@ -596,12 +599,29 @@ async fn refresh_active_view(app: Option<&AppHandle>, state: &AppState) {
     let Some((provider, period, offset)) = view else {
         return;
     };
+    if !keeps_active_view_warm(&period, popover_visible(app)) {
+        return;
+    }
     if let Err(e) =
         crate::commands::usage_query::get_usage_data_inner(app, state, &provider, &period, offset)
             .await
     {
         tracing::warn!("Refresh: recomputing {provider}/{period}/{offset} failed: {e}");
     }
+}
+
+/// Whether the cycle recomputes an active view of `period`: always while the
+/// popover shows, else only the cheap rolling ones.
+fn keeps_active_view_warm(period: &str, popover_visible: bool) -> bool {
+    popover_visible || matches!(period, "5h" | "day")
+}
+
+/// Whether the popover window is on screen. No app (tests) or no window
+/// counts as hidden.
+fn popover_visible(app: Option<&AppHandle>) -> bool {
+    app.and_then(|app| app.get_webview_window("main"))
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
 }
 
 /// Make the cycle's values visible together: the tray cost, the staged plan
@@ -1002,6 +1022,19 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    #[test]
+    fn a_hidden_popover_keeps_only_the_rolling_views_warm() {
+        for period in ["5h", "day", "week", "month", "year"] {
+            assert!(keeps_active_view_warm(period, true), "{period} shown");
+        }
+        assert!(keeps_active_view_warm("5h", false));
+        assert!(keeps_active_view_warm("day", false));
+        for period in ["week", "month", "year"] {
+            assert!(!keeps_active_view_warm(period, false), "{period} hidden");
+        }
+        assert!(!popover_visible(None), "no app: no popover on screen");
+    }
 
     fn position(steps: &[Step], step: Step) -> usize {
         steps
