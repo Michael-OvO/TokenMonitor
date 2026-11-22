@@ -674,6 +674,29 @@ pub async fn set_enabled_integrations(
     Ok(())
 }
 
+/// Integrations that have ever left data on this machine: a log root exists,
+/// or the archive still holds their history. The frontend hides the rest.
+// ponytail: a Cursor API key with no IDE installed and nothing archived yet
+// reads as absent until its first archived hour; add the key check if that bites.
+#[tauri::command]
+pub async fn detected_integrations(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let archived = state
+        .parser
+        .archive()
+        .map(|archive| archive.list_sources())
+        .unwrap_or_default();
+    Ok(crate::usage::integrations::all_usage_integrations()
+        .iter()
+        .filter(|id| {
+            id.detect_roots().iter().any(|root| root.exists())
+                || archived.contains(&format!("local:{}", id.as_str()))
+        })
+        .map(|id| id.as_str().to_string())
+        .collect())
+}
+
 /// Store the enabled integrations; returns whether they changed. A change
 /// requests a refresh: one just switched on has not been probed, nor its
 /// Cursor data refreshed, and the refresh publishes every surface from the

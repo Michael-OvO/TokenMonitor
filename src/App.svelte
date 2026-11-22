@@ -54,6 +54,8 @@
   import {
     DEFAULT_HEADER_TABS,
     areHeaderTabsEqual,
+    detectedProviders,
+    hideUndetectedTabs,
     applyProvider,
     getLastWindowHeight,
     getVisibleHeaderProviders,
@@ -143,6 +145,16 @@
 
   let brandTheming = $state(true);
   let headerTabs = $state<HeaderTabs>(DEFAULT_HEADER_TABS);
+  let savedHeaderTabs: HeaderTabs = DEFAULT_HEADER_TABS;
+  let detected: string[] | null = null;
+  function syncHeaderTabs() {
+    const next = hideUndetectedTabs(savedHeaderTabs, detected);
+    if (areHeaderTabsEqual(headerTabs, next)) return;
+    headerTabs = next;
+    // Startup is handled by bootstrap (set_enabled_integrations) and the
+    // initial load; only live edits from Settings need the runtime update.
+    if (appReady) void applyHeaderTabsToRuntime(next);
+  }
   let popEl: HTMLDivElement | null = null;
   /** The main view's scroll pane, between its header and footer. */
   let scrollPaneEl: HTMLDivElement | null = $state(null);
@@ -239,16 +251,16 @@
     });
     const unsub3 = settings.subscribe((s) => {
       brandTheming = s.brandTheming;
-      if (!areHeaderTabsEqual(headerTabs, s.headerTabs)) {
-        headerTabs = s.headerTabs;
-        // Startup is handled by bootstrap (set_enabled_integrations) and the
-        // initial load; only live edits from Settings need the runtime update.
-        if (appReady) void applyHeaderTabsToRuntime(s.headerTabs);
-      }
+      savedHeaderTabs = s.headerTabs;
+      syncHeaderTabs();
+    });
+    const unsubDetected = detectedProviders.subscribe((v) => {
+      detected = v;
+      syncHeaderTabs();
     });
     const unsub4 = rateLimitsData.subscribe((v) => (rateLimits = v));
     const unsub5 = rateLimitsRequestState.subscribe((v) => (rateLimitsRequest = v));
-    return () => { unsub1(); unsub2(); unsubRefreshErr(); unsubProvider(); unsubPeriod(); unsubPL(); unsub3(); unsub4(); unsub5(); };
+    return () => { unsub1(); unsub2(); unsubRefreshErr(); unsubProvider(); unsubPeriod(); unsubPL(); unsub3(); unsubDetected(); unsub4(); unsub5(); };
   });
 
   // Keep the default view's latest computed payload on disk for the next

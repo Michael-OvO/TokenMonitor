@@ -304,6 +304,23 @@ export function normalizeHeaderTabs(headerTabs?: Partial<HeaderTabs> | null): He
   return normalized;
 }
 
+/** Integration ids the backend has ever seen data for; null until it answers. */
+export const detectedProviders = writable<string[] | null>(null);
+
+/** Header tabs with never-seen integrations switched off (view only, never
+ * saved), so a source appears by itself once it leaves data. */
+export function hideUndetectedTabs(headerTabs: HeaderTabs, detected: string[] | null): HeaderTabs {
+  if (!Array.isArray(detected)) return headerTabs;
+  const masked = { ...headerTabs };
+  for (const provider of HEADER_TAB_ORDER) {
+    if (provider !== ALL_USAGE_PROVIDER_ID && !detected.includes(provider)) {
+      masked[provider] = { ...masked[provider], enabled: false };
+    }
+  }
+  // Nothing detected at all: keep the saved tabs rather than an empty header.
+  return HEADER_TAB_ORDER.some((p) => p !== ALL_USAGE_PROVIDER_ID && masked[p].enabled) ? masked : headerTabs;
+}
+
 export function getVisibleHeaderProviders(headerTabs: HeaderTabs): UsageProvider[] {
   return HEADER_TAB_ORDER.filter((provider) => headerTabs[provider].enabled);
 }

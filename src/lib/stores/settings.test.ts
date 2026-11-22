@@ -668,3 +668,14 @@ describe("period mode compatibility", () => {
     expect(finished).toBe(true);
   });
 });
+
+describe("hideUndetectedTabs", () => {
+  it("hides sources the backend never saw, without touching the saved tabs", async () => {
+    const { hideUndetectedTabs, DEFAULT_HEADER_TABS, getVisibleHeaderProviders } = await import("./settings.js");
+    expect(hideUndetectedTabs(DEFAULT_HEADER_TABS, null)).toBe(DEFAULT_HEADER_TABS);
+    const visible = getVisibleHeaderProviders(hideUndetectedTabs(DEFAULT_HEADER_TABS, ["claude", "gemini"]));
+    expect(visible).toEqual(["all", "claude", "gemini"]);
+    expect(DEFAULT_HEADER_TABS.kimi.enabled).toBe(true);
+    expect(hideUndetectedTabs(DEFAULT_HEADER_TABS, [])).toBe(DEFAULT_HEADER_TABS);
+  });
+});

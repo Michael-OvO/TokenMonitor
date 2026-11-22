@@ -528,6 +528,7 @@ pub fn run() {
             commands::statusline::set_claude_plan_tier,
             commands::tray::set_tray_config,
             commands::tray::set_enabled_integrations,
+            commands::tray::detected_integrations,
             commands::tray::get_status_widget_summary,
             commands::config::clear_cache,
             commands::config::clear_payload_cache,

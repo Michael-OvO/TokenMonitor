@@ -6,7 +6,9 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import {
+    detectedProviders,
     getVisibleHeaderProviders,
+    hideUndetectedTabs,
     settings,
     updateSetting,
     type Settings as SettingsType,
@@ -155,7 +157,7 @@
   ];
 
   let defaultProviderOptions = $derived.by(() =>
-    getVisibleHeaderProviders(current.headerTabs).map((provider) => ({
+    getVisibleHeaderProviders(hideUndetectedTabs(current.headerTabs, $detectedProviders)).map((provider) => ({
       value: provider,
       label: current.headerTabs[provider].label,
     })),

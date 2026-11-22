@@ -2,6 +2,8 @@
   import SettingsDisclosure from "./SettingsDisclosure.svelte";
   import {
     DEFAULT_HEADER_TABS,
+    detectedProviders,
+    hideUndetectedTabs,
     settings,
     updateSetting,
     type Settings as SettingsType,
@@ -18,7 +20,7 @@
 
   let current = $derived($settings as SettingsType);
 
-  const HEADER_TAB_FIELDS: Array<{
+  const ALL_HEADER_TAB_FIELDS: Array<{
     provider: UsageProvider;
     title: string;
     logoKind: UsageProviderLogoKind;
@@ -27,6 +29,16 @@
     title: getUsageProviderTitle(provider),
     logoKind: getUsageProviderLogoKind(provider),
   }));
+
+  /** Sources that never left data on this machine are not offered. */
+  let HEADER_TAB_FIELDS = $derived.by(() => {
+    const visible = hideUndetectedTabs(current.headerTabs, $detectedProviders);
+    return visible === current.headerTabs
+      ? ALL_HEADER_TAB_FIELDS
+      : ALL_HEADER_TAB_FIELDS.filter(
+          ({ provider }) => provider === "all" || ($detectedProviders ?? []).includes(provider),
+        );
+  });
 
   /** Live-updated tab list for the preview Toggle. Labels always come
    * from `DEFAULT_HEADER_TABS` now that user-customizable text has been
