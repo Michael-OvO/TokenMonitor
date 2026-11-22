@@ -8,6 +8,7 @@ mod plan_budget;
 mod platform;
 mod rate_limits;
 mod refresh;
+mod reset_watch;
 mod secrets;
 mod single_instance;
 mod stats;
@@ -503,6 +504,8 @@ pub fn run() {
             usage::claude_otel_setup::enable_claude_otel,
             usage::claude_otel_setup::disable_claude_otel,
             usage::claude_otel_setup::check_claude_otel,
+            plan_budget::get_meter_reading_at,
+            reset_watch::get_codex_reset_watch,
             commands::config::get_last_usage_debug,
             commands::config::set_dock_icon_visible,
             commands::config::suppress_next_auto_hide,
@@ -525,6 +528,7 @@ pub fn run() {
             commands::statusline::set_claude_plan_tier,
             commands::tray::set_tray_config,
             commands::tray::set_enabled_integrations,
+            commands::tray::detected_integrations,
             commands::tray::get_status_widget_summary,
             commands::config::clear_cache,
             commands::config::clear_payload_cache,
@@ -630,6 +634,7 @@ pub(crate) fn archive_local_usage(state: &AppState, horizon: chrono::DateTime<ch
         ("codex", usage::integrations::UsageIntegrationId::Codex),
         ("cursor", usage::integrations::UsageIntegrationId::Cursor),
         ("kimi", usage::integrations::UsageIntegrationId::Kimi),
+        ("gemini", usage::integrations::UsageIntegrationId::Gemini),
     ] {
         let source_key = format!("local:{provider}");
 
@@ -645,12 +650,16 @@ pub(crate) fn archive_local_usage(state: &AppState, horizon: chrono::DateTime<ch
         }
 
         // Hours up to the frontier are skipped, so load from its day on: the
-        // mtime filter then leaves the older logs unread. Not Cursor's: an
-        // all-time load gets its remote rows only from an all-time fetch,
-        // which keeps them out of the archive as before.
-        let since = frontier
-            .filter(|_| integration_id != usage::integrations::UsageIntegrationId::Cursor)
-            .map(|f| f.date);
+        // mtime filter then leaves the older logs unread. Cursor with no
+        // frontier starts at the remote cache's covered day instead of
+        // asking for an all-time load the cache cannot serve.
+        let since = if frontier.is_none()
+            && integration_id == usage::integrations::UsageIntegrationId::Cursor
+        {
+            state.parser.cursor_covered_since()
+        } else {
+            frontier.map(|f| f.date)
+        };
         let (entries, _, _) = state.parser.load_entries(integration_id.as_str(), since);
 
         let count = archive.archive_completed_hours(
@@ -739,20 +748,18 @@ pub(crate) async fn archive_ssh_device_usage(state: &AppState) {
                 };
                 Some(usage::parser::ParsedEntry {
                     timestamp: *local,
-                    model: if r.speed.as_deref() == Some("fast") {
-                        format!("{}-fast", r.model)
-                    } else {
-                        r.model.clone()
-                    },
+                    model: r.billing_model(),
                     input_tokens: r.input_tokens,
                     output_tokens: r.output_tokens,
                     cache_creation_5m_tokens: r.cache_5m,
                     cache_creation_1h_tokens: r.cache_1h,
                     cache_read_tokens: r.cache_read,
                     web_search_requests: 0,
+                    billed_cost: None,
                     unique_hash: None,
                     session_key: format!("ssh:{alias}"),
                     agent_scope: crate::stats::subagent::AgentScope::Main,
+                    session_meta: None,
                 })
             })
             .collect();
@@ -811,6 +818,7 @@ pub(crate) async fn cleanup_duplicate_devices(state: &AppState) -> bool {
             "Folded account-scoped Cursor rows from device archives into local:cursor"
         );
     }
+    let folded_gemini = archive.fold_antigravity_into_gemini(now.date_naive(), now.hour() as u8);
     let folded_all = archive.fold_device_providers_into_all();
     if folded_all > 0 {
         tracing::info!(
@@ -818,7 +826,7 @@ pub(crate) async fn cleanup_duplicate_devices(state: &AppState) -> bool {
             "Folded provider-tagged device rows into p=all (removes SSH double count)"
         );
     }
-    let changed = !removed.is_empty() || folded_cursor > 0 || folded_all > 0;
+    let changed = !removed.is_empty() || folded_cursor > 0 || folded_all > 0 || folded_gemini > 0;
     if changed {
         tracing::info!(
             count = removed.len(),

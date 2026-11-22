@@ -1,8 +1,10 @@
+mod antigravity;
 mod claude;
 mod claude_cli;
 mod codex;
 mod codex_cli;
 mod cursor;
+mod gemini;
 mod http;
 mod kimi;
 
@@ -125,10 +127,12 @@ fn fetch_claude_from_statusline() -> Option<ProviderRateLimits> {
     })
 }
 
+use antigravity::fetch_antigravity_rate_limits;
 use claude::fetch_claude_rate_limits;
 use codex::{codex_log_reading, extract_codex_rate_limits};
 use codex_cli::fetch_codex_rate_limits_via_cli;
 use cursor::fetch_cursor_rate_limits;
+use gemini::fetch_gemini_rate_limits;
 use http::{
     mark_rate_limits_stale, merge_provider_rate_limits, provider_cooldown_is_active,
     provider_rate_limit_error,
@@ -141,6 +145,10 @@ use kimi::fetch_kimi_rate_limits;
 const CLAUDE_MIN_REFETCH_SECS: i64 = 300;
 const CODEX_MIN_REFETCH_SECS: i64 = 300;
 const KIMI_MIN_REFETCH_SECS: i64 = 300;
+// ponytail: one floor for both Gemini sources. The Antigravity half is a
+// loopback call, so it stays at a minute, which also sends the Code Assist
+// quota request every minute; give that half its own gate if Google throttles.
+const GEMINI_MIN_REFETCH_SECS: i64 = 60;
 /// Cursor's probe is an HTTPS round trip (plus a `sqlite3` spawn to re-read
 /// the IDE's token when its state DB changed), and until it had this gate it
 /// ran on every statusline event, several times a minute while Claude Code works.
@@ -301,6 +309,7 @@ pub struct RateLimitSelection {
     codex: bool,
     cursor: bool,
     kimi: bool,
+    gemini: bool,
 }
 
 impl RateLimitSelection {
@@ -313,6 +322,7 @@ impl RateLimitSelection {
                 UsageIntegrationId::Codex => selection.codex = true,
                 UsageIntegrationId::Cursor => selection.cursor = true,
                 UsageIntegrationId::Kimi => selection.kimi = true,
+                UsageIntegrationId::Gemini => selection.gemini = true,
             }
         }
         selection
@@ -332,6 +342,10 @@ impl RateLimitSelection {
 
     pub fn includes_kimi(self) -> bool {
         self.kimi
+    }
+
+    pub fn includes_gemini(self) -> bool {
+        self.gemini
     }
 }
 
@@ -486,14 +500,48 @@ pub fn merge_rate_limits(
             fresh.kimi,
             cached.and_then(|payload| payload.kimi.clone()),
         ),
+        gemini: merge_provider_rate_limits(
+            fresh.gemini,
+            cached.and_then(|payload| payload.gemini.clone()),
+        ),
     }
 }
 
-/// Probe the selected providers one at a time, so their CLI children never
-/// run side by side. Once `deadline` has passed, the providers not reached
-/// yet keep their cached value; a probe already under way is never cut short.
+/// Probe the selected providers: Claude then Codex, one at a time so their
+/// CLI children never run side by side, and the HTTP-only providers beside
+/// them. Once `deadline` has passed, the providers not started yet keep their
+/// cached value; a probe already under way is cut short only past
+/// [`PROVIDER_PROBE_CAP`] (a hang), keeping its cached value too.
 /// `retry_errors` is for an explicit user retry: a provider whose last probe
 /// failed is probed again at once, while a good reading keeps its floor.
+/// Longer than any one probe's own timeouts added up (a 30 s CLI run, then
+/// 15 s HTTP fallbacks), so it only ends a probe that hangs.
+const PROVIDER_PROBE_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run one provider's `probe` unless `deadline` has passed, within
+/// [`PROVIDER_PROBE_CAP`]; a probe not run or cut short keeps `cached`.
+/// Dropping a cut probe kills its CLI child (`kill_on_drop`); its blocking
+/// file reads finish on their own.
+async fn probe_within(
+    probe: impl std::future::Future<Output = (Option<ProviderRateLimits>, std::time::Duration)>,
+    cached: Option<ProviderRateLimits>,
+    deadline: Option<std::time::Instant>,
+    provider: &str,
+) -> (Option<ProviderRateLimits>, std::time::Duration) {
+    if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+        return (cached, std::time::Duration::ZERO);
+    }
+    match tokio::time::timeout(PROVIDER_PROBE_CAP, probe).await {
+        Ok(probed) => probed,
+        Err(_) => {
+            tracing::warn!(
+                "{provider} rate-limit probe exceeded {PROVIDER_PROBE_CAP:?}; kept cached"
+            );
+            (cached, PROVIDER_PROBE_CAP)
+        }
+    }
+}
+
 pub async fn fetch_selected_rate_limits_until(
     codex_dir: &Path,
     selection: RateLimitSelection,
@@ -737,37 +785,141 @@ pub async fn fetch_selected_rate_limits_until(
         (result, provider_t0.elapsed())
     };
 
-    let past_deadline = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
-    let kept = |cached: Option<ProviderRateLimits>| (cached, std::time::Duration::ZERO);
-    let (claude, claude_took) = if past_deadline() {
-        kept(cached.and_then(|payload| payload.claude.clone()))
-    } else {
-        claude_future.await
+    let cached_gemini = cached.and_then(|payload| payload.gemini.clone());
+    let gemini_future =
+        async {
+            let provider_t0 = std::time::Instant::now();
+            let result = async {
+            if !selection.gemini {
+                return cached_gemini;
+            }
+
+            let now = Utc::now();
+            if is_fresh(cached_gemini.as_ref(), GEMINI_MIN_REFETCH_SECS, now, retry_errors) {
+                return cached_gemini;
+            }
+            if let Some(rate_limits) = cached_gemini.clone() {
+                if provider_cooldown_is_active(&rate_limits, now) {
+                    return Some(mark_rate_limits_stale(rate_limits));
+                }
+            }
+
+            let (cli, app) =
+                tokio::join!(fetch_gemini_rate_limits(), fetch_antigravity_rate_limits());
+            match merge_gemini_sources(cli, app) {
+                Ok(rate_limits) => Some(rate_limits),
+                Err(error) => {
+                    if error.message == gemini::NOT_SIGNED_IN
+                        || error.message == antigravity::NOT_RUNNING
+                    {
+                        tracing::debug!("Gemini: {}", error.message);
+                    } else {
+                        tracing::warn!(error = %error.message, "Gemini rate-limit fetch failed");
+                    }
+                    Some(provider_rate_limit_error("gemini", error))
+                }
+            }
+        }
+        .await;
+            (result, provider_t0.elapsed())
+        };
+
+    // Claude and Codex may spawn their CLIs, so they take their turns one
+    // after the other; the HTTP-only probes run beside them.
+    let cli_probes = async {
+        let claude = probe_within(
+            claude_future,
+            cached.and_then(|payload| payload.claude.clone()),
+            deadline,
+            "claude",
+        )
+        .await;
+        let codex = probe_within(
+            codex_future,
+            cached.and_then(|payload| payload.codex.clone()),
+            deadline,
+            "codex",
+        )
+        .await;
+        (claude, codex)
     };
-    let (codex, codex_took) = if past_deadline() {
-        kept(cached.and_then(|payload| payload.codex.clone()))
-    } else {
-        codex_future.await
-    };
-    let (cursor, cursor_took) = if past_deadline() {
-        kept(cached.and_then(|payload| payload.cursor.clone()))
-    } else {
-        cursor_future.await
-    };
-    let (kimi, kimi_took) = if past_deadline() {
-        kept(cached.and_then(|payload| payload.kimi.clone()))
-    } else {
-        kimi_future.await
-    };
+    let (
+        ((claude, claude_took), (codex, codex_took)),
+        (cursor, cursor_took),
+        (kimi, kimi_took),
+        (gemini, gemini_took),
+    ) = tokio::join!(
+        cli_probes,
+        probe_within(
+            cursor_future,
+            cached.and_then(|payload| payload.cursor.clone()),
+            deadline,
+            "cursor",
+        ),
+        probe_within(
+            kimi_future,
+            cached.and_then(|payload| payload.kimi.clone()),
+            deadline,
+            "kimi",
+        ),
+        probe_within(
+            gemini_future,
+            cached.and_then(|payload| payload.gemini.clone()),
+            deadline,
+            "gemini",
+        ),
+    );
     tracing::debug!(
-        "[PROFILE] rate-limits: selection={selection:?} claude={claude_took:?} codex={codex_took:?} cursor={cursor_took:?} kimi={kimi_took:?}"
+        "[PROFILE] rate-limits: selection={selection:?} claude={claude_took:?} codex={codex_took:?} cursor={cursor_took:?} kimi={kimi_took:?} gemini={gemini_took:?}"
     );
     RateLimitsPayload {
         claude,
         codex,
         cursor,
         kimi,
+        gemini,
     }
+}
+
+/// Gemini CLI and Antigravity draw on one Google account, so their quota
+/// readings become one "gemini" entry: every window either lists (the busier
+/// reading where both name it), busiest first. With neither, the CLI's error
+/// wins unless it only says the CLI is signed out.
+fn merge_gemini_sources(
+    cli: Result<ProviderRateLimits, RateLimitFetchError>,
+    app: Result<ProviderRateLimits, RateLimitFetchError>,
+) -> Result<ProviderRateLimits, RateLimitFetchError> {
+    let mut merged = match (cli, app) {
+        (Ok(mut cli), Ok(app)) => {
+            for window in app.windows {
+                match cli
+                    .windows
+                    .iter_mut()
+                    .find(|w| w.window_id == window.window_id || w.label == window.label)
+                {
+                    Some(existing) if existing.utilization < window.utilization => {
+                        *existing = window
+                    }
+                    Some(_) => {}
+                    None => cli.windows.push(window),
+                }
+            }
+            cli.windows
+                .sort_by(|a, b| b.utilization.total_cmp(&a.utilization));
+            cli.plan_tier = cli.plan_tier.or(app.plan_tier);
+            cli
+        }
+        (Ok(one), Err(_)) | (Err(_), Ok(one)) => one,
+        (Err(cli), Err(app)) => {
+            return Err(if cli.message == gemini::NOT_SIGNED_IN {
+                app
+            } else {
+                cli
+            })
+        }
+    };
+    merged.provider = "gemini".to_string();
+    Ok(merged)
 }
 
 #[cfg(test)]
@@ -1072,6 +1224,42 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_runs_only_before_the_deadline_and_within_the_cap() {
+        let cached = Some(make_provider_with_windows("2026-09-23T11:00:00Z", vec![]));
+        let fresh = Some(make_provider_with_windows("2026-09-23T12:00:00Z", vec![]));
+        let fetched =
+            |probe: &Option<ProviderRateLimits>| probe.as_ref().map(|p| p.fetched_at.clone());
+
+        let done = fresh.clone();
+        let (got, _) = probe_within(
+            async move { (done, std::time::Duration::from_millis(5)) },
+            cached.clone(),
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+            "test",
+        )
+        .await;
+        assert_eq!(fetched(&got), fetched(&fresh), "a timely probe's result");
+
+        let (got, took) = probe_within(
+            async { panic!("a probe past the deadline never starts") },
+            cached.clone(),
+            Some(std::time::Instant::now()),
+            "test",
+        )
+        .await;
+        assert_eq!(fetched(&got), fetched(&cached));
+        assert_eq!(took, std::time::Duration::ZERO);
+
+        let (got, took) = probe_within(std::future::pending(), cached.clone(), None, "test").await;
+        assert_eq!(
+            fetched(&got),
+            fetched(&cached),
+            "a hung probe keeps the cache"
+        );
+        assert_eq!(took, PROVIDER_PROBE_CAP);
+    }
+
     #[tokio::test]
     async fn providers_reached_after_the_deadline_keep_their_cached_value() {
         // Every reading is long past its floor: without the deadline each
@@ -1087,6 +1275,7 @@ mod tests {
             codex: reading("codex"),
             cursor: reading("cursor"),
             kimi: reading("kimi"),
+            gemini: None,
         };
         let every = RateLimitSelection::enabled(&[
             UsageIntegrationId::Claude,

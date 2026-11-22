@@ -5,7 +5,7 @@
 <h1 align="center">TokenMonitor</h1>
 
 <p align="center">
-  <strong>Local-first cross-platform system tray app for monitoring Claude Code, Codex CLI, Cursor IDE, and Kimi Code token usage</strong>
+  <strong>Local-first cross-platform system tray app for monitoring Claude Code, Codex CLI, Cursor IDE, Kimi Code, Gemini CLI, and Antigravity token usage</strong>
 </p>
 
 <p align="center">
@@ -42,7 +42,7 @@
 
 ---
 
-TokenMonitor is a local-first system tray app for people who use Claude Code, Codex CLI, Cursor IDE, or Kimi Code heavily and want a compact way to watch spend, burn rate, model mix, and rate limits without leaving the desktop.
+TokenMonitor is a local-first system tray app for people who use Claude Code, Codex CLI, Cursor IDE, Kimi Code, Gemini CLI, or Antigravity heavily and want a compact way to watch spend, burn rate, model mix, and rate limits without leaving the desktop.
 
 It reads the session logs already on your machine, prices them in Rust, and shows the result in a tray popover. No API key is needed for usage history, nothing is synced to the cloud, and there is no runtime dependency on `ccusage` or any other CLI.
 
@@ -109,7 +109,7 @@ The installer is under `src-tauri/target/release/bundle/`:
 
 - **Spend and pace.** The official 5-hour window, plus `day`, `week`, `month`, and `year` views with history browsing, per provider or merged.
 - **Model mix.** Per-model cost and token breakdowns, bar, line, and pie charts, a calendar heatmap, and agent/subagent cost shares.
-- **Rate limits.** Claude, Codex, Cursor, and Kimi utilization with reset timing and pace hints. Claude limits come from the optional statusline TokenMonitor installs into Claude Code, so they are server-reported and need no extra request.
+- **Rate limits.** Claude, Codex, Cursor, Kimi, Gemini, and Antigravity utilization with reset timing and pace hints. Claude limits come from the optional statusline TokenMonitor installs into Claude Code, so they are server-reported and need no extra request.
 - **Accurate pricing.** Claude cache writes split into 5-minute and 1-hour tiers, Codex cached input separated from standard input, reasoning tokens billed as output, and models missing from the built-in table priced through LiteLLM or OpenRouter with a 24-hour cache.
 - **Desktop niceties.** Tray spend text, an optional always-on-top FloatBall, launch at login, native glass effects, themes, currencies with live exchange rates, import/export, SSH remote devices, and an in-app auto-updater.
 
@@ -123,8 +123,10 @@ Nothing leaves your machine. If no logs exist yet, the app stays idle until a pr
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` | Also respects `$CODEX_HOME/sessions` when set |
 | Cursor IDE | Cursor workspace storage `state.vscdb` | Auto-detected from Cursor's local data directory |
 | Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl`, `~/.kimi/sessions/**/wire.jsonl` | Also respects `$KIMI_DATA_DIR` (comma-separated) |
+| Gemini CLI | `~/.gemini/tmp/*/chats/session-*.json` (or `.jsonl`) | Also respects `$GEMINI_CLI_HOME` |
+| Antigravity | `~/.gemini/antigravity/conversations/*.db` | Older encrypted `.pb` conversations are not readable |
 
-Rate limits are read separately: Claude from statusline events with OAuth and CLI probes as fallbacks, Codex from recent session metadata, Cursor from its API using a stored key or the IDE's own login, and Kimi from its usage API with the same token refresh the Kimi CLI performs. Completed hours are persisted to a usage archive, so history survives log deletion.
+Rate limits are read separately: Claude from statusline events with OAuth and CLI probes as fallbacks, Codex from recent session metadata, Cursor from its API using a stored key or the IDE's own login, Kimi from its usage API with the same token refresh the Kimi CLI performs, Gemini CLI from the Code Assist quota API using the CLI's Google sign-in, and Antigravity from the running app's local server (so only while Antigravity is open). Completed hours are persisted to a usage archive, so history survives log deletion.
 
 ## Platform differences
 

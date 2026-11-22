@@ -713,6 +713,7 @@ fn not_probed_since(
                 Id::Codex => p.codex.as_ref(),
                 Id::Cursor => p.cursor.as_ref(),
                 Id::Kimi => p.kimi.as_ref(),
+                Id::Gemini => p.gemini.as_ref(),
             })
             .map(|limits| limits.fetched_at.clone())
     };
@@ -721,6 +722,7 @@ fn not_probed_since(
         (Id::Codex, selection.includes_codex()),
         (Id::Cursor, selection.includes_cursor()),
         (Id::Kimi, selection.includes_kimi()),
+        (Id::Gemini, selection.includes_gemini()),
     ]
     .into_iter()
     .filter(|(id, selected)| *selected && fetched_at(before, *id) == fetched_at(now, *id))
@@ -745,6 +747,7 @@ pub(crate) async fn rate_limits_for(
                 codex: None,
                 cursor: None,
                 kimi: None,
+                gemini: None,
             });
     }
 
@@ -901,6 +904,7 @@ mod tests {
                 cooldown_until: None,
                 fetched_at: "2020-01-01T00:00:00+00:00".to_string(),
             }),
+            gemini: None,
         };
         let state = AppState::new();
         state.usage_access_enabled.store(true, Ordering::SeqCst);
@@ -940,6 +944,7 @@ mod tests {
             codex: None,
             cursor: None,
             kimi: read_at("kimi", kimi),
+            gemini: None,
         };
         let asked = at("2026-09-25T10:00:00Z", "2026-09-25T10:00:00Z");
         // While it waited, the refresh probed Claude (and maybe errored).

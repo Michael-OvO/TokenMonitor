@@ -1,7 +1,18 @@
+<script lang="ts" module>
+  import { createViewCache } from "../utils/viewCache.js";
+  import type { UsagePayload as DevicePayload } from "../types/index.js";
+
+  /** One device's views seen this session, by device/provider/period/offset. */
+  const deviceCache = createViewCache<DevicePayload>();
+</script>
+
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { loadThroughViewCache } from "../utils/viewCache.js";
   import { formatCost, formatModelCost, formatTokens, modelColor, formatDeviceName } from "../utils/format.js";
   import { activePeriod, activeOffset, activeProvider } from "../stores/usage.js";
+  import { resolveUsageScope } from "../providerMetadata.js";
+  import { settings } from "../stores/settings.js";
   import type { UsagePayload } from "../types/index.js";
   import Chart from "./Chart.svelte";
 
@@ -16,30 +27,34 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let provider = $derived($activeProvider);
+  // The All tab asks for its Header Tabs scope, like DevicesView. A primitive,
+  // so an unrelated settings save does not refetch.
+  let scope = $derived(resolveUsageScope(provider, $settings.headerTabs));
   let period = $derived($activePeriod);
   let offset = $derived($activeOffset);
 
+  // A view seen before paints at once and refreshes behind it.
   async function fetchDeviceUsage() {
-    loading = true;
     error = null;
-    try {
-      data = await invoke<UsagePayload>("get_single_device_usage", {
-        device,
-        provider,
-        period,
-        offset,
-      });
-    } catch (e) {
-      error = String(e);
-      data = null;
-    }
-    loading = false;
+    await loadThroughViewCache(
+      deviceCache,
+      JSON.stringify([device, scope, period, offset]),
+      () => invoke<UsagePayload>("get_single_device_usage", { device, provider: scope, period, offset }),
+      {
+        apply: (value) => { data = value; },
+        setLoading: (value) => { loading = value; },
+        onError: (e) => {
+          error = String(e);
+          data = null;
+        },
+      },
+    );
   }
 
   // Fetch on mount and re-fetch when provider/period/offset changes.
   // In Svelte 5, $effect runs immediately on mount, so onMount is not needed.
   $effect(() => {
-    void provider;
+    void scope;
     void period;
     void offset;
     fetchDeviceUsage();
@@ -105,7 +120,7 @@
               <div class="model-row">
                 <div class="model-bar" style:background={modelColor(model.model_key)}></div>
                 <span class="model-name">{model.display_name}</span>
-                <span class="model-cost">{formatModelCost(model.cost, model.pricing_available)}</span>
+                <span class="model-cost">{formatModelCost(model.cost, model.pricing_available, model.model_key)}</span>
                 <span class="model-tokens">{formatTokens(model.tokens)}</span>
               </div>
             {/each}

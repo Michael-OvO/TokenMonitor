@@ -22,6 +22,38 @@ npx tauri dev
 For frontend-only layout work, run `npm run dev` and open
 `http://localhost:1420`. Native IPC calls are unavailable in that mode.
 
+## Rust build disk usage
+
+Development and test builds retain incremental compilation and full debug information
+for TokenMonitor itself. Third-party dependencies use `line-tables-only` debug info:
+backtraces keep source locations, but dependency locals/types are not available in
+the debugger. Release settings are unchanged. When debugging inside a dependency,
+temporarily set its named `[profile.dev.package.<crate-name>]` override to `debug = 2`.
+
+`npm run dev` (also called by `npx tauri dev`) checks the Cargo target directory and
+warns at 15 GiB. This is an advisory threshold, not a hard quota or automatic cleanup;
+direct `cargo` commands do not run the check. File sizes count hard links once and
+may differ from allocated disk space. The check respects Cargo's target-directory
+configuration and never blocks development on a check failure.
+
+```bash
+npm run cache:status       # Show current target size, including release artifacts
+npm run cache:clean:dev    # After stopping dev/builds: remove dev/test artifacts
+```
+
+On Windows, `npm run tauri dev` first checks whether the entire development cache
+has been idle for 7 days, then removes it if eligible before launching Tauri.
+Recent caches are retained; this is not per-file LRU eviction or a size cap.
+An active Cargo/Rust/TokenMonitor process, a locked cache, a redirected path or a
+custom Cargo target causes cleanup to be skipped. Cleanup holds Cargo's Windows
+cache lock and preserves release artifacts. A concurrent build starting during
+cleanup may need to be retried. No scheduled/background cleanup is installed.
+`npx tauri dev`, direct Cargo commands and non-Windows hosts bypass this cleanup.
+Preview with `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/clean-idle-rust-cache.ps1 -DryRun`.
+
+Cleaning preserves release artifacts and source/data files. The next dev/test build
+recompiles dependencies; subsequent builds retain their incremental cache.
+
 ## Repository Layout
 
 ```text
@@ -118,6 +150,26 @@ hourly price-table check. SSH hosts sync in a detached task every 10th cycle; a 
 whose host key fails verification is left out for an hour, doubling to a day, until a
 manual sync, a passing Test or an SSH host change. Results that arrive in the
 background are shown at the next publish.
+
+Codex Reset Watch is an opt-in forecast used by the popover's daily plan. It reads
+`https://codex-reset.com/api/forecast` with an identifying User-Agent, caches requests
+for 10 minutes, and honors longer HTTP 429 Retry-After delays. Concurrent readers
+share one request. Responses older than 30 minutes, malformed probabilities,
+network errors and HTTP errors produce no forecast; both backend and frontend
+expire predictions. The visible popover rechecks through its existing 30-second
+timer, including when normal usage refresh is off. No account or usage data is sent.
+
+The daily plan uses the quota remaining at the start of the day (or window) and
+three scenarios: reset by 24h, between 24h and 48h, or at the official reset. Their
+weights are `p24`, `p48 - p24`, and `1 - p48`; the first two use the ends of those
+horizons measured from the forecast timestamp, never later than the official reset.
+The remaining quota is spread over the probability-weighted duration. This is a
+planning heuristic, not an inferred exact reset time. The existing daily cap grows
+by `1 + 1.5 * pEarly` and keeps its weekend factor of 0.75; the target never exceeds
+remaining quota. Without a valid forecast, the original even-spread/cap calculation
+applies exactly. Today's consumption reduces what is left to use, not the target.
+The UI shows the source link, both probabilities and confidence. Other providers
+and short windows retain their existing calculations.
 
 Rules that keep this working:
 

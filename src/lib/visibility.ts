@@ -25,11 +25,13 @@ export async function trackPopoverVisibility(
 
 /** Runs `refresh` at once while the popover shows. While it is hidden, a
  * request runs only `hiddenEveryMs` after the last run, so a show never paints
- * data older than that; the others collapse into one run at the next show. */
+ * data older than that; the others collapse into one run at the next show.
+ * `hiddenEveryMs` may be a getter, read at each request (the view may change). */
 export function refreshWhenVisible(
   refresh: () => void,
-  hiddenEveryMs = Infinity,
+  hiddenEveryMs: number | (() => number) = Infinity,
 ): { request: () => void; stop: () => void } {
+  const hiddenInterval = typeof hiddenEveryMs === "function" ? hiddenEveryMs : () => hiddenEveryMs;
   let pending = false;
   let last = Date.now();
   const run = () => {
@@ -42,7 +44,7 @@ export function refreshWhenVisible(
   });
   return {
     request: () => {
-      if (get(popoverVisible) || Date.now() - last >= hiddenEveryMs) run();
+      if (get(popoverVisible) || Date.now() - last >= hiddenInterval()) run();
       else pending = true;
     },
     stop,

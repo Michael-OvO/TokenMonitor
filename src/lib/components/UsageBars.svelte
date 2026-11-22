@@ -12,12 +12,14 @@
     rateLimitWindowResetLabel,
     resetTimelineLayout,
   } from "../views/rateLimits.js";
-  import type { CreditsInfo, PlanBudget, ProviderRateLimits, RateLimitWindow } from "../types/index.js";
-  import { invoke } from "@tauri-apps/api/core";
-  import { untrack } from "svelte";
-  import { budgetAsks, budgetRange, untrackedLabel, untrackedTitle, windowSpan, type BudgetAsk } from "../views/planBudget.js";
-  import { popoverVisible } from "../visibility.js";
+  import type { CreditsInfo, PlanBudget, ProviderRateLimits, RateLimitWindow, ResetWatch } from "../types/index.js";
   import { settings } from "../stores/settings.js";
+  import { invoke } from "@tauri-apps/api/core";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { untrack } from "svelte";
+  import { budgetAsks, budgetRange, untrackedLabel, untrackedTitle, windowSpan, windowStart, type BudgetAsk } from "../views/planBudget.js";
+  import { activeResetForecast, planToday, startOfLocalDay, type DailyPlan } from "../views/dailyQuota.js";
+  import { popoverVisible } from "../visibility.js";
   import ResetTimeline from "./ResetTimeline.svelte";
 
   interface Props {
@@ -44,6 +46,33 @@
     }
     return () => { cancelled = true; };
   });
+
+  let resetWatch = $state<ResetWatch | null>(null);
+  let currentResetWatch = $derived.by(() => {
+    void refreshTick;
+    return rateLimits.provider === "codex" && $settings.codexResetWatch
+      ? activeResetForecast(resetWatch, new Date()) : null;
+  });
+  $effect(() => {
+    const ask = rateLimits.provider === "codex" && $settings.codexResetWatch;
+    void rateLimits.fetchedAt;
+    void refreshTick;
+    if (!ask) {
+      resetWatch = null;
+      return;
+    }
+    if (!$popoverVisible) return;
+    let cancelled = false;
+    invoke<ResetWatch | null>("get_codex_reset_watch")
+      .then((w) => { if (!cancelled) resetWatch = w; })
+      .catch(() => { if (!cancelled) resetWatch = null; });
+    return () => { cancelled = true; };
+  });
+
+  function resetWatchTitle(w: ResetWatch): string {
+    const observed = new Date(w.observedAt).toLocaleString();
+    return `Community reset forecast: ${w.resetChance24hPercent}% within 24h, ${w.resetChance48hPercent}% within 48h of ${observed}. Confidence: ${w.confidence}. An estimate, not an announcement. Daily recommendations account for this forecast; unavailable or expired forecasts use the normal plan.`;
+  }
 
   function budgetFor(w: RateLimitWindow): PlanBudget | undefined {
     return budgets[budgetKey(rateLimits.provider, w.windowId)];
@@ -115,6 +144,57 @@
   function resetsIn(isoString: string | null): string {
     void refreshTick;
     return rateLimitWindowResetLabel(rateLimits, isoString);
+  }
+
+  // Multi-day bars (weekly, Cursor's monthly) pace against today's plan instead
+  // of elapsed time. The plan starts at local midnight (or the window start, if
+  // later) from the meter reading then, fetched once per bar and day.
+  const DAY_MINUTES = 1440;
+  let startReadings = $state<Record<string, number | null>>({});
+
+  function planAnchor(w: RateLimitWindow): { key: string; anchor: Date; fresh: boolean } | null {
+    const span = windowSpan(rateLimits.provider, w);
+    if (!w.resetsAt || !span || span.minutes <= DAY_MINUTES) return null;
+    const dayStart = startOfLocalDay(new Date());
+    const start = windowStart(w.resetsAt, span);
+    const fresh = start >= dayStart; // window began today, from zero
+    const anchor = fresh ? start : dayStart;
+    return { key: `${rateLimits.provider}:${w.windowId}:${w.resetsAt}:${dayStart.getTime()}`, anchor, fresh };
+  }
+
+  $effect(() => {
+    void refreshTick;
+    const provider = rateLimits.provider;
+    if (!$settings.showDailyPlan) return;
+    for (const w of visibleWindows) {
+      const a = planAnchor(w);
+      if (!a || a.fresh || a.key in untrack(() => startReadings)) continue;
+      startReadings = { ...untrack(() => startReadings), [a.key]: null };
+      invoke<number | null>("get_meter_reading_at", { provider, windowId: w.windowId, resetsAt: w.resetsAt, at: a.anchor.toISOString() })
+        .then((u) => { startReadings = { ...startReadings, [a.key]: u }; })
+        .catch(() => {});
+    }
+  });
+
+  function weeklyPlan(w: RateLimitWindow): DailyPlan | null {
+    void refreshTick;
+    const a = $settings.showDailyPlan ? planAnchor(w) : null;
+    if (!a || !w.resetsAt) return null;
+    const start = a.fresh ? 0 : startReadings[a.key];
+    if (start == null) return null;
+    return planToday({
+      startUtilization: start,
+      utilization: w.utilization,
+      resetsAt: new Date(w.resetsAt),
+      anchor: a.anchor,
+      capPercent: $settings.dailyQuotaCapPercent,
+      resetForecast: currentResetWatch,
+    });
+  }
+
+  function planTitle(plan: DailyPlan): string {
+    const pct = (v: number) => `${Math.round(v * 10) / 10}%`;
+    return `Recommended today: ${pct(plan.targetPercent)} of this limit. Used today: ${pct(plan.usedTodayPercent)}.`;
   }
 
   function paceDelta(w: RateLimitWindow, windowHours: number): number | null {
@@ -206,18 +286,31 @@
     </div>
   {/if}
 
+  {#if currentResetWatch}
+    <div class="ub-watch" title={resetWatchTitle(currentResetWatch)}>
+      <span>Reset · 24h {currentResetWatch.resetChance24hPercent}% · 48h {currentResetWatch.resetChance48hPercent}% · {currentResetWatch.confidence}</span>
+      <a href="https://codex-reset.com/" onclick={(event) => { event.preventDefault(); void openUrl("https://codex-reset.com/").catch(() => {}); }}>Data: codex-reset.com</a>
+    </div>
+  {/if}
+
   {#if viewState === "ready"}
     {#each visibleWindows as w, i}
       {@const hours = windowHours(w)}
       {@const budget = budgetLabel(w)}
-      {@const pace = paceLabel(w, hours)}
+      {@const plan = weeklyPlan(w)}
+      {@const pace = plan ? "" : paceLabel(w, hours)}
+      {@const tickAt = plan ? Math.min(w.utilization - plan.usedTodayPercent + plan.targetPercent, 100) : 0}
       {@const eta = etaToLimit(w, hours)}
-      <div class="ub-row">
+      {@const details = [budget, budget ? budgetTitle(w) : "", plan ? planTitle(plan) : "", eta, resetsIn(w.resetsAt)].filter(Boolean).join("\n")}
+      <div class="ub-row" title={details}>
         <div class="ub-head">
           <span class="ub-label">{w.label}</span>
           <div class="ub-head-right">
             {#if pace}
-              <span class="ub-pace-badge" style="color: {paceColor(w, hours)}">{pace}</span>
+              <span
+                class="ub-pace-badge"
+                style="color: {paceColor(w, hours)}"
+              >{pace}</span>
             {/if}
             <span class="ub-val" class:stale={rateLimits.stale}>{utilizationLabel(w.utilization)}</span>
           </div>
@@ -227,7 +320,26 @@
             class="ub-fill"
             style="width: {Math.min(w.utilization, 100)}%; background: {utilizationColor(w.utilization)}; opacity: {utilizationFillOpacity(w.utilization)}; --bar-delay: {i * 0.09 + 0.04}s;"
           ></div>
+          {#if plan}
+            <!-- Where today's recommended use ends: today's start reading + today's target. -->
+            <div class="ub-plan-tick" style="left: {tickAt}%"></div>
+          {/if}
         </div>
+        {#if plan}
+          <!-- One line: the label sits under the tick, and one short item takes the
+               other half (under ~35%, so they never meet); the rest moves to the tooltip. -->
+          <div
+            class="ub-sub"
+            class:ub-sub-end={tickAt < 50}
+          >
+            <span class="ub-plan-label" style="left: {Math.min(Math.max(tickAt, 10), 90)}%">Recommended</span>
+            {#if eta}
+              <span class="ub-eta" style="color: {utilizationColor(w.utilization)}">{eta}</span>
+            {:else}
+              {resetsIn(w.resetsAt)}
+            {/if}
+          </div>
+        {:else}
         <div class="ub-sub">
           {#if eta}
             <span class="ub-eta" style="color: {utilizationColor(w.utilization)}">{eta}</span>
@@ -236,9 +348,10 @@
             {resetsIn(w.resetsAt)}
           {/if}
           {#if budget}
-            <span title={budgetTitle(w)}>· {budget}</span>
+            <span>· {budget}</span>
           {/if}
         </div>
+        {/if}
         {#if untrackedLabel(budgetFor(w))}
           <div class="ub-untracked" title={untrackedTitle(rateLimits.provider, budgetFor(w), $settings.claudeOtelEnabled)}>
             {untrackedLabel(budgetFor(w))}
@@ -319,6 +432,23 @@
     padding: 2px 5px;
     border-radius: 3px;
   }
+  .ub-watch {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    align-self: flex-start;
+    max-width: 100%;
+    white-space: nowrap;
+    margin-bottom: 4px;
+    font: 500 8.5px/1.4 system-ui, sans-serif;
+    color: var(--t2);
+    background: var(--surface-2);
+    padding: 3px 6px;
+    border-radius: 3px;
+    cursor: help;
+  }
+  .ub-watch span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .ub-watch a { flex-shrink: 0; color: inherit; }
   .ub-row {
     display: flex;
     flex-direction: column;
@@ -372,12 +502,30 @@
     animation: hBarGrow var(--t-slow) var(--ease-out) both;
     animation-delay: var(--bar-delay, 0s);
   }
+  .ub-plan-tick {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 2px;
+    margin-left: -1px;
+    background: var(--t2);
+    border-radius: 1px;
+  }
+  .ub-plan-label {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+  .ub-sub-end {
+    text-align: right;
+  }
   @keyframes hBarGrow {
     from { transform: scaleX(0); }
     to   { transform: scaleX(1); }
   }
   /* Shimmer overlay removed — read calmer without the white sheen flash. */
   .ub-sub {
+    position: relative;
     font: 400 9px/1 system-ui, sans-serif;
     color: var(--t3);
   }

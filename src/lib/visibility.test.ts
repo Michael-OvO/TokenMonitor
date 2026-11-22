@@ -64,4 +64,30 @@ describe("refreshWhenVisible", () => {
       vi.useRealTimers();
     }
   });
+
+  it("reads a getter interval at each request, so a long view never runs while hidden", () => {
+    vi.useFakeTimers();
+    try {
+      const refresh = vi.fn();
+      let longView = true;
+      const view = refreshWhenVisible(refresh, () => (longView ? Infinity : 60_000));
+      popoverVisible.set(false);
+
+      vi.advanceTimersByTime(10 * 60_000);
+      view.request();
+      expect(refresh).not.toHaveBeenCalled();
+
+      longView = false;
+      view.request();
+      expect(refresh).toHaveBeenCalledTimes(1);
+
+      longView = true;
+      view.request();
+      popoverVisible.set(true);
+      expect(refresh).toHaveBeenCalledTimes(2);
+      view.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Compact per-hour per-model aggregate. ~100 bytes per JSON line.
-/// Cost is NOT stored — recalculated at query time with current pricing.
+/// Provider amounts are preserved; other costs are recalculated with current pricing.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ArchivedHourly {
     /// Date: "2026-04-11"
@@ -47,6 +47,8 @@ pub struct ArchivedHourly {
     /// Exact model ID from the source log, retained for future re-normalization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billed_cost: Option<f64>,
     /// Input tokens
     #[serde(rename = "in")]
     pub input_tokens: u64,
@@ -92,6 +94,7 @@ impl ArchivedHourly {
             self.c1,
             self.cr,
             self.ws,
+            self.billed_cost,
         );
         self.input_tokens = self.input_tokens.max(other.input_tokens);
         self.out = self.out.max(other.out);
@@ -99,6 +102,10 @@ impl ArchivedHourly {
         self.c1 = self.c1.max(other.c1);
         self.cr = self.cr.max(other.cr);
         self.ws = self.ws.max(other.ws);
+        self.billed_cost = match (self.billed_cost, other.billed_cost) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
         if self.mn.is_empty() && !other.mn.is_empty() {
             self.mn = other.mn.clone();
         }
@@ -116,6 +123,7 @@ impl ArchivedHourly {
                 self.c1,
                 self.cr,
                 self.ws,
+                self.billed_cost,
             )
     }
 }
@@ -367,14 +375,16 @@ impl ArchiveManager {
             }
 
             let known = crate::models::known_model_from_raw(&entry.model);
+            let pricing_key = crate::models::pricing_model_key(&entry.model);
             let date_str = entry_date.format("%Y-%m-%d").to_string();
 
-            let key = (date_str.clone(), entry_hour, known.model_key.clone());
+            let key = (date_str.clone(), entry_hour, pricing_key.clone());
             let agg = aggregates.entry(key).or_insert(ArchivedHourly {
                 d: date_str,
                 h: entry_hour,
-                mk: known.model_key,
+                mk: pricing_key,
                 mn: known.display_name,
+                billed_cost: None,
                 raw_model: Some(entry.model.clone()),
                 input_tokens: 0,
                 out: 0,
@@ -391,6 +401,22 @@ impl ArchiveManager {
                 agg.raw_model = None;
             }
 
+            if agg.billed_cost.is_some() || entry.billed_cost.is_some() {
+                let previous = agg.billed_cost.unwrap_or_else(|| {
+                    crate::usage::pricing::calculate_cost_for_key(
+                        &agg.mk,
+                        agg.input_tokens,
+                        agg.out,
+                        agg.c5,
+                        agg.c1,
+                        agg.cr,
+                        agg.ws,
+                    ) * crate::usage::pricing::provider_multiplier(
+                        agg.raw_model.as_deref().unwrap_or(&agg.mk),
+                    )
+                });
+                agg.billed_cost = Some(previous + entry.cost_usd());
+            }
             agg.input_tokens += entry.input_tokens;
             agg.out += entry.output_tokens;
             agg.c5 += entry.cache_creation_5m_tokens;
@@ -623,9 +649,11 @@ impl ArchiveManager {
                 cache_creation_1h_tokens: record.c1,
                 cache_read_tokens: record.cr,
                 web_search_requests: record.ws,
+                billed_cost: record.billed_cost,
                 unique_hash: None,
                 session_key: format!("{ARCHIVE_SESSION_PREFIX}{source_key}"),
                 agent_scope: crate::stats::subagent::AgentScope::Main,
+                session_meta: None,
             });
         }
 
@@ -934,6 +962,21 @@ impl ArchiveManager {
         folded
     }
 
+    /// Antigravity used to be its own source; it is part of Gemini now. Moves
+    /// `local:antigravity` rows into `local:gemini` under `p = "gemini"`.
+    /// Returns the number of rows moved. Idempotent.
+    pub fn fold_antigravity_into_gemini(&self, current_date: NaiveDate, current_hour: u8) -> usize {
+        let mut records = self.read_raw("local:antigravity");
+        for record in &mut records {
+            record.p = String::from("gemini");
+        }
+        if !records.is_empty() {
+            self.import_source("local:gemini", &records, current_date, current_hour);
+        }
+        self.remove_source("local:antigravity");
+        records.len()
+    }
+
     /// Collapse every non-cursor row of a `device:*` source onto `p = "all"`.
     /// Older builds imported a peer's copy of an SSH server under `p = claude/
     /// codex`, which sat beside this machine's own `p = "all"` rows for the same
@@ -1173,6 +1216,24 @@ fn append_to_file(path: &Path, data: &[u8]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn speed_and_reported_amount_survive_archive() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let standard = make_entry("2026-04-11", 10, "grok-4.7", 1000, 500);
+        let mut fast = make_entry("2026-04-11", 10, "grok-4.7-fast", 1000, 500);
+        fast.billed_cost = Some(4.2);
+        let expected = standard.cost_usd() + fast.cost_usd();
+        let date = NaiveDate::from_ymd_opt(2026, 4, 11).unwrap();
+        assert_eq!(
+            mgr.archive_completed_hours(&[standard, fast], "local:cursor", "cursor", date, 14),
+            2
+        );
+        let rows = mgr.load_archived("local:cursor", None);
+        assert_eq!(rows.len(), 2);
+        assert!((rows.iter().map(ParsedEntry::cost_usd).sum::<f64>() - expected).abs() < 1e-9);
+    }
+
     use super::*;
     use tempfile::TempDir;
 
@@ -1190,9 +1251,11 @@ mod tests {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: "test-session".to_string(),
             agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
         }
     }
 
@@ -1421,6 +1484,7 @@ mod tests {
             h,
             mk: mk.to_string(),
             mn: mk.to_string(),
+            billed_cost: None,
             raw_model: None,
             input_tokens: input,
             out,
@@ -1651,6 +1715,22 @@ mod tests {
         );
         fs::write(dir.join("2026-04.jsonl"), body).unwrap();
         assert_eq!(mgr.read_raw("local:claude").len(), 3);
+    }
+
+    #[test]
+    fn antigravity_rows_fold_into_gemini() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let mut row = arch("2026-04-10", 9, "gemini-4-neon", 10, 5);
+        row.p = String::from("antigravity");
+        mgr.import_source("local:antigravity", &[row], future_date(), 0);
+
+        assert_eq!(mgr.fold_antigravity_into_gemini(future_date(), 0), 1);
+        assert_eq!(mgr.fold_antigravity_into_gemini(future_date(), 0), 0);
+        let rows = mgr.read_raw("local:gemini");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].p, "gemini");
+        assert!(mgr.read_raw("local:antigravity").is_empty());
     }
 
     #[test]

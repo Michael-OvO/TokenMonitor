@@ -400,7 +400,13 @@ export function createResizeOrchestrator(
       deltaAbs: Math.abs(nextHeight - lastWindowH),
       hysteresisPx: RESIZE_HYSTERESIS_PX,
     });
-    if (disposition === "skip") return;
+    if (disposition === "skip") {
+      // The content is back at the window's height, so a shrink queued while
+      // it was briefly shorter (a loading placeholder, a tab switch) is stale.
+      // Left queued, it cut the window short when the pointer left.
+      deferredShrinkHeight = null;
+      return;
+    }
     if (!initialContentReady && disposition === "shrink") {
       deps.logDebug("resize:shrink-blocked-initial", {
         source,

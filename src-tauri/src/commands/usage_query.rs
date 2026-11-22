@@ -18,6 +18,7 @@ use chrono::{NaiveDate, Timelike};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 
 // Tied to PRICING_VERSION so a rates bump invalidates persisted usage payloads.
@@ -184,12 +185,16 @@ pub(crate) async fn fetch_cursor_remote_now(
         CursorFetch::Unchanged
     };
     match result {
-        Ok(Ok(Some(entries))) => {
-            let fetched = entries.len();
-            match parser.store_cursor_remote_if_current(entries, since, generation) {
+        Ok(Ok(Some(fetched))) => {
+            let count = fetched.entries.len();
+            match parser.store_cursor_remote_if_current(
+                fetched.entries,
+                fetched.covered_since,
+                generation,
+            ) {
                 Some(changed) => {
                     tracing::debug!(
-                        "[cursor-async] Fetch complete: {fetched} entries, changed={changed}"
+                        "[cursor-async] Fetch complete: {count} entries, changed={changed}"
                     );
                     match (changed, widening_from) {
                         (false, _) => CursorFetch::Unchanged,
@@ -199,7 +204,7 @@ pub(crate) async fn fetch_cursor_remote_now(
                 }
                 None => {
                     tracing::info!(
-                        "[cursor-async] Dropped {fetched} entries: the Cursor data was cleared while fetching"
+                        "[cursor-async] Dropped {count} entries: the Cursor data was cleared while fetching"
                     );
                     CursorFetch::Unchanged
                 }
@@ -214,42 +219,24 @@ pub(crate) async fn fetch_cursor_remote_now(
     }
 }
 
-/// Ensure every day in [start, end) has a chart bucket, inserting empty buckets
-/// for days with no data.  This prevents the chart from appearing "cut off" when
-/// the current month hasn't ended yet.
-fn pad_daily_buckets(payload: &mut UsagePayload, start: NaiveDate, end: NaiveDate) {
-    let existing: std::collections::HashSet<String> = payload
-        .chart_buckets
-        .iter()
-        .map(|b| b.sort_key.clone())
-        .collect();
-
-    let mut date = start;
-    while date < end {
-        let key = date.format("%Y-%m-%d").to_string();
-        if !existing.contains(&key) {
-            payload.chart_buckets.push(ChartBucket {
-                label: date.format("%b %-d").to_string(),
-                sort_key: key,
-                total: 0.0,
-                segments: Vec::new(),
-            });
-        }
-        date += chrono::Duration::days(1);
-    }
-
-    payload
-        .chart_buckets
-        .sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+#[cfg(test)]
+fn bucket_span(sort_key: &str) -> Option<(NaiveDate, NaiveDate)> {
+    let bucket_start = parse_bucket_start_date(sort_key).ok()?;
+    let bucket_end = if NaiveDate::parse_from_str(sort_key, "%Y-%m-%d").is_ok() {
+        bucket_start + chrono::Duration::days(1)
+    } else {
+        first_of_next_month(bucket_start.year(), bucket_start.month())?
+    };
+    Some((bucket_start, bucket_end))
 }
 
-/// Filter a UsagePayload's chart_buckets to only include dates in [start, end).
-/// Recalculates total_cost, total_tokens, and model_breakdown from the retained buckets.
+/// A bucket stays when its span overlaps `[start, end)`. A `YYYY-MM` bar is
+/// the whole month, so a rolling year that opens mid-month keeps that month.
+#[cfg(test)]
 fn filter_buckets_to_range(payload: &mut UsagePayload, start: NaiveDate, end: NaiveDate) {
     payload.chart_buckets.retain(|bucket| {
-        parse_bucket_start_date(&bucket.sort_key)
-            .map(|d| d >= start && d < end)
-            .unwrap_or(false)
+        bucket_span(&bucket.sort_key)
+            .is_some_and(|(bucket_start, bucket_end)| bucket_start < end && bucket_end > start)
     });
 
     payload.total_cost = payload.chart_buckets.iter().map(|b| b.total).sum();
@@ -307,35 +294,33 @@ fn parser_payload_for_period(
     period: &str,
     bounds: &PeriodBounds,
 ) -> Result<UsagePayload, String> {
-    let since_str = bounds.start.format("%Y%m%d").to_string();
+    parser_payload_for_period_with(parser, provider, period, bounds, true)
+}
 
-    let mut payload = match period {
-        "5h" => parser.get_time_range(provider, bounds.range_start, bounds.range_end),
-        "day" => parser.get_hourly(provider, &since_str),
-        "week" => {
-            let mut p = parser.get_daily(provider, &since_str);
-            filter_buckets_to_range(&mut p, bounds.start, bounds.end);
-            pad_daily_buckets(&mut p, bounds.start, bounds.end);
-            p
-        }
-        "month" => {
-            let mut p = parser.get_daily(provider, &since_str);
-            filter_buckets_to_range(&mut p, bounds.start, bounds.end);
-            pad_daily_buckets(&mut p, bounds.start, bounds.end);
-            p
-        }
-        "year" => {
-            let mut p = parser.get_monthly(provider, &since_str);
-            filter_buckets_to_range(&mut p, bounds.start, bounds.end);
-            p
-        }
-        _ => return Err(format!("Unknown period: {period}")),
-    };
-
-    payload.period_label = bounds.period_label.clone();
-    if period != "5h" {
-        payload.has_earlier_data = parser.has_entries_before(provider, bounds.start);
+/// [`parser_payload_for_period`]; without `check_earlier`, the payload's
+/// `has_earlier_data` is left `false` (it can cost a parse of every log).
+fn parser_payload_for_period_with(
+    parser: &UsageParser,
+    provider: &str,
+    period: &str,
+    bounds: &PeriodBounds,
+    check_earlier: bool,
+) -> Result<UsagePayload, String> {
+    if !matches!(period, "5h" | "day" | "week" | "month" | "year") {
+        return Err(format!("Unknown period: {period}"));
     }
+    let mut payload = if period == "5h" {
+        parser.get_time_range(provider, bounds.range_start, bounds.range_end)
+    } else {
+        parser.get_period_range_with(
+            provider,
+            bounds.range_start,
+            bounds.range_end,
+            period,
+            check_earlier,
+        )
+    };
+    payload.period_label = bounds.period_label.clone();
 
     Ok(payload)
 }
@@ -354,6 +339,7 @@ fn attach_local_stats(
     parser: &UsageParser,
     payload: &mut UsagePayload,
     provider: &str,
+    period: &str,
     bounds: &PeriodBounds,
 ) {
     let loaded = parser.load_entries_cached(provider, Some(bounds.start));
@@ -391,6 +377,18 @@ fn attach_local_stats(
         payload.web_search_requests = entries.iter().map(|e| e.web_search_requests).sum();
     }
 
+    let codex_titles = crate::paths::codex_session_index_file()
+        .map(|index| crate::stats::project::read_codex_titles(&index))
+        .unwrap_or_default();
+    payload.project_stats =
+        crate::stats::project::aggregate_project_stats(&session_entries, &codex_titles);
+    // Every row, archived hours included (as "No project"), so the bars sum
+    // to the same local total as the model chart.
+    payload.project_chart_buckets = payload
+        .project_stats
+        .is_some()
+        .then(|| crate::stats::project::project_chart_buckets(&entries, period));
+
     payload.subagent_stats = crate::stats::subagent::aggregate_subagent_stats(
         &session_entries,
         &change_events,
@@ -413,9 +411,37 @@ fn usage_cache_tags_with_reset(
     generation: u64,
     five_hour_reset: Option<chrono::DateTime<chrono::Local>>,
 ) -> String {
-    let date_tag = resolve_period_bounds_with_reset(period, offset, five_hour_reset)
+    usage_cache_tags_for_mode(
+        period,
+        offset,
+        generation,
+        five_hour_reset,
+        period_config().1,
+    )
+}
+
+fn usage_cache_tags_for_mode(
+    period: &str,
+    offset: i32,
+    generation: u64,
+    five_hour_reset: Option<chrono::DateTime<chrono::Local>>,
+    rolling: bool,
+) -> String {
+    let mut date_tag = resolve_period_bounds_with_reset(period, offset, five_hour_reset)
         .map(|b| b.start.format("%Y%m%d").to_string())
         .unwrap_or_default();
+    if period != "5h" {
+        // Separate the new semantics from old persisted views. Rolling windows
+        // move even with unchanged logs, including while browsing history.
+        date_tag.push_str(":period-v2");
+        if rolling {
+            return format!("{date_tag}:rolling:g{generation}");
+        }
+        date_tag.push_str(&format!(
+            ":todate:{}",
+            chrono::Local::now().format("%Y%m%d")
+        ));
+    }
     if period == "day" && offset == 0 {
         return format!("{date_tag}:h{}", chrono::Local::now().hour());
     }
@@ -545,6 +571,7 @@ fn get_provider_chart_data(
     parser_payload_for_period(parser, provider, period, &bounds)
 }
 
+#[cfg(test)]
 pub(crate) fn get_provider_data(
     parser: &UsageParser,
     provider: &str,
@@ -552,6 +579,31 @@ pub(crate) fn get_provider_data(
     offset: i32,
 ) -> Result<UsagePayload, String> {
     get_provider_data_for_interval(parser, provider, period, offset, 0, None)
+}
+
+/// A provider's totals and chart alone, for a caller that shows neither
+/// `has_earlier_data` nor the local stats (the tray cost, the calendar): the
+/// full payload when one is cached, else a payload computed without them and
+/// cached under its own key, never the `full:` one a view would trust.
+pub(crate) fn get_provider_totals(
+    parser: &UsageParser,
+    provider: &str,
+    period: &str,
+    offset: i32,
+) -> Result<UsagePayload, String> {
+    let bounds = resolve_period_bounds_with_reset(period, offset, None)?;
+    let full_key = full_usage_cache_key_with_reset(provider, period, offset, 0, None);
+    let totals_key = format!("totals:{full_key}");
+    for key in [&full_key, &totals_key] {
+        if let Some(mut cached) = parser.check_cache(key) {
+            rebase_burn_rate(&mut cached, bounds.range_start);
+            return Ok(cached);
+        }
+    }
+    let cursor_generation = parser.cursor_remote_generation();
+    let payload = parser_payload_for_period_with(parser, provider, period, &bounds, false)?;
+    parser.store_cache_at_cursor_generation(&totals_key, payload.clone(), cursor_generation);
+    Ok(payload)
 }
 
 fn get_provider_data_for_interval(
@@ -575,7 +627,7 @@ fn get_provider_data_for_interval(
     // Cursor snapshot.
     let cursor_generation = parser.cursor_remote_generation();
     let mut payload = parser_payload_for_period(parser, provider, period, &bounds)?;
-    attach_local_stats(parser, &mut payload, provider, &bounds);
+    attach_local_stats(parser, &mut payload, provider, period, &bounds);
 
     parser.store_cache_at_cursor_generation(&cache_key, payload.clone(), cursor_generation);
 
@@ -701,6 +753,25 @@ pub(crate) fn load_change_events_for_period(
     change_events
 }
 
+/// The models in `provider`'s local entries over all time, first seen
+/// first. A full load of every log, so it is kept until the next sample that
+/// finds a change (or any payload clear).
+fn local_known_models(parser: &UsageParser, provider: &str) -> Arc<[KnownModel]> {
+    let version = parser.data_version(provider);
+    if let Some(models) = parser.known_models_at(provider, version) {
+        return models;
+    }
+    let (entries, _, _) = parser.load_entries(provider, None);
+    let mut models = BTreeMap::<String, KnownModel>::new();
+    for entry in entries {
+        let model = crate::models::known_model_from_raw(&entry.model);
+        models.entry(model.model_key.clone()).or_insert(model);
+    }
+    let models: Arc<[KnownModel]> = models.into_values().collect();
+    parser.store_known_models(provider, version, models.clone());
+    models
+}
+
 #[tauri::command]
 pub async fn get_known_models(
     provider: String,
@@ -712,11 +783,11 @@ pub async fn get_known_models(
     }
     let _gate = state.compute.lock().await;
 
-    let (entries, _, _) = state.parser.load_entries(&provider, None);
     let mut models = BTreeMap::<String, KnownModel>::new();
-    for entry in entries {
-        let model = crate::models::known_model_from_raw(&entry.model);
-        models.entry(model.model_key.clone()).or_insert(model);
+    for model in local_known_models(&state.parser, &provider).iter() {
+        models
+            .entry(model.model_key.clone())
+            .or_insert_with(|| model.clone());
     }
 
     // Also include models discovered from SSH remote caches.
@@ -959,7 +1030,7 @@ pub(crate) async fn get_usage_data_inner(
             .await;
 
             // Aggregate stats once from the selected providers' entries.
-            attach_local_stats(parser, &mut merged, provider, &bounds);
+            attach_local_stats(parser, &mut merged, provider, period, &bounds);
 
             finalize_usage_payload(state, provider, period, offset, merged).await
         }
@@ -1638,6 +1709,29 @@ mod tests {
     }
 
     #[test]
+    fn filter_buckets_to_range_keeps_months_that_overlap_the_window() {
+        let mut payload = payload_with_buckets(vec![
+            bucket("Oct 1", "2025-10-01", 9.0),
+            bucket("Oct", "2025-10", 1.5),
+            bucket("Nov", "2025-11", 2.5),
+        ]);
+
+        filter_buckets_to_range(
+            &mut payload,
+            NaiveDate::from_ymd_opt(2025, 10, 6).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 6).unwrap(),
+        );
+
+        let keys: Vec<_> = payload
+            .chart_buckets
+            .iter()
+            .map(|bucket| bucket.sort_key.as_str())
+            .collect();
+        assert_eq!(keys, vec!["2025-10", "2025-11"]);
+        assert_eq!(payload.total_cost, 4.0);
+    }
+
+    #[test]
     fn year_period_filters_to_target_year_only() {
         let claude_dir = TempDir::new().unwrap();
         let codex_dir = TempDir::new().unwrap();
@@ -1798,6 +1892,109 @@ mod tests {
         assert!(
             second.from_cache,
             "second request should hit the full cache"
+        );
+    }
+
+    #[test]
+    fn known_models_are_kept_until_a_sweep_finds_a_change() {
+        let dir = TempDir::new().unwrap();
+        let line = |model: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-03-05T12:00:00+00:00","message":{{"model":"{model}","usage":{{"input_tokens":1,"output_tokens":1}},"stop_reason":"end_turn"}}}}"#,
+            )
+        };
+        write_file(
+            &dir.path().join("a.jsonl"),
+            &line("claude-sonnet-4-6-20260301"),
+        );
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+        let keys = |models: &[KnownModel]| {
+            models
+                .iter()
+                .map(|m| m.model_key.clone())
+                .collect::<Vec<_>>()
+        };
+        let first = local_known_models(&parser, "claude");
+        assert_eq!(first.len(), 1);
+
+        // Not seen until a sweep finds the change: the list is reused.
+        write_file(
+            &dir.path().join("a.jsonl"),
+            &format!(
+                "{}
+{}",
+                line("claude-sonnet-4-6-20260301"),
+                line("claude-opus-4-6-20260301")
+            ),
+        );
+        let again = local_known_models(&parser, "claude");
+        assert!(Arc::ptr_eq(&first, &again), "served from the cache");
+
+        assert!(parser.invalidate_if_changed(), "guard: the sweep sees it");
+        let after = local_known_models(&parser, "claude");
+        assert_eq!(after.len(), 2, "recomputed: {:?}", keys(&after));
+    }
+
+    #[test]
+    fn provider_totals_skip_the_extras_and_never_fill_the_full_key() {
+        let dir = TempDir::new().unwrap();
+        let ts = Local::now()
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_local_timezone(Local)
+            .unwrap()
+            .to_rfc3339();
+        let line = |ts: &str| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"{ts}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":1000,"output_tokens":500}},"stop_reason":"end_turn"}}}}"#,
+            )
+        };
+        write_file(&dir.path().join("session.jsonl"), &line(&ts));
+        write_file(
+            &dir.path().join("older.jsonl"),
+            &line("2026-01-05T12:00:00+00:00"),
+        );
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+
+        let totals = get_provider_totals(&parser, "claude", "day", 0).unwrap();
+        assert!(
+            totals.total_cost > 0.0,
+            "guard: the fixture has usage today"
+        );
+        assert!(!totals.has_earlier_data, "not computed for the totals");
+        assert!(totals.change_stats.is_none(), "no local stats");
+        assert!(
+            get_provider_totals(&parser, "claude", "day", 0)
+                .unwrap()
+                .from_cache
+        );
+
+        let full = get_provider_data(&parser, "claude", "day", 0).unwrap();
+        assert!(
+            !full.from_cache,
+            "the totals did not stand in for the full payload"
+        );
+        assert!(full.has_earlier_data);
+        assert!((full.total_cost - totals.total_cost).abs() < 1e-9);
+    }
+
+    #[test]
+    fn period_mode_cache_keys_separate_modes_and_rolling_generations() {
+        for period in ["day", "week", "month", "year"] {
+            for offset in [0, -1] {
+                let to_date = usage_cache_tags_for_mode(period, offset, 1, None, false);
+                let rolling = usage_cache_tags_for_mode(period, offset, 1, None, true);
+                assert_ne!(to_date, rolling);
+                assert_ne!(
+                    rolling,
+                    usage_cache_tags_for_mode(period, offset, 2, None, true)
+                );
+            }
+        }
+        assert_eq!(
+            usage_cache_tags_for_mode("5h", 0, 1, None, false),
+            usage_cache_tags_for_mode("5h", 0, 1, None, true)
         );
     }
 

@@ -26,6 +26,7 @@ const DEFAULT_HEADER_TABS = {
   codex: { label: "Codex", enabled: true },
   cursor: { label: "Cursor", enabled: true },
   kimi: { label: "Kimi", enabled: true },
+  gemini: { label: "Gemini", enabled: true },
 } as const;
 
 function makePersistedStore(saved: Partial<Settings> | null = {}) {
@@ -130,6 +131,10 @@ describe("loadSettings", () => {
       autoExportFolder: null,
       weekStart: "mon",
       rollingPeriods: false,
+      codexResetWatch: false,
+      dailyQuotaCapPercent: 25,
+      showProjects: true,
+      showDailyPlan: true,
     });
     expect(get(settings)).toEqual(loaded);
     expect(mockSetCurrency).toHaveBeenCalledWith("EUR");
@@ -166,8 +171,8 @@ describe("loadSettings", () => {
       trayConfig: {
         barDisplay: 'custom',
         barProvider: 'claude',
-        barProviders: ["claude", "codex", "cursor", "kimi"],
-        floatBallBarProviders: ["claude", "codex", "cursor", "kimi"],
+        barProviders: ["claude", "codex", "cursor", "kimi", "gemini"],
+        floatBallBarProviders: ["claude", "codex", "cursor", "kimi", "gemini"],
         showPercentages: false,
         percentageFormat: 'compact',
         showCost: true,
@@ -196,6 +201,10 @@ describe("loadSettings", () => {
       autoExportFolder: null,
       weekStart: "mon",
       rollingPeriods: false,
+      codexResetWatch: false,
+      dailyQuotaCapPercent: 25,
+      showProjects: true,
+      showDailyPlan: true,
     });
     expect(get(settings)).toEqual(fallback);
     expect(mockSetCurrency).toHaveBeenCalledWith("USD");
@@ -320,6 +329,7 @@ describe("loadSettings migration", () => {
       // Provider added after these settings were persisted → filled as a
       // visible tab by the migration in normalizeHeaderTabs.
       kimi: { label: "Kimi", enabled: true },
+      gemini: { label: "Gemini", enabled: true },
     });
   });
 
@@ -339,6 +349,7 @@ describe("loadSettings migration", () => {
         codex: { label: "Codex", enabled: false },
         cursor: { label: "Cursor", enabled: false },
         kimi: { label: "Kimi", enabled: false },
+        gemini: { label: "Gemini", enabled: false },
       },
       brandTheming: "yes" as unknown as Settings["brandTheming"],
       trayConfig: {
@@ -389,6 +400,7 @@ describe("loadSettings migration", () => {
       codex: { label: "Codex", enabled: false },
       cursor: { label: "Cursor", enabled: false },
       kimi: { label: "Kimi", enabled: false },
+      gemini: { label: "Gemini", enabled: false },
     });
     expect(loaded.headerTabs.claude.label).toHaveLength(MAX_HEADER_TAB_LABEL_LENGTH);
   });
@@ -437,6 +449,7 @@ describe("header tab helpers", () => {
         codex: { label: "Codex", enabled: true },
         cursor: { label: "Cursor", enabled: true },
         kimi: { label: "Kimi", enabled: true },
+        gemini: { label: "Gemini", enabled: true },
       }),
     ).toBe(true);
   });
@@ -451,6 +464,7 @@ describe("header tab helpers", () => {
         codex: { label: "Codex", enabled: true },
         cursor: { label: "Cursor", enabled: true },
         kimi: { label: "Kimi", enabled: true },
+        gemini: { label: "Gemini", enabled: true },
       }),
     ).toBe(false);
 
@@ -461,6 +475,7 @@ describe("header tab helpers", () => {
         codex: { label: "Codex", enabled: true },
         cursor: { label: "Cursor", enabled: true },
         kimi: { label: "Kimi", enabled: true },
+        gemini: { label: "Gemini", enabled: true },
       }),
     ).toBe(false);
   });
@@ -474,6 +489,7 @@ describe("header tab helpers", () => {
       codex: { label: "Codex", enabled: false },
       cursor: { label: "Cursor", enabled: false },
       kimi: { label: "Kimi", enabled: false },
+      gemini: { label: "Gemini", enabled: false },
     });
 
     expect(normalized).toEqual({
@@ -482,6 +498,7 @@ describe("header tab helpers", () => {
       codex: { label: "Codex", enabled: false },
       cursor: { label: "Cursor", enabled: false },
       kimi: { label: "Kimi", enabled: false },
+      gemini: { label: "Gemini", enabled: false },
     });
     expect(resolveVisibleProvider("codex", normalized)).toBe("all");
   });
@@ -590,6 +607,7 @@ describe("updateSetting", () => {
           codex: { label: "Codex", enabled: false },
           cursor: { label: "Cursor", enabled: true },
           kimi: { label: "Kimi", enabled: true },
+          gemini: { label: "Gemini", enabled: true },
         },
       }),
     );
@@ -620,5 +638,44 @@ describe("theme and provider application", () => {
     applyProvider("all", true);
     applyProvider("claude", false);
     expect(root.removeAttribute).toHaveBeenCalledWith("data-provider");
+  });
+});
+
+
+describe("period mode compatibility", () => {
+  it("fixes legacy week starts to Monday while preserving the rolling choice", async () => {
+    mockLoad.mockResolvedValue(makePersistedStore({ weekStart: "sun", rollingPeriods: true }));
+    const { loadSettings } = await loadSettingsModule();
+    const saved = await loadSettings();
+    expect(saved.weekStart).toBe("mon");
+    expect(saved.rollingPeriods).toBe(true);
+  });
+
+  it("waits for the backend mode before the caller refreshes usage", async () => {
+    mockLoad.mockResolvedValue(makePersistedStore());
+    const { updateSetting } = await loadSettingsModule();
+    let resolveConfig!: () => void;
+    mockInvoke.mockImplementation((command: string) => command === "set_period_config"
+      ? new Promise<void>(resolve => { resolveConfig = resolve; })
+      : Promise.resolve());
+    let finished = false;
+    const update = updateSetting("rollingPeriods", true).then(() => { finished = true; });
+    await Promise.resolve();
+    expect(mockInvoke).toHaveBeenCalledWith("set_period_config", { weekStart: "mon", rolling: true });
+    expect(finished).toBe(false);
+    resolveConfig();
+    await update;
+    expect(finished).toBe(true);
+  });
+});
+
+describe("hideUndetectedTabs", () => {
+  it("hides sources the backend never saw, without touching the saved tabs", async () => {
+    const { hideUndetectedTabs, DEFAULT_HEADER_TABS, getVisibleHeaderProviders } = await import("./settings.js");
+    expect(hideUndetectedTabs(DEFAULT_HEADER_TABS, null)).toBe(DEFAULT_HEADER_TABS);
+    const visible = getVisibleHeaderProviders(hideUndetectedTabs(DEFAULT_HEADER_TABS, ["claude", "gemini"]));
+    expect(visible).toEqual(["all", "claude", "gemini"]);
+    expect(DEFAULT_HEADER_TABS.kimi.enabled).toBe(true);
+    expect(hideUndetectedTabs(DEFAULT_HEADER_TABS, [])).toBe(DEFAULT_HEADER_TABS);
   });
 });

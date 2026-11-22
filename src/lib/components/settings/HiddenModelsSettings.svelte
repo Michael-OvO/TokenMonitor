@@ -1,6 +1,5 @@
 <script lang="ts">
   import SettingsDisclosure from "./SettingsDisclosure.svelte";
-  import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { settings, updateSetting, type Settings as SettingsType } from "../../stores/settings.js";
   import { setAutoExportConfig } from "../../stores/usageIo.js";
@@ -11,23 +10,43 @@
   let current = $derived($settings as SettingsType);
 
   let availableModels = $state<KnownModel[]>([]);
-  let modelsLoading = $state(true);
+  let modelsLoaded = $state(false);
+  let modelsLoading = $state(false);
+  let modelsFailed = $state(false);
   let modelsExpanded = $state(false);
 
-
-  onMount(() => {
+  // The known-model list reads the whole local history on a cold backend
+  // cache, so it is fetched on the first expand, not on every Settings open.
+  function loadModels() {
+    if (modelsLoaded || modelsLoading) return;
+    modelsLoading = true;
+    modelsFailed = false;
     invoke<KnownModel[]>("get_known_models", { provider: "all" })
       .then((models) => {
         availableModels = [...models].sort((a, b) =>
           a.display_name.localeCompare(b.display_name, undefined, { sensitivity: "base" })
         );
+        modelsLoaded = true;
       })
       .catch((error) => {
+        // Not marked loaded: the next expand retries.
         console.error("Failed to load known models:", error);
+        modelsFailed = true;
       })
       .finally(() => {
         modelsLoading = false;
       });
+  }
+
+  function toggleExpanded() {
+    modelsExpanded = !modelsExpanded;
+    if (modelsExpanded) loadModels();
+  }
+
+  let countLabel = $derived.by(() => {
+    if (modelsLoaded) return `${availableModels.length - current.hiddenModels.length} of ${availableModels.length}`;
+    if (modelsLoading) return "...";
+    return current.hiddenModels.length > 0 ? `${current.hiddenModels.length} hidden` : "";
   });
 
 
@@ -46,17 +65,19 @@
 </script>
 
 <div class="block">
-  <button class="row collapsible-toggle" type="button" aria-expanded={modelsExpanded} onclick={() => (modelsExpanded = !modelsExpanded)}>
+  <button class="row collapsible-toggle" type="button" aria-expanded={modelsExpanded} onclick={toggleExpanded}>
     <span class="label">Models</span>
     <div class="collapsible-right">
-      <span class="count">{modelsLoading ? "..." : `${availableModels.length - current.hiddenModels.length} of ${availableModels.length}`}</span>
+      <span class="count">{countLabel}</span>
       <svg class="collapsible-chevron" class:open={modelsExpanded} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="6 9 12 15 18 9"></polyline>
       </svg>
     </div>
   </button>
   <SettingsDisclosure open={modelsExpanded}>
-    {#if modelsLoading}
+    {#if modelsFailed}
+      <div class="model-empty">Couldn't load models. Collapse and expand to retry.</div>
+    {:else if !modelsLoaded}
       <div class="model-grid" aria-busy="true" aria-label="Loading models">
         {#each Array(4) as _, i (i)}
           <div class="model-cell skeleton-cell">

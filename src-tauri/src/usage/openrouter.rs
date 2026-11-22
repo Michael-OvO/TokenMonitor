@@ -50,7 +50,7 @@ fn parse_price(s: &Option<String>) -> Option<f64> {
 }
 
 fn parse_openrouter_models(models: &[OpenRouterModel]) -> HashMap<String, DynamicModelRates> {
-    use crate::models::normalized_model_key;
+    use crate::models::pricing_model_key;
 
     let mut rates: HashMap<String, DynamicModelRates> = HashMap::new();
 
@@ -104,7 +104,7 @@ fn parse_openrouter_models(models: &[OpenRouterModel]) -> HashMap<String, Dynami
         // OpenRouter IDs are "provider/model-name" — extract the model part.
         let model_name = model.id.rsplit('/').next().unwrap_or(&model.id);
 
-        let key = normalized_model_key(model_name);
+        let key = pricing_model_key(model_name);
         if key == "unknown" {
             let raw_key = model_name.trim().to_ascii_lowercase();
             rates.entry(raw_key).or_insert(model_rates);
@@ -179,7 +179,7 @@ mod tests {
         let models = vec![make_model("zhipu/glm-4-plus", "0.000001", "0.000002")];
 
         let rates = parse_openrouter_models(&models);
-        // normalized_model_key for "glm-4-plus" should be "glm-4-plus"
+        // pricing_model_key for "glm-4-plus" should be "glm-4-plus"
         let r = rates.get("glm-4-plus").expect("should have glm-4-plus");
         assert!((r.input - 1.0).abs() < 0.001);
         assert!((r.output - 2.0).abs() < 0.001);

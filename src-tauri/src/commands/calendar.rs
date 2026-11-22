@@ -1,5 +1,5 @@
 use super::period::{first_of_next_month, month_offset_from_now};
-use super::usage_query::get_provider_data;
+use super::usage_query::get_provider_totals;
 use super::{
     maybe_capture_query_debug, merge_usage_source, merge_usage_warning, parse_usage_selection,
     set_last_usage_debug, AppState, UsageDebugReport,
@@ -71,7 +71,8 @@ pub(crate) fn get_monthly_usage_with_debug_sync(
         ),
         String,
     > {
-        let usage = get_provider_data(&state.parser, prov, "month", month_offset)?;
+        // The calendar shows daily costs alone: no local stats, no earlier-data probe.
+        let usage = get_provider_totals(&state.parser, prov, "month", month_offset)?;
         let query = maybe_capture_query_debug(&state.parser, &usage)?;
         let days = calendar_days_from_payload(&usage, month_start, end_date);
         Ok((days, usage.usage_source, usage.usage_warning, query))
@@ -317,6 +318,34 @@ mod tests {
         assert!(day5.is_some(), "should have data for day 5");
         assert!(day5.unwrap().cost > 0.0, "day 5 should have non-zero cost");
         assert!(payload.total_cost > 0.0);
+    }
+
+    #[test]
+    fn the_calendar_computes_no_full_view_payload() {
+        let claude_dir = TempDir::new().unwrap();
+        let codex_dir = TempDir::new().unwrap();
+        let now = Local::now().date_naive();
+        let content = format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":1000,"output_tokens":500}},"stop_reason":"end_turn"}}}}"#,
+            local_timestamp(now, 12)
+        );
+        write_file(&claude_dir.path().join("session.jsonl"), &content);
+        let parser = UsageParser::with_dirs(
+            claude_dir.path().to_path_buf(),
+            codex_dir.path().to_path_buf(),
+        );
+        let state = AppState::with_parser(parser);
+
+        let payload = get_monthly_usage_sync(&state, "claude", now.year(), now.month());
+        assert!(payload.total_cost > 0.0, "guard: the fixture has usage");
+        let view =
+            super::super::usage_query::get_provider_data(&state.parser, "claude", "month", 0)
+                .unwrap();
+        assert!(
+            !view.from_cache,
+            "the month view (with its local stats) was not built for the calendar"
+        );
+        assert!((view.total_cost - payload.total_cost).abs() < 1e-9);
     }
 
     #[test]

@@ -71,6 +71,10 @@ function makeSettings(overrides: Partial<Settings> = {}): Settings {
     autoExportFolder: null,
     weekStart: "mon",
     rollingPeriods: false,
+    codexResetWatch: false,
+    dailyQuotaCapPercent: 25,
+    showProjects: true,
+    showDailyPlan: true,
     ...overrides,
   };
 }
@@ -99,14 +103,14 @@ describe("initializeRuntimeFromSettings", () => {
     });
 
     expect(invokeFn).toHaveBeenCalledWith("set_enabled_integrations", {
-      ids: ["claude", "cursor", "kimi"],
+      ids: ["claude", "cursor", "kimi", "gemini"],
     });
   });
 
   it("pushes every integration when no integration tab is enabled", async () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const headerTabs = createDefaultHeaderTabs();
-    for (const id of ["claude", "codex", "cursor", "kimi"]) {
+    for (const id of ["claude", "codex", "cursor", "kimi", "gemini"]) {
       headerTabs[id] = { ...headerTabs[id], enabled: false };
     }
     const saved = makeSettings({ headerTabs });
@@ -120,7 +124,7 @@ describe("initializeRuntimeFromSettings", () => {
     });
 
     expect(invokeFn).toHaveBeenCalledWith("set_enabled_integrations", {
-      ids: ["claude", "codex", "cursor", "kimi"],
+      ids: ["claude", "codex", "cursor", "kimi", "gemini"],
     });
   });
 
@@ -340,6 +344,7 @@ describe("initializeRuntimeFromSettings", () => {
           codex: { label: "Codex", enabled: false },
           cursor: { label: "Cursor", enabled: true },
           kimi: { label: "Kimi", enabled: true },
+          gemini: { label: "Gemini", enabled: true },
         },
       }),
       { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowThemeFn, syncNativeWindowSurfaceFn },

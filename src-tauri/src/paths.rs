@@ -49,6 +49,15 @@ pub fn codex_sessions_default() -> Option<PathBuf> {
     home().map(|h| h.join(".codex").join("sessions"))
 }
 
+/// Codex's thread-name index, for session titles in the project breakdown.
+/// Honors `$CODEX_HOME`.
+pub fn codex_session_index_file() -> Option<PathBuf> {
+    env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home().map(|h| h.join(".codex")))
+        .map(|dir| dir.join("session_index.jsonl"))
+}
+
 /// Default Kimi Code CLI session-log roots. The current CLI stores `wire.jsonl`
 /// files under `~/.kimi-code/sessions`; the legacy `kimi-cli` used
 /// `~/.kimi/sessions`. Both are returned so either install is picked up. May be
@@ -60,6 +69,45 @@ pub fn kimi_sessions_defaults() -> Vec<PathBuf> {
         roots.push(h.join(".kimi-code").join("sessions"));
     }
     roots
+}
+
+/// Gemini CLI data home: `~/.gemini`, or `$GEMINI_CLI_HOME/.gemini` like the
+/// CLI itself. Antigravity keeps its data under the same directory.
+pub fn gemini_home() -> Option<PathBuf> {
+    env::var_os("GEMINI_CLI_HOME")
+        .filter(|raw| !raw.is_empty())
+        .map(PathBuf::from)
+        .or_else(home)
+        .map(|h| h.join(".gemini"))
+}
+
+/// Gemini CLI chat logs: `tmp/<project>/chats/session-*.json[l]`.
+pub fn gemini_sessions_default() -> Option<PathBuf> {
+    gemini_home().map(|h| h.join("tmp"))
+}
+
+/// Gemini CLI OAuth token file, read to call the quota API.
+pub fn gemini_oauth_creds_file() -> Option<PathBuf> {
+    gemini_home().map(|h| h.join("oauth_creds.json"))
+}
+
+/// Antigravity conversation databases (`<uuid>.db`), for the standalone app
+/// and the IDE flavor.
+pub fn antigravity_conversation_defaults() -> Vec<PathBuf> {
+    gemini_home()
+        .map(|h| {
+            vec![
+                h.join("antigravity").join("conversations"),
+                h.join("antigravity-ide").join("conversations"),
+            ]
+        })
+        .unwrap_or_default()
+}
+
+/// Where a running Antigravity writes `hub_*.json` (its local server's port
+/// and CSRF token), read to ask it for the model quotas.
+pub fn antigravity_daemon_dir() -> Option<PathBuf> {
+    gemini_home().map(|h| h.join("antigravity").join("daemon"))
 }
 
 /// Kimi Code CLI credential file (`credentials/kimi-code.json` under the data
@@ -166,6 +214,32 @@ pub fn cursor_global_state_vscdb_default() -> Option<PathBuf> {
     }
 }
 
+/// Default Cursor `Local State` path, which holds the DPAPI/Keychain-wrapped
+/// `os_crypt.encrypted_key` used to decrypt the at-rest IDE access token.
+pub fn cursor_local_state_default() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        home().map(|h| {
+            h.join("Library")
+                .join("Application Support")
+                .join("Cursor")
+                .join("Local State")
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        env::var("APPDATA")
+            .ok()
+            .map(|appdata| PathBuf::from(appdata).join("Cursor").join("Local State"))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        home().map(|h| h.join(".config").join("Cursor").join("Local State"))
+    }
+}
+
 /// `~/.ssh/config` — read only when SSH remote devices are configured.
 pub fn ssh_config() -> Option<PathBuf> {
     home().map(|h| h.join(".ssh").join("config"))
@@ -267,6 +341,15 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
             env_override: Some("CODEX_HOME"),
         });
     }
+    if let Some(p) = codex_session_index_file() {
+        out.push(AccessedPath {
+            purpose: "Codex thread names for session titles",
+            path: p,
+            env_override: Some("CODEX_HOME"),
+        });
+    }
+    // Not a fixed location: `stats::project` reads `.git` (and a worktree's
+    // `gitdir`/`commondir`) above each session's working directory.
     for p in kimi_sessions_defaults() {
         out.push(AccessedPath {
             purpose: "Kimi Code CLI session logs",
@@ -281,6 +364,34 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
             env_override: Some("KIMI_DATA_DIR"),
         });
     }
+    if let Some(p) = gemini_sessions_default() {
+        out.push(AccessedPath {
+            purpose: "Gemini CLI session logs",
+            path: p,
+            env_override: Some("GEMINI_CLI_HOME"),
+        });
+    }
+    if let Some(p) = gemini_oauth_creds_file() {
+        out.push(AccessedPath {
+            purpose: "Gemini CLI credentials for quota reads",
+            path: p,
+            env_override: Some("GEMINI_CLI_HOME"),
+        });
+    }
+    for p in antigravity_conversation_defaults() {
+        out.push(AccessedPath {
+            purpose: "Antigravity conversation databases",
+            path: p,
+            env_override: Some("GEMINI_CLI_HOME"),
+        });
+    }
+    if let Some(p) = antigravity_daemon_dir() {
+        out.push(AccessedPath {
+            purpose: "Antigravity local server address for quota reads",
+            path: p,
+            env_override: Some("GEMINI_CLI_HOME"),
+        });
+    }
     if let Some(p) = cursor_workspace_storage_default() {
         out.push(AccessedPath {
             purpose: "Cursor IDE workspace session metadata",
@@ -291,6 +402,13 @@ pub fn accessed_paths() -> Vec<AccessedPath> {
     if let Some(p) = cursor_global_state_vscdb_default() {
         out.push(AccessedPath {
             purpose: "Cursor IDE global auth/session state DB",
+            path: p,
+            env_override: Some("CURSOR_USER_DIR"),
+        });
+    }
+    if let Some(p) = cursor_local_state_default() {
+        out.push(AccessedPath {
+            purpose: "Cursor IDE key store for decrypting the at-rest access token",
             path: p,
             env_override: Some("CURSOR_USER_DIR"),
         });

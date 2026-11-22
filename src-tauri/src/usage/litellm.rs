@@ -24,8 +24,8 @@ struct PricingCache {
 
 /// Current cache version. Bump this whenever a new pricing data source is
 /// added or the cache format changes, to force re-fetch on next startup.
-/// v1 = LiteLLM only, v2 = LiteLLM + OpenRouter.
-const CACHE_VERSION: u32 = 2;
+/// v3 adds the confirmed Doubao model's base-band estimate.
+const CACHE_VERSION: u32 = 3;
 
 /// Raw entry from the LiteLLM JSON (only the fields we need).
 #[derive(Debug, serde::Deserialize)]
@@ -38,6 +38,13 @@ struct LiteLLMEntry {
     cache_read_input_token_cost: Option<f64>,
     #[serde(rename = "cache_creation_input_token_cost_above_1hr")]
     cache_creation_1h_cost: Option<f64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LiteLLMTier {
+    range: [f64; 2],
+    input_cost_per_token: f64,
+    output_cost_per_token: f64,
 }
 
 const CACHE_FILENAME: &str = "pricing-cache.json";
@@ -179,7 +186,7 @@ pub async fn fetch_and_cache(
 fn parse_litellm_json(
     raw: &HashMap<String, serde_json::Value>,
 ) -> HashMap<String, DynamicModelRates> {
-    use crate::models::normalized_model_key;
+    use crate::models::pricing_model_key;
 
     let mut rates: HashMap<String, DynamicModelRates> = HashMap::new();
 
@@ -189,7 +196,7 @@ fn parse_litellm_json(
             continue;
         }
 
-        let entry: LiteLLMEntry = match serde_json::from_value(value.clone()) {
+        let mut entry: LiteLLMEntry = match serde_json::from_value(value.clone()) {
             Ok(e) => e,
             Err(_) => continue,
         };
@@ -199,7 +206,9 @@ fn parse_litellm_json(
             Some(p) => p.as_str(),
             None => continue,
         };
-        if provider != "anthropic" && provider != "openai" {
+        let doubao = provider == "volcengine"
+            && model_name == "volcengine/doubao-seed-2-0-code-preview-260215";
+        if provider != "anthropic" && provider != "openai" && !doubao {
             continue;
         }
 
@@ -207,6 +216,25 @@ fn parse_litellm_json(
         let mode = entry.mode.as_deref().unwrap_or("");
         if mode != "chat" && mode != "responses" {
             continue;
+        }
+
+        // The user chose the base band for this model. Hourly archives cannot
+        // recover individual request context lengths, so this is an estimate,
+        // not tier selection using the (potentially much larger) hourly total.
+        if doubao && entry.input_cost_per_token.is_none() && entry.output_cost_per_token.is_none() {
+            if let Some(base) = value
+                .get("tiered_pricing")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|tiers| {
+                    tiers
+                        .iter()
+                        .filter_map(|tier| serde_json::from_value::<LiteLLMTier>(tier.clone()).ok())
+                        .find(|tier| tier.range[0] == 0.0 && tier.range[1] > 0.0)
+                })
+            {
+                entry.input_cost_per_token = Some(base.input_cost_per_token);
+                entry.output_cost_per_token = Some(base.output_cost_per_token);
+            }
         }
 
         // Must have at least input + output pricing.
@@ -247,6 +275,9 @@ fn parse_litellm_json(
                 // Default: Anthropic 0.1x, OpenAI 0.25x.
                 if provider == "anthropic" {
                     input * 0.1
+                } else if doubao {
+                    // No cache discount is listed: estimate at input price.
+                    input
                 } else {
                     input * 0.25
                 }
@@ -270,7 +301,7 @@ fn parse_litellm_json(
         };
 
         // Normalize to the same key format used by pricing.rs.
-        let key = normalized_model_key(model_name);
+        let key = pricing_model_key(model_name);
         if key == "unknown" {
             // Store under the raw lowercase name for OpenAI models
             // whose full name IS the key (e.g., "gpt-5.4", "o3-mini-2025-01-31").
@@ -287,6 +318,50 @@ fn parse_litellm_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doubao_tiered_price_uses_base_band_and_input_rate_for_unspecified_cache() {
+        // LiteLLM's official Volcengine row has no top-level token rates.
+        let raw = HashMap::from([(
+            "volcengine/doubao-seed-2-0-code-preview-260215".to_string(),
+            serde_json::json!({
+                "litellm_provider": "volcengine",
+                "mode": "chat",
+                "tiered_pricing": [
+                    {"range": [32000, 128000], "input_cost_per_token": 7e-7, "output_cost_per_token": 3.5e-6},
+                    {"range": [0, 32000], "input_cost_per_token": 4.6e-7, "output_cost_per_token": 2.3e-6},
+                    {"range": [128000, 256000], "input_cost_per_token": 1.4e-6, "output_cost_per_token": 7e-6}
+                ]
+            }),
+        )]);
+        let rates = parse_litellm_json(&raw);
+        let r = &rates["doubao-seed-2-0-code-preview-260215"];
+        assert!((r.input - 0.46).abs() < 1e-9);
+        assert!((r.output - 2.3).abs() < 1e-9);
+        assert_eq!(r.cache_read, r.input);
+        assert_eq!(r.cache_write_5m, r.input);
+        assert_eq!(r.cache_write_1h, r.input);
+    }
+
+    #[test]
+    fn doubao_does_not_substitute_a_higher_band_or_another_provider() {
+        let mut row = serde_json::json!({
+            "litellm_provider": "volcengine",
+            "mode": "chat",
+            "tiered_pricing": [
+                {"range": [32000, 128000], "input_cost_per_token": 7e-7, "output_cost_per_token": 3.5e-6}
+            ]
+        });
+        let key = "volcengine/doubao-seed-2-0-code-preview-260215".to_string();
+        assert!(parse_litellm_json(&HashMap::from([(key.clone(), row.clone())])).is_empty());
+        row["input_cost_per_token"] = serde_json::json!(4.6e-7);
+        row["output_cost_per_token"] = serde_json::json!(2.3e-6);
+        row["cache_read_input_token_cost"] = serde_json::json!(1e-7);
+        let parsed = parse_litellm_json(&HashMap::from([(key.clone(), row.clone())]));
+        assert!((parsed["doubao-seed-2-0-code-preview-260215"].cache_read - 0.1).abs() < 1e-9);
+        row["litellm_provider"] = serde_json::json!("aihubmix");
+        assert!(parse_litellm_json(&HashMap::from([(key, row)])).is_empty());
+    }
 
     fn make_entry(input: f64, output: f64) -> serde_json::Value {
         serde_json::json!({

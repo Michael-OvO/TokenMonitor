@@ -51,6 +51,10 @@ function settings(overrides: Partial<Settings> = {}): Settings {
     autoExportFolder: null,
     weekStart: "mon",
     rollingPeriods: false,
+    codexResetWatch: false,
+    dailyQuotaCapPercent: 25,
+    showProjects: true,
+    showDailyPlan: true,
     ...overrides,
   };
 }
@@ -102,6 +106,14 @@ describe("permission surfaces", () => {
 
     expect(updates?.status).toBe("Banner only");
     expect(updates?.requestPolicy).toBe("never_requests_os_prompt");
+  });
+
+  it("discloses the third-party reset watch and follows its toggle", () => {
+    const off = permissionSurfaceById(getPermissionSurfaces(settings(), { macos: true }), "codex_reset_watch");
+    expect(off?.status).toBe("Off");
+    expect(off?.why).toContain("codex-reset.com");
+    const on = getPermissionSurfaces(settings({ codexResetWatch: true }), { macos: true });
+    expect(permissionSurfaceById(on, "codex_reset_watch")?.status).toBe("Enabled");
   });
 
   it("does not include any keychain surface", () => {

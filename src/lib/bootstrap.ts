@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { activePeriod, activeProvider } from "./stores/usage.js";
-import { applyGlass, applyTheme, resolveVisibleProvider, updateSetting, type Settings } from "./stores/settings.js";
+import { applyGlass, applyTheme, detectedProviders, hideUndetectedTabs, resolveVisibleProvider, updateSetting, type Settings } from "./stores/settings.js";
 import { syncTrayConfig } from "./tray/sync.js";
 import { effectiveIntegrationIds } from "./providerMetadata.js";
 import {
@@ -167,13 +167,20 @@ export async function initializeRuntimeFromSettings(
   }
   void Promise.allSettled(paints);
 
+  // Sources that never left data here get no tab and stay out of the All scope.
+  const detected = await invokeFn("detected_integrations").then(
+    (ids) => (Array.isArray(ids) ? (ids as string[]) : null),
+    () => null,
+  );
+  detectedProviders.set(detected);
+
   // The settings the first refresh cycle reads, all cheap to store.
   const cycleSettings: Promise<unknown>[] = [
     invokeFn("set_refresh_interval", { interval: saved.refreshInterval }),
     invokeFn("set_period_config", { weekStart: saved.weekStart, rolling: saved.rollingPeriods }),
     invokeFn("set_rate_limits_enabled", { enabled: saved.rateLimitsEnabled }),
     invokeFn("set_enabled_integrations", {
-      ids: effectiveIntegrationIds(saved.headerTabs),
+      ids: effectiveIntegrationIds(hideUndetectedTabs(saved.headerTabs, detected)),
     }),
     invokeFn("set_auto_export_config", {
       enabled: saved.autoExportEnabled,
