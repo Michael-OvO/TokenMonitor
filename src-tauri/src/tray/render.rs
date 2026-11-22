@@ -65,17 +65,11 @@ const KIMI_COLOR: Color = Color {
     b: 212,
     a: 255,
 };
-// Google blue and green, matching `--accent` for these providers in app.css.
+// Google blue, matching `--accent` for this provider in app.css.
 const GEMINI_COLOR: Color = Color {
     r: 66,
     g: 133,
     b: 244,
-    a: 255,
-};
-const ANTIGRAVITY_COLOR: Color = Color {
-    r: 52,
-    g: 168,
-    b: 83,
     a: 255,
 };
 
@@ -177,7 +171,6 @@ fn selected_bars(
     cursor_util: Option<f64>,
     kimi_util: Option<f64>,
     gemini_util: Option<f64>,
-    antigravity_util: Option<f64>,
 ) -> Vec<(Option<f64>, &'static Color)> {
     let providers: Vec<&str> = match config.bar_display {
         BarDisplay::Off => vec![],
@@ -185,6 +178,13 @@ fn selected_bars(
         BarDisplay::Both => vec!["claude", "codex"],
         BarDisplay::Custom => config.bar_providers.iter().map(String::as_str).collect(),
     };
+    // A saved selection may still name Antigravity, now part of Gemini.
+    let mut providers: Vec<&str> = providers
+        .into_iter()
+        .map(|p| if p == "antigravity" { "gemini" } else { p })
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    providers.retain(|p| seen.insert(*p));
     providers
         .into_iter()
         .filter_map(|provider| match provider {
@@ -193,7 +193,6 @@ fn selected_bars(
             "cursor" => Some((cursor_util, &CURSOR_COLOR)),
             "kimi" => Some((kimi_util, &KIMI_COLOR)),
             "gemini" => Some((gemini_util, &GEMINI_COLOR)),
-            "antigravity" => Some((antigravity_util, &ANTIGRAVITY_COLOR)),
             _ => None,
         })
         .collect()
@@ -235,7 +234,6 @@ pub fn render_tray_icon(
     cursor_util: Option<f64>,
     kimi_util: Option<f64>,
     gemini_util: Option<f64>,
-    antigravity_util: Option<f64>,
     dark_bar: bool,
     update_available: bool,
 ) -> (Vec<u8>, u32, u32, bool) {
@@ -247,7 +245,6 @@ pub fn render_tray_icon(
         cursor_util,
         kimi_util,
         gemini_util,
-        antigravity_util,
     );
     if bars.is_empty() || !has_utilization(&bars) {
         if update_available {
@@ -476,7 +473,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             true,
             false,
         );
@@ -497,7 +493,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             true,
             false,
         );
@@ -513,7 +508,6 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(70.0),
             Some(30.0),
-            None,
             None,
             None,
             None,
@@ -542,7 +536,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             true,
             false,
         );
@@ -557,15 +550,7 @@ mod tests {
         let mut config = make_config(BarDisplay::Custom);
         config.bar_providers = vec!["cursor".into(), "claude".into(), "codex".into()];
 
-        let bars = selected_bars(
-            &config,
-            Some(10.0),
-            Some(20.0),
-            Some(30.0),
-            None,
-            None,
-            None,
-        );
+        let bars = selected_bars(&config, Some(10.0), Some(20.0), Some(30.0), None, None);
 
         assert_eq!(bars.len(), 3);
         assert_eq!(bars[0].0, Some(30.0));
@@ -582,7 +567,6 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(50.0),
             Some(50.0),
-            None,
             None,
             None,
             None,
@@ -606,7 +590,6 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(50.0),
             Some(50.0),
-            None,
             None,
             None,
             None,
@@ -640,7 +623,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             true,
             false,
         );
@@ -649,7 +631,6 @@ mod tests {
             &make_config(BarDisplay::Both),
             Some(50.0),
             Some(50.0),
-            None,
             None,
             None,
             None,
@@ -671,14 +652,12 @@ mod tests {
             None,
             None,
             None,
-            None,
             true,
             false,
         );
         let (with, _, _, tmpl_w) = render_tray_icon(
             &icon,
             &make_config(BarDisplay::Off),
-            None,
             None,
             None,
             None,

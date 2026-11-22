@@ -261,7 +261,6 @@ pub struct RateLimitsPayload {
     pub cursor: Option<ProviderRateLimits>,
     pub kimi: Option<ProviderRateLimits>,
     pub gemini: Option<ProviderRateLimits>,
-    pub antigravity: Option<ProviderRateLimits>,
 }
 
 // ── Helpers ──

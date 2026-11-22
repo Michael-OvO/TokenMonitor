@@ -401,7 +401,6 @@ mod tests {
             cursor: None,
             kimi: None,
             gemini: None,
-            antigravity: None,
         }
     }
 

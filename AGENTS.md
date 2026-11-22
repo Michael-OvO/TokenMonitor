@@ -80,8 +80,9 @@ limits use the Kimi usage API and refresh their token like the Kimi CLI does. Ge
 `~/.gemini/tmp/*/chats/session-*.json(l)`; its quotas from the Code Assist API (`retrieveUserQuota`) with the
 CLI's OAuth file, renewed in memory only. Antigravity usage comes from its per-conversation SQLite files
 (`~/.gemini/antigravity/conversations/*.db`, schema-free protobuf read; the older `.pb` files are encrypted);
-its quotas from the running app's local server (`daemon/hub_*.json` → `GetUserStatus`). Both list one window
-per model, busiest first, and the tray shows the first. The Usage tab covers the
+its quotas from the running app's local server (`daemon/hub_*.json` → `GetUserStatus`). Both are one
+source, `gemini` (one Google account): logs share its tab and archive, and the two quota readings merge into one
+list (`merge_gemini_sources`), one window per model, busiest first; the tray shows the first. The Usage tab covers the
 official 5h reset window from cached rate limits, or a rolling five hours when none is cached. Completed hours
 are persisted to the usage archive so history survives log deletion. Models missing from the static pricing
 table (`usage/pricing.rs`, bump `PRICING_VERSION` when editing) resolve via LiteLLM/OpenRouter with 24h TTL.

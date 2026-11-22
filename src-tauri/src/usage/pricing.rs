@@ -1,5 +1,5 @@
 #[cfg_attr(not(test), allow(dead_code))]
-pub const PRICING_VERSION: &str = "2026-11-15";
+pub const PRICING_VERSION: &str = "2026-11-21";
 
 use crate::models::{detect_model_family, ModelFamily};
 use crate::usage::litellm::DynamicModelRates;
@@ -814,6 +814,7 @@ mod tests {
         assert!(pricing_available_for_key("gemini-4-argon-medium"));
         assert!(pricing_available_for_key("gemini-4-argon"));
         assert!(approx_eq(cost("gemini-4-hydrogen", M, M), 9.0));
+        assert!(approx_eq(cost("gemini-4-neon", M, M), 18.0));
         assert!(approx_eq(cost("gemini-4-argon-high", M, M), 12.0));
         assert!(approx_eq(cost("Gemini 4 Argon Medium", M, M), 12.0));
         assert!(approx_eq(
@@ -923,7 +924,7 @@ mod tests {
 
     #[test]
     fn pricing_version_is_set() {
-        assert_eq!(PRICING_VERSION, "2026-11-15");
+        assert_eq!(PRICING_VERSION, "2026-11-21");
     }
 
     #[test]

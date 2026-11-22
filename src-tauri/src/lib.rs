@@ -634,10 +634,6 @@ pub(crate) fn archive_local_usage(state: &AppState, horizon: chrono::DateTime<ch
         ("cursor", usage::integrations::UsageIntegrationId::Cursor),
         ("kimi", usage::integrations::UsageIntegrationId::Kimi),
         ("gemini", usage::integrations::UsageIntegrationId::Gemini),
-        (
-            "antigravity",
-            usage::integrations::UsageIntegrationId::Antigravity,
-        ),
     ] {
         let source_key = format!("local:{provider}");
 
@@ -821,6 +817,7 @@ pub(crate) async fn cleanup_duplicate_devices(state: &AppState) -> bool {
             "Folded account-scoped Cursor rows from device archives into local:cursor"
         );
     }
+    let folded_gemini = archive.fold_antigravity_into_gemini(now.date_naive(), now.hour() as u8);
     let folded_all = archive.fold_device_providers_into_all();
     if folded_all > 0 {
         tracing::info!(
@@ -828,7 +825,7 @@ pub(crate) async fn cleanup_duplicate_devices(state: &AppState) -> bool {
             "Folded provider-tagged device rows into p=all (removes SSH double count)"
         );
     }
-    let changed = !removed.is_empty() || folded_cursor > 0 || folded_all > 0;
+    let changed = !removed.is_empty() || folded_cursor > 0 || folded_all > 0 || folded_gemini > 0;
     if changed {
         tracing::info!(
             count = removed.len(),

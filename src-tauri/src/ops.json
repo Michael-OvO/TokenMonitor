@@ -32,6 +32,6 @@
     "codex_reset_forecast": "https://codex-reset.com/api/forecast"
   },
   "ttls_secs": {
-    "litellm_cache": 604800
+    "litellm_cache": 86400
   }
 }

@@ -114,9 +114,6 @@
   .provider-logo.gemini {
     color: var(--accent);
   }
-  .provider-logo.antigravity {
-    color: var(--accent);
-  }
   .provider-logo.generic {
     color: var(--t2);
   }

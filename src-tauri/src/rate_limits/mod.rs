@@ -145,9 +145,10 @@ use kimi::fetch_kimi_rate_limits;
 const CLAUDE_MIN_REFETCH_SECS: i64 = 300;
 const CODEX_MIN_REFETCH_SECS: i64 = 300;
 const KIMI_MIN_REFETCH_SECS: i64 = 300;
-const GEMINI_MIN_REFETCH_SECS: i64 = 300;
-/// A loopback call to the running app, so cheap enough for every minute.
-const ANTIGRAVITY_MIN_REFETCH_SECS: i64 = 60;
+// ponytail: one floor for both Gemini sources. The Antigravity half is a
+// loopback call, so it stays at a minute, which also sends the Code Assist
+// quota request every minute; give that half its own gate if Google throttles.
+const GEMINI_MIN_REFETCH_SECS: i64 = 60;
 /// Cursor's probe is an HTTPS round trip (plus a `sqlite3` spawn to re-read
 /// the IDE's token when its state DB changed), and until it had this gate it
 /// ran on every statusline event, several times a minute while Claude Code works.
@@ -309,7 +310,6 @@ pub struct RateLimitSelection {
     cursor: bool,
     kimi: bool,
     gemini: bool,
-    antigravity: bool,
 }
 
 impl RateLimitSelection {
@@ -323,7 +323,6 @@ impl RateLimitSelection {
                 UsageIntegrationId::Cursor => selection.cursor = true,
                 UsageIntegrationId::Kimi => selection.kimi = true,
                 UsageIntegrationId::Gemini => selection.gemini = true,
-                UsageIntegrationId::Antigravity => selection.antigravity = true,
             }
         }
         selection
@@ -347,10 +346,6 @@ impl RateLimitSelection {
 
     pub fn includes_gemini(self) -> bool {
         self.gemini
-    }
-
-    pub fn includes_antigravity(self) -> bool {
-        self.antigravity
     }
 }
 
@@ -508,10 +503,6 @@ pub fn merge_rate_limits(
         gemini: merge_provider_rate_limits(
             fresh.gemini,
             cached.and_then(|payload| payload.gemini.clone()),
-        ),
-        antigravity: merge_provider_rate_limits(
-            fresh.antigravity,
-            cached.and_then(|payload| payload.antigravity.clone()),
         ),
     }
 }
@@ -813,10 +804,14 @@ pub async fn fetch_selected_rate_limits_until(
                 }
             }
 
-            match fetch_gemini_rate_limits().await {
+            let (cli, app) =
+                tokio::join!(fetch_gemini_rate_limits(), fetch_antigravity_rate_limits());
+            match merge_gemini_sources(cli, app) {
                 Ok(rate_limits) => Some(rate_limits),
                 Err(error) => {
-                    if error.message == gemini::NOT_SIGNED_IN {
+                    if error.message == gemini::NOT_SIGNED_IN
+                        || error.message == antigravity::NOT_RUNNING
+                    {
                         tracing::debug!("Gemini: {}", error.message);
                     } else {
                         tracing::warn!(error = %error.message, "Gemini rate-limit fetch failed");
@@ -828,40 +823,6 @@ pub async fn fetch_selected_rate_limits_until(
         .await;
             (result, provider_t0.elapsed())
         };
-
-    let cached_antigravity = cached.and_then(|payload| payload.antigravity.clone());
-    let antigravity_future = async {
-        let provider_t0 = std::time::Instant::now();
-        let result = async {
-            if !selection.antigravity {
-                return cached_antigravity;
-            }
-
-            let now = Utc::now();
-            if is_fresh(cached_antigravity.as_ref(), ANTIGRAVITY_MIN_REFETCH_SECS, now, retry_errors) {
-                return cached_antigravity;
-            }
-            if let Some(rate_limits) = cached_antigravity.clone() {
-                if provider_cooldown_is_active(&rate_limits, now) {
-                    return Some(mark_rate_limits_stale(rate_limits));
-                }
-            }
-
-            match fetch_antigravity_rate_limits().await {
-                Ok(rate_limits) => Some(rate_limits),
-                Err(error) => {
-                    if error.message == antigravity::NOT_RUNNING {
-                        tracing::debug!("Antigravity: {}", error.message);
-                    } else {
-                        tracing::warn!(error = %error.message, "Antigravity rate-limit fetch failed");
-                    }
-                    Some(provider_rate_limit_error("antigravity", error))
-                }
-            }
-        }
-        .await;
-        (result, provider_t0.elapsed())
-    };
 
     // Claude and Codex may spawn their CLIs, so they take their turns one
     // after the other; the HTTP-only probes run beside them.
@@ -887,7 +848,6 @@ pub async fn fetch_selected_rate_limits_until(
         (cursor, cursor_took),
         (kimi, kimi_took),
         (gemini, gemini_took),
-        (antigravity, antigravity_took),
     ) = tokio::join!(
         cli_probes,
         probe_within(
@@ -908,15 +868,9 @@ pub async fn fetch_selected_rate_limits_until(
             deadline,
             "gemini",
         ),
-        probe_within(
-            antigravity_future,
-            cached.and_then(|payload| payload.antigravity.clone()),
-            deadline,
-            "antigravity",
-        ),
     );
     tracing::debug!(
-        "[PROFILE] rate-limits: selection={selection:?} claude={claude_took:?} codex={codex_took:?} cursor={cursor_took:?} kimi={kimi_took:?} gemini={gemini_took:?} antigravity={antigravity_took:?}"
+        "[PROFILE] rate-limits: selection={selection:?} claude={claude_took:?} codex={codex_took:?} cursor={cursor_took:?} kimi={kimi_took:?} gemini={gemini_took:?}"
     );
     RateLimitsPayload {
         claude,
@@ -924,8 +878,48 @@ pub async fn fetch_selected_rate_limits_until(
         cursor,
         kimi,
         gemini,
-        antigravity,
     }
+}
+
+/// Gemini CLI and Antigravity draw on one Google account, so their quota
+/// readings become one "gemini" entry: every window either lists (the busier
+/// reading where both name it), busiest first. With neither, the CLI's error
+/// wins unless it only says the CLI is signed out.
+fn merge_gemini_sources(
+    cli: Result<ProviderRateLimits, RateLimitFetchError>,
+    app: Result<ProviderRateLimits, RateLimitFetchError>,
+) -> Result<ProviderRateLimits, RateLimitFetchError> {
+    let mut merged = match (cli, app) {
+        (Ok(mut cli), Ok(app)) => {
+            for window in app.windows {
+                match cli
+                    .windows
+                    .iter_mut()
+                    .find(|w| w.window_id == window.window_id || w.label == window.label)
+                {
+                    Some(existing) if existing.utilization < window.utilization => {
+                        *existing = window
+                    }
+                    Some(_) => {}
+                    None => cli.windows.push(window),
+                }
+            }
+            cli.windows
+                .sort_by(|a, b| b.utilization.total_cmp(&a.utilization));
+            cli.plan_tier = cli.plan_tier.or(app.plan_tier);
+            cli
+        }
+        (Ok(one), Err(_)) | (Err(_), Ok(one)) => one,
+        (Err(cli), Err(app)) => {
+            return Err(if cli.message == gemini::NOT_SIGNED_IN {
+                app
+            } else {
+                cli
+            })
+        }
+    };
+    merged.provider = "gemini".to_string();
+    Ok(merged)
 }
 
 #[cfg(test)]
@@ -1282,7 +1276,6 @@ mod tests {
             cursor: reading("cursor"),
             kimi: reading("kimi"),
             gemini: None,
-            antigravity: None,
         };
         let every = RateLimitSelection::enabled(&[
             UsageIntegrationId::Claude,

@@ -8,7 +8,7 @@ import {
 
 export { ALL_USAGE_PROVIDER_ID } from "./types/index.js";
 
-export type UsageProviderLogoKind = "all" | "claude" | "codex" | "cursor" | "kimi" | "gemini" | "antigravity" | "generic";
+export type UsageProviderLogoKind = "all" | "claude" | "codex" | "cursor" | "kimi" | "gemini" | "generic";
 type UsageProviderBrandColor = readonly [red: number, green: number, blue: number];
 type RateLimitUtilizationLabelFormat = "percent" | "percent_used";
 
@@ -148,36 +148,20 @@ const USAGE_INTEGRATION_DEFINITIONS: UsageProviderDefinition[] = [
   {
     id: "gemini",
     label: "Gemini",
-    title: "Gemini CLI",
+    // Gemini CLI and Antigravity: one Google account, one source.
+    title: "Gemini",
     logoKind: "gemini",
     brandColor: [66, 133, 244],
     supportsRateLimits: true,
     rateLimits: {
       cacheFile: "rate-limits-gemini.json",
-      minFetchIntervalMs: 300_000,
+      minFetchIntervalMs: 60_000,
       // Windows are one per model id (busiest first); there is no fixed
       // primary, so the first window is used.
       primaryWindowId: "primary",
       utilizationLabelFormat: "percent_used",
-      idleSummary: "No Gemini quota data available. Make sure Gemini CLI is signed in with Google on this machine.",
-      missingMetadataErrors: ["gemini cli is not signed in", "sign-in has expired"],
-    },
-  },
-  {
-    id: "antigravity",
-    label: "Antigravity",
-    title: "Antigravity",
-    logoKind: "antigravity",
-    brandColor: [52, 168, 83],
-    supportsRateLimits: true,
-    rateLimits: {
-      cacheFile: "rate-limits-antigravity.json",
-      minFetchIntervalMs: 60_000,
-      // One window per model family (busiest first); the first is primary.
-      primaryWindowId: "primary",
-      utilizationLabelFormat: "percent_used",
-      idleSummary: "No Antigravity quota data available. Quotas are read from the running Antigravity app.",
-      missingMetadataErrors: ["antigravity is not running"],
+      idleSummary: "No Gemini quota data available. Sign in to Gemini CLI with Google, or keep Antigravity running.",
+      missingMetadataErrors: ["gemini cli is not signed in", "sign-in has expired", "antigravity is not running"],
     },
   },
 ];

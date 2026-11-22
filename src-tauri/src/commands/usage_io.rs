@@ -396,7 +396,9 @@ fn export_record<'a>(r: &'a ArchivedHourly, provider: Option<&'a str>) -> Export
 /// to "claude".
 fn provider_label(record: &ArchivedHourly) -> &str {
     match record.p.as_str() {
-        p @ ("claude" | "codex" | "cursor" | "kimi" | "gemini" | "antigravity") => p,
+        p @ ("claude" | "codex" | "cursor" | "kimi" | "gemini") => p,
+        // Rows archived before Antigravity joined the Gemini source.
+        "antigravity" => "gemini",
         _ => {
             use crate::models::{detect_model_family, ModelFamily};
             match detect_model_family(record.raw_model.as_deref().unwrap_or(&record.mk)) {
@@ -2107,13 +2109,7 @@ mod tests {
         st.parser.set_listings_frozen(true);
         let archive = ArchiveManager::new(dir);
         let now = chrono::Local::now();
-        for source in [
-            "local:codex",
-            "local:cursor",
-            "local:kimi",
-            "local:gemini",
-            "local:antigravity",
-        ] {
+        for source in ["local:codex", "local:cursor", "local:kimi", "local:gemini"] {
             archive.should_scan(source, now.date_naive(), now.hour() as u8, 0);
         }
         st.parser.set_archive(archive);

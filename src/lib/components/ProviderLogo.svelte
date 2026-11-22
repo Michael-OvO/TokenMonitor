@@ -37,12 +37,6 @@
   <svg class={className} width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
     <path d="M12 1.5C12.8 7.6 16.4 11.2 22.5 12 16.4 12.8 12.8 16.4 12 22.5 11.2 16.4 7.6 12.8 1.5 12 7.6 11.2 11.2 7.6 12 1.5z"/>
   </svg>
-{:else if kind === "antigravity"}
-  <!-- Arch / "A" mark -->
-  <svg class={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M4 20C4 8 8 4 12 4s8 4 8 16"></path>
-    <path d="M8.5 15h7"></path>
-  </svg>
 {:else}
   <svg class={className} width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
     <rect x="3.5" y="3.5" width="17" height="17" rx="4"></rect>

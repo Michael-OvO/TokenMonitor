@@ -962,6 +962,21 @@ impl ArchiveManager {
         folded
     }
 
+    /// Antigravity used to be its own source; it is part of Gemini now. Moves
+    /// `local:antigravity` rows into `local:gemini` under `p = "gemini"`.
+    /// Returns the number of rows moved. Idempotent.
+    pub fn fold_antigravity_into_gemini(&self, current_date: NaiveDate, current_hour: u8) -> usize {
+        let mut records = self.read_raw("local:antigravity");
+        for record in &mut records {
+            record.p = String::from("gemini");
+        }
+        if !records.is_empty() {
+            self.import_source("local:gemini", &records, current_date, current_hour);
+        }
+        self.remove_source("local:antigravity");
+        records.len()
+    }
+
     /// Collapse every non-cursor row of a `device:*` source onto `p = "all"`.
     /// Older builds imported a peer's copy of an SSH server under `p = claude/
     /// codex`, which sat beside this machine's own `p = "all"` rows for the same
@@ -1700,6 +1715,22 @@ mod tests {
         );
         fs::write(dir.join("2026-04.jsonl"), body).unwrap();
         assert_eq!(mgr.read_raw("local:claude").len(), 3);
+    }
+
+    #[test]
+    fn antigravity_rows_fold_into_gemini() {
+        let tmp = TempDir::new().unwrap();
+        let mgr = ArchiveManager::new(tmp.path());
+        let mut row = arch("2026-04-10", 9, "gemini-4-neon", 10, 5);
+        row.p = String::from("antigravity");
+        mgr.import_source("local:antigravity", &[row], future_date(), 0);
+
+        assert_eq!(mgr.fold_antigravity_into_gemini(future_date(), 0), 1);
+        assert_eq!(mgr.fold_antigravity_into_gemini(future_date(), 0), 0);
+        let rows = mgr.read_raw("local:gemini");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].p, "gemini");
+        assert!(mgr.read_raw("local:antigravity").is_empty());
     }
 
     #[test]

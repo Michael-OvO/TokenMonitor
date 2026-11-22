@@ -103,14 +103,14 @@ describe("initializeRuntimeFromSettings", () => {
     });
 
     expect(invokeFn).toHaveBeenCalledWith("set_enabled_integrations", {
-      ids: ["claude", "cursor", "kimi", "gemini", "antigravity"],
+      ids: ["claude", "cursor", "kimi", "gemini"],
     });
   });
 
   it("pushes every integration when no integration tab is enabled", async () => {
     const invokeFn = vi.fn().mockResolvedValue(undefined);
     const headerTabs = createDefaultHeaderTabs();
-    for (const id of ["claude", "codex", "cursor", "kimi", "gemini", "antigravity"]) {
+    for (const id of ["claude", "codex", "cursor", "kimi", "gemini"]) {
       headerTabs[id] = { ...headerTabs[id], enabled: false };
     }
     const saved = makeSettings({ headerTabs });
@@ -124,7 +124,7 @@ describe("initializeRuntimeFromSettings", () => {
     });
 
     expect(invokeFn).toHaveBeenCalledWith("set_enabled_integrations", {
-      ids: ["claude", "codex", "cursor", "kimi", "gemini", "antigravity"],
+      ids: ["claude", "codex", "cursor", "kimi", "gemini"],
     });
   });
 
@@ -345,7 +345,6 @@ describe("initializeRuntimeFromSettings", () => {
           cursor: { label: "Cursor", enabled: true },
           kimi: { label: "Kimi", enabled: true },
           gemini: { label: "Gemini", enabled: true },
-          antigravity: { label: "Antigravity", enabled: true },
         },
       }),
       { invokeFn, applyThemeFn, applyGlassFn, syncNativeWindowThemeFn, syncNativeWindowSurfaceFn },

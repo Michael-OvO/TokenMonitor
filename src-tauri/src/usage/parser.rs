@@ -221,7 +221,6 @@ enum ProviderFileKind {
     Cursor,
     Kimi,
     Gemini,
-    Antigravity,
 }
 
 impl ProviderFileKind {
@@ -231,8 +230,12 @@ impl ProviderFileKind {
             Self::Codex => parse_codex_session_file(path),
             Self::Cursor => parse_cursor_session_file(path),
             Self::Kimi => parse_kimi_session_file(path),
+            // One source, two logs: Antigravity's SQLite conversations
+            // and the Gemini CLI's chat files.
+            Self::Gemini if path.extension().is_some_and(|e| e == "db") => {
+                parse_antigravity_conversation(path)
+            }
             Self::Gemini => parse_gemini_session_file(path),
-            Self::Antigravity => parse_antigravity_conversation(path),
         }
     }
 
@@ -247,16 +250,18 @@ impl ProviderFileKind {
                         .and_then(Path::file_name)
                         .is_some_and(|name| name == "chatSessions")
             }
-            // `tmp/<project>/chats/session-*.json` (`.jsonl` in newer CLIs).
+            // `tmp/<project>/chats/session-*.json` (`.jsonl` in newer CLIs),
+            // or an Antigravity conversation database.
             Self::Gemini => {
-                path.extension()
-                    .is_some_and(|e| e == "json" || e == "jsonl")
-                    && path
-                        .parent()
-                        .and_then(Path::file_name)
-                        .is_some_and(|name| name == "chats")
+                path.extension().is_some_and(|e| e == "db")
+                    || path
+                        .extension()
+                        .is_some_and(|e| e == "json" || e == "jsonl")
+                        && path
+                            .parent()
+                            .and_then(Path::file_name)
+                            .is_some_and(|name| name == "chats")
             }
-            Self::Antigravity => path.extension().is_some_and(|e| e == "db"),
             _ => path.extension().is_some_and(|e| e == "jsonl"),
         }
     }
@@ -280,7 +285,6 @@ impl UsageIntegrationConfig {
             UsageIntegrationId::Cursor => ProviderFileKind::Cursor,
             UsageIntegrationId::Kimi => ProviderFileKind::Kimi,
             UsageIntegrationId::Gemini => ProviderFileKind::Gemini,
-            UsageIntegrationId::Antigravity => ProviderFileKind::Antigravity,
         }
     }
 
@@ -296,9 +300,8 @@ impl UsageIntegrationConfig {
             UsageIntegrationId::Kimi => {
                 "recursive-jsonl-glob+root-file-list-cache+parsed-file-cache+turn-scoped"
             }
-            UsageIntegrationId::Gemini => "chat-json+root-file-list-cache+parsed-file-cache",
-            UsageIntegrationId::Antigravity => {
-                "conversation-sqlite+root-file-list-cache+parsed-file-cache"
+            UsageIntegrationId::Gemini => {
+                "chat-json+conversation-sqlite+root-file-list-cache+parsed-file-cache"
             }
         }
     }
@@ -1189,10 +1192,6 @@ fn default_usage_integration_configs() -> Vec<UsageIntegrationConfig> {
             UsageIntegrationId::Gemini,
             UsageIntegrationId::Gemini.detect_roots(),
         ),
-        UsageIntegrationConfig::new(
-            UsageIntegrationId::Antigravity,
-            UsageIntegrationId::Antigravity.detect_roots(),
-        ),
     ]
 }
 
@@ -1221,10 +1220,6 @@ fn usage_integration_configs_with_overrides(
         UsageIntegrationConfig::new(
             UsageIntegrationId::Gemini,
             UsageIntegrationId::Gemini.detect_roots(),
-        ),
-        UsageIntegrationConfig::new(
-            UsageIntegrationId::Antigravity,
-            UsageIntegrationId::Antigravity.detect_roots(),
         ),
     ]
 }
@@ -2597,7 +2592,7 @@ impl UsageParser {
                 let (entries, change_events, report) = self.load_kimi_entries_with_debug(since);
                 (entries, change_events, vec![report])
             }
-            UsageIntegrationId::Gemini | UsageIntegrationId::Antigravity => {
+            UsageIntegrationId::Gemini => {
                 let config = self
                     .integration_config(integration_id)
                     .expect("integration should be configured");

@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn loads_urls_and_ttls() {
         assert!(anthropic_usage_url().starts_with("https://api.anthropic.com/"));
-        assert_eq!(litellm_cache_ttl_secs(), 7 * 24 * 60 * 60);
+        assert_eq!(litellm_cache_ttl_secs(), 24 * 60 * 60);
     }
 
     /// Only the frontend reads `plan_tier_costs_usd`, so guard the key here —

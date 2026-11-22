@@ -844,7 +844,7 @@ pub(crate) async fn fetch_price_tables_once(state: &AppState, app_data: &Path) -
     true
 }
 
-/// Fetch the price (7 d TTL) and exchange-rate (24 h TTL) tables that are
+/// Fetch the price (24 h TTL) and exchange-rate (24 h TTL) tables that are
 /// stale, and hold them for the next sample to apply.
 async fn fetch_stale_price_tables(state: &AppState, app_data: &Path) {
     use crate::usage::{exchange_rates, litellm};
@@ -1393,13 +1393,7 @@ mod tests {
     /// Count this machine's own Cursor and Kimi logs as scanned for an
     /// archive whose horizon is `at`.
     fn skip_other_sources(archive: &ArchiveManager, at: DateTime<Local>) {
-        for source in [
-            "local:codex",
-            "local:cursor",
-            "local:kimi",
-            "local:gemini",
-            "local:antigravity",
-        ] {
+        for source in ["local:codex", "local:cursor", "local:kimi", "local:gemini"] {
             archive.should_scan(source, at.date_naive(), at.hour() as u8, 0);
         }
     }

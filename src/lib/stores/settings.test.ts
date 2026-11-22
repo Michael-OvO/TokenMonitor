@@ -27,7 +27,6 @@ const DEFAULT_HEADER_TABS = {
   cursor: { label: "Cursor", enabled: true },
   kimi: { label: "Kimi", enabled: true },
   gemini: { label: "Gemini", enabled: true },
-  antigravity: { label: "Antigravity", enabled: true },
 } as const;
 
 function makePersistedStore(saved: Partial<Settings> | null = {}) {
@@ -172,8 +171,8 @@ describe("loadSettings", () => {
       trayConfig: {
         barDisplay: 'custom',
         barProvider: 'claude',
-        barProviders: ["claude", "codex", "cursor", "kimi", "gemini", "antigravity"],
-        floatBallBarProviders: ["claude", "codex", "cursor", "kimi", "gemini", "antigravity"],
+        barProviders: ["claude", "codex", "cursor", "kimi", "gemini"],
+        floatBallBarProviders: ["claude", "codex", "cursor", "kimi", "gemini"],
         showPercentages: false,
         percentageFormat: 'compact',
         showCost: true,
@@ -331,7 +330,6 @@ describe("loadSettings migration", () => {
       // visible tab by the migration in normalizeHeaderTabs.
       kimi: { label: "Kimi", enabled: true },
       gemini: { label: "Gemini", enabled: true },
-      antigravity: { label: "Antigravity", enabled: true },
     });
   });
 
@@ -352,7 +350,6 @@ describe("loadSettings migration", () => {
         cursor: { label: "Cursor", enabled: false },
         kimi: { label: "Kimi", enabled: false },
         gemini: { label: "Gemini", enabled: false },
-        antigravity: { label: "Antigravity", enabled: false },
       },
       brandTheming: "yes" as unknown as Settings["brandTheming"],
       trayConfig: {
@@ -404,7 +401,6 @@ describe("loadSettings migration", () => {
       cursor: { label: "Cursor", enabled: false },
       kimi: { label: "Kimi", enabled: false },
       gemini: { label: "Gemini", enabled: false },
-      antigravity: { label: "Antigravity", enabled: false },
     });
     expect(loaded.headerTabs.claude.label).toHaveLength(MAX_HEADER_TAB_LABEL_LENGTH);
   });
@@ -454,7 +450,6 @@ describe("header tab helpers", () => {
         cursor: { label: "Cursor", enabled: true },
         kimi: { label: "Kimi", enabled: true },
         gemini: { label: "Gemini", enabled: true },
-        antigravity: { label: "Antigravity", enabled: true },
       }),
     ).toBe(true);
   });
@@ -470,7 +465,6 @@ describe("header tab helpers", () => {
         cursor: { label: "Cursor", enabled: true },
         kimi: { label: "Kimi", enabled: true },
         gemini: { label: "Gemini", enabled: true },
-        antigravity: { label: "Antigravity", enabled: true },
       }),
     ).toBe(false);
 
@@ -482,7 +476,6 @@ describe("header tab helpers", () => {
         cursor: { label: "Cursor", enabled: true },
         kimi: { label: "Kimi", enabled: true },
         gemini: { label: "Gemini", enabled: true },
-        antigravity: { label: "Antigravity", enabled: true },
       }),
     ).toBe(false);
   });
@@ -497,7 +490,6 @@ describe("header tab helpers", () => {
       cursor: { label: "Cursor", enabled: false },
       kimi: { label: "Kimi", enabled: false },
       gemini: { label: "Gemini", enabled: false },
-      antigravity: { label: "Antigravity", enabled: false },
     });
 
     expect(normalized).toEqual({
@@ -507,7 +499,6 @@ describe("header tab helpers", () => {
       cursor: { label: "Cursor", enabled: false },
       kimi: { label: "Kimi", enabled: false },
       gemini: { label: "Gemini", enabled: false },
-      antigravity: { label: "Antigravity", enabled: false },
     });
     expect(resolveVisibleProvider("codex", normalized)).toBe("all");
   });
@@ -617,7 +608,6 @@ describe("updateSetting", () => {
           cursor: { label: "Cursor", enabled: true },
           kimi: { label: "Kimi", enabled: true },
           gemini: { label: "Gemini", enabled: true },
-          antigravity: { label: "Antigravity", enabled: true },
         },
       }),
     );

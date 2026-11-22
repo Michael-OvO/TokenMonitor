@@ -293,6 +293,9 @@ export function normalizeHeaderTabs(headerTabs?: Partial<HeaderTabs> | null): He
       enabled: normalizeHeaderTabEnabled(provider, headerTabs?.[provider]?.enabled),
     };
   }
+  // Antigravity used to have its own tab; it is part of Gemini now.
+  const legacy = headerTabs as Record<string, { enabled?: unknown } | undefined> | null | undefined;
+  if (normalized.gemini && legacy?.antigravity?.enabled === true) normalized.gemini.enabled = true;
 
   if (!HEADER_TAB_ORDER.some((provider) => normalized[provider].enabled)) {
     normalized[HEADER_TAB_ORDER[0] ?? DEFAULT_USAGE_PROVIDER].enabled = true;

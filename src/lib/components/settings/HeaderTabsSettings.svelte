@@ -376,14 +376,4 @@
     --accent: #2F6FD8;
     --accent-soft: rgba(47, 111, 216, 0.14);
   }
-  .header-preview[data-provider="antigravity"],
-  .chip[data-provider="antigravity"] {
-    --accent: #34A853;
-    --accent-soft: rgba(52, 168, 83, 0.12);
-  }
-  :global([data-theme="light"]) .header-preview[data-provider="antigravity"],
-  :global([data-theme="light"]) .chip[data-provider="antigravity"] {
-    --accent: #278A43;
-    --accent-soft: rgba(39, 138, 67, 0.14);
-  }
 </style>

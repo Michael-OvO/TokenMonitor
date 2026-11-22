@@ -53,7 +53,6 @@
     cursor: "Cr",
     kimi: "K",
     gemini: "G",
-    antigravity: "A",
   };
 
   let titlePreview = $derived.by(() => {
