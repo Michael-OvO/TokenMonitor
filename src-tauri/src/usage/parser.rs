@@ -3992,6 +3992,16 @@ mod tests {
             Some(vec![root.path().to_path_buf()]),
         ));
         parser.set_listings_frozen(true);
+        // Back-date the root: NTFS moves a directory's stamp in clock ticks,
+        // so a subdirectory made within the tick of the listing could leave
+        // it unchanged, and the sweep would see nothing.
+        filetime::set_file_mtime(
+            root.path(),
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+            ),
+        )
+        .unwrap();
 
         let (_, first) = parser.load_cursor_local_entries_with_debug(None);
         assert_eq!((first.listing_cache_hit, first.opened_paths), (false, 1));

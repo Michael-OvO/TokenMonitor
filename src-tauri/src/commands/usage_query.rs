@@ -1938,12 +1938,15 @@ mod tests {
     #[test]
     fn provider_totals_skip_the_extras_and_never_fill_the_full_key() {
         let dir = TempDir::new().unwrap();
-        let ts = Local::now()
+        // Already past, yet today: the current day ends now.
+        let now = Local::now();
+        let midnight = now
             .date_naive()
-            .and_hms_opt(12, 0, 0)
-            .unwrap()
-            .and_local_timezone(Local)
-            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|t| t.and_local_timezone(Local).earliest())
+            .unwrap();
+        let ts = (now - chrono::Duration::seconds(1))
+            .max(midnight)
             .to_rfc3339();
         let line = |ts: &str| {
             format!(

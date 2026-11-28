@@ -1446,7 +1446,9 @@ mod tests {
         // archive_completed_hours needs a `current_hour > row_hour` to
         // actually archive; we write with ts at hour=10 and bump to hour=12.
         let archive_mgr = ArchiveManager::new(app_data_dir.path());
-        let today = Local::now().date_naive();
+        // Yesterday, a complete day: today's view ends now, so a fixed hour
+        // of today is in the future for a run before it.
+        let today = Local::now().date_naive().pred_opt().unwrap();
         let row_ts = Local
             .from_local_datetime(&today.and_hms_opt(10, 0, 0).unwrap())
             .single()
@@ -1492,13 +1494,13 @@ mod tests {
         // the live path. (The frontier prunes these to no-ops under ALL, so
         // the totals here come almost entirely from the archive.)
 
-        let claude_devices = build_device_breakdown_for_payload(&state, "claude", "day", 0)
+        let claude_devices = build_device_breakdown_for_payload(&state, "claude", "day", -1)
             .await
             .unwrap();
-        let codex_devices = build_device_breakdown_for_payload(&state, "codex", "day", 0)
+        let codex_devices = build_device_breakdown_for_payload(&state, "codex", "day", -1)
             .await
             .unwrap();
-        let all_devices = build_device_breakdown_for_payload(&state, "all", "day", 0)
+        let all_devices = build_device_breakdown_for_payload(&state, "all", "day", -1)
             .await
             .unwrap();
 
@@ -1555,7 +1557,8 @@ mod tests {
         }];
         *state.ssh_cache.write().await = Some(SshCacheManager::new(app_data_dir.path()));
 
-        let today = Local::now().date_naive();
+        // Yesterday, a complete day (see above).
+        let today = Local::now().date_naive().pred_opt().unwrap();
         let archived_ts = Local
             .from_local_datetime(&today.and_hms_opt(9, 0, 0).unwrap())
             .single()
@@ -1629,7 +1632,7 @@ mod tests {
             &live_jsonl,
         );
 
-        let payload = build_included_devices_payload(&state, "claude", "day", 0)
+        let payload = build_included_devices_payload(&state, "claude", "day", -1)
             .await
             .expect("included devices payload should exist when archive has data");
 

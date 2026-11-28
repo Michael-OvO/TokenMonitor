@@ -251,6 +251,20 @@ mod tests {
             .to_rfc3339()
     }
 
+    /// An instant already past today, so inside the current (to-date)
+    /// period whatever the time of the run.
+    fn earlier_today() -> String {
+        let now = Local::now();
+        let midnight = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|t| t.and_local_timezone(Local).earliest())
+            .unwrap();
+        (now - chrono::Duration::seconds(1))
+            .max(midnight)
+            .to_rfc3339()
+    }
+
     fn remote_record(ts: &str, model: &str, input_tokens: u64, output_tokens: u64) -> String {
         format!(
             r#"{{"ts":"{ts}","m":"{model}","in":{input_tokens},"out":{output_tokens},"c5":0,"cr":0}}"#
@@ -327,7 +341,7 @@ mod tests {
         let now = Local::now().date_naive();
         let content = format!(
             r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-sonnet-4-6-20260301","usage":{{"input_tokens":1000,"output_tokens":500}},"stop_reason":"end_turn"}}}}"#,
-            local_timestamp(now, 12)
+            earlier_today()
         );
         write_file(&claude_dir.path().join("session.jsonl"), &content);
         let parser = UsageParser::with_dirs(
