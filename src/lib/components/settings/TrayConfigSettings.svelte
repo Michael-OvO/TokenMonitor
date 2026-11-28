@@ -52,6 +52,7 @@
     codex: "X",
     cursor: "Cr",
     kimi: "K",
+    gemini: "G",
   };
 
   let titlePreview = $derived.by(() => {

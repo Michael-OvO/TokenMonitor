@@ -19,7 +19,7 @@ export const activeProvider = writable<UsageProvider>(DEFAULT_USAGE_PROVIDER);
 export const activePeriod = writable<UsagePeriod>("day");
 export const activeOffset = writable<number>(0);
 export const chartMode = writable<"bar" | "line" | "pie">("bar");
-export const chartSegmentMode = writable<"model" | "device">("model");
+export const chartSegmentMode = writable<"model" | "device" | "project">("model");
 export const chartMetric = writable<"cost" | "tokens">("cost");
 /** Whether the line chart draws its per-bucket total line. */
 export const chartShowTotal = writable(true);
@@ -242,13 +242,16 @@ export function clearUsageCacheForProviders(providers: Iterable<UsageProvider>) 
   );
 }
 
+/** Seed the frontend cache for a tab's view, so the next `fetchData` of it
+ * paints `data` at once and refreshes behind it. Keyed like `fetchData`
+ * (the All tab resolves to its Header Tabs scope). */
 export function seedUsageCache(
   provider: UsageProvider,
   period: UsagePeriod,
   offset: number,
   data: UsagePayload,
 ) {
-  cachePayload(cacheKey(provider, period, offset), data);
+  cachePayload(cacheKey(backendScope(provider), period, offset), data);
 }
 
 async function logUsageReadDebug(
@@ -492,5 +495,28 @@ const WARM_PERIODS = ["5h", "day", "week", "month"] as const;
 export function warmAllPeriods(provider: UsageProvider, skipPeriod?: UsagePeriod) {
   for (const p of WARM_PERIODS) {
     if (p !== skipPeriod) warmCache(provider, p);
+  }
+}
+
+/**
+ * Launch warm-up for several tabs, cheapest first: 5h for every tab, then
+ * day, then week, then month, with the All tab last within each period, so
+ * its month (the costliest, seconds on a large history) runs last and a
+ * click never queues behind it early. Skips the view already being shown;
+ * never `year`.
+ */
+export function warmStartupViews(
+  providers: readonly UsageProvider[],
+  skip?: { provider: UsageProvider; period: UsagePeriod },
+) {
+  const ordered = [
+    ...providers.filter((p) => p !== ALL_USAGE_PROVIDER_ID),
+    ...providers.filter((p) => p === ALL_USAGE_PROVIDER_ID),
+  ];
+  for (const period of WARM_PERIODS) {
+    for (const provider of ordered) {
+      if (skip && provider === skip.provider && period === skip.period) continue;
+      warmCache(provider, period);
+    }
   }
 }

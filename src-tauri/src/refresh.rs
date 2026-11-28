@@ -449,8 +449,9 @@ async fn refresh_cursor_today(state: &AppState) -> bool {
     fetch_cursor_remote_now(state, since).await != CursorFetch::Unchanged
 }
 
-/// Probe the enabled providers' rate limits one at a time, until the probe
-/// budget runs out, and store the merged result. Emits nothing: the publish
+/// Probe the enabled providers' rate limits (the CLI ones in turn, the HTTP
+/// ones beside them), starting none once the probe budget has run out, and
+/// store the merged result. Emits nothing: the publish
 /// shows it.
 async fn refresh_rate_limits(state: &AppState) {
     if !state.usage_access_enabled() || !state.rate_limits_enabled.load(Ordering::SeqCst) {
@@ -585,7 +586,10 @@ fn put<T>(slot: &Mutex<Option<T>>, value: T) {
 }
 
 /// Recompute the view the popover last asked for, so its re-read after the
-/// publish is a hit. A failure is logged; the cycle goes on.
+/// publish is a hit. A failure is logged; the cycle goes on. While the
+/// popover is hidden only the cheap 5h/day views are kept warm: a long view
+/// (a year can take seconds) would hold the compute gate every cycle for a
+/// payload nobody sees; it recomputes when the popover asks for it again.
 async fn refresh_active_view(app: Option<&AppHandle>, state: &AppState) {
     let view = state
         .refresh
@@ -596,12 +600,29 @@ async fn refresh_active_view(app: Option<&AppHandle>, state: &AppState) {
     let Some((provider, period, offset)) = view else {
         return;
     };
+    if !keeps_active_view_warm(&period, popover_visible(app)) {
+        return;
+    }
     if let Err(e) =
         crate::commands::usage_query::get_usage_data_inner(app, state, &provider, &period, offset)
             .await
     {
         tracing::warn!("Refresh: recomputing {provider}/{period}/{offset} failed: {e}");
     }
+}
+
+/// Whether the cycle recomputes an active view of `period`: always while the
+/// popover shows, else only the cheap rolling ones.
+fn keeps_active_view_warm(period: &str, popover_visible: bool) -> bool {
+    popover_visible || matches!(period, "5h" | "day")
+}
+
+/// Whether the popover window is on screen. No app (tests) or no window
+/// counts as hidden.
+fn popover_visible(app: Option<&AppHandle>) -> bool {
+    app.and_then(|app| app.get_webview_window("main"))
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
 }
 
 /// Make the cycle's values visible together: the tray cost, the staged plan
@@ -823,7 +844,7 @@ pub(crate) async fn fetch_price_tables_once(state: &AppState, app_data: &Path) -
     true
 }
 
-/// Fetch the price (7 d TTL) and exchange-rate (24 h TTL) tables that are
+/// Fetch the price (24 h TTL) and exchange-rate (24 h TTL) tables that are
 /// stale, and hold them for the next sample to apply.
 async fn fetch_stale_price_tables(state: &AppState, app_data: &Path) {
     use crate::usage::{exchange_rates, litellm};
@@ -1002,6 +1023,19 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    #[test]
+    fn a_hidden_popover_keeps_only_the_rolling_views_warm() {
+        for period in ["5h", "day", "week", "month", "year"] {
+            assert!(keeps_active_view_warm(period, true), "{period} shown");
+        }
+        assert!(keeps_active_view_warm("5h", false));
+        assert!(keeps_active_view_warm("day", false));
+        for period in ["week", "month", "year"] {
+            assert!(!keeps_active_view_warm(period, false), "{period} hidden");
+        }
+        assert!(!popover_visible(None), "no app: no popover on screen");
+    }
 
     fn position(steps: &[Step], step: Step) -> usize {
         steps
@@ -1359,7 +1393,7 @@ mod tests {
     /// Count this machine's own Cursor and Kimi logs as scanned for an
     /// archive whose horizon is `at`.
     fn skip_other_sources(archive: &ArchiveManager, at: DateTime<Local>) {
-        for source in ["local:codex", "local:cursor", "local:kimi"] {
+        for source in ["local:codex", "local:cursor", "local:kimi", "local:gemini"] {
             archive.should_scan(source, at.date_naive(), at.hour() as u8, 0);
         }
     }

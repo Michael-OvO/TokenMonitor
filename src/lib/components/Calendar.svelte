@@ -1,6 +1,15 @@
+<script lang="ts" module>
+  import { createViewCache } from "../utils/viewCache.js";
+  import type { MonthlyUsagePayload as MonthPayload } from "../types/index.js";
+
+  /** Months seen this session, kept across openings of the calendar. */
+  const monthCache = createViewCache<MonthPayload>();
+</script>
+
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { settings, SUPPORTED_WEEK_STARTS } from "../stores/settings.js";
+  import { loadThroughViewCache } from "../utils/viewCache.js";
+  import { settings } from "../stores/settings.js";
   import { activeProvider } from "../stores/usage.js";
   import { formatCost } from "../utils/format.js";
   import { intensityLevel, computeEarned, heatmapColor } from "../utils/calendar.js";
@@ -23,8 +32,8 @@
   let loading = $state(false);
   let provider = $state<UsageProvider>("claude");
   let brandTheming = $state(true);
-  // 0 = Monday … 6 = Sunday; mirrors the Week Starts setting.
-  let weekStartIndex = $state(0);
+  // Calendar weeks always start on Monday.
+  const weekStartIndex = 0;
   let dismissedWarningText = $state<string | null>(null);
   let rateLimits = $state<RateLimitsPayload | null>(null);
 
@@ -34,7 +43,6 @@
     const unsub1 = activeProvider.subscribe((p) => (provider = p));
     const unsub2 = settings.subscribe((s) => {
       brandTheming = s.brandTheming;
-      weekStartIndex = Math.max(0, SUPPORTED_WEEK_STARTS.indexOf(s.weekStart));
     });
     const unsub3 = rateLimitsData.subscribe((r) => { rateLimits = r; });
     return () => { unsub1(); unsub2(); unsub3(); };
@@ -45,31 +53,34 @@
     fetchMonth(provider, viewYear, viewMonth);
   });
 
+  // A month seen before paints at once and refreshes behind; a response
+  // for a month the user already clicked past is dropped.
   async function fetchMonth(prov: UsageProvider, year: number, month: number) {
-    loading = true;
-    try {
-      data = await invoke<MonthlyUsagePayload>("get_monthly_usage", {
-        provider: resolveUsageScope(prov, $settings.headerTabs),
-        year,
-        month,
-      });
-    } catch (e) {
-      console.error("Failed to fetch monthly usage:", e);
-      data = {
-        year,
-        month,
-        days: [],
-        total_cost: 0,
-        usage_source: "parser",
-        usage_warning: typeof e === "string"
-          ? e
-          : e instanceof Error
-            ? e.message
-            : "Failed to load monthly usage.",
-      };
-    } finally {
-      loading = false;
-    }
+    const scope = resolveUsageScope(prov, $settings.headerTabs);
+    await loadThroughViewCache(
+      monthCache,
+      `${scope}:${year}:${month}`,
+      () => invoke<MonthlyUsagePayload>("get_monthly_usage", { provider: scope, year, month }),
+      {
+        apply: (value) => { data = value; },
+        setLoading: (value) => { loading = value; },
+        onError: (e) => {
+          console.error("Failed to fetch monthly usage:", e);
+          data = {
+            year,
+            month,
+            days: [],
+            total_cost: 0,
+            usage_source: "parser",
+            usage_warning: typeof e === "string"
+              ? e
+              : e instanceof Error
+                ? e.message
+                : "Failed to load monthly usage.",
+          };
+        },
+      },
+    );
   }
 
   function prevMonth() {

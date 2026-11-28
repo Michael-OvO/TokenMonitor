@@ -40,6 +40,12 @@ pub struct UsagePayload {
     pub has_earlier_data: bool,
     pub change_stats: Option<ChangeStats>,
     pub subagent_stats: Option<crate::stats::subagent::SubagentStats>,
+    /// Claude/Codex cost by git project, each with its costliest sessions.
+    #[serde(default)]
+    pub project_stats: Option<Vec<crate::stats::project::ProjectUsage>>,
+    /// `chart_buckets` split by project (`project:<root>` segment keys).
+    #[serde(default)]
+    pub project_chart_buckets: Option<Vec<ChartBucket>>,
     pub device_breakdown: Option<Vec<DeviceSummary>>,
     pub device_chart_buckets: Option<Vec<ChartBucket>>,
     pub provider_detected: Option<bool>,
@@ -72,6 +78,8 @@ impl Default for UsagePayload {
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -252,6 +260,7 @@ pub struct RateLimitsPayload {
     pub codex: Option<ProviderRateLimits>,
     pub cursor: Option<ProviderRateLimits>,
     pub kimi: Option<ProviderRateLimits>,
+    pub gemini: Option<ProviderRateLimits>,
 }
 
 // ── Helpers ──
@@ -610,6 +619,9 @@ pub fn normalize_generic_model(raw: &str) -> (String, String) {
             if display_name.is_empty() {
                 return (String::from("Unknown"), String::from("unknown"));
             }
+            if display_name.to_ascii_lowercase().starts_with("muse") {
+                return normalize_prefixed_model(raw, "muse", "Muse");
+            }
             // Unknown brand: we don't know which '-' separates brand from version,
             // so keep the raw display verbatim and let the user interpret it.
             (display_name.to_string(), display_name.to_ascii_lowercase())
@@ -618,24 +630,220 @@ pub fn normalize_generic_model(raw: &str) -> (String, String) {
 }
 
 /// Display names never show dashes, and Cursor slugs ("cursor-grok-4.6-fast")
-/// lose their "cursor" prefix. The key keeps coming from the raw name so
-/// archived history stays grouped under the same model.
+/// lose their "cursor" prefix. Reasoning effort (`low`, `medium`, `high`,
+/// `xhigh`, `minimal`, and Gemini/Muse `max`) is not a separate model, so
+/// every family drops it. Speed is a billing dimension, not a model identity.
 pub fn normalize_model(raw: &str) -> (String, String) {
     static NORMALIZED: ModelMemo<(String, String)> = OnceLock::new();
-    memoized(&NORMALIZED, raw, normalize_model_uncached)
+    memoized(&NORMALIZED, raw, |raw| {
+        let (display, key) = normalize_model_uncached(raw);
+        (
+            display
+                .split_whitespace()
+                .filter(|t| !is_speed_token(t))
+                .collect::<Vec<_>>()
+                .join(" "),
+            key.split('-')
+                .filter(|t| !is_speed_token(t))
+                .collect::<Vec<_>>()
+                .join("-"),
+        )
+    })
+}
+
+/// Keep the speed dimension for prices and persisted hourly buckets.
+pub fn pricing_model_key(raw: &str) -> String {
+    static PRICED: ModelMemo<String> = OnceLock::new();
+    memoized(&PRICED, raw, |raw| {
+        let mut key = normalize_model_uncached(raw).1;
+        if key == "deepseek-flash" {
+            key = String::from("deepseek-flash-latest");
+        }
+        // Historical alias confirmed by the user; preserve its display identity.
+        if matches!(
+            key.as_str(),
+            "doubao-seed-code" | "volcengine/doubao-seed-2-0-code-preview-260215"
+        ) {
+            key = String::from("doubao-seed-2-0-code-preview-260215");
+        }
+        if let Some(speed) = raw
+            .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+            .find(|t| is_speed_token(t))
+        {
+            if !key.split('-').any(is_speed_token) {
+                key.push('-');
+                key.push_str(&speed.to_ascii_lowercase());
+            }
+        }
+        key
+    })
+}
+
+fn is_speed_token(token: &str) -> bool {
+    token.eq_ignore_ascii_case("fast") || token.eq_ignore_ascii_case("priority")
 }
 
 fn normalize_model_uncached(raw: &str) -> (String, String) {
-    let trimmed = raw.trim();
+    if raw.to_ascii_lowercase().contains("grok") {
+        return normalize_grok_model(raw);
+    }
+    // Antigravity logs internal ids. Its own label for the orchestrator is
+    // "Orchestrator (Argon)"; `-tiered` is the same model on another quota.
+    // Done here, not in the parser, so archived hours are repaired too.
+    // ponytail: one hardcoded id; read the label (gen_metadata field 21) if
+    // more orchestrators appear.
+    let trimmed = match raw.trim() {
+        "gemini-pro-orchestrator-g1-pro" => "gemini-4-argon",
+        other => other.strip_suffix("-tiered").unwrap_or(other),
+    };
     let stripped = trimmed
         .get(..7)
         .filter(|p| p.eq_ignore_ascii_case("cursor-"))
         .map(|_| &trimmed[7..])
         .filter(|s| !s.is_empty())
         .unwrap_or(trimmed);
-    let (_, key) = normalize_model_by_family(raw);
-    let (display, _) = normalize_model_by_family(stripped);
-    (display.replace('-', " "), key)
+    // The priced id never includes Cursor's `cursor-` prefix. Family
+    // normalizers already recover Claude from either form; Gemini and Muse
+    // would otherwise keep the prefix and miss the price table.
+    let (display, key) = normalize_model_by_family(stripped);
+    let display = display_without_effort(&display.replace('-', " "));
+    let key = key_without_effort(&key);
+    (
+        if display.is_empty() {
+            String::from("Unknown")
+        } else {
+            display
+        },
+        if key.is_empty() {
+            String::from("unknown")
+        } else {
+            key
+        },
+    )
+}
+
+/// How many leading tokens at `index` are reasoning effort, not model identity.
+/// `fast` is absent on purpose: it changes the rate.
+fn effort_skip(tokens: &[&str], index: usize, drop_max: bool) -> usize {
+    let lower = tokens[index].to_ascii_lowercase();
+    if lower == "extra"
+        && tokens
+            .get(index + 1)
+            .is_some_and(|next| next.eq_ignore_ascii_case("high"))
+    {
+        return 2;
+    }
+    if matches!(
+        lower.as_str(),
+        "low" | "medium" | "high" | "xhigh" | "extrahigh" | "minimal"
+    ) || (drop_max && lower == "max")
+    {
+        return 1;
+    }
+    0
+}
+
+/// Gemini and Muse publish `max` as an effort level. Other families keep it:
+/// `gpt-5.1-codex-max` is a different model.
+fn drop_max_effort(slug: &str) -> bool {
+    let lower = slug.to_ascii_lowercase();
+    lower.contains("gemini") || lower.contains("muse")
+}
+
+fn kept_tokens<'a>(tokens: &[&'a str], drop_max: bool) -> Vec<&'a str> {
+    let mut kept = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let skip = effort_skip(tokens, index, drop_max);
+        if skip == 0 {
+            kept.push(tokens[index]);
+            index += 1;
+        } else {
+            index += skip;
+        }
+    }
+    kept
+}
+
+fn display_without_effort(display: &str) -> String {
+    let tokens: Vec<&str> = display.split_whitespace().collect();
+    kept_tokens(&tokens, drop_max_effort(display)).join(" ")
+}
+
+fn key_without_effort(slug: &str) -> String {
+    let tokens: Vec<&str> = slug
+        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .collect();
+    kept_tokens(&tokens, drop_max_effort(slug))
+        .into_iter()
+        .map(|token| token.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Grok effort (`high`, `xhigh`, `extra high`, …) is not a separate model.
+/// `fast` stays. Display title-cases the product words; the key joins the rest with `-`.
+fn normalize_grok_model(raw: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .get(..7)
+        .filter(|prefix| {
+            prefix.eq_ignore_ascii_case("cursor-") || prefix.eq_ignore_ascii_case("cursor ")
+        })
+        .map(|_| &trimmed[7..])
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(trimmed);
+    let expanded = if stripped
+        .get(..4)
+        .is_some_and(|p| p.eq_ignore_ascii_case("grok"))
+        && stripped.as_bytes().get(4).is_some_and(u8::is_ascii_digit)
+    {
+        format!("grok-{}", &stripped[4..])
+    } else {
+        stripped.to_string()
+    };
+    let tokens: Vec<&str> = expanded
+        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .collect();
+    let kept = kept_tokens(&tokens, false);
+    let display = kept
+        .iter()
+        .copied()
+        .map(grok_display_token)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let key = kept
+        .iter()
+        .map(|token| token.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("-");
+    (
+        if display.is_empty() {
+            String::from("Grok")
+        } else {
+            display
+        },
+        if key.is_empty() {
+            String::from("grok")
+        } else {
+            key
+        },
+    )
+}
+
+fn grok_display_token(token: &str) -> String {
+    match token.to_ascii_lowercase().as_str() {
+        "grok" => String::from("Grok"),
+        "fast" => String::from("Fast"),
+        "bot" => String::from("Bot"),
+        "default" => String::from("Default"),
+        "cua" => String::from("Cua"),
+        "build" => String::from("Build"),
+        "latest" => String::from("Latest"),
+        _ => token.to_string(),
+    }
 }
 
 fn normalize_model_by_family(raw: &str) -> (String, String) {
@@ -753,13 +961,68 @@ pub fn known_model_from_raw(raw: &str) -> KnownModel {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn doubao_seed_code_uses_confirmed_billing_model() {
+        let canonical = "doubao-seed-2-0-code-preview-260215";
+        for raw in [
+            "doubao-seed-code",
+            "Doubao Seed Code",
+            canonical,
+            "volcengine/doubao-seed-2-0-code-preview-260215",
+        ] {
+            assert_eq!(super::pricing_model_key(raw), canonical, "{raw}");
+        }
+        assert_eq!(
+            super::normalize_model("doubao-seed-code").1,
+            "doubao-seed-code"
+        );
+    }
+
+    #[test]
+    fn deepseek_flash_prices_as_latest_without_changing_display_identity() {
+        assert_eq!(
+            super::pricing_model_key("deepseek-flash"),
+            "deepseek-flash-latest"
+        );
+        assert_eq!(
+            super::pricing_model_key("DeepSeek flash"),
+            "deepseek-flash-latest"
+        );
+        assert_eq!(super::normalize_model("deepseek-flash").1, "deepseek-flash");
+    }
+
+    #[test]
+    fn speed_is_billing_only_across_providers() {
+        for (normal, fast) in [
+            ("Grok 4.7", "Grok4.7 fast"),
+            ("claude-opus-4-6", "claude-opus-4-6-fast"),
+            ("gpt-5.4", "gpt-5.4-priority"),
+            ("composer-2", "composer-2-fast"),
+        ] {
+            assert_eq!(normalize_model(normal), normalize_model(fast));
+            assert_ne!(pricing_model_key(normal), pricing_model_key(fast));
+        }
+    }
+
     use super::*;
+
+    #[test]
+    fn antigravity_internal_ids_map_to_public_models() {
+        assert_eq!(
+            normalize_model("gemini-pro-orchestrator-g1-pro"),
+            normalize_model("gemini-4-argon")
+        );
+        assert_eq!(
+            pricing_model_key("gemini-3.8-flash-tiered"),
+            pricing_model_key("gemini-3.8-flash")
+        );
+    }
 
     #[test]
     fn cursor_display_name_drops_prefix_and_dashes() {
         let (d, k) = normalize_model("cursor-grok-4.6-xhigh-fast");
-        assert_eq!(d, "grok 4.6 xhigh fast");
-        assert_eq!(k, normalize_model_by_family("cursor-grok-4.6-xhigh-fast").1);
+        assert_eq!(d, "Grok 4.6");
+        assert_eq!(k, "grok-4.6");
         assert_eq!(normalize_model("Cursor-claude-4.5-sonnet").0, "Sonnet 4.5");
         assert_eq!(
             normalize_model("claude-3-7-sonnet-thinking").0,
@@ -778,6 +1041,88 @@ mod tests {
         assert_eq!(
             detect_model_family("cursor-gemini-2.5-pro"),
             ModelFamily::Google
+        );
+    }
+
+    #[test]
+    fn grok_effort_collapses_into_one_model() {
+        for raw in [
+            "cursor-grok-4.7-high",
+            "Grok 4.7 High",
+            "Grok 4.7 xhigh",
+            "grok-4.7",
+        ] {
+            assert_eq!(normalize_model(raw), ("Grok 4.7".into(), "grok-4.7".into()));
+        }
+        for raw in ["cursor-grok-4.7-high-fast", "grok-4.7-fast-xhigh"] {
+            assert_eq!(normalize_model(raw), ("Grok 4.7".into(), "grok-4.7".into()));
+        }
+        assert_eq!(
+            normalize_model("cursor-grok-4.6-xhigh-fast"),
+            ("Grok 4.6".into(), "grok-4.6".into())
+        );
+        assert_eq!(
+            normalize_model("grok-extra-high"),
+            ("Grok".into(), "grok".into())
+        );
+        assert_eq!(
+            normalize_model("grok-4.7-minimal"),
+            ("Grok 4.7".into(), "grok-4.7".into())
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_is_not_a_separate_model() {
+        for raw in [
+            "gemini-4-argon-medium",
+            "gemini-4-argon-high",
+            "cursor-gemini-4-argon-minimal",
+        ] {
+            assert_eq!(
+                normalize_model(raw),
+                ("Gemini 4 argon".into(), "gemini-4-argon".into()),
+                "{raw}"
+            );
+        }
+        // A display name keeps its own capitals; the key still drops effort.
+        assert_eq!(
+            normalize_model("Gemini 4 Argon High"),
+            ("Gemini 4 Argon".into(), "gemini-4-argon".into())
+        );
+        for raw in ["muse-wonder-1.0-high", "muse-wonder-1.0-medium"] {
+            assert_eq!(
+                normalize_model(raw),
+                ("Muse wonder 1.0".into(), "muse-wonder-1.0".into()),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            normalize_model("Muse Wonder 1.0 extra high"),
+            ("Muse Wonder 1.0".into(), "muse-wonder-1.0".into())
+        );
+        assert_eq!(
+            normalize_model("muse-wonder-1.0-max"),
+            ("Muse wonder 1.0".into(), "muse-wonder-1.0".into())
+        );
+        // `max` is an effort level only for Gemini and Muse.
+        assert_eq!(
+            normalize_model("gpt-5.1-codex-max"),
+            ("GPT 5.1 codex max".into(), "gpt-5.1-codex-max".into())
+        );
+        assert_eq!(
+            normalize_model("kimi-for-coding-highspeed"),
+            (
+                "Kimi for coding highspeed".into(),
+                "kimi-for-coding-highspeed".into()
+            )
+        );
+        assert_eq!(
+            normalize_model("composer-2-fast"),
+            ("Composer 2".into(), "composer-2".into())
+        );
+        assert_eq!(
+            normalize_model("gpt-5-high"),
+            ("GPT 5".into(), "gpt-5".into())
         );
     }
 

@@ -115,13 +115,20 @@ export interface Settings {
   autoExportEnabled: boolean;
   /** Destination folder for the auto-export file. `null` until the user picks one. */
   autoExportFolder: string | null;
-  /** First day of the calendar week used by the Week period. */
+  /** Legacy persisted field, normalized to Monday. */
   weekStart: WeekStart;
   /**
-   * When `true`, Week/Month/Year end today (today is the last day) and reach
-   * back one unit, instead of aligning to the calendar. Day and 5h are unaffected.
+   * Rolling day/week/month/year ending now; otherwise calendar-to-date.
+   * The Usage (5h) window is independent.
    */
   rollingPeriods: boolean;
+  codexResetWatch: boolean;
+  /** Most of a weekly limit one day's plan asks for (percent; 100 = no cap). */
+  dailyQuotaCapPercent: number;
+  /** Projects in the breakdown and the chart's "by project" split. */
+  showProjects: boolean;
+  /** Weekly bars pace against today's plan (else against elapsed time). */
+  showDailyPlan: boolean;
 }
 
 export const SUPPORTED_WEEK_STARTS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
@@ -129,7 +136,7 @@ export type WeekStart = (typeof SUPPORTED_WEEK_STARTS)[number];
 
 /** Rust resolves every period window, so it must learn about changes here. */
 function pushPeriodConfig(s: Settings) {
-  invoke("set_period_config", { weekStart: s.weekStart, rolling: s.rollingPeriods }).catch(
+  return invoke("set_period_config", { weekStart: "mon", rolling: s.rollingPeriods }).catch(
     (error) => logger.warn("settings", `set_period_config failed: ${error}`),
   );
 }
@@ -198,6 +205,10 @@ const DEFAULTS: Settings = {
   autoExportFolder: null,
   weekStart: "mon",
   rollingPeriods: false,
+  codexResetWatch: false,
+  dailyQuotaCapPercent: 25,
+  showProjects: true,
+  showDailyPlan: true,
 };
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
@@ -282,12 +293,32 @@ export function normalizeHeaderTabs(headerTabs?: Partial<HeaderTabs> | null): He
       enabled: normalizeHeaderTabEnabled(provider, headerTabs?.[provider]?.enabled),
     };
   }
+  // Antigravity used to have its own tab; it is part of Gemini now.
+  const legacy = headerTabs as Record<string, { enabled?: unknown } | undefined> | null | undefined;
+  if (normalized.gemini && legacy?.antigravity?.enabled === true) normalized.gemini.enabled = true;
 
   if (!HEADER_TAB_ORDER.some((provider) => normalized[provider].enabled)) {
     normalized[HEADER_TAB_ORDER[0] ?? DEFAULT_USAGE_PROVIDER].enabled = true;
   }
 
   return normalized;
+}
+
+/** Integration ids the backend has ever seen data for; null until it answers. */
+export const detectedProviders = writable<string[] | null>(null);
+
+/** Header tabs with never-seen integrations switched off (view only, never
+ * saved), so a source appears by itself once it leaves data. */
+export function hideUndetectedTabs(headerTabs: HeaderTabs, detected: string[] | null): HeaderTabs {
+  if (!Array.isArray(detected)) return headerTabs;
+  const masked = { ...headerTabs };
+  for (const provider of HEADER_TAB_ORDER) {
+    if (provider !== ALL_USAGE_PROVIDER_ID && !detected.includes(provider)) {
+      masked[provider] = { ...masked[provider], enabled: false };
+    }
+  }
+  // Nothing detected at all: keep the saved tabs rather than an empty header.
+  return HEADER_TAB_ORDER.some((p) => p !== ALL_USAGE_PROVIDER_ID && masked[p].enabled) ? masked : headerTabs;
 }
 
 export function getVisibleHeaderProviders(headerTabs: HeaderTabs): UsageProvider[] {
@@ -474,8 +505,17 @@ export function normalizeSettings(saved?: Partial<Settings> | null): Settings {
     usageAccessEnabled: normalizeBoolean(saved?.usageAccessEnabled, DEFAULTS.usageAccessEnabled),
     autoExportEnabled: normalizeBoolean(saved?.autoExportEnabled, DEFAULTS.autoExportEnabled),
     autoExportFolder: normalizeAutoExportFolder(saved?.autoExportFolder),
-    weekStart: normalizeStringChoice(saved?.weekStart, SUPPORTED_WEEK_STARTS, DEFAULTS.weekStart),
+    weekStart: "mon",
     rollingPeriods: normalizeBoolean(saved?.rollingPeriods, DEFAULTS.rollingPeriods),
+    codexResetWatch: normalizeBoolean(saved?.codexResetWatch, DEFAULTS.codexResetWatch),
+    dailyQuotaCapPercent:
+      typeof saved?.dailyQuotaCapPercent === "number" &&
+      saved.dailyQuotaCapPercent > 0 &&
+      saved.dailyQuotaCapPercent <= 100
+        ? saved.dailyQuotaCapPercent
+        : DEFAULTS.dailyQuotaCapPercent,
+    showProjects: normalizeBoolean(saved?.showProjects, DEFAULTS.showProjects),
+    showDailyPlan: normalizeBoolean(saved?.showDailyPlan, DEFAULTS.showDailyPlan),
   };
 }
 
@@ -685,7 +725,7 @@ export async function updateSetting<K extends keyof Settings>(
   }
 
   if (key === "weekStart" || key === "rollingPeriods") {
-    pushPeriodConfig(updated);
+    await pushPeriodConfig(updated);
   }
 
   if (key !== "cursorApiKey") {

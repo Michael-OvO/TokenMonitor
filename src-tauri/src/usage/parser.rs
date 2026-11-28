@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
+use super::antigravity_parser::parse_antigravity_conversation;
 #[cfg(test)]
 use super::claude_parser::read_claude_entries;
 use super::claude_parser::{
@@ -24,6 +25,7 @@ use super::claude_parser::{
 };
 use super::codex_parser::parse_codex_session_file;
 use super::cursor_parser::{cursor_last_warning, parse_cursor_session_file, set_cursor_warning};
+use super::gemini_parser::parse_gemini_session_file;
 use super::kimi_parser::parse_kimi_session_file;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -40,15 +42,29 @@ pub struct ParsedEntry {
     pub cache_creation_1h_tokens: u64,
     pub cache_read_tokens: u64,
     pub web_search_requests: u64,
+    /// Provider-reported USD amount; absent means estimate with the billing key.
+    pub billed_cost: Option<f64>,
     pub unique_hash: Option<String>,
     pub session_key: String,
     pub agent_scope: crate::stats::subagent::AgentScope,
+    /// Working directory and title of the session (Claude and Codex only).
+    pub session_meta: Option<Arc<crate::stats::project::SessionMeta>>,
 }
 
 impl ParsedEntry {
-    /// List-price cost of this row in USD.
+    pub fn pricing_available(&self) -> bool {
+        self.billed_cost.is_some()
+            || crate::usage::pricing::pricing_available_for_key(&crate::models::pricing_model_key(
+                &self.model,
+            ))
+    }
+
+    /// Provider-reported cost, or a speed-specific estimate in USD.
     pub fn cost_usd(&self) -> f64 {
-        let model_key = crate::models::normalized_model_key(&self.model);
+        if let Some(cost) = self.billed_cost {
+            return cost;
+        }
+        let model_key = crate::models::pricing_model_key(&self.model);
         crate::usage::pricing::calculate_cost_for_key(
             &model_key,
             self.input_tokens,
@@ -204,6 +220,7 @@ enum ProviderFileKind {
     Codex,
     Cursor,
     Kimi,
+    Gemini,
 }
 
 impl ProviderFileKind {
@@ -213,6 +230,12 @@ impl ProviderFileKind {
             Self::Codex => parse_codex_session_file(path),
             Self::Cursor => parse_cursor_session_file(path),
             Self::Kimi => parse_kimi_session_file(path),
+            // One source, two logs: Antigravity's SQLite conversations
+            // and the Gemini CLI's chat files.
+            Self::Gemini if path.extension().is_some_and(|e| e == "db") => {
+                parse_antigravity_conversation(path)
+            }
+            Self::Gemini => parse_gemini_session_file(path),
         }
     }
 
@@ -226,6 +249,18 @@ impl ProviderFileKind {
                         .parent()
                         .and_then(Path::file_name)
                         .is_some_and(|name| name == "chatSessions")
+            }
+            // `tmp/<project>/chats/session-*.json` (`.jsonl` in newer CLIs),
+            // or an Antigravity conversation database.
+            Self::Gemini => {
+                path.extension().is_some_and(|e| e == "db")
+                    || path
+                        .extension()
+                        .is_some_and(|e| e == "json" || e == "jsonl")
+                        && path
+                            .parent()
+                            .and_then(Path::file_name)
+                            .is_some_and(|name| name == "chats")
             }
             _ => path.extension().is_some_and(|e| e == "jsonl"),
         }
@@ -249,6 +284,7 @@ impl UsageIntegrationConfig {
             UsageIntegrationId::Codex => ProviderFileKind::Codex,
             UsageIntegrationId::Cursor => ProviderFileKind::Cursor,
             UsageIntegrationId::Kimi => ProviderFileKind::Kimi,
+            UsageIntegrationId::Gemini => ProviderFileKind::Gemini,
         }
     }
 
@@ -263,6 +299,9 @@ impl UsageIntegrationConfig {
             UsageIntegrationId::Cursor => "workspace-chat-json+token-field-probe+cursor-remote-api",
             UsageIntegrationId::Kimi => {
                 "recursive-jsonl-glob+root-file-list-cache+parsed-file-cache+turn-scoped"
+            }
+            UsageIntegrationId::Gemini => {
+                "chat-json+conversation-sqlite+root-file-list-cache+parsed-file-cache"
             }
         }
     }
@@ -365,6 +404,7 @@ pub(crate) fn glob_jsonl_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Parse a `since` string in `YYYYMMDD` format into a `NaiveDate`.
+#[cfg(test)]
 pub(crate) fn parse_since_date(since: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(since, "%Y%m%d").ok()
 }
@@ -445,10 +485,24 @@ fn scan_jsonl_tree(dir: &Path, kind: ProviderFileKind) -> (Vec<PathBuf>, Vec<Dir
 
 fn file_stamp(path: &Path) -> Option<FileStamp> {
     let metadata = fs::metadata(path).ok()?;
-    Some(FileStamp {
+    let mut stamp = FileStamp {
         modified: metadata.modified().ok()?,
         len: metadata.len(),
-    })
+    };
+    // An SQLite database in WAL mode (Antigravity) takes new rows in its
+    // `-wal` sibling first, leaving the `.db` itself untouched until the
+    // next checkpoint.
+    if path.extension().is_some_and(|e| e == "db") {
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        if let Ok(wal) = fs::metadata(wal) {
+            stamp.len += wal.len();
+            if let Ok(modified) = wal.modified() {
+                stamp.modified = stamp.modified.max(modified);
+            }
+        }
+    }
+    Some(stamp)
 }
 
 /// Sweep one root's listing: stat its files, every one when `full`, else
@@ -757,15 +811,7 @@ struct SegmentAgg {
 /// (display_name, model_key, USD cost) of one entry.
 fn price_entry(e: &ParsedEntry) -> (String, String, f64) {
     let (name, key) = normalize_model(&e.model);
-    let cost = crate::usage::pricing::calculate_cost_for_key(
-        &key,
-        e.input_tokens,
-        e.output_tokens,
-        e.cache_creation_5m_tokens,
-        e.cache_creation_1h_tokens,
-        e.cache_read_tokens,
-        e.web_search_requests,
-    ) * crate::usage::pricing::provider_multiplier(&e.model);
+    let cost = e.cost_usd();
     (name, key, cost)
 }
 
@@ -773,7 +819,7 @@ fn build_segment_map(entries: &[&ParsedEntry]) -> HashMap<String, SegmentAgg> {
     let mut map: HashMap<String, SegmentAgg> = HashMap::new();
     for e in entries {
         let (name, key, cost) = price_entry(e);
-        let pricing_available = crate::usage::pricing::pricing_available_for_key(&key);
+        let pricing_available = e.pricing_available();
         let entry = map.entry(key).or_insert(SegmentAgg {
             display_name: name,
             cost: 0.0,
@@ -940,6 +986,10 @@ pub struct UsageParser {
     file_earliest_dates: Mutex<HashMap<String, FileEarliestDates>>,
     /// How long a payload cache entry lives; see [`payload_ttl_for`].
     payload_ttl_secs: AtomicU64,
+    /// Each provider's models seen in its local entries, with the
+    /// [`UsageParser::data_version`] they were read at. Dropped with the
+    /// payloads, so a sample that found a change recomputes them.
+    known_models: Mutex<HashMap<String, (u64, KnownModels)>>,
     /// When set, only the sweep ([`UsageParser::sweep`]) revalidates the
     /// session-file listings; queries reuse them as built.
     listings_frozen: AtomicBool,
@@ -968,6 +1018,9 @@ fn entries_cache_key(provider: &str, since: Option<NaiveDate>, with_archive: boo
         since.map(|d| d.to_string()).unwrap_or_default()
     )
 }
+
+/// A provider's known models, first seen first.
+type KnownModels = Arc<[crate::models::KnownModel]>;
 
 /// Cached result of a background Cursor remote API fetch.
 ///
@@ -1135,6 +1188,10 @@ fn default_usage_integration_configs() -> Vec<UsageIntegrationConfig> {
             UsageIntegrationId::Kimi,
             UsageIntegrationId::Kimi.detect_roots(),
         ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Gemini,
+            UsageIntegrationId::Gemini.detect_roots(),
+        ),
     ]
 }
 
@@ -1160,6 +1217,10 @@ fn usage_integration_configs_with_overrides(
             UsageIntegrationId::Kimi,
             UsageIntegrationId::Kimi.detect_roots(),
         ),
+        UsageIntegrationConfig::new(
+            UsageIntegrationId::Gemini,
+            UsageIntegrationId::Gemini.detect_roots(),
+        ),
     ]
 }
 
@@ -1180,6 +1241,7 @@ impl UsageParser {
             earliest_date_cache: Mutex::new(HashMap::new()),
             file_earliest_dates: Mutex::new(HashMap::new()),
             payload_ttl_secs: AtomicU64::new(CACHE_TTL_SECS),
+            known_models: Mutex::new(HashMap::new()),
             listings_frozen: AtomicBool::new(false),
             log_changes: Mutex::new(HashMap::new()),
         }
@@ -1529,7 +1591,28 @@ impl UsageParser {
         if let Ok(mut c) = self.cache.lock() {
             c.clear();
         }
+        self.clear_known_models();
         self.clear_entries_cache();
+    }
+
+    fn clear_known_models(&self) {
+        if let Ok(mut c) = self.known_models.lock() {
+            c.clear();
+        }
+    }
+
+    /// `provider`'s known local models, if read while its entries were at
+    /// `version` (see [`Self::data_version`]) and not dropped since.
+    pub(crate) fn known_models_at(&self, provider: &str, version: u64) -> Option<KnownModels> {
+        let cache = self.known_models.lock().ok()?;
+        let (at, models) = cache.get(provider)?;
+        (*at == version).then(|| models.clone())
+    }
+
+    pub(crate) fn store_known_models(&self, provider: &str, version: u64, models: KnownModels) {
+        if let Ok(mut c) = self.known_models.lock() {
+            c.insert(provider.to_string(), (version, models));
+        }
     }
 
     /// [`Self::clear_payload_cache`] of only the payloads `stale` picks by key.
@@ -1537,6 +1620,7 @@ impl UsageParser {
         if let Ok(mut c) = self.cache.lock() {
             c.retain(|key, _| !stale(key));
         }
+        self.clear_known_models();
         self.clear_entries_cache();
     }
 
@@ -2330,23 +2414,30 @@ impl UsageParser {
         &self,
         since: Option<NaiveDate>,
     ) -> (Vec<ParsedEntry>, Vec<ParsedChangeEvent>, ProviderReadDebug) {
+        // The account feed wins whenever the cache covers this range. Local
+        // chats are a fallback for a range the remote cache does not cover.
+        if let Some(entries) = self.cursor_remote_for(since) {
+            let strategy = self
+                .integration_config(UsageIntegrationId::Cursor)
+                .map(|config| config.scan_strategy())
+                .unwrap_or("cursor");
+            let report = ProviderReadDebug {
+                strategy: format!("{strategy}+cursor-remote-cache"),
+                emitted_entries: entries.len(),
+                ..ProviderReadDebug::default()
+            };
+            set_cursor_warning(None);
+            return (entries, Vec::new(), report);
+        }
+
         let (local_entries, mut report) = self.load_cursor_local_entries_with_debug(since);
         if !local_entries.is_empty() {
             set_cursor_warning(None);
             return (local_entries, Vec::new(), report);
         }
 
-        // Serve from the non-consuming, range-tagged remote cache when it covers
-        // the requested range (entries are filtered to `since`).
-        if let Some(entries) = self.cursor_remote_for(since) {
-            report.strategy = format!("{}+cursor-remote-cache", report.strategy);
-            report.emitted_entries = entries.len();
-            set_cursor_warning(None);
-            return (entries, Vec::new(), report);
-        }
-
-        // No local entries and no cache — signal that async fetch is needed.
-        // The caller (usage_query) will spawn a background task.
+        // No cache for this range and no local entries — signal that async
+        // fetch is needed. The caller (usage_query) will spawn a background task.
         report.strategy = format!("{}+cursor-remote-pending", report.strategy);
         (Vec::new(), Vec::new(), report)
     }
@@ -2388,6 +2479,15 @@ impl UsageParser {
         resolve_cursor_auth().is_some()
             && !self.cursor_remote_failure_cooldown_active()
             && self.cursor_remote_cache_uncovered(req_since)
+    }
+
+    /// The `since` stored on the Cursor remote cache, when one is loaded.
+    pub(crate) fn cursor_covered_since(&self) -> Option<NaiveDate> {
+        self.cursor_remote_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|cache| cache.covered_since)
     }
 
     /// The first day the Cursor remote cache covers, when a fetch since
@@ -2492,6 +2592,12 @@ impl UsageParser {
                 let (entries, change_events, report) = self.load_kimi_entries_with_debug(since);
                 (entries, change_events, vec![report])
             }
+            UsageIntegrationId::Gemini => {
+                let config = self
+                    .integration_config(integration_id)
+                    .expect("integration should be configured");
+                self.load_integration_entries_with_debug(config, since)
+            }
         };
 
         let mut entries = Vec::new();
@@ -2507,9 +2613,53 @@ impl UsageParser {
 
     // ── has_entries_before: check if data exists before a given date ──
 
+    /// Answered from the cached earliest date when there is one; else a
+    /// listed file last written before `before_date` answers `true` without
+    /// a parse (its lines are dated before it). Only when no file is that old
+    /// does it parse for the earliest date.
     pub fn has_entries_before(&self, provider: &str, before_date: NaiveDate) -> bool {
-        self.provider_earliest_date(provider)
-            .is_some_and(|earliest| earliest < before_date)
+        let cached = self
+            .earliest_date_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(provider).copied());
+        let earliest = match cached {
+            Some(earliest) => earliest,
+            None if self.has_file_written_before(provider, before_date) => return true,
+            None => self.provider_earliest_date(provider),
+        };
+        earliest.is_some_and(|earliest| earliest < before_date)
+    }
+
+    /// Whether a listed, non-empty log of `provider` was last written before
+    /// `before_date` began. A file that holds no usage line answers `true`
+    /// too; that only offers paging back to an empty period.
+    fn has_file_written_before(&self, provider: &str, before_date: NaiveDate) -> bool {
+        let Some(cutoff) = before_date
+            .and_hms_opt(0, 0, 0)
+            .and_then(|midnight| midnight.and_local_timezone(Local).earliest())
+            .map(SystemTime::from)
+        else {
+            return false;
+        };
+        let Some(selection) = UsageIntegrationSelection::parse(provider) else {
+            return false;
+        };
+        selection
+            .integration_ids()
+            .iter()
+            .filter_map(|&id| self.integration_config(id))
+            .any(|config| {
+                let kind = config.file_kind();
+                config.roots.iter().any(|root_dir| {
+                    let (_, stamps, _) = self.cached_jsonl_files(root_dir, kind);
+                    stamps.is_some_and(|stamps| {
+                        stamps
+                            .iter()
+                            .any(|file| file.stamp.len > 0 && file.stamp.modified < cutoff)
+                    })
+                })
+            })
     }
 
     /// Earliest entry date across all of a provider's data, cached per epoch.
@@ -2614,6 +2764,7 @@ impl UsageParser {
 
     // ── Aggregation: daily ──
 
+    #[cfg(test)]
     pub fn get_daily(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("daily:{}:{}", provider, since);
         let since_date = parse_since_date(since);
@@ -2703,6 +2854,8 @@ impl UsageParser {
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -2712,6 +2865,7 @@ impl UsageParser {
 
     // ── Aggregation: monthly ──
 
+    #[cfg(test)]
     pub fn get_monthly(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("monthly:{}:{}", provider, since);
         let since_date = parse_since_date(since);
@@ -2805,6 +2959,8 @@ impl UsageParser {
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -2814,6 +2970,7 @@ impl UsageParser {
 
     // ── Aggregation: hourly ──
 
+    #[cfg(test)]
     pub fn get_hourly(&self, provider: &str, since: &str) -> UsagePayload {
         let cache_key = format!("hourly:{}:{}", provider, since);
         let since_date = parse_since_date(since);
@@ -2920,6 +3077,8 @@ impl UsageParser {
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -2957,6 +3116,30 @@ impl UsageParser {
         start: DateTime<Local>,
         end: DateTime<Local>,
     ) -> UsagePayload {
+        self.get_period_range(provider, start, end, "5h")
+    }
+
+    pub(crate) fn get_period_range(
+        &self,
+        provider: &str,
+        start: DateTime<Local>,
+        end: DateTime<Local>,
+        period: &str,
+    ) -> UsagePayload {
+        self.get_period_range_with(provider, start, end, period, true)
+    }
+
+    /// [`Self::get_period_range`]; without `check_earlier`, `has_earlier_data`
+    /// is left `false` for a caller that never shows it.
+    pub(crate) fn get_period_range_with(
+        &self,
+        provider: &str,
+        start: DateTime<Local>,
+        end: DateTime<Local>,
+        period: &str,
+        check_earlier: bool,
+    ) -> UsagePayload {
+        use super::device_aggregation::{bucket_key_for_local, bucket_label_for_key};
         let loaded = self.load_entries_cached(provider, Some(start.date_naive()));
         let entries: Vec<&ParsedEntry> = loaded
             .entries
@@ -2978,12 +3161,32 @@ impl UsageParser {
             sources: loaded.reports.clone(),
         });
 
-        let mut hour_map: HashMap<DateTime<Local>, Vec<&ParsedEntry>> = HashMap::new();
+        let mut buckets: std::collections::BTreeMap<String, Vec<&ParsedEntry>> =
+            std::collections::BTreeMap::new();
         for entry in &entries {
-            hour_map
-                .entry(truncate_hour(entry.timestamp))
+            buckets
+                .entry(bucket_key_for_local(&entry.timestamp, period))
                 .or_default()
                 .push(*entry);
+        }
+        // Pad only the selected range, at the chart's resolution.
+        if matches!(period, "5h" | "day") {
+            let mut hour = truncate_hour(start);
+            while hour < end {
+                buckets
+                    .entry(bucket_key_for_local(&hour, period))
+                    .or_default();
+                hour += Duration::hours(1);
+            }
+        } else if period != "year" {
+            let mut date = start.date_naive();
+            while date < end.date_naive()
+                || (date == end.date_naive() && end.time() != chrono::NaiveTime::MIN)
+            {
+                let key = date.format("%Y-%m-%d").to_string();
+                buckets.entry(key).or_default();
+                date += Duration::days(1);
+            }
         }
 
         let mut chart_buckets: Vec<ChartBucket> = Vec::new();
@@ -2993,9 +3196,8 @@ impl UsageParser {
         let mut total_output = 0u64;
         let mut global_model_map: HashMap<String, SegmentAgg> = HashMap::new();
 
-        let mut hour = truncate_hour(start);
-        while hour < end {
-            let hour_entries = hour_map.get(&hour).map(|v| v.as_slice()).unwrap_or(&[]);
+        for (key, bucket_entries) in buckets {
+            let hour_entries = bucket_entries.as_slice();
             let seg_map = build_segment_map(hour_entries);
             let bucket_cost: f64 = seg_map.values().map(|agg| agg.cost).sum();
             let bucket_tokens: u64 = seg_map.values().map(|agg| agg.tokens).sum();
@@ -3019,19 +3221,18 @@ impl UsageParser {
             }
 
             chart_buckets.push(ChartBucket {
-                label: format_hour(hour.hour()),
-                sort_key: hour.format("%Y-%m-%dT%H:00:00%z").to_string(),
+                label: bucket_label_for_key(&key, period),
+                sort_key: key,
                 total: bucket_cost,
                 segments: segment_map_to_vec(seg_map),
             });
-            hour += Duration::hours(1);
         }
 
         let now = Local::now();
         let elapsed_hours = (now - start).num_milliseconds().max(1) as f64 / 3_600_000.0;
         // Rolling fallback ends at resolve-time `now` (exclusive), so the live
         // check needs a small grace for the aggregation that follows.
-        let active_block = if now >= start && now < end + Duration::seconds(2) {
+        let active_block = if period == "5h" && now >= start && now < end + Duration::seconds(2) {
             let burn_rate_per_hour = total_cost / elapsed_hours;
             Some(ActiveBlock {
                 cost: total_cost,
@@ -3056,15 +3257,20 @@ impl UsageParser {
             chart_buckets,
             model_breakdown: segment_map_to_model_summaries(&global_model_map),
             active_block,
-            five_hour_cost: total_cost,
+            five_hour_cost: if period == "5h" { total_cost } else { 0.0 },
             last_updated: now.to_rfc3339(),
             from_cache: false,
             usage_source: UsageSource::Parser,
             usage_warning: Self::provider_usage_warning(provider),
             period_label: String::new(),
-            has_earlier_data: false,
+            has_earlier_data: check_earlier
+                && period != "5h"
+                && (self.has_entries_before(provider, start.date_naive())
+                    || loaded.entries.iter().any(|entry| entry.timestamp < start)),
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -3214,6 +3420,8 @@ impl UsageParser {
             has_earlier_data: false,
             change_stats: None,
             subagent_stats: None,
+            project_stats: None,
+            project_chart_buckets: None,
             device_breakdown: None,
             device_chart_buckets: None,
             provider_detected: None,
@@ -3228,6 +3436,47 @@ impl UsageParser {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archived_cursor_opus_5_5_fast_is_priced_in_the_main_model() {
+        // Token counts from the affected historical Cursor hourly bucket.
+        let mut fast = test_entry("claude-opus-5-5-high-fast", 23);
+        fast.input_tokens = 347;
+        fast.output_tokens = 90_537;
+        fast.cache_creation_1h_tokens = 517_117;
+        fast.cache_read_tokens = 6_370_676;
+        assert!((fast.cost_usd() - 11.3436964).abs() < 1e-9);
+        let standard = test_entry("claude-opus-5-5", 23);
+        let rows = build_segment_map(&[&fast, &standard]);
+        assert_eq!(rows.len(), 1);
+        let row = &rows["opus-5-5"];
+        assert!(row.pricing_available);
+        assert!((row.cost - fast.cost_usd() - standard.cost_usd()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn speed_usage_merges_without_repricing() {
+        let regular = test_entry("grok-4.7", 10);
+        let fast = test_entry("cursor-grok-4.7-high-fast", 10);
+        assert!(fast.cost_usd() > regular.cost_usd());
+        let mut billed = fast.clone();
+        billed.billed_cost = Some(7.25);
+        let map = build_segment_map(&[&regular, &fast, &billed]);
+        assert_eq!(map.len(), 1);
+        let row = &map["grok-4.7"];
+        assert_eq!(row.tokens, 450);
+        assert!((row.cost - regular.cost_usd() - fast.cost_usd() - 7.25).abs() < 1e-9);
+        let unlisted_fast = test_entry("gpt-5.4-fast", 10);
+        assert!(unlisted_fast.pricing_available());
+        assert_eq!(
+            unlisted_fast.cost_usd(),
+            test_entry("gpt-5.4", 10).cost_usd()
+        );
+        assert!(
+            build_segment_map(&[&test_entry("gpt-5.4", 10), &unlisted_fast])["gpt-5.4"]
+                .pricing_available
+        );
+    }
+
     use super::*;
     use crate::usage::codex_parser::*;
     use crate::usage::cursor_parser::*;
@@ -3255,9 +3504,11 @@ mod tests {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: String::from("test"),
             agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
         }
     }
 
@@ -3741,6 +3992,16 @@ mod tests {
             Some(vec![root.path().to_path_buf()]),
         ));
         parser.set_listings_frozen(true);
+        // Back-date the root: NTFS moves a directory's stamp in clock ticks,
+        // so a subdirectory made within the tick of the listing could leave
+        // it unchanged, and the sweep would see nothing.
+        filetime::set_file_mtime(
+            root.path(),
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+            ),
+        )
+        .unwrap();
 
         let (_, first) = parser.load_cursor_local_entries_with_debug(None);
         assert_eq!((first.listing_cache_hit, first.opened_paths), (false, 1));
@@ -3759,6 +4020,53 @@ mod tests {
         assert!(parser.invalidate_if_changed());
         let (entries, _) = parser.load_cursor_local_entries_with_debug(None);
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn cursor_load_prefers_remote_cache_and_falls_back_to_local_chats() {
+        use chrono::TimeZone;
+        let root = TempDir::new().unwrap();
+        let chat_dir = root.path().join("workspace-a").join("chatSessions");
+        fs::create_dir_all(&chat_dir).unwrap();
+        write_file(
+            &chat_dir.join("session.json"),
+            r#"{"messages":[{"id":"local-1","timestamp":"2026-03-15T12:00:00+00:00","model":"local-model","tokenUsage":{"inputTokens":100,"outputTokens":50}}]}"#,
+        );
+        let parser = UsageParser::from_integrations(usage_integration_configs_with_overrides(
+            None,
+            None,
+            Some(vec![root.path().to_path_buf()]),
+        ));
+        let jun1 = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let remote = ParsedEntry {
+            timestamp: Local
+                .with_ymd_and_hms(2026, 6, 1, 12, 0, 0)
+                .single()
+                .unwrap(),
+            model: "remote-model".to_string(),
+            input_tokens: 7,
+            output_tokens: 1,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
+            cache_read_tokens: 0,
+            web_search_requests: 0,
+            billed_cost: None,
+            unique_hash: Some("remote-1".to_string()),
+            session_key: "cursor-ide".to_string(),
+            agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
+        };
+        parser.store_cursor_remote(vec![remote], Some(jun1));
+
+        let (covered, _, _) = parser.load_cursor_entries_with_debug(Some(jun1));
+        assert_eq!(covered.len(), 1);
+        assert_eq!(covered[0].model, "remote-model");
+
+        let jan1 = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let (wider, _, _) = parser.load_cursor_entries_with_debug(Some(jan1));
+        assert_eq!(wider.len(), 1);
+        assert_eq!(wider[0].model, "local-model");
+        assert_eq!(wider[0].input_tokens, 100);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -4472,6 +4780,47 @@ mod tests {
         assert!(!parser.has_entries_before("claude", NaiveDate::from_ymd_opt(2026, 3, 1).unwrap()));
     }
 
+    #[test]
+    fn a_log_written_before_the_period_answers_without_a_parse() {
+        let dir = TempDir::new().unwrap();
+        let old = dir.path().join("old.jsonl");
+        // Unparseable on purpose: only its mtime can say it is earlier.
+        write_file(&old, "not json");
+        let set_mtime = |path: &Path, date: NaiveDate| {
+            let at = date
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+                .and_local_timezone(Local);
+            filetime::set_file_mtime(
+                path,
+                filetime::FileTime::from_system_time(at.unwrap().into()),
+            )
+            .unwrap();
+        };
+        set_mtime(&old, march(1));
+        let empty = dir.path().join("empty.jsonl");
+        write_file(&empty, "");
+        set_mtime(&empty, march(1));
+        let parser = UsageParser::with_claude_dir(dir.path().to_path_buf());
+
+        assert!(parser.has_entries_before("claude", march(10)));
+        assert!(
+            !parser
+                .earliest_date_cache
+                .lock()
+                .unwrap()
+                .contains_key("claude"),
+            "answered from the listing, nothing parsed"
+        );
+        // Not older than the day itself: the parse decides, and finds nothing.
+        assert!(!parser.has_entries_before("claude", march(1)));
+        assert!(parser
+            .earliest_date_cache
+            .lock()
+            .unwrap()
+            .contains_key("claude"));
+    }
+
     /// One Claude request logged at noon UTC on `day` of March 2026.
     fn march_line(day: u32) -> String {
         format!(
@@ -4678,10 +5027,10 @@ mod tests {
             otel.path().to_path_buf(),
         ]);
         let payload = parser.get_daily("claude", "20260301");
-        // Two distinct 1M-input Opus requests at $5/M input.
+        // Two distinct 1M-input Opus requests at $4/M input.
         assert_eq!(payload.input_tokens, 2_000_000);
         assert!(
-            (payload.total_cost - 10.0).abs() < 1e-9,
+            (payload.total_cost - 8.0).abs() < 1e-9,
             "{}",
             payload.total_cost
         );
@@ -4924,6 +5273,46 @@ mod tests {
         assert!(payload.active_block.is_none());
         assert!((payload.five_hour_cost - payload.total_cost).abs() < f64::EPSILON);
         assert!(payload.total_cost > 0.0);
+    }
+
+    #[test]
+    fn period_range_filters_partial_days_before_grouping() {
+        use chrono::TimeZone;
+        let start = Local.with_ymd_and_hms(2026, 3, 15, 12, 30, 0).unwrap();
+        let end = start + Duration::hours(24);
+        let times = [
+            start - Duration::seconds(1),
+            start,
+            end - Duration::seconds(1),
+            end,
+        ];
+        let content = times.iter().map(|at| format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"model":"claude-sonnet-4-6","stop_reason":"end_turn","usage":{{"input_tokens":100,"output_tokens":50}}}}}}"#,
+            at.to_rfc3339()
+        )).collect::<Vec<_>>().join("\n");
+        let (_dir, parser) = make_parser_with_claude_data(&content);
+        for period in ["day", "week", "month", "year"] {
+            let p = parser.get_period_range("claude", start, end, period);
+            assert_eq!(p.total_tokens, 300, "{period}");
+            assert_eq!(p.input_tokens, 200, "{period}");
+            assert_eq!(
+                p.chart_buckets
+                    .iter()
+                    .flat_map(|b| &b.segments)
+                    .map(|s| s.tokens)
+                    .sum::<u64>(),
+                300
+            );
+            assert!(p.active_block.is_none());
+            assert!(p.has_earlier_data);
+            if period == "day" {
+                assert_eq!(p.chart_buckets.len(), 25);
+                assert_ne!(
+                    p.chart_buckets.first().unwrap().sort_key,
+                    p.chart_buckets.last().unwrap().sort_key
+                );
+            }
+        }
     }
 
     #[test]
@@ -5258,6 +5647,30 @@ mod tests {
         assert_eq!(count_lines("one"), 1);
         assert_eq!(count_lines("one\ntwo"), 2);
         assert_eq!(count_lines("one\ntwo\nthree"), 3);
+    }
+
+    #[test]
+    fn parse_session_meta_reads_cwd_and_titles() {
+        let dir = TempDir::new().unwrap();
+        // A /rename (custom-title) beats the generated ai-title, even when it
+        // lands after the usage rows; a quoted title in content is not a title.
+        let claude = r#"{"type":"ai-title","aiTitle":"Generated","sessionId":"s1"}
+{"type":"assistant","cwd":"/work/repo","sessionId":"s1","timestamp":"2026-03-21T10:00:00+00:00","requestId":"r1","message":{"id":"m1","model":"claude-opus-4-6-20260301","content":[{"type":"text","text":"{\"type\":\"custom-title\",\"customTitle\":\"Fake\"}"}],"usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"custom-title","customTitle":"Renamed","sessionId":"s1"}"#;
+        write_file(&dir.path().join("claude.jsonl"), claude);
+        let (entries, _, _, _) = parse_claude_session_file(&dir.path().join("claude.jsonl"));
+        let meta = entries[0].session_meta.as_deref().unwrap();
+        assert_eq!(meta.cwd.as_deref(), Some("/work/repo"));
+        assert_eq!(meta.title.as_deref(), Some("Renamed"));
+
+        let codex = r#"{"type":"session_meta","payload":{"id":"t1","cwd":"/work/codex"}}
+{"type":"turn_context","payload":{"cwd":"/work/codex/sub","model":"gpt-5.4"}}
+{"type":"event_msg","timestamp":"2026-03-21T10:00:00+00:00","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":50}}}}"#;
+        write_file(&dir.path().join("codex.jsonl"), codex);
+        let (entries, _, _, _) = parse_codex_session_file(&dir.path().join("codex.jsonl"));
+        let meta = entries[0].session_meta.as_deref().unwrap();
+        assert_eq!(meta.cwd.as_deref(), Some("/work/codex/sub"));
+        assert_eq!(meta.title, None);
     }
 
     #[test]
@@ -6391,7 +6804,8 @@ mod path_a_smoke {
 
         let result = fetch_cursor_remote_entries(None);
         match result {
-            Ok(Some(entries)) => {
+            Ok(Some(fetched)) => {
+                let entries = &fetched.entries;
                 eprintln!(
                     "Got {} parsed entries from production pipeline",
                     entries.len()
@@ -6443,9 +6857,11 @@ mod cursor_remote_cache_tests {
             cache_creation_1h_tokens: 0,
             cache_read_tokens: 0,
             web_search_requests: 0,
+            billed_cost: None,
             unique_hash: None,
             session_key: "test-cursor".to_string(),
             agent_scope: crate::stats::subagent::AgentScope::Main,
+            session_meta: None,
         }
     }
 

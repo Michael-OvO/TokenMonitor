@@ -24,6 +24,9 @@
   let showLogo = $derived(brandTheming);
   let activeLogoKind = $derived(getUsageProviderLogoKind(active));
   let activeLabel = $derived(activeOption?.label ?? getUsageProviderLabel(active));
+  // Past this many tabs the names no longer fit, so each tab shows its logo.
+  const MAX_NAMED_TABS = 5;
+  let iconTabs = $derived(options.length > MAX_NAMED_TABS);
 </script>
 
 <div class="tog-wrap">
@@ -36,8 +39,18 @@
   <div class="tog">
     <div class="sl" style="width: calc((100% - 5px) / {options.length}); transform: translateX({activeIdx * 100}%)"></div>
     {#each options as opt}
-      <button class:on={active === opt.value} onclick={() => onChange(opt.value)} title={opt.label}>
-        {opt.label}
+      <button
+        class:on={active === opt.value}
+        class:icon={iconTabs}
+        onclick={() => onChange(opt.value)}
+        title={opt.label}
+        aria-label={opt.label}
+      >
+        {#if iconTabs}
+          <ProviderLogo kind={getUsageProviderLogoKind(opt.value)} size={13} />
+        {:else}
+          {opt.label}
+        {/if}
       </button>
     {/each}
   </div>
@@ -69,6 +82,8 @@
     white-space: nowrap;
   }
   button.on { color: var(--t1); }
+  button.icon { padding: 4px 0; display: flex; justify-content: center; }
+  button.icon.on { color: var(--accent, var(--t1)); }
 
   .provider-logo {
     display: flex;
@@ -94,6 +109,9 @@
     color: var(--accent);
   }
   .provider-logo.kimi {
+    color: var(--accent);
+  }
+  .provider-logo.gemini {
     color: var(--accent);
   }
   .provider-logo.generic {

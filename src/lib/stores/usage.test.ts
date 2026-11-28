@@ -711,6 +711,29 @@ describe("warmAllPeriods", () => {
   });
 });
 
+describe("warmStartupViews", () => {
+  it("warms 5h then day across tabs, the All tab last in each period, its month last of all", async () => {
+    const { warmStartupViews } = await loadUsageModule();
+    mockInvoke.mockResolvedValue(makePayload());
+
+    warmStartupViews(["all", "claude", "codex"], { provider: "all", period: "day" });
+
+    await vi.waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledTimes(11);
+    });
+    const order = mockInvoke.mock.calls.map(([, args]) => {
+      const { provider, period } = args as { provider: string; period: string };
+      return `${provider}/${period}`;
+    });
+    expect(order).toEqual([
+      "claude/5h", "codex/5h", "all/5h",
+      "claude/day", "codex/day",
+      "claude/week", "codex/week", "all/week",
+      "claude/month", "codex/month", "all/month",
+    ]);
+  });
+});
+
 describe("All-tab scope", () => {
   it("requests and caches the enabled integrations instead of `all`", async () => {
     mockInvoke.mockResolvedValue(makePayload());
@@ -723,13 +746,13 @@ describe("All-tab scope", () => {
     const { fetchData } = await loadUsageModule();
     await fetchData("all", "day", 0);
     expect(mockInvoke).toHaveBeenCalledWith("get_usage_data", {
-      provider: "claude+cursor+kimi",
+      provider: "claude+cursor+kimi+gemini",
       period: "day",
       offset: 0,
     });
 
     // Re-enabling the tab is a different scope, so it must hit IPC again
-    // rather than reuse the claude+cursor+kimi cache entry.
+    // rather than reuse the claude+cursor+kimi+gemini cache entry.
     const restored = { ...tabs, codex: { ...tabs.codex, enabled: true } };
     settings.update((current) => ({ ...current, headerTabs: restored }));
     await fetchData("all", "day", 0);
@@ -753,6 +776,28 @@ describe("All-tab scope", () => {
   });
 });
 
+describe("seedUsageCache", () => {
+  it("seeds the All tab under its Header Tabs scope, so its fetch paints the seed", async () => {
+    const { settings } = await import("./settings.js");
+    const { createDefaultHeaderTabs } = await import("../providerMetadata.js");
+    const tabs = createDefaultHeaderTabs();
+    tabs.codex = { ...tabs.codex, enabled: false };
+    settings.update((current) => ({ ...current, headerTabs: tabs }));
+    const { fetchData, seedUsageCache, usageData, isLoading } = await loadUsageModule();
+
+    seedUsageCache("all", "day", 0, makePayload({ total_cost: 7, from_cache: true }));
+    const fresh = deferred<UsagePayload>();
+    mockInvoke.mockReturnValueOnce(fresh.promise);
+    void fetchData("all", "day", 0);
+    expect(get(usageData)?.total_cost).toBe(7);
+    expect(get(isLoading)).toBe(false);
+
+    fresh.resolve(makePayload({ total_cost: 8 }));
+    await vi.waitFor(() => expect(get(usageData)?.total_cost).toBe(8));
+    expect(get(usageData)?.from_cache).toBe(false);
+  });
+});
+
 describe("subset scope cache invalidation", () => {
   it("drops a subset entry when one of its providers is cleared", async () => {
     const { settings } = await import("./settings.js");
@@ -764,7 +809,7 @@ describe("subset scope cache invalidation", () => {
       await loadUsageModule();
 
     // Warm entry for the All tab's scope is served synchronously.
-    seedUsageCache("claude+cursor+kimi", "day", 0, makePayload({ total_cost: 9 }));
+    seedUsageCache("claude+cursor+kimi+gemini", "day", 0, makePayload({ total_cost: 9 }));
     mockInvoke.mockReturnValueOnce(deferred<UsagePayload>().promise);
     void fetchData("all", "day", 0);
     expect(get(usageData)?.total_cost).toBe(9);

@@ -2,6 +2,8 @@
   import SettingsDisclosure from "./SettingsDisclosure.svelte";
   import {
     DEFAULT_HEADER_TABS,
+    detectedProviders,
+    hideUndetectedTabs,
     settings,
     updateSetting,
     type Settings as SettingsType,
@@ -18,7 +20,7 @@
 
   let current = $derived($settings as SettingsType);
 
-  const HEADER_TAB_FIELDS: Array<{
+  const ALL_HEADER_TAB_FIELDS: Array<{
     provider: UsageProvider;
     title: string;
     logoKind: UsageProviderLogoKind;
@@ -27,6 +29,16 @@
     title: getUsageProviderTitle(provider),
     logoKind: getUsageProviderLogoKind(provider),
   }));
+
+  /** Sources that never left data on this machine are not offered. */
+  let HEADER_TAB_FIELDS = $derived.by(() => {
+    const visible = hideUndetectedTabs(current.headerTabs, $detectedProviders);
+    return visible === current.headerTabs
+      ? ALL_HEADER_TAB_FIELDS
+      : ALL_HEADER_TAB_FIELDS.filter(
+          ({ provider }) => provider === "all" || ($detectedProviders ?? []).includes(provider),
+        );
+  });
 
   /** Live-updated tab list for the preview Toggle. Labels always come
    * from `DEFAULT_HEADER_TABS` now that user-customizable text has been
@@ -365,5 +377,15 @@
   :global([data-theme="light"]) .chip[data-provider="kimi"] {
     --accent: #6E52C6;
     --accent-soft: rgba(110, 82, 198, 0.14);
+  }
+  .header-preview[data-provider="gemini"],
+  .chip[data-provider="gemini"] {
+    --accent: #4285F4;
+    --accent-soft: rgba(66, 133, 244, 0.12);
+  }
+  :global([data-theme="light"]) .header-preview[data-provider="gemini"],
+  :global([data-theme="light"]) .chip[data-provider="gemini"] {
+    --accent: #2F6FD8;
+    --accent-soft: rgba(47, 111, 216, 0.14);
   }
 </style>

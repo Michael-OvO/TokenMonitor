@@ -265,6 +265,32 @@ describe("createResizeOrchestrator", () => {
     orchestrator.destroy();
   });
 
+  it("drops a deferred shrink once the content grows back to the window height", async () => {
+    installWindowStub(420);
+    installRafStub();
+    const popEl = createPopEl(420);
+    const invoke = vi.fn(() => Promise.resolve());
+    const orchestrator = createTestOrchestrator({
+      invoke,
+      popEl: popEl.element,
+    });
+
+    orchestrator.markInitialContentReady();
+    orchestrator.setAnchorEdge("bottom");
+    orchestrator.setMouseOverWindow(true);
+    // A loading placeholder is briefly shorter, then the data is back.
+    popEl.setHeight(300);
+    orchestrator.syncSizeAndVerify("content-loading");
+    popEl.setHeight(420);
+    orchestrator.syncSizeAndVerify("content-loaded");
+
+    orchestrator.setMouseOverWindow(false);
+    await flushMicrotasks();
+    expect(invoke).not.toHaveBeenCalled();
+
+    orchestrator.destroy();
+  });
+
   it("applies a shrink immediately under the pointer on a top-anchored window", async () => {
     installWindowStub(420);
     installRafStub();

@@ -6,13 +6,14 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import {
+    detectedProviders,
     getVisibleHeaderProviders,
+    hideUndetectedTabs,
     settings,
-    SUPPORTED_WEEK_STARTS,
     updateSetting,
     type Settings as SettingsType,
   } from "../../stores/settings.js";
-  import { clearUsageCache } from "../../stores/usage.js";
+  import { clearUsageCache, fetchData, activeProvider, activePeriod, activeOffset } from "../../stores/usage.js";
   import {
     exportUsageData,
     importUsageData,
@@ -156,7 +157,7 @@
   ];
 
   let defaultProviderOptions = $derived.by(() =>
-    getVisibleHeaderProviders(current.headerTabs).map((provider) => ({
+    getVisibleHeaderProviders(hideUndetectedTabs(current.headerTabs, $detectedProviders)).map((provider) => ({
       value: provider,
       label: current.headerTabs[provider].label,
     })),
@@ -184,14 +185,11 @@
     updateSetting("defaultPeriod", val as SettingsType["defaultPeriod"]);
   }
 
-  async function handleWeekStart(val: string) {
-    // "To date" is rolling mode; any weekday switches back to calendar weeks.
-    if (val === "todate") {
-      await updateSetting("rollingPeriods", true);
-      return;
-    }
-    await updateSetting("weekStart", val as SettingsType["weekStart"]);
-    await updateSetting("rollingPeriods", false);
+  async function handlePeriodMode(val: string) {
+    await updateSetting("rollingPeriods", val === "rolling");
+    clearUsageCache();
+    activeOffset.set(0);
+    await fetchData($activeProvider, $activePeriod, 0);
   }
 
   function handleCurrency(val: string) {
@@ -682,18 +680,45 @@
           />
         </div>
         <div class="row border">
-          <span class="label">Week Starts</span>
-          <select
-            class="currency-select"
-            value={current.rollingPeriods ? "todate" : current.weekStart}
-            onchange={(e) => handleWeekStart((e.target as HTMLSelectElement).value)}
-          >
-            {#each SUPPORTED_WEEK_STARTS as day}
-              <option value={day}>{day[0].toUpperCase() + day.slice(1)}</option>
-            {/each}
-            <option value="todate" title="Week/Month/Year end today and reach back one unit">To date</option>
-          </select>
+          <span class="label">Period Mode</span>
+          <SegmentedControl
+            options={[
+              { value: "todate", label: "To date" },
+              { value: "rolling", label: "Rolling" },
+            ]}
+            value={current.rollingPeriods ? "rolling" : "todate"}
+            onChange={handlePeriodMode}
+          />
         </div>
+        <div class="row border" title="Breakdown by project and the chart's P (by project) split">
+          <span class="label">Projects</span>
+          <ToggleSwitch
+            checked={current.showProjects}
+            onChange={(checked) => updateSetting("showProjects", checked)}
+          />
+        </div>
+        <div class="row border" title="Weekly limits pace against today's planned share instead of elapsed time">
+          <span class="label">Daily Plan</span>
+          <ToggleSwitch
+            checked={current.showDailyPlan}
+            onChange={(checked) => updateSetting("showDailyPlan", checked)}
+          />
+        </div>
+        {#if current.showDailyPlan}
+        <div class="row border" title="Most of a weekly limit one day's plan asks for (×0.75 on weekends)">
+          <span class="label">Daily Cap</span>
+          <SegmentedControl
+            options={[
+              { value: "15", label: "15%" },
+              { value: "25", label: "25%" },
+              { value: "40", label: "40%" },
+              { value: "100", label: "None" },
+            ]}
+            value={String(current.dailyQuotaCapPercent)}
+            onChange={(v) => updateSetting("dailyQuotaCapPercent", Number(v))}
+          />
+        </div>
+        {/if}
         <div class="row border">
           <span class="label">Currency</span>
           <select
@@ -883,6 +908,18 @@
             </SettingsDisclosure>
           </div>
         </SettingsDisclosure>
+        <div class="row border">
+          <span class="label">Codex Reset Watch</span>
+          <ToggleSwitch
+            checked={current.codexResetWatch}
+            onChange={(checked) => updateSetting("codexResetWatch", checked)}
+          />
+        </div>
+        <div class="hint reset-watch-hint">
+          Uses codex-reset.com's 24h/48h reset forecast to adjust Codex daily recommendations.
+          Checks at most every 10 min while shown; unavailable or expired forecasts use the normal plan.
+          Community estimates, not announcements; no usage or account data is sent.
+        </div>
       </div>
     </div>
 
@@ -1254,6 +1291,7 @@
     font: 400 8.5px/1.35 system-ui, sans-serif;
     color: var(--t4);
   }
+  .reset-watch-hint { margin-top: 0; padding: 0 12px 8px; }
   .cursor-actions {
     display: flex;
     flex-wrap: wrap;

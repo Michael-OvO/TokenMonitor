@@ -89,6 +89,17 @@ pub struct CompactUsageRecord {
     pub dedupe_key: Option<String>,
 }
 
+impl CompactUsageRecord {
+    pub fn billing_model(&self) -> String {
+        match self.speed.as_deref() {
+            Some(speed @ ("fast" | "priority")) if !self.model.ends_with(&format!("-{speed}")) => {
+                format!("{}-{speed}", self.model)
+            }
+            _ => self.model.clone(),
+        }
+    }
+}
+
 fn compact_record_key(r: &CompactUsageRecord) -> String {
     if let Some(k) = &r.dedupe_key {
         return k.clone();
@@ -339,7 +350,7 @@ fn build_extraction_script(claude_since: Option<u64>, codex_since: Option<u64>) 
          {S3}try:\n\
          {S4}d=json.loads(line)\n\
          {S4}t=d.get('type','')\n\
-         {S4}if t=='turn_context':m=d.get('payload',{{}}).get('model','')\n\
+         {S4}if t=='turn_context':p=d.get('payload',{{}});m=p.get('model','');sp=p.get('service_tier');m=m+'-'+sp if sp in ('fast','priority') and not m.endswith('-'+sp) else m\n\
          {S4}elif t=='event_msg':\n\
          {S5}p=d.get('payload',{{}})\n\
          {S5}if p.get('type')=='token_count':\n\

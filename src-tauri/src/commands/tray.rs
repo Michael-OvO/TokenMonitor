@@ -1,4 +1,4 @@
-use super::usage_query::get_provider_data;
+use super::usage_query::get_provider_totals;
 use super::AppState;
 use crate::models::*;
 use crate::usage::integrations::UsageIntegrationId;
@@ -77,6 +77,7 @@ pub(crate) struct TrayUtilization {
     pub(crate) codex: Option<f64>,
     pub(crate) cursor: Option<f64>,
     pub(crate) kimi: Option<f64>,
+    pub(crate) gemini: Option<f64>,
 }
 
 impl TrayUtilization {
@@ -85,6 +86,7 @@ impl TrayUtilization {
             || self.codex.is_some()
             || self.cursor.is_some()
             || self.kimi.is_some()
+            || self.gemini.is_some()
     }
 }
 
@@ -97,6 +99,7 @@ pub struct StatusWidgetSummary {
     pub codex_util: Option<f64>,
     pub cursor_util: Option<f64>,
     pub kimi_util: Option<f64>,
+    pub gemini_util: Option<f64>,
     pub title: String,
     /// `total_cost` already rendered in the user's currency. The float ball is
     /// a separate webview that never loads the settings store, so it cannot
@@ -107,7 +110,7 @@ pub struct StatusWidgetSummary {
 /// Rate-limit providers in display order, mirroring the frontend's
 /// `RATE_LIMIT_PROVIDER_ORDER`. Used when the user has not narrowed the
 /// selection, so a newly supported provider shows up by default.
-const RATE_LIMIT_PROVIDER_ORDER: &[&str] = &["claude", "codex", "cursor", "kimi"];
+const RATE_LIMIT_PROVIDER_ORDER: &[&str] = &["claude", "codex", "cursor", "kimi", "gemini"];
 
 /// Menu-bar title for a provider, matching `getUsageProviderTitle` on the
 /// frontend so the settings preview and the real tray agree.
@@ -257,6 +260,10 @@ pub(crate) fn tray_utilization_from_rate_limits(
             "kimi",
             payload.and_then(|rate_limits| rate_limits.kimi.as_ref()),
         ),
+        gemini: primary_window_utilization(
+            "gemini",
+            payload.and_then(|rate_limits| rate_limits.gemini.as_ref()),
+        ),
     }
 }
 
@@ -266,6 +273,7 @@ fn merge_tray_utilization(current: TrayUtilization, patch: TrayUtilization) -> T
         codex: patch.codex.or(current.codex),
         cursor: patch.cursor.or(current.cursor),
         kimi: patch.kimi.or(current.kimi),
+        gemini: patch.gemini.or(current.gemini),
     }
 }
 
@@ -282,7 +290,7 @@ fn current_daily_total_cost(state: &AppState) -> f64 {
     enabled_integrations(state)
         .iter()
         .map(|integration_id| {
-            get_provider_data(&state.parser, integration_id.as_str(), "day", 0)
+            get_provider_totals(&state.parser, integration_id.as_str(), "day", 0)
                 .map(|payload| payload.total_cost)
                 .unwrap_or(0.0)
         })
@@ -488,6 +496,7 @@ fn apply_tray_presentation_on_main_thread(
                 utilization.codex,
                 utilization.cursor,
                 utilization.kimi,
+                utilization.gemini,
                 dark_bar,
                 update_available,
             );
@@ -598,6 +607,7 @@ pub async fn set_tray_config(
                 codex: codex_util,
                 cursor: None,
                 kimi: None,
+                gemini: None,
             },
         )
         .await
@@ -664,6 +674,33 @@ pub async fn set_enabled_integrations(
     Ok(())
 }
 
+/// Integrations that have ever left data on this machine: a log root exists,
+/// or the archive still holds their history, or (Cursor) a saved API key or
+/// session token, so a key-only user without the IDE keeps the tab. The
+/// frontend hides the rest.
+#[tauri::command]
+pub async fn detected_integrations(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    use crate::usage::integrations::UsageIntegrationId;
+    let archived = state
+        .parser
+        .archive()
+        .map(|archive| archive.list_sources())
+        .unwrap_or_default();
+    Ok(crate::usage::integrations::all_usage_integrations()
+        .iter()
+        .filter(|id| {
+            id.detect_roots().iter().any(|root| root.exists())
+                || archived.contains(&format!("local:{}", id.as_str()))
+                || (**id == UsageIntegrationId::Cursor
+                    && crate::secrets::cursor::load(&app).is_some())
+        })
+        .map(|id| id.as_str().to_string())
+        .collect())
+}
+
 /// Store the enabled integrations; returns whether they changed. A change
 /// requests a refresh: one just switched on has not been probed, nor its
 /// Cursor data refreshed, and the refresh publishes every surface from the
@@ -704,6 +741,7 @@ async fn status_widget_summary(state: &AppState) -> StatusWidgetSummary {
         codex_util: utilization.codex,
         cursor_util: utilization.cursor,
         kimi_util: utilization.kimi,
+        gemini_util: utilization.gemini,
     }
 }
 
@@ -797,6 +835,7 @@ mod tests {
             codex,
             cursor,
             kimi: None,
+            gemini: None,
         }
     }
 
@@ -942,6 +981,7 @@ mod tests {
             codex: Some(35.0),
             cursor: None,
             kimi: None,
+            gemini: None,
         };
 
         assert_eq!(
@@ -957,12 +997,14 @@ mod tests {
             codex: Some(35.0),
             cursor: None,
             kimi: None,
+            gemini: None,
         };
         let patch = TrayUtilization {
             claude: None,
             codex: Some(41.0),
             cursor: None,
             kimi: None,
+            gemini: None,
         };
 
         assert_eq!(
@@ -972,6 +1014,7 @@ mod tests {
                 codex: Some(41.0),
                 cursor: None,
                 kimi: None,
+                gemini: None,
             }
         );
     }
@@ -1015,6 +1058,7 @@ mod tests {
             }),
             cursor: None,
             kimi: None,
+            gemini: None,
         };
 
         assert_eq!(
@@ -1024,6 +1068,7 @@ mod tests {
                 codex: Some(35.0),
                 cursor: None,
                 kimi: None,
+                gemini: None,
             }
         );
     }
@@ -1060,6 +1105,7 @@ mod tests {
                 codex: None,
                 cursor: None,
                 kimi: None,
+                gemini: None,
             }
         ));
         assert!(should_update_tray_icon(
@@ -1191,7 +1237,7 @@ mod tests {
     #[test]
     fn parse_enabled_integrations_validates_and_dedupes() {
         assert!(parse_enabled_integrations(&[]).is_err());
-        assert!(parse_enabled_integrations(&["gemini".to_string()]).is_err());
+        assert!(parse_enabled_integrations(&["copilot".to_string()]).is_err());
         assert_eq!(
             parse_enabled_integrations(&[
                 "codex".to_string(),
@@ -1242,9 +1288,10 @@ mod tests {
         ));
 
         let everything = current_daily_total_cost(&state);
-        let claude_only = get_provider_data(&state.parser, "claude", "day", 0)
-            .unwrap()
-            .total_cost;
+        let claude_only =
+            crate::commands::usage_query::get_provider_data(&state.parser, "claude", "day", 0)
+                .unwrap()
+                .total_cost;
         assert!(claude_only > 0.0, "fixture must produce Claude cost today");
         assert!(everything > claude_only, "fixture must include Codex cost");
 

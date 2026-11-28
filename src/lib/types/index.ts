@@ -35,6 +35,9 @@ export interface UsagePayload {
   has_earlier_data: boolean;
   change_stats: ChangeStats | null;
   subagent_stats: SubagentStats | null;
+  project_stats?: ProjectUsage[] | null;
+  /** chart_buckets split by project (`project:<root>`, `project:none`, `project:other`). */
+  project_chart_buckets?: ChartBucket[] | null;
   device_breakdown: DeviceSummary[] | null;
   device_chart_buckets: ChartBucket[] | null;
   provider_detected: boolean | null;
@@ -143,10 +146,31 @@ export interface SubagentStats {
   subagents: ScopeUsageSummary;
 }
 
+/** One conversation; subagent work is folded in (`subagent_cost`). */
+export interface SessionUsage {
+  key: string;
+  title: string | null;
+  cost: number;
+  tokens: number;
+  subagent_cost: number;
+  last_active: string;
+}
+
+/** Claude/Codex cost by git repository; `path` null = no working directory. */
+export interface ProjectUsage {
+  path: string | null;
+  name: string;
+  cost: number;
+  tokens: number;
+  session_count: number;
+  /** Costliest sessions only (up to 20). */
+  sessions: SessionUsage[];
+}
+
 export type AccordionToggleDetail = {
   durationMs: number;
   expanding: boolean;
-  scope: "main" | "subagents" | "devices";
+  scope: "main" | "subagents" | "devices" | "projects";
 };
 
 /** Payload of the window-level `chart-hover` event the Chart dispatches when
@@ -235,7 +259,15 @@ export interface ProviderRateLimits {
   fetchedAt: string;
 }
 
-export type RateLimitsPayload = Record<RateLimitProviderId, ProviderRateLimits | null>;
+export interface ResetWatch {
+  resetChance24hPercent: number;
+  resetChance48hPercent: number;
+  confidence: string;
+  observedAt: string;
+  expiresAt: string;
+}
+
+export type RateLimitsPayload =Record<RateLimitProviderId, ProviderRateLimits | null>;
 
 export type BarDisplay = 'off' | 'single' | 'both' | 'custom';
 export type PercentageFormat = 'compact' | 'verbose';
@@ -263,6 +295,7 @@ export interface StatusWidgetSummary {
   codexUtil: number | null;
   cursorUtil: number | null;
   kimiUtil: number | null;
+  geminiUtil: number | null;
   title: string;
   /**
    * `totalCost` already rendered in the user's currency by the backend. The

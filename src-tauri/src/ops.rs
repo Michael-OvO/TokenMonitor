@@ -29,6 +29,7 @@ struct Urls {
     openrouter_models: String,
     litellm_prices: String,
     frankfurter_latest: String,
+    codex_reset_forecast: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +113,11 @@ pub fn frankfurter_latest_url() -> &'static str {
     ops().urls.frankfurter_latest.as_str()
 }
 
+/// Third-party community tracker of OpenAI's unscheduled Codex limit resets.
+pub fn codex_reset_forecast_url() -> &'static str {
+    ops().urls.codex_reset_forecast.as_str()
+}
+
 pub fn litellm_cache_ttl_secs() -> u64 {
     ops().litellm_cache_ttl_secs
 }
@@ -130,7 +136,7 @@ mod tests {
     #[test]
     fn loads_urls_and_ttls() {
         assert!(anthropic_usage_url().starts_with("https://api.anthropic.com/"));
-        assert_eq!(litellm_cache_ttl_secs(), 7 * 24 * 60 * 60);
+        assert_eq!(litellm_cache_ttl_secs(), 24 * 60 * 60);
     }
 
     /// Only the frontend reads `plan_tier_costs_usd`, so guard the key here —

@@ -1,11 +1,11 @@
 # TokenMonitor — Agent Guide
 
 Local-first, cross-platform (macOS/Windows/Linux) system-tray app that monitors Claude Code, Codex CLI,
-Cursor IDE, and Kimi Code token usage. Stack: Tauri v2 + Svelte 5 frontend (`src/`), Rust backend (`src-tauri/`). It parses JSONL
+Cursor IDE, Kimi Code, Gemini CLI, and Antigravity token usage. Stack: Tauri v2 + Svelte 5 frontend (`src/`), Rust backend (`src-tauri/`). It parses JSONL
 session logs from disk, prices them in Rust, and shows spend + rate limits in a tray popover and an optional
 FloatBall overlay. Entry points: `src/main.ts` (main window), `src/float-ball.ts` (FloatBall, separate Vite
 entry), `src-tauri/src/main.rs` → `lib.rs` (backend). Root `README.md` covers the product overview, the three-step build, and the unsigned-macOS note; `docs/DEVELOPMENT.md` is the
-maintained dev guide; `CHANGELOG.md` at the repository root is the release history. Current version: 0.17.x.
+maintained dev guide; `CHANGELOG.md` at the repository root is the release history. Current version: 0.18.x.
 
 ## Commands
 
@@ -40,8 +40,8 @@ src/                     Svelte 5 frontend
   lib/types/               shared payload types mirroring Rust structs
 src-tauri/src/           Rust backend
   commands/                Tauri IPC dispatch, split by domain (usage_query, calendar, tray, ssh, statusline…)
-  usage/                   parsers (claude/codex/cursor/kimi), pricing, money (display currency), caches, archive, SSH remote sync
-  rate_limits/             claude + claude_cli (`claude -p /usage` probe), codex + codex_cli, cursor, kimi
+  usage/                   parsers (claude/codex/cursor/kimi/gemini/antigravity), pricing, money (display currency), caches, archive, SSH remote sync
+  rate_limits/             claude + claude_cli (`claude -p /usage` probe), codex + codex_cli, cursor, kimi, gemini, antigravity
   statusline/              installs a shell/PowerShell statusline script into Claude Code; reads its JSONL events
   stats/  secrets/         change/subagent aggregation; keyring-backed credential access
   single_instance/         process ownership + focus protocol
@@ -76,13 +76,19 @@ limits use the newest meters Codex logged (`token_count`) when newer than the la
 else the `codex app-server` probe, which on Windows starts the vendored `codex.exe` behind the npm shim; only
 the probe reports usage-limit resets, so it still runs at launch and every 15 min, and a logged reading keeps
 the last probe's resets. Kimi
-limits use the Kimi usage API and refresh their token like the Kimi CLI does. The Usage tab covers the
+limits use the Kimi usage API and refresh their token like the Kimi CLI does. Gemini CLI usage comes from
+`~/.gemini/tmp/*/chats/session-*.json(l)`; its quotas from the Code Assist API (`retrieveUserQuota`) with the
+CLI's OAuth file, renewed in memory only. Antigravity usage comes from its per-conversation SQLite files
+(`~/.gemini/antigravity/conversations/*.db`, schema-free protobuf read; the older `.pb` files are encrypted);
+its quotas from the running app's local server (`daemon/hub_*.json` → `GetUserStatus`). Both are one
+source, `gemini` (one Google account): logs share its tab and archive, and the two quota readings merge into one
+list (`merge_gemini_sources`), one window per model, busiest first; the tray shows the first. The Usage tab covers the
 official 5h reset window from cached rate limits, or a rolling five hours when none is cached. Completed hours
 are persisted to the usage archive so history survives log deletion. Models missing from the static pricing
 table (`usage/pricing.rs`, bump `PRICING_VERSION` when editing) resolve via LiteLLM/OpenRouter with 24h TTL.
 
 Refresh: `refresh.rs` owns all periodic work. Each refresh (launch, then every aligned interval tick) runs its
-I/O first (Cursor today, rate-limit probes one provider at a time), then one sample (the only log sweep and
+I/O first (Cursor today, rate-limit probes: Claude then Codex in turn, the HTTP-only providers beside them), then one sample (the only log sweep and
 cache invalidation; it stats the files written within a week, and every file hourly, after user actions and
 after a popover show; an append drops only the views it can reach), computes the tray cost and open view
 behind the `AppState.compute` FIFO gate (one heavy CPU job at a time), and publishes once; only it and the

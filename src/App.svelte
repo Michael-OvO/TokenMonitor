@@ -18,8 +18,16 @@
     notePublish,
     warmCache,
     warmAllPeriods,
+    warmStartupViews,
+    seedUsageCache,
     usageRefreshError,
   } from "./lib/stores/usage.js";
+  import {
+    isDefaultView,
+    readUsageSnapshot,
+    usageSnapshotKey,
+    writeUsageSnapshot,
+  } from "./lib/stores/usageSnapshot.js";
   import {
     ALL_USAGE_PROVIDER_ID,
     DEFAULT_USAGE_PROVIDER,
@@ -46,6 +54,8 @@
   import {
     DEFAULT_HEADER_TABS,
     areHeaderTabsEqual,
+    detectedProviders,
+    hideUndetectedTabs,
     applyProvider,
     getLastWindowHeight,
     getVisibleHeaderProviders,
@@ -135,6 +145,16 @@
 
   let brandTheming = $state(true);
   let headerTabs = $state<HeaderTabs>(DEFAULT_HEADER_TABS);
+  let savedHeaderTabs: HeaderTabs = DEFAULT_HEADER_TABS;
+  let detected: string[] | null = null;
+  function syncHeaderTabs() {
+    const next = hideUndetectedTabs(savedHeaderTabs, detected);
+    if (areHeaderTabsEqual(headerTabs, next)) return;
+    headerTabs = next;
+    // Startup is handled by bootstrap (set_enabled_integrations) and the
+    // initial load; only live edits from Settings need the runtime update.
+    if (appReady) void applyHeaderTabsToRuntime(next);
+  }
   let popEl: HTMLDivElement | null = null;
   /** The main view's scroll pane, between its header and footer. */
   let scrollPaneEl: HTMLDivElement | null = $state(null);
@@ -231,16 +251,32 @@
     });
     const unsub3 = settings.subscribe((s) => {
       brandTheming = s.brandTheming;
-      if (!areHeaderTabsEqual(headerTabs, s.headerTabs)) {
-        headerTabs = s.headerTabs;
-        // Startup is handled by bootstrap (set_enabled_integrations) and the
-        // initial load; only live edits from Settings need the runtime update.
-        if (appReady) void applyHeaderTabsToRuntime(s.headerTabs);
-      }
+      savedHeaderTabs = s.headerTabs;
+      syncHeaderTabs();
+    });
+    const unsubDetected = detectedProviders.subscribe((v) => {
+      detected = v;
+      syncHeaderTabs();
     });
     const unsub4 = rateLimitsData.subscribe((v) => (rateLimits = v));
     const unsub5 = rateLimitsRequestState.subscribe((v) => (rateLimitsRequest = v));
-    return () => { unsub1(); unsub2(); unsubRefreshErr(); unsubProvider(); unsubPeriod(); unsubPL(); unsub3(); unsub4(); unsub5(); };
+    return () => { unsub1(); unsub2(); unsubRefreshErr(); unsubProvider(); unsubPeriod(); unsubPL(); unsub3(); unsubDetected(); unsub4(); unsub5(); };
+  });
+
+  // Keep the default view's latest computed payload on disk for the next
+  // launch (see loadInitialData). Only a settled, freshly computed payload:
+  // never the loading placeholder, a failed fetch's empty payload, or a
+  // payload that itself came from a cache.
+  $effect(() => {
+    const payload = data;
+    if (!appReady || !payload || payload.from_cache || loading || placeholderLoading || refreshError) return;
+    // Settings are read untracked: only a new payload triggers a write, so a
+    // settings edit never re-saves the old payload under the new key.
+    untrack(() => {
+      const s = $settings;
+      if (!isDefaultView(provider, period, offset, s)) return;
+      void writeUsageSnapshot(usageSnapshotKey(provider, period, s), period, payload);
+    });
   });
 
   // Apply/remove data-provider attribute reactively
@@ -299,20 +335,28 @@
     if (initialDataLoad) return initialDataLoad;
 
     initialDataLoad = (async () => {
+      // The rate limits load beside the first view, and the tray sync after
+      // them; neither holds the dashboard back (they paint their own parts).
+      const rateLimitsLoad = period === "5h"
+        ? fetchRateLimits(backendScope(provider))
+        : hydrateRateLimits();
+      void rateLimitsLoad
+        .catch((e) => logger.debug("rateLimits", `initial rate-limit load failed: ${e}`))
+        .then(() => syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)))
+        .catch((e) => logger.debug("tray", `syncTrayConfig failed: ${e}`));
+
+      // Paint the default view's last payload from the previous session
+      // (labelled "cached") while its first compute runs behind it.
+      const saved = get(settings);
+      if (isDefaultView(provider, period, offset, saved)) {
+        const snapshot = await readUsageSnapshot(usageSnapshotKey(provider, period, saved));
+        if (snapshot) seedUsageCache(provider, period, offset, snapshot);
+      }
+
       await fetchData(provider, period, offset);
       logResizeDebug("app:data-ready", { provider, period, offset });
 
-      if (period === "5h") {
-        await fetchRateLimits(backendScope(provider));
-      } else {
-        await hydrateRateLimits();
-      }
-
-      await syncTrayConfig(get(settings).trayConfig, get(rateLimitsData)).catch((e) => logger.debug("tray", `syncTrayConfig failed: ${e}`));
-      warmAllPeriods(provider, period);
-      for (const warmProvider of getAdjacentWarmProviders(provider)) {
-        warmAllPeriods(warmProvider);
-      }
+      warmStartupViews([provider, ...getAdjacentWarmProviders(provider)], { provider, period });
     })();
 
     return initialDataLoad;
@@ -768,16 +812,20 @@
         }
       }
 
+      // The anchor edge is a cheap IPC: ask for it beside the first view.
+      const anchorEdge = isWindows()
+        ? invoke<string>("get_window_anchor_edge").catch(() => null)
+        : null;
       if (get(settings).hasSeenWelcome) {
         await loadInitialData();
         if (cancelled) return;
       }
-      if (isWindows()) {
-        try {
-          const edge = await invoke<string>("get_window_anchor_edge");
+      if (anchorEdge) {
+        const edge = await anchorEdge;
+        if (edge) {
           document.documentElement.setAttribute("data-anchor", edge);
           resizeOrch?.setAnchorEdge(edge === "bottom" ? "bottom" : "top");
-        } catch { /* non-critical */ }
+        }
       } else {
         // The macOS tray popover and the Linux top-right window shrink from
         // the bottom, so shrinks never need to wait for the pointer to leave.
@@ -830,13 +878,16 @@
       // Silent background refresh — the backend just recomputed. Clearing
       // the cache + cold-fetching here re-showed the loading spinner over
       // live data every ~120s; keep the view and swap in fresh numbers.
-      // While the popover is hidden, a publish refetches every 5 min at most
-      // (the view is a memory hit by then), so a show paints recent numbers at
-      // the right height; the rest wait for the next show.
+      // While the popover is hidden, a 5h/day view refetches on a publish
+      // every 5 min at most (the backend keeps those warm, so it is a memory
+      // hit), so a show paints recent numbers at the right height. Longer
+      // views are not kept warm while hidden: a refetch would compute them
+      // under the backend's compute gate for nobody, so they wait for the
+      // next show, which paints the cached payload and swaps in the refetch.
       viewRefresh = refreshWhenVisible(() => {
         fetchData(provider, period, offset, { silent: true });
         if (period === "5h") fetchRateLimits(backendScope(provider));
-      }, 5 * 60_000);
+      }, () => (period === "5h" || period === "day" ? 5 * 60_000 : Infinity));
       unlisten = await listen("data-updated", () => {
         logResizeDebug("app:data-updated-event", {
           provider,
@@ -1087,15 +1138,16 @@
               {/if}
             </div>
           {:else}
-            <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} />
+            <Chart buckets={data.chart_buckets} dataKey={`${provider}-${period}-${offset}`} deviceBuckets={data.device_chart_buckets} projectBuckets={$settings.showProjects ? data.project_chart_buckets : null} />
           {/if}
 
-          {#if (period !== "5h" && data.model_breakdown.length > 0) || data.subagent_stats || (data.device_breakdown && data.device_breakdown.length > 0)}
+          {#if (period !== "5h" && data.model_breakdown.length > 0) || data.subagent_stats || ($settings.showProjects && data.project_stats?.length) || (data.device_breakdown && data.device_breakdown.length > 0)}
             <div class="hr"></div>
             <Breakdown
               models={period !== "5h" ? data.model_breakdown : []}
               onAccordionToggle={(detail) => resizeOrch?.handleBreakdownAccordionToggle(detail)}
               subagentStats={data.subagent_stats}
+              projectStats={$settings.showProjects ? data.project_stats : null}
               deviceBreakdown={data.device_breakdown}
               onDeviceSelect={handleDeviceSelect}
               onShowAllDevices={() => { showDevices = true; }}
