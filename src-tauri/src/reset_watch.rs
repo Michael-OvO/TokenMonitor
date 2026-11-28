@@ -63,7 +63,7 @@ async fn fetch(url: &str) -> Result<(Option<ResetWatch>, Duration), String> {
         .user_agent(concat!(
             "TokenMonitor/",
             env!("CARGO_PKG_VERSION"),
-            " (+https://github.com/TzJ2006/TokenMonitor)"
+            " (+https://github.com/Michael-OvO/TokenMonitor)"
         ))
         .build()
         .map_err(|error| error.to_string())?;
@@ -249,7 +249,7 @@ mod tests {
                 .unwrap();
             assert!(request.starts_with("GET /api/forecast HTTP/1.1"));
             assert!(request.contains("TokenMonitor/"));
-            assert!(request.contains("https://github.com/TzJ2006/TokenMonitor"));
+            assert!(request.contains("https://github.com/Michael-OvO/TokenMonitor"));
         }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

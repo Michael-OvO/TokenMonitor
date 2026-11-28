@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## v0.21.0 — Gemini CLI 与 Antigravity、更快的启动与弹窗
+
+### 新增
+- **Gemini 来源（Gemini CLI + Antigravity）**：新增 Gemini 标签页。Gemini CLI 用量取自 `~/.gemini/tmp/*/chats/session-*.json(l)`；Antigravity 用量取自每个对话的 SQLite 文件（`~/.gemini/antigravity/conversations/*.db`，只读打开）。两者共用一个 Google 账号，因此合并为一个来源：日志共用标签页与归档，两边的配额读数合并为一个列表（每个模型一个窗口，最忙的在前，托盘显示第一个）。Gemini CLI 配额来自 Code Assist API，使用 CLI 自己的 OAuth 文件，续期只在内存中进行；Antigravity 配额来自正在运行的应用的本地服务。此前保存的「antigravity」标签、范围与托盘条自动归入 Gemini，归档中的 `local:antigravity` 记录在启动时迁移到 `local:gemini`
+- **Gemini 4 Neon 定价**：静态价格表新增 $3 输入 / $15 输出 / $0.15 缓存读取（每百万 token）；LiteLLM 价格缓存恢复为文档所述的 24 小时（此前实际为 7 天）
+- **Cursor IDE 加密令牌**：新版 Cursor 以 Chromium os_crypt 加密保存 IDE 访问令牌，现在可自动解密（macOS 读取钥匙串「Cursor Safe Storage」，仅在已授权时静默读取，绝不弹出密码框；Windows 使用 DPAPI；Linux 仅支持默认密钥，否则沿用手动粘贴的令牌）
+- **隐藏未使用的来源**：从未在本机留下数据（无日志目录、无归档、Cursor 也无已保存的密钥）的来源不再显示在页眉标签与 设置 → Visibility → Header Tabs 中，留下数据后自动出现；保存的设置不会被修改
+- **设置新增**：Period Mode（To date / Rolling，取代 Week Starts，周固定从周一开始）、Projects（项目分类开关）、Daily Plan 与 Daily Cap（每周限额按当天计划份额而非已过时间计速）、Codex Reset Watch（默认关闭，开启后从 codex-reset.com 获取 Codex 重置概率预测）
+
+### 性能
+- **启动**：启动画面最短时间从约 3.4 秒降到约 0.7 秒；启动时先显示上次保存的默认视图，计算完成后再替换；第一个视图载入后即显示主界面，限额与托盘同步在旁并行；预热按最便宜的视图优先
+- **弹窗与刷新**：弹窗隐藏时不再重算或重新获取周 / 月 / 年视图；限额探测中只走 HTTP 的提供方与 Claude、Codex 的 CLI 探测并行；`has_earlier_data` 改由文件修改时间判断；Claude 解析不再深拷贝工具结果（三个 50–98 MB 日志的解析从 0.8–1.4 秒降到约 0.2 秒）
+- **日历、设备、设置**：已看过的月份与设备视图立即显示并在后台刷新，并丢弃过期的乱序响应；日历的每月合计不再计算本地统计；设置中的模型列表在首次展开时才载入，SSH 主机页跳过本地扫描
+- **开发构建**：dev profile 对本 crate 使用 opt-level 1、依赖使用 opt-level 3
+
+### 修复
+- 当前的日 / 周 / 月 / 年视图截止到此刻（To date），不再包含今天之后的时间
+- Antigravity 的 Orchestrator 模型定价；图标标签页；弹窗收缩
+
 ## v0.20.1 — 笔记本屏幕不再放大弹窗
 
 ### 修复
