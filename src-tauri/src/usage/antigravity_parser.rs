@@ -115,7 +115,12 @@ fn generation_entry(
     let output_tokens = varint(usage, 3);
     let cache_write = varint(usage, 4);
     let cache_read = varint(usage, 5);
-    if input_tokens + output_tokens + cache_write + cache_read == 0 {
+    if input_tokens
+        .saturating_add(output_tokens)
+        .saturating_add(cache_write)
+        .saturating_add(cache_read)
+        == 0
+    {
         return None;
     }
     let model = text(chat, 19).filter(|model| !model.is_empty())?;

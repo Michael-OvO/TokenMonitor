@@ -80,7 +80,7 @@ fn read_cli_client() -> Option<(String, String)> {
 }
 
 async fn cli_client() -> Result<(String, String), RateLimitFetchError> {
-    if let Some(client) = CLI_CLIENT.lock().unwrap().clone() {
+    if let Some(client) = CLI_CLIENT.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         return Ok(client);
     }
     let found = tokio::task::spawn_blocking(read_cli_client)
@@ -88,7 +88,7 @@ async fn cli_client() -> Result<(String, String), RateLimitFetchError> {
         .ok()
         .flatten()
         .ok_or_else(|| RateLimitFetchError::message(SIGN_IN_EXPIRED))?;
-    *CLI_CLIENT.lock().unwrap() = Some(found.clone());
+    *CLI_CLIENT.lock().unwrap_or_else(|e| e.into_inner()) = Some(found.clone());
     Ok(found)
 }
 
@@ -157,7 +157,8 @@ async fn refresh(
         .await
         .map_err(|e| RateLimitFetchError::message(format!("Gemini token refresh failed: {e}")))?;
     let expires_at = Utc::now().timestamp_millis() + renewed.expires_in.unwrap_or(3600) * 1000;
-    *RENEWED.lock().unwrap() = Some((renewed.access_token.clone(), expires_at));
+    *RENEWED.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((renewed.access_token.clone(), expires_at));
     Ok(renewed.access_token)
 }
 

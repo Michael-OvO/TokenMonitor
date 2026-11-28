@@ -675,13 +675,15 @@ pub async fn set_enabled_integrations(
 }
 
 /// Integrations that have ever left data on this machine: a log root exists,
-/// or the archive still holds their history. The frontend hides the rest.
-// ponytail: a Cursor API key with no IDE installed and nothing archived yet
-// reads as absent until its first archived hour; add the key check if that bites.
+/// or the archive still holds their history, or (Cursor) a saved API key or
+/// session token, so a key-only user without the IDE keeps the tab. The
+/// frontend hides the rest.
 #[tauri::command]
 pub async fn detected_integrations(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
+    use crate::usage::integrations::UsageIntegrationId;
     let archived = state
         .parser
         .archive()
@@ -692,6 +694,8 @@ pub async fn detected_integrations(
         .filter(|id| {
             id.detect_roots().iter().any(|root| root.exists())
                 || archived.contains(&format!("local:{}", id.as_str()))
+                || (**id == UsageIntegrationId::Cursor
+                    && crate::secrets::cursor::load(&app).is_some())
         })
         .map(|id| id.as_str().to_string())
         .collect())

@@ -150,7 +150,7 @@ fn platform_decrypt(version: &[u8], body: &[u8]) -> Option<Vec<u8>> {
 #[cfg(not(target_os = "windows"))]
 fn cbc_decrypt(key: &[u8], ciphertext: &[u8]) -> Option<Vec<u8>> {
     use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
-    if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+    if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
         return None;
     }
     // Chromium's CBC IV is a fixed 16 bytes of 0x20 (space); it is not stored.
@@ -169,8 +169,15 @@ fn pbkdf2_sha1(password: &[u8], salt: &[u8], rounds: u32, out_len: usize) -> Vec
 #[cfg(target_os = "macos")]
 fn secret_password(_version: &[u8]) -> Option<(Vec<u8>, u32)> {
     // Electron stores the os_crypt password under this Keychain generic item.
-    let pw = security_framework::passwords::get_generic_password("Cursor Safe Storage", "Cursor")
-        .ok()?;
+    // Its ACL trusts only Cursor, so a read with Keychain UI allowed pops a
+    // modal password panel from the background refresh. Read with the UI
+    // suppressed: it succeeds silently where the user already granted access
+    // and otherwise fails, leaving the pasted-token fallback.
+    let pw = crate::platform::macos::keychain::with_ui_suppressed(|| {
+        security_framework::passwords::get_generic_password("Cursor Safe Storage", "Cursor")
+    })
+    .ok()?
+    .ok()?;
     Some((pw, 1003))
 }
 
